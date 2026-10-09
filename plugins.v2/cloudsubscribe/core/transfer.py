@@ -16,6 +16,8 @@ from typing import Callable, Optional
 
 import requests
 
+from app.log import logger
+
 from .cloud import (
     CloudDriveCapability,
     CloudDriveProvider,
@@ -78,7 +80,9 @@ class HttpFileDownloadService:
     ):
         self._resolver = resolver
         self._timeout = timeout
-        self._concurrency = max(1, min(int(concurrency or 5), 10))
+        # 云盘 CDN 普遍按「单连接」限速（夸克约 100~200KB/s），提速只能靠并发连接数叠加，
+        # 因此这里只做 256 的兜底保护，真正生效的并发由调用方（下载线程数）决定。
+        self._concurrency = max(1, min(int(concurrency or 5), 256))
         self._part_size = max(1024 * 1024, int(part_size or 0))
 
     @property
@@ -168,6 +172,10 @@ class HttpFileDownloadService:
         worker_count = min(self._concurrency, len(ranges))
         if worker_count <= 1:
             raise _RangeDownloadUnsupported
+        logger.info(
+            f"分段下载启用：{worker_count} 并发连接 × "
+            f"{self._part_size // (1024 * 1024)}MB 分片 → {target.name}"
+        )
 
         progress_lock = Lock()
         abort_event = Event()
@@ -305,7 +313,11 @@ class HttpFileDownloadService:
                         report,
                         stop_requested,
                     )
-                except _RangeDownloadUnsupported:
+                except _RangeDownloadUnsupported as error:
+                    logger.warning(
+                        f"源盘不支持分段下载（{error}），回落单线程顺序下载："
+                        f"{file_item.name}（实际并发 {self._concurrency}）"
+                    )
                     target.unlink(missing_ok=True)
                     self._parts_path(target).unlink(missing_ok=True)
             return self._download_serial(
@@ -436,7 +448,7 @@ class CrossTransferTaskManager:
                  on_change: Optional[Callable[[], None]] = None):
         self._provider_resolver = provider_resolver
         self._download_path = str(download_path or "").strip()
-        self._download_threads = max(1, min(int(download_threads or 5), 64))
+        self._download_threads = max(1, min(int(download_threads or 5), 256))
         self._direct_stream = bool(direct_stream)
         self._transfer_slots = Semaphore(max(1, min(int(max_concurrent or 2), 10)))
         self._tasks: dict[str, dict] = {}

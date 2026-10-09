@@ -763,7 +763,7 @@ class CloudSubscribe(_PluginBase):
                                            ] or ["movie", "tv"]
         self._cross_transfer_download_path = str(config.get("cross_transfer_download_path", "") or "").strip()
         self._cross_transfer_download_threads = max(1,
-                                                    min(int(config.get("cross_transfer_download_threads", 5) or 5), 64))
+                                                    min(int(config.get("cross_transfer_download_threads", 5) or 5), 256))
         self._cross_transfer_max_concurrent = max(1, min(int(config.get("cross_transfer_max_concurrent", 2) or 2), 10))
         self._cross_transfer_direct_stream = bool(config.get("cross_transfer_direct_stream", True))
 
