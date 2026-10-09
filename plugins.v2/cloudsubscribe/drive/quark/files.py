@@ -75,9 +75,10 @@ class QuarkFileService(CloudDriveFileServiceBase):
                       progress_callback=None, stop_requested=None,
                       preserve_partial: bool = False,
                       download_threads: int = 5) -> str:
-        url, headers = self.resolve_download_link(file_item)
+        # 直链按需重新解析：夸克直链在大文件下载中途会限速甚至失效，
+        # 分片失败时重新取链（内部节流）比整段复用失效链接更稳。
         service = HttpFileDownloadService(
-            lambda _: (url, headers),
+            lambda _: self.resolve_download_link(file_item),
             concurrency=download_threads,
             part_size=10 * 1024 * 1024,
         )

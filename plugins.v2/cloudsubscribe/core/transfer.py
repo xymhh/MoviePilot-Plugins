@@ -68,6 +68,52 @@ def file_checksum(path: str, algorithm: str) -> str:
     return digest.hexdigest()
 
 
+class _LinkRefresher:
+    """按需刷新源盘直链。
+
+    长任务（几十 GB）里直链可能被限速或过期，原先整段下载复用同一个直链，
+    一旦失效所有分片都会失败。这里在分片读取失败后重新取链，并对刷新做节流，
+    避免并发分片同时打爆取链接口。
+    """
+
+    def __init__(
+            self,
+            resolver: Callable[[], tuple[str, dict]],
+            refresh_interval: float = 30.0,
+            max_age: float = 20 * 60.0,
+    ):
+        self._resolver = resolver
+        self._refresh_interval = max(0.0, float(refresh_interval))
+        self._max_age = max(self._refresh_interval, float(max_age))
+        self._url = ""
+        self._headers: dict = {}
+        self._resolved_at = 0.0
+        self._lock = Lock()
+
+    def get(self, refresh: bool = False) -> tuple[str, dict]:
+        with self._lock:
+            now = time.time()
+            age = now - self._resolved_at
+            should_refresh = (
+                    not self._url
+                    or age >= self._max_age
+                    or (refresh and age >= self._refresh_interval)
+            )
+            if should_refresh:
+                url, headers = self._resolver()
+                if url:
+                    if self._url and url != self._url:
+                        logger.info("已刷新源盘直链，继续断点续传")
+                    self._url = str(url)
+                    self._headers = dict(headers or {})
+                    # 分段/Range 下载必须拿原始字节，禁止传输层压缩
+                    self._headers.setdefault("Accept-Encoding", "identity")
+                    self._resolved_at = now
+                elif not self._url:
+                    self._resolved_at = now
+            return self._url, dict(self._headers)
+
+
 class HttpFileDownloadService:
     """把 Provider 的临时下载地址解析器适配为流式文件下载能力。"""
 
@@ -77,9 +123,13 @@ class HttpFileDownloadService:
             timeout: int = 300,
             concurrency: int = 5,
             part_size: int = 10 * 1024 * 1024,
+            link_refresh_interval: float = 30.0,
+            link_max_age: float = 20 * 60.0,
     ):
         self._resolver = resolver
         self._timeout = timeout
+        self._link_refresh_interval = float(link_refresh_interval)
+        self._link_max_age = float(link_max_age)
         # 云盘 CDN 普遍按「单连接」限速（夸克约 100~200KB/s），提速只能靠并发连接数叠加，
         # 因此这里只做 256 的兜底保护，真正生效的并发由调用方（下载线程数）决定。
         self._concurrency = max(1, min(int(concurrency or 5), 256))
@@ -133,10 +183,11 @@ class HttpFileDownloadService:
             return set()
 
     def _download_serial(
-            self, url: str, headers: dict, file_item: CloudFile, target: Path,
+            self, refresher: _LinkRefresher, file_item: CloudFile, target: Path,
             progress_callback=None, stop_requested=None,
     ) -> str:
         done = 0
+        url, headers = refresher.get()
         with requests.get(
                 url,
                 headers=headers,
@@ -162,7 +213,7 @@ class HttpFileDownloadService:
         return str(target)
 
     def _download_parallel(
-            self, url: str, headers: dict, total: int, target: Path,
+            self, refresher: _LinkRefresher, total: int, target: Path,
             progress_callback=None, stop_requested=None,
     ) -> str:
         ranges = [
@@ -203,10 +254,11 @@ class HttpFileDownloadService:
         def download_part(byte_range: tuple[int, int]) -> None:
             nonlocal downloaded
             start, end = byte_range
-            request_headers = dict(headers)
-            request_headers["Range"] = f"bytes={start}-{end}"
             for attempt in range(3):
                 received = 0
+                url, headers = refresher.get(refresh=attempt > 0)
+                request_headers = dict(headers)
+                request_headers["Range"] = f"bytes={start}-{end}"
                 try:
                     with requests.get(
                             url,
@@ -215,6 +267,14 @@ class HttpFileDownloadService:
                             timeout=self._request_timeout,
                     ) as response:
                         if response.status_code != 206:
+                            if (
+                                    response.status_code >= 500
+                                    or response.status_code in (401, 403, 404, 410, 429)
+                            ):
+                                # 链接过期/被风控/源站抖动：交给重试逻辑换取新直链
+                                raise requests.RequestException(
+                                    f"HTTP {response.status_code}"
+                                )
                             raise _RangeDownloadUnsupported(
                                 f"HTTP {response.status_code}"
                             )
@@ -286,13 +346,15 @@ class HttpFileDownloadService:
     def download_file(self, file_item: CloudFile, local_path: str,
                       progress_callback=None, stop_requested=None,
                       preserve_partial: bool = False) -> str:
-        url, headers = self._resolver(file_item)
-        if not url:
+        refresher = _LinkRefresher(
+            lambda: self._resolver(file_item),
+            refresh_interval=self._link_refresh_interval,
+            max_age=self._link_max_age,
+        )
+        if not refresher.get()[0]:
             raise RuntimeError("源网盘未返回下载地址")
         target = Path(local_path)
         target.parent.mkdir(parents=True, exist_ok=True)
-        request_headers = dict(headers or {})
-        request_headers.setdefault("Accept-Encoding", "identity")
         total = int(file_item.size or 0)
         reported = 0
 
@@ -306,8 +368,7 @@ class HttpFileDownloadService:
             if self._concurrency > 1 and total > self._part_size:
                 try:
                     return self._download_parallel(
-                        url,
-                        request_headers,
+                        refresher,
                         total,
                         target,
                         report,
@@ -318,11 +379,12 @@ class HttpFileDownloadService:
                         f"源盘不支持分段下载（{error}），回落单线程顺序下载："
                         f"{file_item.name}（实际并发 {self._concurrency}）"
                     )
+                    # 403/失效链接也会走到这里，回退前先尝试换取新链接
+                    refresher.get(refresh=True)
                     target.unlink(missing_ok=True)
                     self._parts_path(target).unlink(missing_ok=True)
             return self._download_serial(
-                url,
-                request_headers,
+                refresher,
                 file_item,
                 target,
                 report,
@@ -1044,6 +1106,9 @@ class CrossTransferTaskManager:
                         download_url, download_headers, target_path,
                         target_name, int(task["total"]), algorithm, checksum,
                         remote_progress, stop_event.is_set,
+                        refresh_link=lambda: source_provider.require(
+                            CloudDriveCapability.FILE_DOWNLOAD
+                        ).resolve_download_link(task["source_file"]),
                     )
                     if remote_uploaded:
                         remote_rapid = remote_uploaded == "rapid"
@@ -1079,7 +1144,12 @@ class CrossTransferTaskManager:
                         return
                 except InterruptedError:
                     raise
-                except Exception:
+                except Exception as error:  # noqa: BLE001 - 直传失败回退本地缓存
+                    logger.warning(
+                        f"Range 直传失败，回退本地缓存下载："
+                        f"{type(error).__name__}: {error}"
+                    )
+                    logger.debug("Range 直传异常详情", exc_info=True)
                     self._update(
                         task_id, phase="downloading", progress=0,
                         message="Range 直传不可用，正在回退本地缓存",

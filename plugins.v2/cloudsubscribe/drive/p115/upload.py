@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import time
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
@@ -134,6 +135,7 @@ class P115UploadService(OwnerDelegator):
             checksum: str,
             progress_callback: Optional[Callable[[int, int], None]] = None,
             stop_requested: Optional[Callable[[], bool]] = None,
+            refresh_link: Optional[Callable[[], tuple[str, Mapping[str, str]]]] = None,
     ) -> bool | str:
         """优先用远程 Range 完成 SHA1 秒传，未命中时继续流式上传。"""
         if (
@@ -152,7 +154,8 @@ class P115UploadService(OwnerDelegator):
         if not lookup.checked or lookup.directory_id is None:
             raise RuntimeError(f"115 远程上传目录不可用：{save_path}")
         reader = _HttpRangeReader(
-            download_url, download_headers, file_size, stop_requested
+            download_url, download_headers, file_size, stop_requested,
+            refresh_link=refresh_link,
         )
         uploaded = 0
 
@@ -234,9 +237,12 @@ class _HttpRangeReader(io.RawIOBase):
     def __init__(
             self, url: str, headers: Mapping[str, str], size: int,
             stop_requested: Optional[Callable[[], bool]] = None,
+            refresh_link: Optional[Callable[[], tuple[str, Mapping[str, str]]]] = None,
     ):
         self._url = url
         self._headers = dict(headers or {})
+        self._refresh_link = refresh_link
+        self._refreshed_at = time.time()
         self._size = int(size)
         self._position = 0
         self._stop_requested = stop_requested
@@ -263,6 +269,24 @@ class _HttpRangeReader(io.RawIOBase):
         self._position = min(int(offset), self._size)
         return self._position
 
+    def _refresh_source_link(self) -> None:
+        """直链限速/失效时重新取链（30 秒节流），让长任务能继续跑下去。"""
+        if not self._refresh_link:
+            return
+        now = time.time()
+        if now - self._refreshed_at < 30:
+            return
+        self._refreshed_at = now
+        try:
+            url, headers = self._refresh_link()
+        except Exception as error:  # noqa: BLE001 - 取链失败沿用旧链接重试
+            logger.warning(f"刷新源盘直链失败，沿用原链接重试：{error}")
+            return
+        if url:
+            self._url = str(url)
+            self._headers = dict(headers or {})
+            logger.info("已刷新源盘直链，继续 Range 直传")
+
     def read(self, size: int = -1) -> bytes:
         if self._stop_requested and self._stop_requested():
             raise InterruptedError
@@ -273,10 +297,14 @@ class _HttpRangeReader(io.RawIOBase):
         if end < self._position:
             return b""
         start = self._position
-        headers = dict(self._headers)
-        headers["Range"] = f"bytes={start}-{end}"
-        headers.setdefault("Accept-Encoding", "identity")
+        expected = end - start + 1
+        last_error: Optional[Exception] = None
         for attempt in range(3):
+            if attempt:
+                self._refresh_source_link()
+            headers = dict(self._headers)
+            headers["Range"] = f"bytes={start}-{end}"
+            headers.setdefault("Accept-Encoding", "identity")
             try:
                 with self._session.get(
                         self._url, headers=headers, timeout=(15, 120), stream=True,
@@ -293,15 +321,19 @@ class _HttpRangeReader(io.RawIOBase):
                             f"源盘返回无效 Content-Range：{content_range or '空'}"
                         )
                     data = response.content
-                break
-            except requests.RequestException:
+                if len(data) != expected:
+                    raise IOError(
+                        f"源盘 Range 读取不完整：{len(data)}/{expected}"
+                    )
+            except (requests.RequestException, IOError) as error:
+                last_error = error
                 if attempt >= 2:
                     raise
-        expected = end - start + 1
-        if len(data) != expected:
-            raise IOError(f"源盘 Range 读取不完整：{len(data)}/{expected}")
-        self._position += len(data)
-        return data
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            self._position += len(data)
+            return data
+        raise last_error or IOError("源盘 Range 读取失败")
 
     def read_range_sha1(self, value: str) -> str:
         """按 115 的二次校验范围读取源盘并返回大写 SHA1。"""
