@@ -22,6 +22,10 @@ from ...search.types import (
 )
 from ...utils.cache import create_platform_ttl_cache
 
+_MEDIA_SOURCE_ALIASES = {
+    "tmdb", "themoviedb", "douban", "bangumi", "anilist", "imdb", "tvdb",
+}
+
 _RECENT_MANUAL_SUBMITS = create_platform_ttl_cache(
     "sync:manual_submits", maxsize=256, ttl=4
 )
@@ -63,8 +67,15 @@ class SyncApi(OwnerDelegator):
         resolved_type = MediaType.TV if media_type == "tv" else MediaType.MOVIE
         title = str(raw_media.get("title") or "").strip()
         year = str(raw_media.get("year") or "").strip()
-        media_source = raw_media.get("media_source")
-        media_id = raw_media.get("media_id")
+        media_source = str(raw_media.get("media_source") or "").strip() or None
+        media_id = str(raw_media.get("media_id") or "").strip() or None
+        # 兼容「douban:37473691」这类带来源前缀的写法：规范契约要的是裸 ID，
+        # 前缀留着会让识别直接失败
+        if media_id and ":" in media_id:
+            prefix, _, tail = media_id.partition(":")
+            if tail.strip() and prefix.strip().casefold() in _MEDIA_SOURCE_ALIASES:
+                media_source = media_source or prefix.strip().casefold()
+                media_id = tail.strip()
         douban_id = raw_media.get("douban_id")
         bangumi_id = raw_media.get("bangumi_id")
         anilist_id = raw_media.get("anilist_id")

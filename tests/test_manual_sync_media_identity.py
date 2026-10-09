@@ -185,6 +185,24 @@ class TestManualSyncMediaIdentity(unittest.TestCase):
         kwargs, _label = self.submitted[0]
         self.assertEqual(kwargs["manual_target"]["media_type"], "movie")
 
+    def test_prefixed_media_id_is_normalized(self):
+        """前端若回传「douban:37473691」这类带来源前缀的 media_id，要拆成规范身份再识别。"""
+        result = self.api.api_vue_start_manual_sync(
+            self._payload({
+                "tmdb_id": None,
+                "media_type": "movie",
+                "title": "巴黎绽放的星辰",
+                "year": "2026",
+                "media_source": "douban",
+                "media_id": "douban:37473691",
+                "seek_by_title": True,
+            })
+        )
+        self.assertTrue(result["success"], result)
+        kwargs = sync_module.recognize_media.call_args.kwargs
+        self.assertEqual(kwargs["media_id"], "37473691")
+        self.assertEqual(kwargs["media_source"], "douban")
+
     def test_without_any_identity_still_rejected(self):
         """没有任何可用身份时保持原报错，不猜测媒体。"""
         sync_module.recognize_media = MagicMock(return_value=None)
