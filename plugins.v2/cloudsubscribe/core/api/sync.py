@@ -12,7 +12,7 @@ from app.log import logger
 from app.schemas.types import MediaType
 
 from .. import CloudDriveCapability, OwnerDelegator, SearchCapability
-from ..media import recognize_media, tmdb_id_of
+from ..media import media_identity, recognize_media, tmdb_id_of
 from ...search.matching import positive_ints
 from ...search.types import (
     normalize_resource_type,
@@ -49,6 +49,67 @@ class SyncApi(OwnerDelegator):
         if not mediainfo:
             raise ValueError(f"TMDB 媒体不存在：{tmdb_id}")
         return mediainfo
+
+    def _resolve_manual_media_by_identity(
+            self,
+            raw_media: Dict[str, Any],
+            media_type: str,
+    ) -> Optional[Any]:
+        """TMDB 认不出这部片时，按豆瓣 / Bangumi / AniList 等身份兜底识别。
+
+        新片或中文片名未被 TMDB 收录时，MoviePilot 往往仍能通过豆瓣识别；
+        此前只认 TMDB 会让这类媒体完全无法转存。
+        """
+        resolved_type = MediaType.TV if media_type == "tv" else MediaType.MOVIE
+        title = str(raw_media.get("title") or "").strip()
+        year = str(raw_media.get("year") or "").strip()
+        media_source = raw_media.get("media_source")
+        media_id = raw_media.get("media_id")
+        douban_id = raw_media.get("douban_id")
+        bangumi_id = raw_media.get("bangumi_id")
+        anilist_id = raw_media.get("anilist_id")
+        allow_title = bool(title) and bool(raw_media.get("seek_by_title"))
+        if not any([media_id, douban_id, bangumi_id, anilist_id, allow_title]):
+            return None
+        meta = None
+        if title and allow_title:
+            try:
+                meta = MetaInfo(title)
+                meta.type = resolved_type
+                if year.isdigit():
+                    meta.year = year
+            except Exception:
+                meta = None
+        try:
+            mediainfo = recognize_media(
+                self.chain,
+                meta=meta,
+                mtype=resolved_type,
+                media_source=media_source,
+                media_id=media_id,
+                douban_id=douban_id,
+                bangumi_id=bangumi_id,
+                anilist_id=anilist_id,
+                cache=True,
+            )
+        except Exception as error:
+            logger.warning(f"兜底识别手动转存媒体失败：{error}")
+            return None
+        if not mediainfo:
+            return None
+        # 识别结果自带类型时以它为准：前端在没有媒体上下文时默认按电视剧传，
+        # 电影会被带错类型，这里纠正回真实类型
+        resolved_from_media = (
+            "tv" if getattr(mediainfo, "type", None) == MediaType.TV else
+            "movie" if getattr(mediainfo, "type", None) == MediaType.MOVIE else ""
+        )
+        source, identity = media_identity(mediainfo)
+        logger.info(
+            f"手动转存媒体兜底识别成功：{getattr(mediainfo, 'title', '')}"
+            f"（来源 {source or media_source or '未知'} / {identity or media_id or ''}"
+            f" / 类型 {resolved_from_media or media_type}）"
+        )
+        return mediainfo, resolved_from_media or media_type
 
     @staticmethod
     def _manual_resource_type(link: str, default: str) -> str:
@@ -350,14 +411,22 @@ class SyncApi(OwnerDelegator):
             except (TypeError, ValueError):
                 return {"success": False, "message": "TMDB 媒体信息格式错误"}
             if tmdb_id <= 0 or media_type not in {"movie", "tv"}:
-                return {"success": False, "message": "请选择订阅或有效的 TMDB 媒体"}
-            try:
-                canonical_media = self._resolve_manual_tmdb_media(
-                    tmdb_id=tmdb_id,
-                    media_type=media_type,
-                )
-            except Exception as error:
-                return {"success": False, "message": f"读取 TMDB 媒体信息失败：{error}"}
+                if media_type not in {"movie", "tv"}:
+                    return {"success": False, "message": "请选择订阅或有效的 TMDB 媒体"}
+                # TMDB 认不出（新片/片名未收录）→ 用豆瓣等身份兜底，兜底不到才报错
+                resolved = self._resolve_manual_media_by_identity(raw_media, media_type)
+                if resolved is None:
+                    return {"success": False, "message": "请选择订阅或有效的 TMDB 媒体"}
+                canonical_media, media_type = resolved
+                tmdb_id = int(tmdb_id_of(canonical_media) or 0)
+            else:
+                try:
+                    canonical_media = self._resolve_manual_tmdb_media(
+                        tmdb_id=tmdb_id,
+                        media_type=media_type,
+                    )
+                except Exception as error:
+                    return {"success": False, "message": f"读取 TMDB 媒体信息失败：{error}"}
             canonical_title = str(getattr(canonical_media, "title", "") or "").strip()
             if not canonical_title:
                 return {"success": False, "message": "TMDB 媒体缺少规范标题"}
@@ -399,10 +468,14 @@ class SyncApi(OwnerDelegator):
                     seasons = [1]
                 if seasons[-1] > 999:
                     return {"success": False, "message": "请选择 1 到 999 之间的季"}
+            canonical_source, canonical_id = media_identity(canonical_media)
             media_target = {
-                "tmdb_id": tmdb_id,
+                # TMDB 未收录该片时可能没有 TMDB ID，此时保留下游可用的规范身份
+                "tmdb_id": tmdb_id or None,
                 "douban_id": raw_media.get("douban_id"),
                 "bangumi_id": raw_media.get("bangumi_id"),
+                "media_source": canonical_source or raw_media.get("media_source"),
+                "media_id": canonical_id or raw_media.get("media_id"),
                 "media_type": media_type,
                 "title": canonical_title,
                 "year": getattr(canonical_media, "year", None) or raw_media.get("year"),

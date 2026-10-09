@@ -730,11 +730,20 @@ async function submitManualDownload(url, title, resItem = null, options = {}) {
     } catch (_) {
     }
   }
-  if (!tmdbId) {
-    // 没有媒体上下文、按标题又反查不到 TMDB 时，后端会拒绝并回「请选择订阅或有效的
-    // TMDB 媒体」，这里直接给出可操作的提示，避免用户对着模糊报错猜。
+  // TMDB 认不出（新片、中文片名未收录）时，只要媒体还有豆瓣/Bangumi 等身份，
+  // 或本来就带着明确的媒体上下文，就交给后端按身份兜底识别，不再直接拦下。
+  const hasIdentity = Boolean(
+    media.media_id ||
+      media.douban_id ||
+      media.bangumi_id ||
+      media.anilist_id ||
+      media.imdb_id ||
+      media.tvdb_id,
+  );
+  const seekByTitle = Boolean(media.title);
+  if (!tmdbId && !hasIdentity && !seekByTitle) {
     showMessage(
-      `未能自动识别「${mediaTitle}」的 TMDB 信息，请在「手动添加资源」中选择对应媒体再转存`,
+      `未能自动识别「${mediaTitle}」的媒体信息，请在「手动添加资源」中选择对应媒体再转存`,
       "warning",
     );
     return;
@@ -788,6 +797,7 @@ async function submitManualDownload(url, title, resItem = null, options = {}) {
       title: mediaTitle,
       year: media.year || "",
       seasons: seasons,
+      seek_by_title: seekByTitle,
     },
     resource_links: [],
     resource_titles: {},
