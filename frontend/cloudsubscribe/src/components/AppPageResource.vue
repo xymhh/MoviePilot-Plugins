@@ -698,7 +698,7 @@ async function submitManualDownload(url, title, resItem = null, options = {}) {
     .toLowerCase();
   const resourceRef = String(resItem?.resource_ref || "").trim();
   const media = activeMedia.value || {};
-  const mediaType = media.media_type === "movie" ? "movie" : "tv";
+  let mediaType = media.media_type === "movie" ? "movie" : "tv";
   const mediaTitle = media.title || title || "未命名媒体";
   let tmdbId = Number(media.tmdb_id || 0);
   if (!tmdbId && mediaTitle) {
@@ -713,10 +713,31 @@ async function submitManualDownload(url, title, resItem = null, options = {}) {
         tmdbId = Number(matched.tmdb_id || 0);
         if (tmdbId) {
           media.tmdb_id = tmdbId;
+          // 反查命中的类型才是 TMDB 的真实类型：没有媒体上下文时上面默认按电视剧查，
+          // 电影就会带错类型提交，后端会拒绝并报「请选择订阅或有效的 TMDB 媒体」
+          const matchedType = String(matched.media_type || "").toLowerCase();
+          if (matchedType === "movie" || matchedType === "tv") {
+            mediaType = matchedType;
+            media.media_type = matchedType;
+          }
+          if (Array.isArray(matched.seasons) && matched.seasons.length) {
+            media.seasons = matched.seasons
+              .map((item) => (typeof item === "object" && item !== null ? Number(item.season_number) : Number(item)))
+              .filter((value) => value > 0);
+          }
         }
       }
     } catch (_) {
     }
+  }
+  if (!tmdbId) {
+    // 没有媒体上下文、按标题又反查不到 TMDB 时，后端会拒绝并回「请选择订阅或有效的
+    // TMDB 媒体」，这里直接给出可操作的提示，避免用户对着模糊报错猜。
+    showMessage(
+      `未能自动识别「${mediaTitle}」的 TMDB 信息，请在「手动添加资源」中选择对应媒体再转存`,
+      "warning",
+    );
+    return;
   }
   let seasons = [];
   if (mediaType === "tv") {

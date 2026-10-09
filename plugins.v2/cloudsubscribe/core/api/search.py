@@ -668,6 +668,9 @@ class SearchApi(OwnerDelegator):
             return {"success": False, "message": f"TMDB 查询失败：{error}"}
 
         items = []
+        # 类型不符的候选先暂存：前端在「没有选中媒体」时默认按电视剧反查，
+        # 电影会因此被类型过滤全部挡掉，最后误报「请选择订阅或有效的 TMDB 媒体」
+        deferred = []
         seen = set()
         for candidate in candidates:
             candidate_type = getattr(candidate, "type", None)
@@ -685,10 +688,8 @@ class SearchApi(OwnerDelegator):
                 continue
             if requested_tmdb_id > 0 and tmdb_id != requested_tmdb_id:
                 continue
-            if requested_media_type in {"movie", "tv"} and media_type != requested_media_type:
-                continue
             seen.add(identity)
-            items.append({
+            entry = {
                 "tmdb_id": tmdb_id,
                 "imdb_id": getattr(candidate, "imdb_id", None),
                 "tvdb_id": getattr(candidate, "tvdb_id", None),
@@ -708,9 +709,20 @@ class SearchApi(OwnerDelegator):
                     "w500",
                 ),
                 "vote_average": getattr(candidate, "vote_average", None),
-            })
+            }
+            if requested_media_type in {"movie", "tv"} and media_type != requested_media_type:
+                deferred.append(entry)
+                continue
+            items.append(entry)
             if len(items) >= 20:
                 break
+        if not items and deferred:
+            # 类型不符但确实存在该媒体 → 放宽类型（优先保留用户所需类型，其余按原相关度）
+            logger.info(
+                f"[{title}][TMDB] 按 {requested_media_type or '全部'} 未命中，"
+                f"放宽类型后命中 {len(deferred)} 个候选"
+            )
+            items = deferred
         seasons = []
         if len(items) == 1 and items[0]["media_type"] == "tv" and requested_tmdb_id > 0:
             seasons = self._resolve_tmdb_seasons({**payload, **items[0]})
