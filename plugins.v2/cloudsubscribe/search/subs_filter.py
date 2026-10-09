@@ -370,6 +370,13 @@ def anime_file_candidates(
         prefix: str = "mikan",
 ) -> Dict[int, List[Dict[str, Any]]]:
     """利用已匹配发布的双语名称精确匹配文件候选。"""
+    candidates: Dict[int, List[Dict[str, Any]]] = {}
+    for target in targets:
+        try:
+            episode = int(target)
+        except (TypeError, ValueError):
+            continue
+        candidates.setdefault(episode, [])
     aliases = release_titles(release_title)
     aliases += [
         re.sub(r"\s+The Animation$", "", name, flags=re.I)

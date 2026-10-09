@@ -1271,6 +1271,13 @@ class CrossTransferTaskManager:
                             Path(source_path), cache_key, source_file
                         )
                     cache_complete = True
+            if source_path and not Path(source_path).is_file():
+                # 中继文件在传输途中被清理（历史删除联动删缓存/手工清缓存/插件重载）：
+                # 明确报错并让下一次重试重新下载，避免抛出裸 Errno 2 让用户无从下手
+                raise RuntimeError(
+                    "本地中继缓存文件已被清理（可能来自历史删除联动清缓存或手工清理），"
+                    "请重新点击重试，插件会重新下载"
+                )
             if progressive_result:
                 result_file = progressive_result.file
                 self._update(

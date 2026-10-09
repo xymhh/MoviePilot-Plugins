@@ -994,8 +994,11 @@ class SearchApi(OwnerDelegator):
                 "media_ids": media_ids,
                 "media": (
                     f"{getattr(mediainfo, 'title', None) or title}"
-                    f"{f' ({getattr(mediainfo, 'year', None)})' if getattr(mediainfo, 'year', None) else ''}"
-                    f"{f' S{season:02d}' if season else ''}"
+                    + (
+                        f" ({getattr(mediainfo, 'year', None)})"
+                        if getattr(mediainfo, "year", None) else ""
+                    )
+                    + (f" S{season:02d}" if season else "")
                 ),
                 "count": total_result_count,
                 "displayed_count": displayed_result_count,

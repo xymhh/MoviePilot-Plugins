@@ -384,19 +384,6 @@ class HistoryRetryService(OwnerDelegator):
         record["source_file_name"] = source_name
         record["source_sha1"] = source_sha1
         record["tmdb_id"] = mediainfo.tmdb_id
-        effective_title = str(
-            getattr(subscribe, "name", None)
-            or getattr(target_subscribe, "name", None)
-            or getattr(mediainfo, "title", None)
-            or record.get("title")
-            or ""
-        ).strip()
-        if effective_title:
-            record["title"] = effective_title
-        if getattr(target_subscribe, "year", None) or getattr(mediainfo, "year", None):
-            record["year"] = str(getattr(target_subscribe, "year", None) or mediainfo.year)
-        if getattr(mediainfo, "get_poster_image", None) and mediainfo.get_poster_image():
-            record["image"] = mediainfo.get_poster_image()
         record.pop("failure_reason", None)
         if cached_source and self._cross_transfer_manager:
             record.update(self._cross_transfer_manager.cache_info(
@@ -404,6 +391,8 @@ class HistoryRetryService(OwnerDelegator):
                 cached_source,
                 verify_checksum=False,
             ))
+        # 终态关联先落定，再做标题/年份/封面等装饰性更新：
+        # 装饰性字段异常时记录仍带 finalize_key，后处理可把终态写回，不会卡在旧状态。
         if pending_key:
             record["finalize_key"] = pending_key
             record["status"] = (
@@ -417,6 +406,28 @@ class HistoryRetryService(OwnerDelegator):
                 mediainfo=mediainfo,
                 file_name=target_name,
             )
+        try:
+            target_subscribe = subscribe or SimpleNamespace(
+                name=str(record.get("title") or getattr(mediainfo, "title", "") or ""),
+                year=str(record.get("year") or getattr(mediainfo, "year", "") or ""),
+            )
+            effective_title = str(
+                getattr(subscribe, "name", None)
+                or getattr(target_subscribe, "name", None)
+                or getattr(mediainfo, "title", None)
+                or record.get("title")
+                or ""
+            ).strip()
+            if effective_title:
+                record["title"] = effective_title
+            if getattr(target_subscribe, "year", None) or getattr(mediainfo, "year", None):
+                record["year"] = str(
+                    getattr(target_subscribe, "year", None) or mediainfo.year
+                )
+            if getattr(mediainfo, "get_poster_image", None) and mediainfo.get_poster_image():
+                record["image"] = mediainfo.get_poster_image()
+        except Exception as error:
+            logger.warning(f"历史记录重试元数据更新失败（不影响终态写入）：{error}")
 
         if subscribe and not pending_key:
             success_episodes = [1]
