@@ -432,10 +432,12 @@ class CrossTransferTaskManager:
     def __init__(self, provider_resolver: Callable[[str], CloudDriveProvider],
                  download_path: str = "", download_threads: int = 5,
                  max_concurrent: int = 2,
+                 direct_stream: bool = True,
                  on_change: Optional[Callable[[], None]] = None):
         self._provider_resolver = provider_resolver
         self._download_path = str(download_path or "").strip()
-        self._download_threads = max(1, min(int(download_threads or 5), 10))
+        self._download_threads = max(1, min(int(download_threads or 5), 64))
+        self._direct_stream = bool(direct_stream)
         self._transfer_slots = Semaphore(max(1, min(int(max_concurrent or 2), 10)))
         self._tasks: dict[str, dict] = {}
         self._lock = Lock()
@@ -984,6 +986,7 @@ class CrossTransferTaskManager:
                 )
             if (
                     not source_path
+                    and self._direct_stream
                     and fallback
                     and algorithm == "sha1"
                     and bool(checksum)

@@ -176,6 +176,7 @@ class UIConfig:
             "cross_transfer_download_path": "/tmp",
             "cross_transfer_download_threads": 5,
             "cross_transfer_max_concurrent": 2,
+            "cross_transfer_direct_stream": True,
             "subscription_concurrency": 2,
             "batch_size": 20,
             "batch_interval": 3,

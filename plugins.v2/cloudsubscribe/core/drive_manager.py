@@ -39,6 +39,7 @@ class CloudDriveManager:
             download_path=getattr(self._plugin, "_cross_transfer_download_path", ""),
             download_threads=getattr(self._plugin, "_cross_transfer_download_threads", 5),
             max_concurrent=getattr(self._plugin, "_cross_transfer_max_concurrent", 2),
+            direct_stream=getattr(self._plugin, "_cross_transfer_direct_stream", True),
             on_change=getattr(self._plugin, "_mark_runtime_changed", None),
         )
 
