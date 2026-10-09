@@ -729,6 +729,7 @@ class SyncApi(OwnerDelegator):
                         "resource_ref", "provider_data", "media_page_url",
                         "is_unlocked", "preview_episodes", "target_season",
                         "target_episodes", "supports_file_preview",
+                        "target_file_ids", "target_file_names",
                     )
                     if metadata.get(key) is not None
                 },

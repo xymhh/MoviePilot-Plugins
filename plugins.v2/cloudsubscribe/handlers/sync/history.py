@@ -410,6 +410,7 @@ class HistoryService(OwnerDelegator):
         if activated_pending_count:
             self._notify_offline_pending_changed(activated_pending_count)
         self._record_platform_transfer_histories(platform_records)
+        self.reconcile_orphan_finalize_records()
         return len(records)
 
     def compact_workflow_history(self) -> List[Dict[str, Any]]:
@@ -1051,25 +1052,26 @@ class HistoryService(OwnerDelegator):
     def _mark_offline_history_status(
             self, pending_key: str, status: str, reason: str = "",
             updates: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> int:
         batch_updates = {pending_key: updates} if updates else None
-        self._mark_offline_history_status_batch({pending_key}, status, reason, updates=batch_updates)
+        return self._mark_offline_history_status_batch({pending_key}, status, reason, updates=batch_updates)
 
     def _mark_offline_history_status_batch(
             self, pending_keys: Set[str], status: str, reason: str = "",
             updates: Optional[Dict[str, Dict[str, Any]]] = None,
-    ) -> None:
-        """一次扫描并持久化多个离线任务对应的历史记录。"""
+    ) -> int:
+        """一次扫描并持久化多个离线任务对应的历史记录，返回命中的记录数。"""
         if not self._get_data or not self._save_data:
-            return
+            return 0
         normalized_keys = {
             str(value or "").strip() for value in pending_keys
             if str(value or "").strip()
         }
         if not normalized_keys:
-            return
+            return 0
         uppercase_keys = {value.upper() for value in normalized_keys}
         platform_records = []
+        matched_records = 0
         with self._offline_pending_lock:
             history = self._get_data("history") or []
             changed = False
@@ -1083,6 +1085,7 @@ class HistoryService(OwnerDelegator):
                     matched_key = next((k for k in normalized_keys if k.upper() in link), None)
                 if not matched_key:
                     continue
+                matched_records += 1
                 if status == "失败" and item.get("status") == "成功":
                     continue
                 item["status"] = status
@@ -1103,6 +1106,7 @@ class HistoryService(OwnerDelegator):
         self._record_platform_transfer_histories(platform_records)
         if changed and self._history_changed:
             self._history_changed()
+        return matched_records
 
     def get_pending_finalize_tasks(self) -> List[Dict[str, Any]]:
         """返回等待115文件就绪、重命名或生成STRM的持久任务。"""
@@ -1111,6 +1115,34 @@ class HistoryService(OwnerDelegator):
         with self._offline_pending_lock:
             pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
             return [copy.deepcopy({**item, "pending_key": key}) for key, item in pending.items()]
+
+    def reconcile_orphan_finalize_records(self) -> int:
+        """修复「后处理已提交但历史终态没写入」的记录，避免历史长期停在处理中。"""
+        if not self._get_data or not self._save_data:
+            return 0
+        with self._offline_pending_lock:
+            history = self._get_data("history") or []
+            pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
+            repaired = 0
+            for item in history:
+                if str(item.get("status") or "") not in {"处理中", "下载中"}:
+                    continue
+                key = str(item.get("finalize_key") or "").strip()
+                if not key or key in pending:
+                    continue
+                item["status"] = "成功"
+                item.pop("finalize_key", None)
+                item.pop("failure_reason", None)
+                repaired += 1
+            if repaired:
+                self._save_data("history", history)
+        if repaired:
+            logger.warning(
+                f"已修复 {repaired} 条历史记录状态：文件后处理已完成但终态未写入历史"
+            )
+            if self._history_changed:
+                self._history_changed()
+        return repaired
 
     def delete_pending_finalize_tasks(
             self,

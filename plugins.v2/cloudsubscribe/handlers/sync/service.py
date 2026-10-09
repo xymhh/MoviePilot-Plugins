@@ -106,6 +106,10 @@ class SyncHandler:
     _OFFLINE_CHECK_DELAYS = (10, 20, 40, 60, 120, 300)
     _OFFLINE_TIMEOUT = 30 * 60
     _FILE_FINALIZE_TIMEOUT = 30 * 60
+    # 历史记录落盘前不提交后处理终态，超过该宽限期后允许放行，避免任务永久排队
+    _HISTORY_READY_GRACE_SECONDS = 10 * 60
+    # 提交时历史记录尚未落盘的最大保留重试次数
+    _HISTORY_RESYNC_LIMIT = 10
     _OFFLINE_MONITOR_LEASE_SECONDS = 15 * 60
     _MEDIA_RECOGNITION_CACHE_LIMIT = 256
     _PLATFORM_ROOT_CACHE_LIMIT = 256

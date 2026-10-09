@@ -671,12 +671,86 @@ class ResourceTransferService(OwnerDelegator):
         )
         return False
 
+    @staticmethod
+    def _explicit_selection_values(
+            resource: Optional[Dict[str, Any]],
+    ) -> Tuple[List[str], List[str]]:
+        """读取资源上用户显式勾选的文件标识（预览面板单个/批量转存）。"""
+        if not isinstance(resource, dict):
+            return [], []
+        raw_ids = resource.get("target_file_ids")
+        raw_names = resource.get("target_file_names")
+        ids = [
+            str(value).strip()
+            for value in (raw_ids if isinstance(raw_ids, (list, tuple, set)) else [])
+            if str(value or "").strip()
+        ]
+        names = [
+            str(value).strip()
+            for value in (raw_names if isinstance(raw_names, (list, tuple, set)) else [])
+            if str(value or "").strip()
+        ]
+        return ids, names
+
+    @staticmethod
+    def _filter_files_by_explicit_selection(
+            files: List[Dict[str, Any]],
+            target_file_ids: Optional[List[str]] = None,
+            target_file_names: Optional[List[str]] = None,
+            log_prefix: str = "",
+    ) -> List[Dict[str, Any]]:
+        """把分享文件收敛到用户显式选中的条目，未命中时回退原始列表。"""
+        selected_ids = {
+            str(value).strip()
+            for value in (target_file_ids or [])
+            if str(value or "").strip()
+        }
+        selected_names = {
+            str(value).strip().casefold()
+            for value in (target_file_names or [])
+            if str(value or "").strip()
+        }
+        if not selected_ids and not selected_names:
+            return files
+        selected: List[Dict[str, Any]] = []
+        for item in files:
+            file_id = str(
+                item.get("id") or item.get("file_id") or item.get("fid") or ""
+            ).strip()
+            if file_id and file_id in selected_ids:
+                selected.append(item)
+                continue
+            relative = str(
+                item.get("relative_path") or item.get("parent_path") or ""
+            ).strip()
+            name = str(item.get("name") or "").strip()
+            segments = {
+                segment.strip().casefold()
+                for segment in f"{relative}/{name}".split("/")
+                if segment.strip()
+            }
+            if name.casefold() in selected_names or segments & selected_names:
+                selected.append(item)
+        if not selected:
+            logger.warning(
+                f"{log_prefix + ' ' if log_prefix else ''}显式选择的文件未在分享中找到，"
+                f"回退为全部候选：ids={sorted(selected_ids)} names={sorted(selected_names)}"
+            )
+            return files
+        logger.info(
+            f"{log_prefix + ' ' if log_prefix else ''}已按用户选择收敛候选文件："
+            f"{len(selected)}/{len(files)}"
+        )
+        return selected
+
     def _validated_resource_files(
             self,
             share_url: str,
             resource_title: str = "",
             target_season: Optional[int] = None,
             log_prefix: str = "",
+            target_file_ids: Optional[List[str]] = None,
+            target_file_names: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """校验分享并读取文件列表，供电影、剧集和洗版共同使用。"""
         if self._is_cloud_resource_url(share_url):
@@ -716,7 +790,14 @@ class ResourceTransferService(OwnerDelegator):
             logger.debug(
                 f"{log_prefix + ' ' if log_prefix else ''}分享链接无内容：{label}"
             )
-        return files
+            return files
+        return self._filter_files_by_explicit_selection(
+            files,
+            target_file_ids,
+            target_file_names,
+            log_prefix=log_prefix,
+        )
+
 
     def preview_resource_files(self, share_url: str) -> List[Dict[str, Any]]:
         """只读校验分享链接并列举媒体文件，供无订阅入口识别内容。"""

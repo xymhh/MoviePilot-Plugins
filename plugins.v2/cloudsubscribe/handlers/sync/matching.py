@@ -57,6 +57,7 @@ class FileMatchingService(OwnerDelegator):
             subscribe,
             resource_title: str = "",
             require_media_match: bool = True,
+            explicit_selection: bool = False,
     ) -> tuple:
         """按媒体文件结构收集电影候选，再使用规则组选择。"""
         matched = self._search_handler.select_file_candidate(
@@ -70,8 +71,23 @@ class FileMatchingService(OwnerDelegator):
         if matched[0] or not require_media_match:
             return matched if matched[0] else (None, 0)
 
-        # 跨盘文件名被网盘混淆时，仅允许“资源标题匹配 + 唯一大视频”兜底。
+        # 用户在预览面板显式勾选过文件：候选已被收敛为该选择，直接按体积取最大视频。
         fallback = FileMatcher.movie_candidates(files)
+        if explicit_selection and fallback:
+            actual = max(fallback, key=lambda item: int(item.get("size") or 0))
+            scoring_item = dict(actual)
+            scoring_item["name"] = (
+                f"{str(resource_title).strip()}{Path(str(actual.get('name') or '')).suffix}"
+            )
+            _, score = self._search_handler.select_file_candidate(
+                [scoring_item], mediainfo, subscribe
+            )
+            logger.info(
+                f"按用户显式选择转存电影文件：{actual.get('name')}（评分 {score}）"
+            )
+            return actual, score
+
+        # 跨盘文件名被网盘混淆时，仅允许“资源标题匹配 + 唯一大视频”兜底。
         if (
                 len(fallback) != 1
                 or not FileMatcher.media_name_matches(resource_title, mediainfo)

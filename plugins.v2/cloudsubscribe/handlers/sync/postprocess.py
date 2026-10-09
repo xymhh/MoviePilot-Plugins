@@ -290,8 +290,21 @@ class PostprocessService(OwnerDelegator):
             short_id = uuid.uuid4().hex[:10]
         return f"{source.stem}-{short_id}{source.suffix}"
 
-    @staticmethod
+    def _history_ready_for_finalize(self, item: Dict[str, Any], now: float) -> bool:
+        """历史记录尚未落盘时先不提交终态，超过宽限期后放行以免任务永久排队。"""
+        if item.get("history_ready") or item.get("skip_history"):
+            return True
+        grace = float(getattr(self, "_HISTORY_READY_GRACE_SECONDS", 600) or 600)
+        if now - float(item.get("created_at") or now) < grace:
+            return False
+        logger.warning(
+            f"历史记录长时间未落盘，放行文件后处理："
+            f"{item.get('file_name') or item.get('pending_key') or ''}"
+        )
+        return True
+
     def _due_pending_keys(
+            self,
             pending: Dict[str, Dict[str, Any]],
             now: float,
             force: bool = False,
@@ -304,6 +317,7 @@ class PostprocessService(OwnerDelegator):
             if (not selected or key in selected)
                and (bool(selected and key in selected) or now >= float(item.get("_monitor_until") or 0))
                and (force or now >= float(item.get("next_check_at") or 0))
+               and self._history_ready_for_finalize(item, now)
         ]
 
     @staticmethod
@@ -806,6 +820,35 @@ class PostprocessService(OwnerDelegator):
                 return True
         return False
 
+    def _resolve_history_record(
+            self,
+            item: Dict[str, Any],
+            pending_key: str,
+            status: str,
+            reason: str = "",
+    ) -> bool:
+        """写入历史终态；历史记录尚未落盘时保留任务，稍后重写避免状态卡在处理中。"""
+        if self._mark_offline_history_status(pending_key, status, reason):
+            return True
+        if item.get("skip_history"):
+            return True
+        limit = int(getattr(self, "_HISTORY_RESYNC_LIMIT", 10) or 10)
+        retries = int(item.get("history_resync_count") or 0)
+        if retries < limit:
+            item["history_resync_count"] = retries + 1
+            item["history_ready"] = False
+            item["next_check_at"] = time.time() + 60
+            logger.warning(
+                f"历史记录尚未落盘，保留后处理任务稍后重写终态（{status}）："
+                f"{item.get('file_name') or pending_key}"
+            )
+            return False
+        logger.error(
+            f"历史记录长时间缺失，放弃写入终态（{status}）："
+            f"{item.get('file_name') or pending_key}"
+        )
+        return True
+
     def _commit_single_item(
             self,
             item: Dict[str, Any],
@@ -825,6 +868,8 @@ class PostprocessService(OwnerDelegator):
             self._delete_upgrade_old_strm(
                 item, replacement_path=strm_path
             )
+        if not self._resolve_history_record(item, pending_key, "成功"):
+            return
         self._queue_subscription_completion(item, media, media_data, ctx)
         detail = self._notify_pending_file_finalized(
             item,
@@ -835,7 +880,6 @@ class PostprocessService(OwnerDelegator):
             finish_subscription=media is None,
             subscribe_cache=ctx.subscribe_cache,
         )
-        self._mark_offline_history_status(pending_key, "成功")
         if detail:
             ctx.finalized_details.append(detail)
             ctx.notification_contexts.append((item, pending_key))
@@ -865,7 +909,8 @@ class PostprocessService(OwnerDelegator):
         logger.warning(
             f"文件后处理失败并停止：{item.get('file_name') or pending_key}，原因：{reason}"
         )
-        self._mark_offline_history_status(pending_key, "失败", reason)
+        if not self._resolve_history_record(item, pending_key, "失败", reason):
+            return
         ctx.pending.pop(pending_key, None)
         ctx.committed_keys.add(pending_key)
         ctx.failed += 1
@@ -1564,7 +1609,8 @@ class PostprocessService(OwnerDelegator):
         ready_at = float(item.get("download_completed_at") or created_at)
         if ctx.now - ready_at >= self._FILE_FINALIZE_TIMEOUT:
             reason = "文件已下载但30分钟内仍无法生成 STRM"
-            self._mark_offline_history_status(pending_key, "失败", reason)
+            if not self._resolve_history_record(item, pending_key, "失败", reason):
+                return
             ctx.pending.pop(pending_key, None)
             ctx.committed_keys.add(pending_key)
             ctx.failed += 1

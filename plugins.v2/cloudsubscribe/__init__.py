@@ -100,7 +100,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.12"
+    plugin_version = "1.6.13"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -559,6 +559,7 @@ class CloudSubscribe(_PluginBase):
         self._init_handlers()
         if self._sync_handler:
             self._sync_handler.sync_platform_transfer_history()
+            self._sync_handler.reconcile_orphan_finalize_records()
         self._update_offline_monitor(
             len(self._sync_handler.get_pending_finalize_tasks())
             if self._sync_handler else 0

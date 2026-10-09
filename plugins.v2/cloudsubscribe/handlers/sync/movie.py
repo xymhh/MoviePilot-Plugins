@@ -436,9 +436,14 @@ class MovieSyncProcessor(OwnerDelegator):
                         logger.info(f"Magnet 已进入下载后真实文件匹配：{provider_name}")
                         continue
 
+                    selected_file_ids, selected_file_names = (
+                        self._explicit_selection_values(resource)
+                    )
                     share_files = self._validated_resource_files(
                         share_url,
                         resource_title=resource_title,
+                        target_file_ids=selected_file_ids,
+                        target_file_names=selected_file_names,
                     )
                     if not share_files:
                         continue
@@ -452,6 +457,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         subscribe,
                         resource_title,
                         require_media_match=require_media_match,
+                        explicit_selection=bool(selected_file_ids or selected_file_names),
                     )
 
                     if not matched_file:

@@ -413,11 +413,16 @@ class UpgradeService(OwnerDelegator):
                         ]
                         continue
 
+                    selected_file_ids, selected_file_names = (
+                        self._explicit_selection_values(resource)
+                    )
                     share_files = self._validated_resource_files(
                         share_url,
                         resource_title=resource_title,
                         target_season=(season if self._skip_other_season_dirs else None),
                         log_prefix=upgrade_log_prefix,
+                        target_file_ids=selected_file_ids,
+                        target_file_names=selected_file_names,
                     )
                     if not share_files:
                         continue
