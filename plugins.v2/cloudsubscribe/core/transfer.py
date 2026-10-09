@@ -15,6 +15,7 @@ from threading import Event, Lock, Semaphore, Thread
 from typing import Callable, Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from app.log import logger
 
@@ -28,6 +29,18 @@ from .cloud import (
 
 class _RangeDownloadUnsupported(RuntimeError):
     pass
+
+
+def _describe_transfer_error(error: BaseException) -> str:
+    """把常见底层报错翻译成可操作的提示。"""
+    message = str(error)
+    lowered = message.lower()
+    if "too many open files" in lowered or "errno 24" in lowered:
+        return (
+            f"{message[:180]}；提示：容器文件描述符已耗尽（Errno 24），"
+            "请给容器加 ulimits.nofile: 65535 并适当调低「下载线程数」后重试"
+        )
+    return message
 
 
 class _SpeedSampler:
@@ -140,6 +153,23 @@ class HttpFileDownloadService:
         # CDN 大文件分段可能长时间无数据，不能把调用方配置的 300 秒硬截断为 30 秒。
         return 15, min(max(30, self._timeout), 120)
 
+    def _create_session(self) -> requests.Session:
+        """复用连接的下载 session。
+
+        每个分片都新建连接会耗尽容器文件描述符（Errno 24 Too many open files），
+        这里按并发上限建连接池并复用，socket 数被池大小夹住。
+        """
+        session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=2,
+            pool_maxsize=max(2, self._concurrency),
+            max_retries=0,
+            pool_block=True,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
+
     @staticmethod
     def _parts_path(target: Path) -> Path:
         return target.with_name(f"{target.name}.parts.json")
@@ -183,12 +213,13 @@ class HttpFileDownloadService:
             return set()
 
     def _download_serial(
-            self, refresher: _LinkRefresher, file_item: CloudFile, target: Path,
+            self, refresher: _LinkRefresher, session: requests.Session,
+            file_item: CloudFile, target: Path,
             progress_callback=None, stop_requested=None,
     ) -> str:
         done = 0
         url, headers = refresher.get()
-        with requests.get(
+        with session.get(
                 url,
                 headers=headers,
                 stream=True,
@@ -213,7 +244,8 @@ class HttpFileDownloadService:
         return str(target)
 
     def _download_parallel(
-            self, refresher: _LinkRefresher, total: int, target: Path,
+            self, refresher: _LinkRefresher, session: requests.Session,
+            total: int, target: Path,
             progress_callback=None, stop_requested=None,
     ) -> str:
         ranges = [
@@ -260,7 +292,7 @@ class HttpFileDownloadService:
                 request_headers = dict(headers)
                 request_headers["Range"] = f"bytes={start}-{end}"
                 try:
-                    with requests.get(
+                    with session.get(
                             url,
                             headers=request_headers,
                             stream=True,
@@ -364,11 +396,13 @@ class HttpFileDownloadService:
             if progress_callback:
                 progress_callback(reported, current_total)
 
+        session = self._create_session()
         try:
             if self._concurrency > 1 and total > self._part_size:
                 try:
                     return self._download_parallel(
                         refresher,
+                        session,
                         total,
                         target,
                         report,
@@ -385,6 +419,7 @@ class HttpFileDownloadService:
                     self._parts_path(target).unlink(missing_ok=True)
             return self._download_serial(
                 refresher,
+                session,
                 file_item,
                 target,
                 report,
@@ -395,6 +430,8 @@ class HttpFileDownloadService:
                 target.unlink(missing_ok=True)
                 self._parts_path(target).unlink(missing_ok=True)
             raise
+        finally:
+            session.close()
 
 
 class LocalRapidUploadAdapter:
@@ -1349,6 +1386,7 @@ class CrossTransferTaskManager:
             ):
                 self._delete_cache_path(Path(temporary_path))
             self._update(task_id, status="failed", phase="failed", message="跨盘传输失败",
-                         error=str(error), speed_bytes_per_second=0.0, finished_at=time.time())
+                         error=_describe_transfer_error(error),
+                         speed_bytes_per_second=0.0, finished_at=time.time())
         finally:
             self._transfer_slots.release()
