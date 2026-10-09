@@ -2,6 +2,8 @@
 历史记录重试与现场补偿执行服务。
 """
 import re
+from copy import deepcopy
+from threading import Lock, Thread
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -20,8 +22,119 @@ from ...core.media import (
 )
 
 
+_retry_inflight_lock = Lock()
+_retry_inflight_keys: set = set()
+
+
 class HistoryRetryService(OwnerDelegator):
     """负责对历史失败或中断的记录进行就地重试与上下文还原。"""
+
+    def _find_history_record(
+            self, record_time: str, share_url: str, file_name: str
+    ) -> Optional[Dict[str, Any]]:
+        history = (self._get_data("history") or []) if self._get_data else []
+        return next(
+            (
+                item for item in history
+                if str(item.get("time") or "") == str(record_time or "")
+                   and str(item.get("share_url") or "") == str(share_url or "")
+                   and str(item.get("file_name") or "") == str(file_name or "")
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _history_retry_key(record_time: str, share_url: str, file_name: str) -> str:
+        return "|".join(
+            (str(record_time or ""), str(share_url or ""), str(file_name or ""))
+        )
+
+    def submit_history_retry(
+            self, record_time: str, share_url: str, file_name: str
+    ) -> Dict[str, Any]:
+        """校验后立即返回，把耗时的重试放到后台线程执行。
+
+        前台请求不再阻塞在跨盘转存与后处理上（此前会长达数十分钟，
+        界面只能停在旧状态等刷新）；提交时先把记录置为处理中并刷新历史版本，
+        结束后再刷新一次，界面通过运行态 SSE 自动更新，无需手动刷新。
+        """
+        record = self._find_history_record(record_time, share_url, file_name)
+        if not record:
+            raise ValueError("未找到对应的转存历史记录")
+        can_retry, retry_title = self._history_retry_state(record)
+        if not can_retry:
+            raise ValueError(retry_title)
+
+        key = self._history_retry_key(record_time, share_url, file_name)
+        with _retry_inflight_lock:
+            if key in _retry_inflight_keys:
+                raise ValueError("该记录正在重试中，请稍候")
+            _retry_inflight_keys.add(key)
+
+        try:
+            processing = deepcopy(record)
+            processing["status"] = (
+                "下载中"
+                if self._is_ed2k_url(str(processing.get("share_url") or ""))
+                else "处理中"
+            )
+            processing.pop("failure_reason", None)
+            self.append_history_records([processing], reopen_terminal=True)
+            if self._history_changed:
+                self._history_changed()
+        except Exception:
+            with _retry_inflight_lock:
+                _retry_inflight_keys.discard(key)
+            raise
+
+        Thread(
+            target=self._run_history_retry,
+            args=(key, str(record_time or ""), str(share_url or ""), str(file_name or "")),
+            daemon=True,
+            name="cloudsubscribe-history-retry",
+        ).start()
+        return {"status": "处理中"}
+
+    def _run_history_retry(
+            self, key: str, record_time: str, share_url: str, file_name: str
+    ) -> None:
+        try:
+            self.retry_history_record(
+                record_time, share_url, file_name, force=True
+            )
+        except Exception as error:
+            logger.error(f"后台重试历史记录失败：{error}")
+            self._mark_history_retry_failed(
+                record_time, share_url, file_name, str(error) or "重试失败"
+            )
+        finally:
+            with _retry_inflight_lock:
+                _retry_inflight_keys.discard(key)
+            if self._history_changed:
+                self._history_changed()
+
+    def _mark_history_retry_failed(
+            self, record_time: str, share_url: str, file_name: str, reason: str
+    ) -> None:
+        """后台重试异常时把记录落回失败态，避免界面一直停在「处理中」。"""
+        history = (self._get_data("history") or []) if self._get_data else []
+        record = next(
+            (
+                item for item in history
+                if str(item.get("time") or "") == str(record_time or "")
+                   and str(item.get("share_url") or "") == str(share_url or "")
+                   and str(item.get("file_name") or "") == str(file_name or "")
+            ),
+            None,
+        )
+        if not record or str(record.get("status") or "") == "成功":
+            return
+        record["status"] = "失败"
+        record["failure_reason"] = reason
+        record.pop("retrying", None)
+        record.pop("finalize_key", None)
+        if self._save_data:
+            self._save_data("history", history)
 
     @staticmethod
     def _find_share_file_for_history(files: List[dict], source_sha1: str, source_name: str) -> Optional[dict]:
@@ -56,8 +169,18 @@ class HistoryRetryService(OwnerDelegator):
                 return matched
         return leaf_files[0] if len(leaf_files) == 1 else None
 
-    def retry_history_record(self, record_time: str, share_url: str, file_name: str) -> Dict[str, Any]:
-        """按持久化历史中的精确记录重新执行平台命名和完整后处理。"""
+    def retry_history_record(
+            self,
+            record_time: str,
+            share_url: str,
+            file_name: str,
+            force: bool = False,
+    ) -> Dict[str, Any]:
+        """按持久化历史中的精确记录重新执行平台命名和完整后处理。
+
+        force=True 供后台线程调用：提交阶段已校验过可重试性，此时记录已被
+        置为「处理中」，需要跳过状态校验继续执行。
+        """
         history = (self._get_data("history") or []) if self._get_data else []
         record = next(
             (
@@ -70,9 +193,12 @@ class HistoryRetryService(OwnerDelegator):
         )
         if not record:
             raise ValueError("未找到对应的转存历史记录")
-        can_retry, retry_title = self._history_retry_state(record)
-        if not can_retry:
-            raise ValueError(retry_title)
+        if not force:
+            can_retry, retry_title = self._history_retry_state(record)
+            if not can_retry:
+                raise ValueError(retry_title)
+        else:
+            record.pop("retrying", None)
 
         source_sha1 = str(record.get("source_sha1") or "").strip()
         source_name = str(
