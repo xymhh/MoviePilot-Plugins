@@ -421,6 +421,14 @@
                   <td>
                     <v-chip :color="statusColor(record.status)" size="x-small" variant="tonal">
                       {{ record.status }}
+                      <v-tooltip
+                        v-if="record.failure_reason"
+                        activator="parent"
+                        location="top"
+                        max-width="380"
+                      >
+                        {{ record.failure_reason }}
+                      </v-tooltip>
                     </v-chip>
                   </td>
                   <td class="text-no-wrap">{{ record.time || "-" }}</td>
@@ -583,6 +591,14 @@
                     </v-chip>
                     <v-chip :color="statusColor(record.status)" size="x-small" variant="tonal">
                       {{ record.status }}
+                      <v-tooltip
+                        v-if="record.failure_reason"
+                        activator="parent"
+                        location="top"
+                        max-width="380"
+                      >
+                        {{ record.failure_reason }}
+                      </v-tooltip>
                     </v-chip>
                     <v-spacer />
                     <div class="action-buttons history-mobile-actions">
