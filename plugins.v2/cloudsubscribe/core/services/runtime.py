@@ -1308,6 +1308,29 @@ class SyncRuntimeService(OwnerDelegator):
                     **pending_meta,
                 }
                 tasks.insert(0, synthetic)
+        if self._sync_handler:
+            pending_task_keys = {
+                str(item.get("id") or "").upper()
+                for item in tasks
+                if item.get("finalize_pending")
+            }
+            for task in tasks:
+                if task.get("finalize_pending"):
+                    continue
+                task_id = str(task.get("id") or "").strip()
+                if not task_id or task_id.upper() in pending_task_keys:
+                    continue
+                try:
+                    finalized = self._sync_handler.is_offline_task_finalized(task_id)
+                except Exception as error:
+                    logger.debug(f"标注离线任务入库状态失败 {task_id}：{error}")
+                    continue
+                if not finalized:
+                    continue
+                # 只影响展示层：state/completed/percent 等判定字段保持不变
+                task["finalized"] = True
+                task["finalized_text"] = "已入库"
+                task["status_text"] = "已完成（已入库）"
         result["tasks"] = tasks
         result["pending_count"] = offline_pending_count
         return result

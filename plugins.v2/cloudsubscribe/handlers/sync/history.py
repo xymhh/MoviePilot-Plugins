@@ -1049,6 +1049,30 @@ class HistoryService(OwnerDelegator):
             f"{len(aggregated)} 个媒体项"
         )
 
+    def is_offline_task_finalized(self, info_hash: str) -> bool:
+        """历史记录中存在该磁力任务且状态为成功时视为已入库。
+
+        115 秒传命中时文件立即可用，但 115 云下载任务条目的状态可能长时间停留在
+        「等待下载」，故此判定仅用于展示层标注，不参与任何完成/失败判定。
+        """
+        normalized = re.sub(r"[^0-9A-Fa-f]", "", str(info_hash or "")).upper()
+        if not normalized or not self._get_data:
+            return False
+        try:
+            history = self._get_data("history") or []
+            for item in history:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("status") or "") != "成功":
+                    continue
+                link = str(item.get("share_url") or "").upper()
+                if normalized in link:
+                    return True
+        except Exception as error:
+            logger.debug(f"查询离线任务入库状态失败：{error}")
+            return False
+        return False
+
     def _mark_offline_history_status(
             self, pending_key: str, status: str, reason: str = "",
             updates: Optional[Dict[str, Any]] = None,
