@@ -100,7 +100,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.21"
+    plugin_version = "1.6.22"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -172,6 +172,7 @@ class CloudSubscribe(_PluginBase):
     _cross_transfer_download_threads: int = 5
     _cross_transfer_max_concurrent: int = 2
     _cross_transfer_direct_stream: bool = True
+    _cross_transfer_upload_concurrency: int = 4
     _subscription_concurrency: int = 2
     _batch_size: int = 20
     _batch_interval: float = 3
@@ -404,11 +405,35 @@ class CloudSubscribe(_PluginBase):
 
     def init_plugin(self, config: dict = None):
         """宿主加载或重载插件时初始化完整运行环境。"""
+        self._raise_file_limit()
         self._offline_monitor_lock = RLock()
         self._offline_scheduler_lock = RLock()
         # 初始化独立数据库并修复历史分组键。
         self._get_data_store().initialize()
         self._apply_plugin_config(config, reset_runtime=True)
+
+    @staticmethod
+    def _raise_file_limit(target: int = 65535) -> None:
+        """把进程的软 nofile 上限抬到 ``target``（受核允许的硬上限约束）。
+
+        容器里默认 ``soft=1024``，跨盘并发下载（每个分片一个连接）会把它撞爆，
+        表现为 ``Errno 24 Too many open files`` 加掉速。硬上限通常已是 524288，
+        所以插件自己就能抬，不必改 docker compose。
+        """
+        try:
+            import resource
+
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if hard == resource.RLIM_INFINITY or int(hard) < 0:
+                desired = int(target)
+            else:
+                desired = min(int(target), int(hard))
+            if int(soft) >= desired:
+                return
+            resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+            logger.info(f"已提升进程文件句柄上限：soft {soft} -> {desired}（hard {hard}）")
+        except Exception as error:  # noqa: BLE001 - 抬不动不影响插件可用性
+            logger.warning(f"提升进程文件句柄上限失败（不影响运行）：{error}")
 
     def _apply_plugin_config(
             self, config: Optional[Dict[str, Any]], reset_runtime: bool = False
@@ -767,6 +792,18 @@ class CloudSubscribe(_PluginBase):
                                                     min(int(config.get("cross_transfer_download_threads", 5) or 5), 256))
         self._cross_transfer_max_concurrent = max(1, min(int(config.get("cross_transfer_max_concurrent", 2) or 2), 10))
         self._cross_transfer_direct_stream = bool(config.get("cross_transfer_direct_stream", True))
+        try:
+            upload_concurrency = int(
+                config.get(
+                    "cross_transfer_upload_concurrency",
+                    self._cross_transfer_upload_concurrency,
+                )
+            )
+        except (TypeError, ValueError):
+            upload_concurrency = 4
+        # 0 表示关闭 115 分片并发上传（回退顺序上传），上限 16。
+        self._cross_transfer_upload_concurrency = max(0, min(upload_concurrency, 16))
+        self._sync_cross_transfer_upload_concurrency()
 
         self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", 2) or 2), 5))
         self._batch_size = int(config.get("batch_size", 20) or 20)
@@ -848,6 +885,22 @@ class CloudSubscribe(_PluginBase):
         self._cloud_drive_registry = self._drive_manager.registry
         self._cloud_drive = self._drive_manager.active_drive
         self._cross_transfer_manager = self._drive_manager.cross_transfer_manager
+        self._sync_cross_transfer_upload_concurrency()
+
+    def _sync_cross_transfer_upload_concurrency(self) -> None:
+        """把 115 分片并发度注入 115 客户端管理器。
+
+        上传组件挂在客户端管理器下、靠属性委托读宿主值，构造期拿不到插件配置，
+        所以插件在初始化与每次保存配置后显式注入；注入失败时组件用默认值（4）。
+        """
+        manager = getattr(self, "_drive_manager", None)
+        client = manager.get_client("115") if manager else None
+        if not client:
+            return
+        try:
+            client._cross_transfer_upload_concurrency = self._cross_transfer_upload_concurrency
+        except Exception as error:  # noqa: BLE001 - 注入失败不影响主流程
+            logger.debug(f"注入 115 上传并发度失败：{error}")
 
     def register_provider(self, key: str) -> bool:
         """根据网盘标识动态注册驱动。"""

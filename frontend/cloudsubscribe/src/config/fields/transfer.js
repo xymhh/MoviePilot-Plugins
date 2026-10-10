@@ -171,6 +171,16 @@ export function createTransferSection(options) {
             show: enabled("cross_transfer_enabled"),
           },
           {
+            key: "cross_transfer_upload_concurrency",
+            label: "115 上传分片并发",
+            type: "number",
+            min: 0,
+            max: 16,
+            hint: "跨盘直传时并发上传的 115 分片数，0 表示关闭（回退单流顺序上传）",
+            cols: 4,
+            show: enabled("cross_transfer_enabled"),
+          },
+          {
             key: "cross_transfer_max_concurrent",
             label: "同时跨盘任务数",
             type: "number",

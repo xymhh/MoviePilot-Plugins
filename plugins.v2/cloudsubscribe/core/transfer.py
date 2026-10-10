@@ -27,6 +27,25 @@ from .cloud import (
 )
 
 
+def _fd_safe_workers(requested: int, ceiling: int = 256) -> int:
+    """按进程文件句柄软上限收敛分片并发数。
+
+    每个分片至少占一个 socket，句柄上限低时高并发会直接撞爆
+    ``Errno 24 Too many open files``（并把速度拖到接近单连接水平）。
+    插件加载时已尝试把 soft 抬到 65535；万一抬不动，这里兜底收敛。
+    """
+    try:
+        import resource
+
+        soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        soft = int(soft)
+    except Exception:  # noqa: BLE001 - 取不到上限时按保守值处理
+        return max(1, min(int(requested), 32))
+    if soft <= 0:
+        return max(1, min(int(requested), ceiling))
+    return max(1, min(int(requested), max(8, soft // 8), ceiling))
+
+
 class _RangeDownloadUnsupported(RuntimeError):
     pass
 
@@ -37,8 +56,9 @@ def _describe_transfer_error(error: BaseException) -> str:
     lowered = message.lower()
     if "too many open files" in lowered or "errno 24" in lowered:
         return (
-            f"{message[:180]}；提示：容器文件描述符已耗尽（Errno 24），"
-            "请给容器加 ulimits.nofile: 65535 并适当调低「下载线程数」后重试"
+            f"{message[:180]}；提示：容器文件描述符已耗尽（Errno 24）。插件已尝试"
+            "自动抬升上限并按上限收敛并发数，仍失败请把「下载线程数」调低到 32 "
+            "以内（必要时给容器加 ulimits.nofile: 65535）后重试"
         )
     return message
 
@@ -253,6 +273,12 @@ class HttpFileDownloadService:
             for start in range(0, total, self._part_size)
         ]
         worker_count = min(self._concurrency, len(ranges))
+        safe_workers = _fd_safe_workers(worker_count)
+        if safe_workers < worker_count:
+            logger.warning(
+                f"按文件句柄上限收敛分段下载并发数：{worker_count} -> {safe_workers}"
+            )
+            worker_count = safe_workers
         if worker_count <= 1:
             raise _RangeDownloadUnsupported
         logger.info(
