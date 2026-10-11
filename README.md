@@ -1,10 +1,13 @@
 # MoviePilot-Plugins
 
-MoviePilot 自用插件市场，可直接作为插件市场源添加：
+MoviePilot 自用插件市场（个人 fork 版，可直接作为插件市场源添加，**一个地址装全部自用插件**）：
 
 ```
-https://github.com/zkmydgth/MoviePilot-Plugins
+https://github.com/xymhh/MoviePilot-Plugins
 ```
+
+上游来源：`zkmydgth/MoviePilot-Plugins`（115网盘STRM助手 / 配置备份 / 保种空间守护 / TgSignin / VarietyGuard）、
+`odomu/MoviePilot-Plugins`（网盘订阅助手）。
 
 ---
 
@@ -12,14 +15,32 @@ https://github.com/zkmydgth/MoviePilot-Plugins
 
 | 插件 | 用途 | 适用版本 |
 | --- | --- | --- |
+| [**网盘订阅助手**](#网盘订阅助手cloudsubscribe) | 整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容（跨盘转存优化） | MoviePilot >= 2.14.6（V2 线） |
 | [**115网盘STRM助手**](#115网盘strm助手p115strmhelper) | 115 网盘 STRM 生成、302 跳转、转移整理一条龙 | MoviePilot >= 3.0.0 |
 | [**配置备份**](#配置备份configbackup) | 定时备份系统配置、数据库与插件数据，备份内容可勾选，支持 WebDAV 远端上传与取回 | MoviePilot >= 3.0.0 |
 | [**保种空间守护**](#保种空间守护seedspaceguard) | 空间不足时自动清理保种最久的资源，避免 H&R | MoviePilot >= 3.0.0 |
 | [**Telegram 自动签到**](#telegram-自动签到tgsignin) | 多账号定时到各自订阅的 Telegram bot 签到（按钮式/命令式） | MoviePilot >= 3.0.0 |
 | [**综艺正片守卫**](#综艺正片守卫varietyguard) | 整理综艺整季包时按关键词只保留正片、静默跳过先导/花絮/加更等非正片 | MoviePilot >= 3.0.0 |
 
-> 以上为 **V3 插件线**（源码在 `plugins.v3/`），仅支持 MoviePilot >= 3.0.0。
-> V2 插件线已停止更新，相关说明见文末[附录](#附录v2-插件线已停更)，仅供存档查阅。
+> 表内 **网盘订阅助手** 属 **V2 插件线**（源码在 `plugins.v2/`，索引 `package.v2.json`，适用 MoviePilot >= 2.14.6）；
+> 其余为 **V3 插件线**（源码在 `plugins.v3/`），仅支持 MoviePilot >= 3.0.0。
+> zkmydgth 的 V2 插件线（配置备份/保种空间守护）已停止更新，相关说明见文末[附录](#附录v2-插件线已停更)，仅供存档查阅。
+
+---
+
+## 网盘订阅助手（CloudSubscribe）
+
+| 项目 | 说明 |
+| --- | --- |
+| 标签 | 订阅, 网盘, 转存, 搜索, 通知, 刮削, 签到, ed2k, magnet |
+| 适用版本 | MoviePilot >= 2.14.6（V2 插件线；本机运行于 MoviePilot V3 实测可用） |
+| 源码目录 | `plugins.v2/cloudsubscribe` |
+| 索引文件 | `package.v2.json` |
+| 上游 | [`odomu/MoviePilot-Plugins`](https://github.com/odomu/MoviePilot-Plugins)（本 fork 在其基础上做跨盘转存等优化） |
+
+功能特性、使用说明与注意事项见 [`plugins.v2/cloudsubscribe/README.md`](plugins.v2/cloudsubscribe/README.md)。
+
+本 fork 相对上游的改动记录见 `package.v2.json` 的 `history` 字段（逐版本说明）。
 
 ---
 
@@ -402,9 +423,24 @@ V2 版**已停更，不再同步 V3 的新能力**，仅作存档。V3 在其之
 
 ## 本 fork（xymhh）的文档与改动
 
-本仓库是 `zkmydgth/MoviePilot-Plugins` 的个人 fork，用于装自己需要的改动；上游内容保持原样（除下方列出的改动）。
+本仓库是**个人自用的单一插件市场仓库**（2026-10-11 由 `zkmydgth/MoviePilot-Plugins` 的 fork 改名而来，
+并合入 `odomu/MoviePilot-Plugins` 线的**网盘订阅助手**），本地所有自用修改都发在这里，
+插件市场只需添加 **一个地址**：`https://github.com/xymhh/MoviePilot-Plugins`。
 
+- 仓库内容：`plugins.v2/cloudsubscribe`（网盘订阅助手）+ `plugins.v3/*`（115网盘STRM助手等 V3 线插件）
+  + 顶层 `tests/`（网盘订阅助手单测）+ `frontend/`（前端源码，CI 构建后再打包）
+- 历史备份：原 CloudSubscribe fork 改名保留为
+  `https://github.com/xymhh/MoviePilot-Plugins-archive`（仅存档，插件市场不要订阅它；可自行删除）
+- 发布方式：push 到 `main` → `.github/workflows/plugins-release.yml` 按 `package.*.json` 的版本变化
+  自动检测并出 Release（标签 `{插件ID}_v{版本}`，资产 `{插件id}_v{版本}.zip` + `.tar.gz` + sha256）。
+  另外三个工作流：`lint.yml`（`scripts/lint.py --all`）、`test-p115strmhelper-v3.yml`、`test-cloudsubscribe.yml`。
 - 文档索引见 [`docs/README.md`](docs/README.md)
-- 本 fork 的改动（P115StrmHelper 2.7.26）：整理接管命中「媒体库同名文件质量更好」时不再写失败整理记录
-  （此前会把同源原成功记录替换成失败），改为跳过语义（只记日志 + 通知 + 删除低质量源文件）；
-  `覆盖模式=never` 与第三方插件拒绝覆盖的跳过**保留源文件**。
+
+本 fork 的改动：
+
+- **网盘订阅助手**：跨盘转存（尤其夸克→115）性能与稳定性优化、离线任务「已入库」状态修正等，
+  逐版本说明见 `package.v2.json` 的 `history`。
+- **115网盘STRM助手 2.7.26**：整理接管命中「媒体库同名文件质量更好」时不再写失败整理记录
+  （此前会把同源原成功记录替换成失败，导致该路径长期失败态并反复重试/通知），改为跳过语义
+  （只记日志 + 通知 + 删除低质量源文件）；`覆盖模式=never` 与第三方插件拒绝覆盖的跳过**保留源文件**。
+
