@@ -199,19 +199,30 @@ class TestPostprocessServiceHelpers(unittest.TestCase):
 
     def test_due_pending_keys(self):
         now = 1000.0
+        # skip_history：跳过「等待历史落盘」判断（该判断由 _history_ready_for_finalize 负责，
+        # 这里只验证到期逻辑，否则缺省 created_at 会落入宽限期而全部不算到期）。
         pending = {
-            "due_item": {"next_check_at": 900.0, "_monitor_until": 950.0},
-            "future_item": {"next_check_at": 1100.0, "_monitor_until": 950.0},
-            "monitored_item": {"next_check_at": 900.0, "_monitor_until": 1200.0},
+            "due_item": {"next_check_at": 900.0, "_monitor_until": 950.0, "skip_history": True},
+            "future_item": {"next_check_at": 1100.0, "_monitor_until": 950.0, "skip_history": True},
+            "monitored_item": {"next_check_at": 900.0, "_monitor_until": 1200.0, "skip_history": True},
         }
-        due = PostprocessService._due_pending_keys(pending, now)
+        # _due_pending_keys 已从静态方法改为实例方法（新增 pending_keys 参数），
+        # 真实实现见 plugins.v2/cloudsubscribe/handlers/sync/postprocess.py:306。
+        service = DummyPostprocessService()
+        due = service._due_pending_keys(pending, now)
         self.assertEqual(due, ["due_item"])
 
         # 强制到期测试
-        forced_due = PostprocessService._due_pending_keys(pending, now, force=True)
+        forced_due = service._due_pending_keys(pending, now, force=True)
         self.assertIn("due_item", forced_due)
         self.assertIn("future_item", forced_due)
         self.assertNotIn("monitored_item", forced_due)
+
+        # 显式指定 pending_keys 时不再受 _monitor_until 限制
+        self.assertEqual(
+            service._due_pending_keys(pending, now, pending_keys={"monitored_item"}),
+            ["monitored_item"],
+        )
 
     def test_media_context_key(self):
         sub_item = {"subscribe_id": 42}

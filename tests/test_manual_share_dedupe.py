@@ -159,7 +159,27 @@ class FakeOwner:
     def _is_ed2k_url(self, url):
         return False
 
-    def _validated_resource_files(self, url, resource_title="", target_season=None, log_prefix=""):
+    def _explicit_selection_values(self, resource):
+        # 真实实现见 plugins.v2/cloudsubscribe/handlers/sync/resources.py:675：
+        # 读取资源上用户显式勾选的文件标识（预览面板单条/批量转存用）；
+        # 普通资源没有勾选信息，返回空 → 后续按整包处理。
+        # 这里必须显式返回二元组：FakeOwner.__getattr__ 的 MagicMock 默认值
+        # 解包会抛 "not enough values to unpack (expected 2, got 0)"，
+        # 被 process_tv_subscribe 的 except 吞掉，表现为「一条记录都没转存」。
+        return [], []
+
+    def _filter_files_by_explicit_selection(self, files, target_file_ids=None,
+                                            target_file_names=None, log_prefix=""):
+        # 真实实现见 plugins.v2/cloudsubscribe/handlers/sync/resources.py:695：
+        # 未勾选任何文件时原样返回全部候选。
+        if not target_file_ids and not target_file_names:
+            return files
+        return files
+
+    def _validated_resource_files(self, url, resource_title="", target_season=None, log_prefix="",
+                                  target_file_ids=None, target_file_names=None):
+        # 签名对齐真实实现 plugins.v2/cloudsubscribe/handlers/sync/resources.py:746
+        # （新增 target_file_ids / target_file_names，用于预览面板按勾选收敛文件）。
         return _share_files()
 
     def _summarize_share_episodes(self, files, season, mediainfo=None):
@@ -281,7 +301,8 @@ class ManualUpgradeScopeTest(unittest.TestCase):
                 return True, {5: old_file}, "/电视剧/国剧/兰香如故 (2026)/Season 01"
 
             def _validated_resource_files(self, url, resource_title="",
-                                          target_season=None, log_prefix=""):
+                                          target_season=None, log_prefix="",
+                                          target_file_ids=None, target_file_names=None):
                 return [
                     {"id": "5", "name": "兰香如故.S01E05.mkv", "size": 5_100_000_000},
                     {"id": "6", "name": "兰香如故.S01E06.mkv", "size": 5_100_000_000},

@@ -34,9 +34,9 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r plugins.v2/cloudsubscribe/requirements.txt
-          # pytz / requests / httpx 由 MoviePilot 运行时提供（插件自身不声明），
+          # pytz / requests / httpx / apscheduler 由 MoviePilot 运行时提供（插件自身不声明），
           # 单测在纯 CI 环境里必须显式安装，否则相关用例在 import 阶段就会失败。
-          pip install pytz requests httpx
+          pip install pytz requests httpx apscheduler
 
       - name: Run tests
         run: |
