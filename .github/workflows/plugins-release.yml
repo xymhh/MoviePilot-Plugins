@@ -186,10 +186,20 @@ jobs:
             npm --prefix "${FRONTEND_DIR}" run build
           fi
 
-          echo "Copying dist to ${PLUGIN_DIR}/dist/..."
-          rm -rf "${PLUGIN_DIR}/dist"
-          cp -r "${FRONTEND_DIR}/dist" "${PLUGIN_DIR}/"
-          echo "Frontend dist built and copied successfully"
+          # dist 落点因前端而异：npm 前端（p115strmhelper）构建到 frontend/{id}/dist，
+          # pnpm 前端（网盘订阅助手）的 vite outDir 直接指向 plugins.v2/{id}/dist。
+          # 两种都要能打包，所以按实际存在位置处理，并断言至少有一处产物。
+          if [ -d "${FRONTEND_DIR}/dist" ]; then
+            echo "Copying dist to ${PLUGIN_DIR}/dist/..."
+            rm -rf "${PLUGIN_DIR}/dist"
+            cp -r "${FRONTEND_DIR}/dist" "${PLUGIN_DIR}/"
+            echo "Frontend dist built and copied successfully"
+          elif [ -d "${PLUGIN_DIR}/dist" ]; then
+            echo "Frontend dist 已由构建直接输出到 ${PLUGIN_DIR}/dist（vite outDir 指向插件目录），无需复制"
+          else
+            echo "[Error] 未找到前端构建产物：${FRONTEND_DIR}/dist 与 ${PLUGIN_DIR}/dist 均不存在"
+            exit 1
+          fi
 
       - name: Package plugin source code
         run: |
