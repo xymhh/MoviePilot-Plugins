@@ -50,8 +50,8 @@
             </span>
           </div>
 
-          <!-- 入库/评分徽章：电影显示「已入库」，剧集显示「完整/缺集」 -->
-          <template v-if="item.media_type !== 'tv' && item.in_library">
+          <!-- 入库/评分徽章 -->
+          <template v-if="item.in_library">
             <div class="library-badge" :class="{ 'hide-on-card-hover': getRatingValue(item) > 0 }">
               <v-icon icon="mdi-check" size="11" class="library-badge-icon mr-0.5" />
               <span class="library-badge-text">已入库</span>
@@ -65,10 +65,7 @@
             <v-icon icon="mdi-star" size="12" color="amber" class="mr-0.5" />
             {{ getRatingText(item) }}
           </div>
-          <div v-if="item.media_type === 'tv'"
-               :class="hasMissingEpisodes(item) ? 'missing-badge' : 'complete-badge'">
-            {{ hasMissingEpisodes(item) ? "缺集" : "完整" }}
-          </div>
+          <div v-if="item.media_type === 'tv' && hasMissingEpisodes(item)" class="missing-badge">缺集</div>
           <div class="media-caption">
             <h3 class="media-title" :title="item.title">{{ item.title }}</h3>
             <span v-if="item.year" class="media-year">{{ item.year }}</span>
@@ -338,8 +335,7 @@ onUnmounted(() => {
 .type-badge,
 .rating-badge,
 .library-badge,
-.missing-badge,
-.complete-badge {
+.missing-badge {
   position: absolute;
   z-index: 5;
   display: inline-flex;
@@ -416,15 +412,6 @@ onUnmounted(() => {
   background: #b45309;
   color: #fff;
   box-shadow: 0 2px 6px rgba(180, 83, 9, 0.35);
-}
-
-/* 完整徽章（剧集已收齐） */
-.complete-badge {
-  bottom: 34px;
-  right: 7px;
-  background: #16a34a;
-  color: #fff;
-  box-shadow: 0 2px 6px rgba(22, 163, 74, 0.35);
 }
 
 /* 海报底部常驻渐变遮罩与标题年份 */
@@ -548,8 +535,7 @@ onUnmounted(() => {
   .type-badge,
   .rating-badge,
   .library-badge,
-  .missing-badge,
-  .complete-badge {
+  .missing-badge {
     padding: 1.5px 5px;
     font-size: 0.64rem;
   }

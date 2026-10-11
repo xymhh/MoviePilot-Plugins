@@ -911,12 +911,6 @@ class PageApi(OwnerDelegator):
                 "anidb_id": data.get("anidb_id") or data.get("anidbid") or getattr(item, "anidb_id", None),
                 "media_source": data.get("media_source") or getattr(item, "media_source", None),
                 "media_id": data.get("media_id") or data.get("mediaid") or getattr(item, "media_id", None),
-                # 官方季集信息：仅用于剧集「完整/缺集」判定，返回前弹出，不下发给前端
-                "_rec_seasons": data.get("seasons") or {},
-                "_rec_total_episodes": (
-                    data.get("number_of_episodes") or data.get("total_episodes")
-                    or data.get("episodes_count") or 0
-                ),
             })
 
         # 非 TMDB 榜单只携带来源原生 ID，交由平台媒体识别链补齐完整身份。
@@ -930,9 +924,6 @@ class PageApi(OwnerDelegator):
         }
         identity_cache = {}
         for media_item in media_items if resolve_identity else []:
-            # 已带 TMDB 身份的条目（TMDB 榜单本身）无需再走识别链，避免多余请求
-            if media_item.get("tmdb_id"):
-                continue
             source_alias = source_aliases.get(source_key)
             if not source_alias:
                 if source_key.startswith("douban_"):
@@ -992,16 +983,6 @@ class PageApi(OwnerDelegator):
                 value = getattr(recognized, field, None)
                 if value and not media_item.get(field):
                     media_item[field] = value
-            recognized_seasons = getattr(recognized, "seasons", None)
-            if recognized_seasons and not media_item.get("_rec_seasons"):
-                try:
-                    media_item["_rec_seasons"] = dict(recognized_seasons)
-                except (TypeError, ValueError):
-                    pass
-            if not media_item.get("_rec_total_episodes"):
-                recognized_total = getattr(recognized, "number_of_episodes", None)
-                if recognized_total:
-                    media_item["_rec_total_episodes"] = recognized_total
             for field in ("category", "genres", "regions"):
                 if not media_item.get(field):
                     value = getattr(recognized, field, None)
@@ -1220,21 +1201,8 @@ class PageApi(OwnerDelegator):
                     any(not ep.get("in_library") for ep in s.get("episodes", []))
                     for s in seasons_list
                 )
-                # 官方总集数兜底：库内集数不足官方总集数（缺尾季/缺尾集）同样算缺集
-                official_total_eps = 0
-                for season_num, season_eps in (meta_seasons_info or {}).items():
-                    if not isinstance(season_num, int) or season_num < 1:
-                        continue
-                    if isinstance(season_eps, (list, tuple, set)):
-                        official_total_eps += len(season_eps)
-                    elif isinstance(season_eps, int):
-                        official_total_eps += max(season_eps, 0)
-                if official_total_eps and media_item["library_episodes_total"] < official_total_eps:
-                    has_missing = True
                 media_item["has_missing_episodes"] = has_missing
             else:
-                media_item.pop("_rec_seasons", None)
-                media_item.pop("_rec_total_episodes", None)
                 media_item["seasons"] = []
                 media_item["library_episodes_total"] = 0
                 media_item["has_missing_episodes"] = False
