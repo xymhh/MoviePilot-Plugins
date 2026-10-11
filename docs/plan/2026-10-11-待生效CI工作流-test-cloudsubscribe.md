@@ -1,5 +1,11 @@
 # 待生效：CI 工作流 `test-cloudsubscribe.yml`（网盘订阅助手单测）
 
+> 状态：**已完成 2026-10-11** —— 用户给 token 补上 `workflow` scope 后，本文件内容已落回
+> `.github/workflows/test-cloudsubscribe.yml` 并推送；工作流已跑绿（Ran 130 tests — OK）。
+> 验证证据见 [`../test/2026-10-11-CI工作流验证.md`](../test/2026-10-11-CI工作流验证.md)，
+> 结论与教训见 [`../summary/2026-10-11-合并仓库CI三件事.md`](../summary/2026-10-11-合并仓库CI三件事.md)。
+> 文末 YAML 保留作为当时的原始底稿。
+
 - 日期：2026-10-11
 - 状态：**尚未推送到仓库**（文件内容见文末，本地已备好）
 - 原因：推送用 GitHub token 只具备 `repo` 权限，GitHub 拒绝「用无 `workflow` 权限的 PAT 创建/更新 `.github/workflows/*`」：
