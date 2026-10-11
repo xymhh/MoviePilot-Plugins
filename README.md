@@ -26,6 +26,12 @@ https://github.com/xymhh/MoviePilot-Plugins
 > 其余为 **V3 插件线**（源码在 `plugins.v3/`），仅支持 MoviePilot >= 3.0.0。
 > zkmydgth 的 V2 插件线（配置备份/保种空间守护）已停止更新，相关说明见文末[附录](#附录v2-插件线已停更)，仅供存档查阅。
 
+> **2026-10-11 起：本仓库的市场索引只保留 2 个插件 —— 115网盘STRM助手（`package.v3.json` 2.7.26）+ 网盘订阅助手（`package.v2.json` 1.6.22）。**
+> `配置备份 / 保种空间守护 / Telegram 自动签到 / 综艺正片守卫` 四条**已从索引删除**：它们的源码与 tag 继承自上游 fork，
+> 而本仓库没有对应的 Release 资产，留在索引里会让 MoviePilot 的 `plugin/source/{pid}/options` 把本仓库也列成候选源，
+> 一旦被选中就回落到「文件列表逐个下载（raw.github…）」的慢/失败路径。要用这四个插件请改用上游源
+> `https://github.com/zkmydgth/MoviePilot-Plugins`。下文这四个插件的章节仅作源码存档说明，**不再随本仓库安装**。
+
 ---
 
 ## 网盘订阅助手（CloudSubscribe）
