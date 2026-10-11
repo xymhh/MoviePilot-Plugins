@@ -397,3 +397,14 @@ V2 版**已停更，不再同步 V3 的新能力**，仅作存档。V3 在其之
   注意：本版本与上游 V2 版本数据不互通，且两者插件 ID 相同，请勿同时订阅上游仓库。
 - **其余插件**（ConfigBackup / SeedSpaceGuard / TgSignin / VarietyGuard）：由 zkmydgth 原创编写，
   随本仓库一并按 GNU General Public License v3.0 授权。
+
+---
+
+## 本 fork（xymhh）的文档与改动
+
+本仓库是 `zkmydgth/MoviePilot-Plugins` 的个人 fork，用于装自己需要的改动；上游内容保持原样（除下方列出的改动）。
+
+- 文档索引见 [`docs/README.md`](docs/README.md)
+- 本 fork 的改动（P115StrmHelper 2.7.26）：整理接管命中「媒体库同名文件质量更好」时不再写失败整理记录
+  （此前会把同源原成功记录替换成失败），改为跳过语义（只记日志 + 通知 + 删除低质量源文件）；
+  `覆盖模式=never` 与第三方插件拒绝覆盖的跳过**保留源文件**。
