@@ -155,6 +155,11 @@ def handle_push() -> List[Dict]:
         for package_file in package_files:
             log(f"[Info] 正在处理变更的 package 文件: {package_file}")
 
+            # 清单文件被删除（如仓库缩为单插件时删掉 package.v3.json）→ 无需发布，跳过
+            if not os.path.exists(package_file):
+                log(f"[Info] ⏩ 跳过已删除的清单文件: {package_file}")
+                continue
+
             try:
                 old_content_raw = subprocess.check_output(["git", "show", f"{before_sha}:{package_file}"])
                 old_package_data = json.loads(old_content_raw)

@@ -127,8 +127,9 @@ def check_plugin(plugin_id: str, plugin_dir: Path, declared_version: str) -> lis
 def main() -> int:
     package_path = REPO_ROOT / PACKAGE_FILE
     if not package_path.exists():
-        log(f"[Fatal] 未找到清单文件：{package_path}")
-        return 1
+        # 本仓库已缩为单插件（只保留 V2 线的网盘订阅助手），无 V3 清单 = 无 V3 插件需要校验。
+        log(f"[Skip] 未找到清单文件：{package_path}（当前仓库无 V3 插件线，跳过校验）")
+        return 0
 
     try:
         package_data = json.loads(package_path.read_text(encoding="utf-8"))
@@ -138,8 +139,8 @@ def main() -> int:
 
     source_root = REPO_ROOT / SOURCE_DIR
     if not source_root.is_dir():
-        log(f"[Fatal] 未找到源码目录：{source_root}")
-        return 1
+        log(f"[Skip] 未找到源码目录：{source_root}（当前仓库无 V3 插件线，跳过校验）")
+        return 0
 
     checked = 0
     failed: list[str] = []
