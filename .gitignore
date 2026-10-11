@@ -58,3 +58,6 @@ Thumbs.db
 .coverage
 htmlcov/
 .tox/
+
+# 会话级便签（仅根级，不要用 *_TODO.md 以免误伤 docs/）
+/*_TODO.md

@@ -33,6 +33,10 @@ from ...utils.transfer_compat import (
 )
 
 
+# 跳过原因：库内同名文件不劣于源文件，判定为「媒体库质量更好」
+QUALITY_BETTER_SKIP_REASON = "媒体库存在同名文件，且质量更好"
+
+
 class TransferHandler:
     """
     115 整理执行器
@@ -338,6 +342,7 @@ class TransferHandler:
         else:
             remaining_tasks = self._sort_tasks_for_batch(tasks)
         failed_tasks: List[Tuple[TransferTask, str]] = []
+        skipped_tasks: List[Tuple[TransferTask, str]] = []
 
         try:
             # 批量创建目标目录
@@ -366,14 +371,15 @@ class TransferHandler:
             if remaining_tasks:
                 try:
                     if self._pan_transfer_linked_subtitle_audio():
-                        failed_in_step, remaining_tasks = (
+                        failed_in_step, skipped_in_step, remaining_tasks = (
                             self._linked_batch.batch_move_or_copy(remaining_tasks)
                         )
                     else:
-                        failed_in_step, remaining_tasks = self._batch_move_or_copy(
-                            remaining_tasks
+                        failed_in_step, skipped_in_step, remaining_tasks = (
+                            self._batch_move_or_copy(remaining_tasks)
                         )
                     failed_tasks.extend(failed_in_step)
+                    skipped_tasks.extend(skipped_in_step)
                 except Exception as e:
                     error_msg = f"批量移动/复制文件失败: {e}"
                     logger.error(f"【整理接管】{error_msg}", exc_info=True)
@@ -402,7 +408,9 @@ class TransferHandler:
                     # 所有剩余任务都失败
                     failed_tasks.extend([(task, error_msg) for task in remaining_tasks])
                     remaining_tasks = []
-                    # 阻断后续步骤
+                    # 阻断后续步骤（已跳过的任务先收尾，避免丢失跳过记录）
+                    if skipped_tasks:
+                        self._batch_record_skips(skipped_tasks)
                     self._batch_record_failures(failed_tasks)
                     return
 
@@ -420,14 +428,20 @@ class TransferHandler:
                     failed_tasks.extend([(task, error_msg) for task in remaining_tasks])
                     remaining_tasks = []
 
+            # 批量记录所有跳过的任务（不写整理历史、不发失败事件）
+            if skipped_tasks:
+                self._batch_record_skips(skipped_tasks)
+
             # 批量记录所有失败的任务
             if failed_tasks:
                 self._batch_record_failures(failed_tasks)
 
             success_count = len(remaining_tasks)
+            skip_count = len(skipped_tasks)
             fail_count = len(failed_tasks)
             logger.info(
-                f"【整理接管】批量处理完成，成功: {success_count} 个，失败: {fail_count} 个"
+                f"【整理接管】批量处理完成，成功: {success_count} 个，"
+                f"跳过: {skip_count} 个，失败: {fail_count} 个"
             )
 
         except Exception as e:
@@ -435,6 +449,9 @@ class TransferHandler:
             # 所有剩余任务都失败
             error_msg = f"批量处理异常: {e}"
             failed_tasks.extend([(task, error_msg) for task in remaining_tasks])
+            # 已跳过的任务先收尾，避免丢失跳过记录
+            if skipped_tasks:
+                self._batch_record_skips(skipped_tasks)
             self._batch_record_failures(failed_tasks)
 
     def _batch_create_directories(
@@ -506,13 +523,17 @@ class TransferHandler:
 
     def _batch_move_or_copy(
         self, tasks: List[TransferTask]
-    ) -> Tuple[List[Tuple[TransferTask, str]], List[TransferTask]]:
+    ) -> Tuple[
+        List[Tuple[TransferTask, str]],
+        List[Tuple[TransferTask, str]],
+        List[TransferTask],
+    ]:
         """
         批量移动/复制文件（按目标目录分组）
 
         :param tasks (List): 任务列表
 
-        :return Tuple: (失败任务列表, 成功任务列表)
+        :return Tuple: (失败任务列表, 跳过任务列表, 成功任务列表)
         """
         logger.info("【整理接管】开始批量移动/复制文件")
 
@@ -520,6 +541,8 @@ class TransferHandler:
             task.fileitem.path: False for task in tasks
         }
         task_failures: Dict[str, str] = {}
+        # 库内已有更优文件 / 覆盖模式不覆盖：走跳过通道，不进失败通道
+        task_skips: Dict[str, str] = {}
 
         operations: Dict[Tuple[Path, str], List[Tuple[FileItem, str, TransferTask]]] = (
             defaultdict(list)
@@ -682,7 +705,7 @@ class TransferHandler:
                                     else None
                                 )
                                 if task_path:
-                                    task_failures[task_path] = skip_reason
+                                    task_skips[task_path] = skip_reason
                                 continue
                             if over_flag:
                                 files_to_delete.append(existing_item)
@@ -705,7 +728,7 @@ class TransferHandler:
                                         f"将覆盖: {target_dir / target_name}"
                                     )
                                 else:
-                                    skip_reason = "媒体库存在同名文件，且质量更好"
+                                    skip_reason = QUALITY_BETTER_SKIP_REASON
                                     logger.info(
                                         f"【整理接管】目标文件已存在，覆盖模式=size，"
                                         f"目标文件质量更好 ({target_size} >= {source_size})，"
@@ -729,7 +752,7 @@ class TransferHandler:
                                     else None
                                 )
                                 if task_path:
-                                    task_failures[task_path] = skip_reason
+                                    task_skips[task_path] = skip_reason
                                 continue
                             elif over_flag:
                                 files_to_delete.append(existing_item)
@@ -936,11 +959,15 @@ class TransferHandler:
                         )
 
         failed_tasks: List[Tuple[TransferTask, str]] = []
+        skipped_tasks: List[Tuple[TransferTask, str]] = []
         success_tasks: List[TransferTask] = []
         tasks_to_check: List[TransferTask] = []
 
         for task in tasks:
             task_path = task.fileitem.path if task and task.fileitem else None
+            if task_path and task_path in task_skips:
+                skipped_tasks.append((task, task_skips[task_path]))
+                continue
             if task_path and task_path in task_failures:
                 failed_tasks.append((task, task_failures[task_path]))
             elif task_path and task_main_file_status.get(task_path, False):
@@ -984,10 +1011,11 @@ class TransferHandler:
                         failed_tasks.append((task, "主文件移动/复制未完成"))
 
         logger.info(
-            f"【整理接管】批量移动/复制完成，成功: {len(success_tasks)} 个，失败: {len(failed_tasks)} 个"
+            f"【整理接管】批量移动/复制完成，成功: {len(success_tasks)} 个，"
+            f"跳过: {len(skipped_tasks)} 个，失败: {len(failed_tasks)} 个"
         )
 
-        return failed_tasks, success_tasks
+        return failed_tasks, skipped_tasks, success_tasks
 
     def _batch_delete_version_files(
         self,
@@ -1832,6 +1860,125 @@ class TransferHandler:
             type="dir",
         )
         return target_fileitem, target_diritem
+
+    def _batch_record_skips(
+        self, skipped_tasks: List[Tuple[TransferTask, str]]
+    ) -> None:
+        """
+        批量记录跳过任务（库内已有更优文件 / 覆盖模式不覆盖）
+
+        与失败通道的差异：不写任何整理历史、不发失败事件、不登记 AI 智能体重试。
+
+        :param skipped_tasks (List): 跳过任务列表，每个元素为 (task, skip_reason)
+        """
+        if not skipped_tasks:
+            return
+
+        logger.info(f"【整理接管】批量记录跳过任务，共 {len(skipped_tasks)} 个跳过任务")
+
+        # 逐个记录跳过（单个任务异常不影响其它任务）
+        for task, reason in skipped_tasks:
+            try:
+                self._record_skip(task, reason)
+            except Exception as e:
+                logger.error(
+                    f"【整理接管】记录跳过任务失败 (任务: {task.fileitem.name}): {e}",
+                    exc_info=True,
+                )
+
+        # 按媒体分组收尾（宿主对覆盖跳过也是把任务置为「未入库」，此处保持一致）
+        try:
+            tasks = [task for task, _ in skipped_tasks]
+            tasks_by_media = self._group_tasks_by_media(tasks)
+            removed_count = self._remove_completed_jobs(
+                tasks_by_media, task_action="fail", check_method="is_done"
+            )
+
+            if removed_count > 0:
+                logger.info(f"【整理接管】已移除 {removed_count} 个已跳过的任务组")
+        except Exception as e:
+            logger.debug(f"【整理接管】移除跳过任务组失败: {e}", exc_info=True)
+
+    def _record_skip(self, task: TransferTask, reason: str) -> None:
+        """
+        记录整理跳过（库内已有更优文件 / 覆盖模式不覆盖）
+
+        不写任何整理历史（不调用 add_transfer_fail / add_transfer_success）、不发
+        EventType.TransferFailed、不登记 AI 智能体重试；删除低质量源文件并发插件通知。
+        全程异常只记日志，不会让 process_batch 抛错。
+
+        :param task (TransferTask): 任务
+        :param reason (str): 跳过原因
+        """
+        src_path = None
+        try:
+            fileitem = task.fileitem if task else None
+            src_path = fileitem.path if fileitem else None
+            target_path = str(task.target_path) if task and task.target_path else None
+
+            logger.info(
+                f"【整理接管】已跳过（不写失败记录）: "
+                f"{src_path} -> {target_path}，原因: {reason}"
+            )
+
+            # 删除低质量源文件：仅在「库内同名文件质量更好」这一裁决下执行。
+            # 覆盖模式=never、第三方插件拒绝覆盖等跳过无法确认库内更优，
+            # 删源存在丢失更好版本的风险，因此只记日志与通知、保留源文件。
+            deletable = reason.startswith(QUALITY_BETTER_SKIP_REASON)
+            deleted = False
+            delete_error: Optional[str] = None
+            if not deletable:
+                logger.info(
+                    f"【整理接管】已跳过，按策略保留源文件（原因非库内更优）: {src_path}"
+                )
+            elif fileitem:
+                try:
+                    deleted = bool(StorageChain().delete_media_file(fileitem=fileitem))
+                except Exception as e:
+                    delete_error = f"{e}"
+                    logger.error(
+                        f"【整理接管】已跳过，删除低质量源文件异常: {src_path} - {e}",
+                        exc_info=True,
+                    )
+            else:
+                delete_error = "任务缺少源文件项"
+                logger.error(
+                    f"【整理接管】已跳过，低质源文件删除失败: {src_path} - {delete_error}"
+                )
+
+            if deletable:
+                if deleted:
+                    logger.info(f"【整理接管】已跳过，低质源文件已删除: {src_path}")
+                elif not delete_error:
+                    logger.error(f"【整理接管】已跳过，低质源文件删除失败: {src_path}")
+
+            # 插件通知（受 configer.notify 控制）
+            if configer.notify:
+                from ...core.message import post_message
+
+                if not deletable:
+                    status = "源文件已保留（该跳过原因不删除源文件）"
+                elif deleted:
+                    status = "低质源文件已删除"
+                elif delete_error:
+                    status = f"低质源文件删除失败: {delete_error}"
+                else:
+                    status = "低质源文件删除失败"
+                post_message(
+                    mtype=MessageType.Plugin,
+                    title="【整理接管】已跳过（库内已有更优文件）",
+                    text=(
+                        f"源文件: {src_path}\n"
+                        f"目标: {target_path}\n"
+                        f"原因: {reason}\n"
+                        f"处理结果: {status}"
+                    ),
+                )
+        except Exception as e:
+            logger.error(
+                f"【整理接管】记录整理跳过异常 ({src_path}): {e}",
+                exc_info=True,
+            )
 
     def _batch_record_failures(
         self, failed_tasks: List[Tuple[TransferTask, str]]

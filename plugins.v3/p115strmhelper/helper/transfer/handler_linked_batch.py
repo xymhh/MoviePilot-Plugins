@@ -120,13 +120,17 @@ class TransferHandlerLinkedBatch:
 
     def batch_move_or_copy(
         self, tasks: List[TransferTask]
-    ) -> Tuple[List[Tuple[TransferTask, str]], List[TransferTask]]:
+    ) -> Tuple[
+        List[Tuple[TransferTask, str]],
+        List[Tuple[TransferTask, str]],
+        List[TransferTask],
+    ]:
         """
         批量移动/复制文件（按目标目录分组）
 
         :param tasks (List): 任务列表
 
-        :return Tuple: (失败任务列表, 成功任务列表)
+        :return Tuple: (失败任务列表, 跳过任务列表, 成功任务列表)
         """
         logger.info("【整理接管】开始批量移动/复制文件")
 
@@ -136,6 +140,8 @@ class TransferHandlerLinkedBatch:
         }
         # 跟踪每个任务的失败原因
         task_failures: Dict[str, str] = {}
+        # 跟踪每个任务的跳过原因（库内已有更优文件 / 覆盖模式不覆盖）
+        task_skips: Dict[str, str] = {}
 
         # 按目标目录和操作类型分组
         operations: Dict[
@@ -336,7 +342,7 @@ class TransferHandlerLinkedBatch:
                                     else None
                                 )
                                 if task_path:
-                                    task_failures[task_path] = skip_reason
+                                    task_skips[task_path] = skip_reason
                                 continue
                             if over_flag:
                                 files_to_delete.append(existing_item)
@@ -383,7 +389,7 @@ class TransferHandlerLinkedBatch:
                                     else None
                                 )
                                 if task_path:
-                                    task_failures[task_path] = skip_reason
+                                    task_skips[task_path] = skip_reason
                                 continue
                             if over_flag:
                                 files_to_delete.append(existing_item)
@@ -662,14 +668,18 @@ class TransferHandlerLinkedBatch:
                             f"批量移动/复制失败 (目录: {target_dir}): {e}"
                         )
 
-        # 收集失败和成功的任务
+        # 收集失败、跳过和成功的任务
         failed_tasks: List[Tuple[TransferTask, str]] = []
+        skipped_tasks: List[Tuple[TransferTask, str]] = []
         success_tasks: List[TransferTask] = []
         # 需要检查的任务（有 fileid 但状态未标记，可能是文件已存在被跳过但未正确标记）
         tasks_to_check: List[TransferTask] = []
 
         for task in tasks:
             task_path = task.fileitem.path if task and task.fileitem else None
+            if task_path and task_path in task_skips:
+                skipped_tasks.append((task, task_skips[task_path]))
+                continue
             if task_path and task_path in task_failures:
                 failed_tasks.append((task, task_failures[task_path]))
             elif task_path and task_main_file_status.get(task_path, False):
@@ -726,10 +736,11 @@ class TransferHandlerLinkedBatch:
                         failed_tasks.append((task, "主文件移动/复制未完成"))
 
         logger.info(
-            f"【整理接管】批量移动/复制完成，成功: {len(success_tasks)} 个，失败: {len(failed_tasks)} 个"
+            f"【整理接管】批量移动/复制完成，成功: {len(success_tasks)} 个，"
+            f"跳过: {len(skipped_tasks)} 个，失败: {len(failed_tasks)} 个"
         )
 
-        return failed_tasks, success_tasks
+        return failed_tasks, skipped_tasks, success_tasks
 
     def update_file_ids_after_copy(
         self,
