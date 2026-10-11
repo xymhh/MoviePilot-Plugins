@@ -156,7 +156,9 @@ export function useMediaData({api, pluginId, showMessage}) {
     try {
       const res = unwrapApiResponse(
         await api.value.get(
-          `plugin/${pluginId.value}/resource/recommend?source=${sourceName}&page=${page}&count=24${force ? "&force=true" : ""}`,
+          // resolve_identity=true：让豆瓣/Bangumi/AniList 榜单条目由后端补齐 TMDB 身份，
+          // 否则媒体库匹配为空 → 电影看不到「已入库」、剧集整页误标「缺集」
+          `plugin/${pluginId.value}/resource/recommend?source=${sourceName}&page=${page}&count=24${force ? "&force=true" : ""}&resolve_identity=true`,
         ),
       );
       if (token !== currentRecommendToken) return;
