@@ -132,13 +132,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Setup Node.js
-        if: ${{ hashFiles(format('frontend/{0}/package.json', matrix.plugin.backend_path)) != '' }}
+      # 前端包管理器分流（2026-10-11）：本仓库既有 npm 前端（带 package-lock.json，如 p115strmhelper），
+      # 也有 pnpm 前端（带 pnpm-lock.yaml，如网盘订阅助手）。此前统一用 `cache: npm` + `npm ci`，
+      # 遇到 pnpm 前端会直接硬失败（cache 路径不存在 → Some specified paths were not resolved，
+      # 即使跳过缓存，`npm ci` 也找不到 package-lock.json）。现按 lockfile 判定包管理器。
+      - name: Setup Node.js (npm frontend)
+        if: ${{ hashFiles(format('frontend/{0}/package.json', matrix.plugin.backend_path)) != '' && hashFiles(format('frontend/{0}/pnpm-lock.yaml', matrix.plugin.backend_path)) == '' }}
         uses: actions/setup-node@v7
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: ${{ format('frontend/{0}/package-lock.json', matrix.plugin.backend_path) }}
+
+      - name: Enable pnpm via corepack
+        if: ${{ hashFiles(format('frontend/{0}/pnpm-lock.yaml', matrix.plugin.backend_path)) != '' }}
+        env:
+          FRONTEND_DIR: ${{ format('frontend/{0}', matrix.plugin.backend_path) }}
+        run: |
+          # pnpm 版本以 package.json 的 packageManager 为准（corepack 会校验 lockfile 与之一致）
+          package_manager="$(node -p "require('./${FRONTEND_DIR}/package.json').packageManager || ''")"
+          case "$package_manager" in
+            pnpm@*) ;;
+            *) echo "[Error] ${FRONTEND_DIR}/package.json 必须 pin packageManager=pnpm@<版本>"; exit 1 ;;
+          esac
+          corepack enable
+          corepack prepare "$package_manager" --activate
+
+      - name: Setup Node.js (pnpm frontend)
+        if: ${{ hashFiles(format('frontend/{0}/pnpm-lock.yaml', matrix.plugin.backend_path)) != '' }}
+        uses: actions/setup-node@v7
+        with:
+          # pnpm 前端的 engines 一般要求 node >= 22（见其 package.json 的 engines）
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: ${{ format('frontend/{0}/pnpm-lock.yaml', matrix.plugin.backend_path) }}
 
       - name: Build frontend and copy dist
         if: ${{ hashFiles(format('frontend/{0}/package.json', matrix.plugin.backend_path)) != '' }}
@@ -149,10 +176,15 @@ jobs:
           FRONTEND_DIR="frontend/${FRONTEND_NAME}"
 
           echo "Building frontend for ${FRONTEND_NAME}..."
-          cd "${FRONTEND_DIR}"
-          npm ci
-          npm run build
-          cd -
+          if [ -f "${FRONTEND_DIR}/pnpm-lock.yaml" ]; then
+            echo "[Info] 检测到 pnpm-lock.yaml → 使用 pnpm 构建"
+            pnpm --dir "${FRONTEND_DIR}" install --frozen-lockfile
+            pnpm --dir "${FRONTEND_DIR}" build
+          else
+            echo "[Info] 未检测到 pnpm-lock.yaml → 使用 npm 构建"
+            npm --prefix "${FRONTEND_DIR}" ci
+            npm --prefix "${FRONTEND_DIR}" run build
+          fi
 
           echo "Copying dist to ${PLUGIN_DIR}/dist/..."
           rm -rf "${PLUGIN_DIR}/dist"
