@@ -198,6 +198,23 @@ install_app_mocks(
     ],
 )
 
+# service.py 顶部会 `from ...search.magnet import extract_magnet_hash`（service.py:60）。
+# cloudsubscribe.search 在此前只是 AutoMockModule（__path__ 为空），子模块解析不到会抛
+# ImportError: cannot import name 'extract_magnet_hash' ... (unknown location)。
+# 这里按真实实现加载 magnet 及其依赖，保证导入链可用。
+load_module(
+    "cloudsubscribe.search.matching",
+    "plugins.v2/cloudsubscribe/search/matching.py",
+)
+load_module(
+    "cloudsubscribe.utils.magnet",
+    "plugins.v2/cloudsubscribe/utils/magnet.py",
+)
+load_module(
+    "cloudsubscribe.search.magnet",
+    "plugins.v2/cloudsubscribe/search/magnet.py",
+)
+
 # 加载 service.py 中的真实 SyncHandler
 SyncHandler = load_module(
     "cloudsubscribe.handlers.sync.service",
