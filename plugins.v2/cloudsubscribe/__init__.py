@@ -38,7 +38,12 @@ from .core.api import (
     SearchApi,
     SyncApi,
 )
-from .core.hook import MessageRoutingHook, PluginEventHandler, SubscriptionSearchHook
+from .core.hook import (
+    MessageRoutingHook,
+    MoviePilotSearchModule,
+    PluginEventHandler,
+    SubscriptionSearchHook,
+)
 from .core.services import (
     SubscriptionControlService,
     CheckinService,
@@ -77,6 +82,7 @@ _COMPONENT_TYPES = (
     QRCodeService,
     HistoryApi,
     MessageRoutingHook,
+    MoviePilotSearchModule,
     PluginEventHandler,
     MoviePilotRegistration,
     SyncRuntimeService,
@@ -100,7 +106,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.24"
+    plugin_version = "1.6.25"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -226,6 +232,9 @@ class CloudSubscribe(_PluginBase):
 
     # 处理器
     _search_handler: Optional[SearchHandler] = None
+    # 平台资源源（search_torrents 模块）开关与候选上限
+    _mp_search_module_enabled: bool = True
+    _mp_search_module_limit: int = 20
     _subscribe_handler: Optional[SubscribeHandler] = None
     _sync_handler: Optional[SyncHandler] = None
     _webhook_handler: Optional[WebhookHandler] = None
@@ -337,6 +346,10 @@ class CloudSubscribe(_PluginBase):
 
     def get_agent_tools(self) -> List[type]:
         return self._get_component(MoviePilotRegistration).get_agent_tools()
+
+    def get_module(self) -> Optional[Dict[str, Any]]:
+        """向平台暴露网盘搜索模块（search_torrents）。"""
+        return self._get_component(MoviePilotSearchModule).get_module()
 
     @eventmanager.register(EventType.SubscribeAdded)
     def on_subscribe_added(self, event: Event):
@@ -482,6 +495,8 @@ class CloudSubscribe(_PluginBase):
             "show_sidebar_nav",
             "agent_enabled",
             "direct_transfer_enabled",
+            "mp_search_module_enabled",
+            "mp_search_module_limit",
             "notify",
             "notification_type",
             "webhook_enabled",
@@ -512,6 +527,21 @@ class CloudSubscribe(_PluginBase):
                 self._direct_transfer_enabled = bool(
                     config.get("direct_transfer_enabled", True)
                 )
+                self._mp_search_module_enabled = bool(
+                    config.get("mp_search_module_enabled", True)
+                )
+                try:
+                    self._mp_search_module_limit = max(
+                        1, min(int(config.get("mp_search_module_limit") or 20), 50)
+                    )
+                except (TypeError, ValueError):
+                    self._mp_search_module_limit = 20
+                if "mp_search_module_enabled" in changed_keys:
+                    # 平台每次搜索都会重新调用 get_module()，这里只需记录状态变化
+                    logger.info(
+                        "平台资源源开关已热更新："
+                        f"{'启用' if self._mp_search_module_enabled else '停用'}"
+                    )
                 if "video_extensions" in changed_keys or "subtitle_extensions" in changed_keys:
                     video_exts, sub_exts = MediaFileParser.configure_extensions(
                         video_extensions=config.get("video_extensions"),
@@ -702,6 +732,15 @@ class CloudSubscribe(_PluginBase):
         self._direct_transfer_enabled = bool(
             config.get("direct_transfer_enabled", True)
         )
+        self._mp_search_module_enabled = bool(
+            config.get("mp_search_module_enabled", True)
+        )
+        try:
+            self._mp_search_module_limit = max(
+                1, min(int(config.get("mp_search_module_limit") or 20), 50)
+            )
+        except (TypeError, ValueError):
+            self._mp_search_module_limit = 20
 
         self._cron = (config.get("cron", self._cron) or "").strip()
         if self._cron and not self._cron_is_valid(self._cron):

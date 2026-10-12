@@ -32,6 +32,9 @@ class UIConfig:
             "show_sidebar_nav": True,
             "agent_enabled": True,
             "direct_transfer_enabled": True,
+            # 平台资源源：把网盘候选接入 MoviePilot 的 search_torrents 插件模块
+            "mp_search_module_enabled": True,
+            "mp_search_module_limit": 20,
             "notify": True,
             "notification_type": "Plugin",
             "webhook_enabled": False,

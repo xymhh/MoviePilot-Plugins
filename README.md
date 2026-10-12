@@ -46,7 +46,21 @@ https://github.com/xymhh/MoviePilot-Plugins
 | 插件 | 用途 | 适用版本 | 源码目录 |
 | --- | --- | --- | --- |
 | **115网盘STRM助手**（P115StrmHelper） | 115 网盘 STRM 生成、302 跳转、转移整理一条龙；本 fork 修补「库内质量更好→整理失败」 | MoviePilot >= 3.0.0（V3 插件线） | `plugins.v3/p115strmhelper` |
-| **网盘订阅助手**（CloudSubscribe） | 整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容 | MoviePilot >= 2.14.6（V2 插件线，MoviePilot V3 实测可用） | `plugins.v2/cloudsubscribe` |
+| **网盘订阅助手**（CloudSubscribe） | 整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容；1.6.25 起把网盘候选接入平台搜索（`search_torrents` 模块） | MoviePilot >= 2.14.6（V2 插件线，MoviePilot V3 实测可用） | `plugins.v2/cloudsubscribe` |
+
+### 网盘订阅助手 1.6.25：平台搜索也能出网盘候选
+
+平台搜索（含 TG 机器人搜片名）以前只返回 PT 站结果，因为插件没有声明平台要求的
+`search_torrents` 模块。1.6.25 补上了：
+
+- 搜到的网盘候选以 **`网盘订阅助手｜<来源>`** 作为站点名出现在平台搜索结果里；
+- 点它下载时，插件会**拦下平台下载**（网盘分享链接不是种子，下载器必然拿不到），
+  改走插件的链接转存链路，并带上 TMDB 身份，免人工再选媒体；
+- 失败会发插件通知说明原因，不会静默失败；
+- 开关：配置项 `mp_search_module_enabled`（默认开）、`mp_search_module_limit`（默认 20）。
+  关掉后平台搜索回到「只有 PT 站结果」的原行为。
+
+> 注意：网盘候选的「做种数」恒为 0、体积取自资源标题描述，平台侧的**搜索结果过滤规则**可能命中它们。
 
 配置项与注意事项见 [`plugins.v2/cloudsubscribe/README.md`](plugins.v2/cloudsubscribe/README.md)；
 两个插件的逐版本改动见 `package.v3.json` / `package.v2.json` 的 `history` 字段（P115StrmHelper 的 2.8.77 是本 fork 相对官方 2.8.76 的唯一功能性改动）。
@@ -79,5 +93,8 @@ https://github.com/xymhh/MoviePilot-Plugins
   - [撤下 P115 分叉与仓库瘦身](docs/summary/2026-10-11-撤下P115分叉与仓库瘦身.md)
   - [单仓库插件市场合并](docs/summary/2026-10-11-单仓库插件市场合并-总结.md)
   - [合并仓库 CI 三件事](docs/summary/2026-10-11-合并仓库CI三件事.md)
+- 平台资源源（1.6.25）：
+  - [任务书](docs/plan/2026-10-12-MP平台资源源接入.md)
+  - [单元测试证据](docs/test/2026-10-12-平台资源源单测.md)
 
 如果本文档信息与插件实际表现不符，以插件仓库代码为准。

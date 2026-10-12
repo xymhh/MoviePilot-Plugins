@@ -14,6 +14,7 @@ from app.schemas.types import MediaType, NotificationType
 from torf import Torrent, TorfError
 
 from ..media import list_subscribes_by_tmdb_id
+from .mp_module import MoviePilotSearchModule
 from ...core import OwnerDelegator
 from ...search.types import resource_type_from_url, resource_type_name
 
@@ -841,6 +842,92 @@ class PluginEventHandler(OwnerDelegator):
                 str(result.get("message") or "缓存清理失败"),
             )
 
+    def _takeover_module_cloud_resource(
+            self,
+            event_data: ResourceDownloadEventData,
+            torrent: Any,
+    ) -> None:
+        """把平台搜索里选中的网盘候选交回本插件的链接转存链路。
+
+        网盘分享链接不是种子，平台下载器一定拿不到内容；因此无论转存是否成功，
+        都必须取消平台下载，并把结果或失败原因告知用户。
+        """
+        event_data.cancel = True
+        event_data.source = "CloudSubscribe-网盘资源接管"
+        torrent_title = str(getattr(torrent, "title", "") or "")
+        link = str(getattr(torrent, "enclosure", "") or "").strip()
+        if not link:
+            event_data.reason = "网盘候选缺少可用链接，已阻止平台下载"
+            logger.warning(f"网盘候选缺少可用链接：{torrent_title}")
+            return
+
+        context = getattr(event_data, "context", None)
+        media = getattr(context, "media_info", None)
+        meta = getattr(context, "meta_info", None)
+        title = str(getattr(media, "title", "") or torrent_title).strip()
+        media_type = MoviePilotSearchModule.media_type_key(
+            getattr(media, "type", None)
+        )
+        seasons = []
+        for value in (getattr(meta, "season_list", None) or []):
+            try:
+                season = int(value)
+            except (TypeError, ValueError):
+                continue
+            if season > 0 and season not in seasons:
+                seasons.append(season)
+        try:
+            result = self.submit_platform_links(
+                resource_links=[link],
+                title=title,
+                media_type=media_type,
+                seasons=seasons,
+                tmdb_id=self._module_tmdb_id(torrent, media),
+                detect_multiple=False,
+            )
+        except Exception as error:
+            logger.error(f"网盘候选转存异常：{torrent_title}，{error}", exc_info=True)
+            event_data.reason = "网盘候选转存异常，已阻止平台下载"
+            self._notify_module_takeover_failure(torrent_title, "转存异常，请查看插件日志")
+            return
+
+        if isinstance(result, dict) and result.get("success"):
+            event_data.reason = "网盘候选已提交本插件转存，已阻止平台重复下载"
+            logger.info(f"平台搜索网盘候选已接管：{torrent_title} → 已提交转存")
+            return
+        message = (
+            str((result or {}).get("message") or "未知原因")
+            if isinstance(result, dict) else "未知原因"
+        )
+        event_data.reason = f"网盘候选转存失败：{message}"
+        logger.warning(f"网盘候选转存失败：{torrent_title}，{message}")
+        self._notify_module_takeover_failure(torrent_title, message)
+
+    @staticmethod
+    def _module_tmdb_id(torrent: Any, media: Any) -> Optional[int]:
+        """优先使用网盘候选自带的 TMDB 身份，避免转存时再走人工选择。"""
+        for value in (
+                getattr(torrent, "media_id", None),
+                getattr(media, "tmdb_id", None),
+                getattr(media, "tmdbid", None),
+        ):
+            text = str(value or "").strip()
+            if text.isdigit():
+                return int(text)
+        return None
+
+    def _notify_module_takeover_failure(self, title: str, reason: str) -> None:
+        """网盘候选转存失败时提示用户，失败不影响平台下载拦截。"""
+        try:
+            self.post_message(
+                mtype=NotificationType.Plugin,
+                title="网盘候选转存未完成",
+                text=f"{title}\n原因：{reason}",
+                disable_web_page_preview=True,
+            )
+        except Exception as error:
+            logger.debug(f"网盘候选转存失败通知发送失败：{error}")
+
     def on_resource_download(self, event: Event):
         """接管或拦截即将创建的平台资源下载。"""
         if not event or not self._enabled:
@@ -858,6 +945,11 @@ class PluginEventHandler(OwnerDelegator):
             return
 
         torrent = context.torrent_info
+        if torrent and MoviePilotSearchModule.is_cloud_resource(torrent):
+            # 网盘候选只能由本插件转存，绝不能让平台按种子/磁力去下载分享链接。
+            self._takeover_module_cloud_resource(event_data, torrent)
+            return
+
         media = context.media_info
         meta = context.meta_info
         if not torrent or not media or not meta:
