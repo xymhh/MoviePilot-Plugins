@@ -144,7 +144,11 @@ class SyncApi(OwnerDelegator):
     @staticmethod
     def _manual_share_info_valid(resource_type: str, share_info: Dict[str, Any]) -> bool:
         """分享提取码是可选字段，语法校验只要求可解析分享标识。"""
-        return bool(share_info.get("share_code"))
+        return bool(
+            share_info.get("share_code")
+            or share_info.get("share_id")
+            or share_info.get("link_id")
+        )
 
     @staticmethod
     def _manual_resource_name(resource_type: str) -> str:

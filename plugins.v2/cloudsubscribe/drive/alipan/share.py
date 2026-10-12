@@ -35,9 +35,23 @@ class AliPanShareService:
         match = re.search(r"(?:alipan\.com|aliyundrive\.com)/s/([\w-]+)", value, re.I)
         if not match:
             return {}
+        share_id = match.group(1)
         query = parse_qs(urlsplit(value).query)
         password = str((query.get("pwd") or query.get("code") or [""])[0])
-        return {"share_id": match.group(1), "share_pwd": password}
+        if not password:
+            # 分享常以「提取码: xxxx」附言给出，与 115/夸克的做法保持一致。
+            code_match = re.search(
+                r"(?:提取码|访问码|密码|pwd|code)\s*[：:]?\s*([A-Za-z0-9]{1,16})",
+                value, re.I,
+            )
+            password = code_match.group(1) if code_match else ""
+        # share_code 是跨驱动统一契约（手动转存校验只认该键），
+        # share_id / share_pwd 供阿里云盘分享接口使用。
+        return {
+            "share_code": share_id,
+            "share_id": share_id,
+            "share_pwd": password,
+        }
 
     def _request(
             self, path: str, *, headers=None, payload=None,
@@ -61,8 +75,13 @@ class AliPanShareService:
         cached = self._shares.get(parsed["share_id"])
         if cached and cached.get("share_pwd") == parsed["share_pwd"]:
             return cached
+        # 只把阿里云盘接口认识的字段发给对端，share_code 仅用于内部契约。
         token = self._request(
-            "/v2/share_link/get_share_token", payload=parsed
+            "/v2/share_link/get_share_token",
+            payload={
+                "share_id": parsed["share_id"],
+                "share_pwd": parsed["share_pwd"],
+            },
         ).get("share_token")
         if not token:
             raise RuntimeError("阿里云盘未返回分享 Token")

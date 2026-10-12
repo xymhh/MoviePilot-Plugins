@@ -96,7 +96,8 @@ class Yun139ShareService:
             tail = text.rsplit("#", 1)[1].strip()
             if re.fullmatch(r"[A-Za-z0-9]{1,16}", tail):
                 password = tail
-        return {"link_id": link_id, "password": password}
+        # share_code 是跨驱动统一契约（手动转存校验只认该键），link_id 供移动云盘接口使用。
+        return {"share_code": link_id, "link_id": link_id, "password": password}
 
     def _share_headers(self) -> Dict[str, str]:
         authorization = self.client.authorization
