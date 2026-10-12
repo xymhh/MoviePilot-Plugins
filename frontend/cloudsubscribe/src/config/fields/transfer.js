@@ -260,6 +260,48 @@ export function createTransferSection(options) {
         ],
       },
       {
+        title: "媒体库目录结构",
+        icon: "mdi-folder-multiple-outline",
+        fields: [
+          {
+            key: "type_folder_enabled",
+            label: "按媒体类型建一级目录",
+            type: "switch",
+            hint: "在网盘「媒体库目录」和「本地媒体根路径」下先建 电影/剧集 一级目录，再放二级分类（外语电影、国产剧…）",
+            cols: 4,
+          },
+          {
+            key: "type_folder_movie",
+            label: "电影一级目录名",
+            type: "text",
+            placeholder: "电影",
+            cols: 4,
+            show: enabled("type_folder_enabled"),
+          },
+          {
+            key: "type_folder_tv",
+            label: "剧集一级目录名",
+            type: "text",
+            placeholder: "剧集",
+            cols: 4,
+            show: enabled("type_folder_enabled"),
+          },
+          {
+            key: "type_folder_info",
+            type: "info",
+            label: "分层行为说明",
+            lines: [
+              "只改变插件产出的目录层级：网盘整理目录 <媒体库目录>/电影/<二级分类>/…，本地 STRM 目录 <本地媒体根路径>/电影/<二级分类>/…。",
+              "不修改 MoviePilot「设定 → 目录」的任何配置，平台自身的整理行为不受影响。",
+              "目录名可自定义（默认 电影 / 剧集），用于对齐你总媒体库的一级目录命名。",
+              "只对开关打开之后新转存/新整理的媒体生效；已入库的历史目录不会自动搬迁。",
+            ],
+            cols: 12,
+            show: enabled("type_folder_enabled"),
+          },
+        ],
+      },
+      {
         title: "本地路径与 STRM",
         icon: "mdi-folder-play-outline",
         fields: [

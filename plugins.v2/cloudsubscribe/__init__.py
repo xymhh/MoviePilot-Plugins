@@ -100,7 +100,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.30"
+    plugin_version = "1.6.31"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -195,6 +195,10 @@ class CloudSubscribe(_PluginBase):
     _enable_pt_upgrade: bool = False
     _upgrade_mode: str = "largest"
     _local_resource_path: str = ""
+    # 媒体库一级目录（按媒体类型分层：电影/剧集），仅作用于网盘媒体库与本地 STRM 目录结构
+    _type_folder_enabled: bool = False
+    _type_folder_movie: str = "电影"
+    _type_folder_tv: str = "剧集"
     _strm_generate_enabled: bool = True
     _nfo_scrape_enabled: bool = False
     _image_scrape_enabled: bool = False
@@ -853,6 +857,13 @@ class CloudSubscribe(_PluginBase):
         if self._upgrade_mode not in {"coexist", "replace", "largest", "smallest"}:
             self._upgrade_mode = "largest"
         self._local_resource_path = str(config.get("local_resource_path", "") or "").strip()
+        self._type_folder_enabled = bool(config.get("type_folder_enabled", False))
+        self._type_folder_movie = (
+                str(config.get("type_folder_movie", "电影") or "").strip().strip("/") or "电影"
+        )
+        self._type_folder_tv = (
+                str(config.get("type_folder_tv", "剧集") or "").strip().strip("/") or "剧集"
+        )
 
         self._organize_after_transfer = bool(config.get("organize_after_transfer", True))
         self._organize_subtitles = bool(config.get("organize_subtitles", True))

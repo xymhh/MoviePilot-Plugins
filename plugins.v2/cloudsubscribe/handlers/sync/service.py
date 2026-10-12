@@ -339,6 +339,14 @@ class SyncHandler:
             raw_mode if raw_mode in {"coexist", "replace", "largest", "smallest"} else "largest"
         )
         self._local_resource_path = str(_get_val("local_resource_path", "") or "").strip()
+        # 媒体库一级目录：在网盘媒体库目录/本地媒体根路径下先建 电影/剧集 目录，再放二级分类
+        self._type_folder_enabled = bool(_get_val("type_folder_enabled", False))
+        self._type_folder_movie = (
+                str(_get_val("type_folder_movie", "电影") or "").strip().strip("/") or "电影"
+        )
+        self._type_folder_tv = (
+                str(_get_val("type_folder_tv", "剧集") or "").strip().strip("/") or "剧集"
+        )
 
         paths = cloud_transfer_paths if cloud_transfer_paths is not None else self._configured_transfer_paths(plugin)
         self._cloud_transfer_paths = {

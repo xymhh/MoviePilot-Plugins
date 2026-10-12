@@ -49,8 +49,10 @@ class SyncNamingService(OwnerDelegator):
     ) -> Optional[Path]:
         """缓存分类根目录，避免逐集重复执行相同目录规则。"""
         media_source, media_id = media_identity(mediainfo)
+        type_folder = self._type_folder_name(mediainfo)
         key = (
             str(root_path),
+            type_folder,
             media_source,
             media_id,
             getattr(mediainfo, "tmdb_id", None),
@@ -104,14 +106,51 @@ class SyncNamingService(OwnerDelegator):
                 MediaType.MOVIE.value,
                 MediaType.TV.value,
             }:
-                resolved = Path(str(root_path or "/")) / media_type_value
+                resolved = Path(str(root_path or "/"))
+                # 启用媒体类型一级目录时，一级目录名以插件配置为准（以免出现 剧集/电视剧 叠层）
+                if not type_folder:
+                    resolved = resolved / media_type_value
                 if category_name:
                     resolved = resolved / category_name.strip("/")
+
+        if resolved is not None:
+            resolved = self._with_type_folder(resolved, root_path, type_folder)
 
         if platform_root_lock and platform_root_cache:
             with platform_root_lock:
                 platform_root_cache.set(cache_key, resolved)
         return resolved
+
+    def _type_folder_name(self, mediainfo: MediaInfo) -> str:
+        """按媒体类型返回媒体库一级目录名；未启用该功能或类型未知时返回空串。
+
+        目录名由插件配置提供（默认 电影 / 剧集），与宿主「设定 → 目录」配置无关，
+        因此打开本开关只影响网盘媒体库与本地 STRM 的目录层级，不改变平台整理行为。
+        """
+        if not getattr(self, "_type_folder_enabled", False):
+            return ""
+        media_type = getattr(mediainfo, "type", None)
+        if media_type == MediaType.MOVIE:
+            name = getattr(self, "_type_folder_movie", "")
+        elif media_type == MediaType.TV:
+            name = getattr(self, "_type_folder_tv", "")
+        else:
+            return ""
+        return str(name or "").strip().strip("/")
+
+    @staticmethod
+    def _with_type_folder(resolved: Path, root_path: str, type_folder: str) -> Path:
+        """在媒体库根目录下插入媒体类型一级目录，重复调用保持幂等。"""
+        if not type_folder:
+            return resolved
+        base = Path(str(root_path or "/"))
+        try:
+            relative = resolved.relative_to(base)
+        except ValueError:
+            return resolved
+        if relative.parts and relative.parts[0] == type_folder:
+            return resolved
+        return base / type_folder / relative
 
     def _platform_rename_path(
             self,
