@@ -31,6 +31,13 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             cols: 4,
           },
           {
+            key: "title_subscribe_enabled",
+            label: "片名自动订阅",
+            type: "switch",
+            hint: "对话框直接发片名即建订阅并搜索",
+            cols: 4,
+          },
+          {
             key: "platform_transfer_history_enabled",
             label: "写入整理历史",
             type: "switch",

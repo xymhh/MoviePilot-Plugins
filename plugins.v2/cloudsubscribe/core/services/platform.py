@@ -543,8 +543,6 @@ class PlatformIntegrationService(OwnerDelegator):
             "year": getattr(mediainfo, "year", None),
             "type": resolved_type.value,
             "season": resolved_season,
-            # 平台资源源需要把 TMDB 身份回填给 MoviePilot，便于下载时直接定位媒体
-            "tmdb_id": getattr(mediainfo, "tmdb_id", None),
         }
         cache_key = self._agent_cache_key(session_id, search_id)
         self._agent_resource_cache[cache_key] = {
