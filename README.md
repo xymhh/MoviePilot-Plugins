@@ -82,6 +82,7 @@ https://github.com/xymhh/MoviePilot-Plugins
 
 - [`docs/README.md`](docs/README.md) — 文档索引（`plan/` 计划、`test/` 证据、`summary/` 结论）
 - 关键总结：
+  - [HDHaven 签到 403（浏览器 Fetch Metadata）修复（1.6.30）](docs/summary/2026-10-12-HDHaven签到403修复.md) —— 站点风控新增 `Sec-Fetch-*` 判据
   - [手动订阅补缺集季（1.6.29）](docs/summary/2026-10-12-手动订阅缺集季.md) —— 决策与教训
   - [恢复 P115 分叉并重新发布 2.8.77](docs/summary/2026-10-11-恢复P115分叉并重新发布2.8.77.md) —— 为什么撤下又恢复
   - [撤下 P115 分叉与仓库瘦身](docs/summary/2026-10-11-撤下P115分叉与仓库瘦身.md)
