@@ -20,6 +20,11 @@ register_mock("cloudsubscribe")
 register_mock("cloudsubscribe.core", OwnerDelegator=OwnerDelegator)
 register_mock("cloudsubscribe.core.hook")
 
+# 片名候选登记表：hook 模块加载时即需要（1.6.27 片名先登记、选定后再接入）
+load_module(
+    "cloudsubscribe.core.pending_titles",
+    "plugins.v2/cloudsubscribe/core/pending_titles.py",
+)
 SubscriptionSearchHook = load_module(
     "cloudsubscribe.core.hook.subscription",
     "plugins.v2/cloudsubscribe/core/hook/subscription.py",

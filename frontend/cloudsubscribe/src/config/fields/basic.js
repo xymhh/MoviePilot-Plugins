@@ -34,7 +34,7 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             key: "title_subscribe_enabled",
             label: "片名自动订阅",
             type: "switch",
-            hint: "对话框直接发片名即建订阅并搜索",
+            hint: "对话框发片名先由平台出候选，选定后再建订阅并搜索",
             cols: 4,
           },
           {

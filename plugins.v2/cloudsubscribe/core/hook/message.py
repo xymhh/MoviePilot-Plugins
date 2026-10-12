@@ -10,11 +10,12 @@ from app.chain.message import MessageChain
 from app.log import logger
 
 from ..delegation import OwnerDelegator
+from ..pending_titles import PendingTitleStore, get_pending_title_store, media_type_value
 from ...search.types import resource_type_from_url
 
 
 class MessageRoutingHook(OwnerDelegator):
-    """在全局智能体路由前接管支持渠道中的资源链接与纯片名订阅。"""
+    """在全局智能体路由前接管资源链接；纯片名只登记候选，等用户选定后接入订阅。"""
 
     _patch_lock = Lock()
     _original: Optional[Callable] = None
@@ -106,17 +107,20 @@ class MessageRoutingHook(OwnerDelegator):
         }
 
     def _try_handle(self, arguments: Dict[str, Any]) -> bool:
-        """优先接管消息中的资源链接，其次接管纯片名的订阅创建。"""
+        """接管消息中的资源链接；纯片名只登记候选，消息原样交回平台。
+
+        1.6.27 起纯片名不再直接建订阅：先让平台给出候选列表，用户在候选里
+        选定后平台会发起真实搜索，由搜索钩子命中登记记录再创建订阅。
+        """
         payload = self._message_payload(arguments)
-        handler: Optional[Callable] = self.handle_telegram_links if payload else None
         if not payload:
-            payload = self._title_payload(arguments)
-            handler = self._handle_title_subscribe if payload else None
-        if not payload or handler is None:
+            title_payload = self._title_payload(arguments)
+            if title_payload:
+                self._remember_title_candidate(title_payload)
             return False
         try:
             Thread(
-                target=handler,
+                target=self.handle_telegram_links,
                 args=(payload,),
                 daemon=True,
                 name="cloudsubscribe-message-hook",
@@ -175,6 +179,10 @@ class MessageRoutingHook(OwnerDelegator):
             cls._original = None
             cls._wrapped = None
             cls._signature = None
+        try:
+            self._pending_store().clear()
+        except Exception as error:
+            logger.debug(f"清理片名候选登记表失败：{error}")
 
     @staticmethod
     def _as_media_type(value: Any) -> Optional[Any]:
@@ -277,23 +285,162 @@ class MessageRoutingHook(OwnerDelegator):
         except Exception as error:
             logger.warning(f"订阅搜索排队失败：subscribe_id={subscribe_id}，{error}")
 
-    def _handle_title_subscribe(self, payload: Dict[str, Any]) -> None:
-        """纯片名消息：识别媒体、按需创建订阅并立即触发一次网盘搜索。"""
+    @staticmethod
+    def _pending_store() -> PendingTitleStore:
+        """共享的片名登记表。"""
+        return get_pending_title_store()
+
+    def _remember_title_candidate(self, payload: Dict[str, Any]) -> None:
+        """登记纯片名候选，并在后台补齐 TMDB 身份，等用户选定后的搜索来消费。"""
         text = str(payload.get("text") or "").strip()
+        try:
+            record = self._pending_store().remember(
+                text=text,
+                userid=payload.get("userid"),
+                username=payload.get("username"),
+                channel=payload.get("channel"),
+                source=payload.get("source"),
+                chat_id=payload.get("chat_id"),
+                message_id=payload.get("message_id"),
+            )
+        except Exception as error:
+            logger.warning(f"片名候选登记失败：{text}，{error}")
+            return
+        logger.info(f"已登记片名候选「{text}」，交回平台给出候选列表，等用户选定后再接入订阅")
+        try:
+            Thread(
+                target=self._enrich_title_candidate,
+                args=(record.get("id"), text),
+                daemon=True,
+                name="cloudsubscribe-title-candidate",
+            ).start()
+        except Exception as error:
+            logger.debug(f"片名候选识别线程启动失败：{text}，{error}")
+
+    @staticmethod
+    def _tmdb_id_of(media: Any) -> Optional[int]:
+        """读取媒体对象的 TMDB ID（惰性导入，避免加载期依赖 app 运行时）。"""
+        if media is None:
+            return None
+        from ..media import tmdb_id_of
+
+        try:
+            return tmdb_id_of(media)
+        except Exception:
+            return None
+
+    def _enrich_title_candidate(self, record_id: Optional[str], text: str) -> None:
+        """后台识别片名并补齐登记记录的身份，识别不出就保持只按片名比对。"""
+        if not record_id:
+            return
         try:
             resolution = self._resolve_title_media(text)
         except Exception as error:
-            logger.error(f"片名识别异常，交回平台处理：{text}，{error}")
+            logger.debug(f"片名候选识别失败：{text}，{error}")
             return
         if not resolution:
-            logger.info(f"片名未识别为影视媒体，交回平台处理：{text}")
+            return
+        mediainfo, media_type, season = resolution
+        try:
+            self._pending_store().enrich(
+                record_id,
+                title=str(getattr(mediainfo, "title", "") or text),
+                year=str(getattr(mediainfo, "year", "") or ""),
+                mtype=media_type_value(media_type),
+                season=season,
+                tmdbid=self._tmdb_id_of(mediainfo),
+            )
+        except Exception as error:
+            logger.debug(f"片名候选身份补齐失败：{text}，{error}")
+
+    def _resolve_selected_media(
+            self, identity: Dict[str, Any]
+    ) -> Optional[Tuple[Any, Any, Optional[int]]]:
+        """按平台搜索使用的身份识别媒体（优先复用已知结果/已识别实例）。"""
+        from app.schemas.types import MediaType
+
+        season = identity.get("season")
+        try:
+            season = int(season) if season else None
+        except (TypeError, ValueError):
+            season = None
+        mediainfo = identity.get("mediainfo")
+        if mediainfo is not None:
+            media_type = self._as_media_type(getattr(mediainfo, "type", None))
+            if media_type:
+                return mediainfo, media_type, season if media_type == MediaType.TV else None
+        media_id = identity.get("media_id")
+        meta = identity.get("meta")
+        if not media_id and meta is None:
+            return None
+        mediainfo = self._sync_handler._recognize_media_once(
+            (
+                "selected_title",
+                str(identity.get("media_source") or ""),
+                str(media_id or ""),
+                str(identity.get("title") or ""),
+            ),
+            meta=meta,
+            mtype=identity.get("mtype_raw"),
+            media_source=identity.get("media_source"),
+            media_id=media_id,
+            cache=True,
+        )
+        media_type = (
+            self._as_media_type(getattr(mediainfo, "type", None)) if mediainfo else None
+        )
+        if not mediainfo or not media_type:
+            return None
+        return mediainfo, media_type, season if media_type == MediaType.TV else None
+
+    def _handle_selected_title(
+            self,
+            record: Dict[str, Any],
+            identity: Dict[str, Any],
+    ) -> None:
+        """用户选定后的真实搜索：按选定媒体建订阅并排队一次网盘搜索。"""
+        identity = dict(identity or {})
+        payload = {
+            "channel": record.get("channel"),
+            "source": record.get("source"),
+            "user": record.get("userid"),
+            "userid": record.get("userid"),
+            "username": record.get("username"),
+            "message_id": record.get("message_id"),
+            "chat_id": record.get("chat_id"),
+            "text": record.get("text"),
+        }
+        text = str(
+            identity.get("title") or record.get("title") or record.get("text") or ""
+        ).strip()
+        try:
+            resolution = self._resolve_selected_media(identity)
+            if not resolution:
+                resolution = self._resolve_title_media(text)
+        except Exception as error:
+            logger.error(f"选定片名识别异常：{text}，{error}")
+            return
+        if not resolution:
+            logger.info(f"选定片名未识别为影视媒体，跳过订阅创建：{text}")
             return
         mediainfo, media_type, season = resolution
         title = str(getattr(mediainfo, "title", "") or text).strip() or text
+        logger.info(f"片名候选已被平台搜索命中，按选定结果接入订阅：{title}")
+        self._ensure_title_subscribe(mediainfo, media_type, season, title, payload)
+
+    def _ensure_title_subscribe(
+            self,
+            mediainfo: Any,
+            media_type: Any,
+            season: Optional[int],
+            title: str,
+            payload: Dict[str, Any],
+    ) -> None:
+        """按识别结果复用或创建订阅，立刻排队网盘搜索并回执。"""
         try:
             subscribe = self._find_title_subscribe(mediainfo, media_type, season)
         except Exception as error:
-            logger.warning(f"查询既有订阅失败：{text}，{error}")
+            logger.warning(f"查询既有订阅失败：{title}，{error}")
             subscribe = None
         if subscribe:
             self._dispatch_title_search(int(getattr(subscribe, "id", 0) or 0), "R")
@@ -327,6 +474,6 @@ class MessageRoutingHook(OwnerDelegator):
         self._post_command_message(
             payload,
             "【网盘订阅】已创建订阅",
-            f"已创建订阅《{title}》{season_text}，正在搜索网盘资源，"
-            "找到后会自动转存入库。",
+            f"已按你在平台候选中选定的《{title}》{season_text}创建订阅，"
+            "正在搜索网盘资源，找到后会自动转存入库。",
         )

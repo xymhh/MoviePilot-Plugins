@@ -3,13 +3,15 @@
 import inspect
 from datetime import datetime, timezone
 from functools import wraps
-from typing import Any, Callable, List, Optional, Tuple
+from threading import Thread
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.chain.subscribe import SubscribeChain
 from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 
 from .. import OwnerDelegator
+from ..pending_titles import get_pending_title_store, media_type_value
 
 
 class SubscriptionSearchHook(OwnerDelegator):
@@ -151,6 +153,7 @@ class SubscriptionSearchHook(OwnerDelegator):
             @wraps(original)
             async def stream_wrapper(chain, *args, **kwargs):
                 if owner._is_platform_search_blocked():
+                    owner._dispatch_pending_title_search(original, (chain, *args), kwargs)
                     yield {
                         "type": "done",
                         "stage": "done",
@@ -168,6 +171,7 @@ class SubscriptionSearchHook(OwnerDelegator):
             @wraps(original)
             async def async_wrapper(chain, *args, **kwargs):
                 if owner._is_platform_search_blocked():
+                    owner._dispatch_pending_title_search(original, (chain, *args), kwargs)
                     return []
                 return await original(chain, *args, **kwargs)
 
@@ -176,6 +180,7 @@ class SubscriptionSearchHook(OwnerDelegator):
             @wraps(original)
             def sync_wrapper(chain, *args, **kwargs):
                 if owner._is_platform_search_blocked():
+                    owner._dispatch_pending_title_search(original, (chain, *args), kwargs)
                     return []
                 return original(chain, *args, **kwargs)
 
@@ -184,6 +189,182 @@ class SubscriptionSearchHook(OwnerDelegator):
         wrapper.__cloudsubscribe_owner__ = self
         wrapper.__cloudsubscribe_original__ = original
         return wrapper
+
+    # -------------------------------------------------- 片名候选命中（1.6.27）
+    @staticmethod
+    def _tmdb_id_of(media: Any) -> Optional[int]:
+        """读取媒体对象的 TMDB ID（惰性导入，避免加载期依赖 app 运行时）。"""
+        if media is None:
+            return None
+        from ..media import tmdb_id_of
+
+        try:
+            return tmdb_id_of(media)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _is_tmdb_source(media_source: Any) -> bool:
+        """判断媒体身份来源是否为 TMDB。"""
+        if not media_source:
+            return False
+        from ..media import TMDB_SOURCE, normalize_media_source
+
+        try:
+            return normalize_media_source(media_source) == TMDB_SOURCE
+        except Exception:
+            return False
+
+    def _search_identity(
+            self,
+            original: Callable,
+            args: Tuple[Any, ...],
+            kwargs: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """从平台搜索调用参数里提取被搜索的媒体身份（片名 / TMDB ID / 类型 / 季）。"""
+        try:
+            signature = inspect.signature(original)
+            bound = signature.bind_partial(*args, **kwargs)
+        except (TypeError, ValueError):
+            return None
+        arguments = dict(bound.arguments)
+        arguments.pop("self", None)
+        arguments.pop("chain", None)
+        for name, parameter in signature.parameters.items():
+            if parameter.kind is not inspect.Parameter.VAR_KEYWORD:
+                continue
+            extra = arguments.pop(name, None)
+            if isinstance(extra, dict):
+                arguments.update(extra)
+        meta = arguments.get("meta") or arguments.get("metainfo")
+        mediainfo = arguments.get("mediainfo") or arguments.get("media_info")
+        media_id = arguments.get("media_id") or arguments.get("mediaid")
+        media_source = arguments.get("media_source") or arguments.get("source")
+        titles = [arguments.get("title")]
+        raw_type = arguments.get("mtype")
+        season = arguments.get("season")
+        for candidate in (meta, mediainfo):
+            if candidate is None:
+                continue
+            titles.append(getattr(candidate, "name", None))
+            titles.append(getattr(candidate, "title", None))
+            raw_type = raw_type or getattr(candidate, "type", None)
+            season = (
+                season
+                or getattr(candidate, "begin_season", None)
+                or getattr(candidate, "season", None)
+            )
+        tmdbid = self._tmdb_id_of(mediainfo)
+        if not tmdbid and self._is_tmdb_source(media_source):
+            tmdbid = media_id
+        titles = [str(title).strip() for title in titles if title]
+        if not titles and not media_id and meta is None and mediainfo is None:
+            return None
+        return {
+            "titles": titles,
+            "title": titles[0] if titles else None,
+            "media_id": media_id,
+            "media_source": media_source,
+            "mtype": media_type_value(raw_type),
+            "mtype_raw": raw_type,
+            "season": season,
+            "tmdbid": tmdbid,
+            "meta": meta,
+            "mediainfo": mediainfo,
+        }
+
+    def _dispatch_pending_title_search(
+            self,
+            original: Callable,
+            args: Tuple[Any, ...],
+            kwargs: Dict[str, Any],
+    ) -> None:
+        """平台搜索被阻止时，检查是否为「用户刚发过的片名被选定」，命中就接入网盘订阅。
+
+        ``args`` 需带上链实例（``(chain, *args)``），以便按原函数签名解析参数。
+        只有存在未过期的片名候选时才做参数解析，平时零开销。
+        """
+        store = get_pending_title_store()
+        if not len(store):
+            return
+        identity = self._search_identity(original, args, kwargs)
+        if not identity:
+            return
+        record = store.consume(
+            titles=identity.get("titles") or (),
+            tmdbid=identity.get("tmdbid"),
+            mtype=identity.get("mtype"),
+        )
+        if record:
+            self._start_selected_title(record, identity)
+            return
+        if identity.get("media_id") or identity.get("meta") is not None:
+            # 只有媒体身份、没有片名：后台识别出标题再比对，避免阻塞搜索调用
+            try:
+                Thread(
+                    target=self._recognize_selected_title,
+                    args=(identity,),
+                    daemon=True,
+                    name="cloudsubscribe-selected-title",
+                ).start()
+            except Exception as error:
+                logger.debug(f"选定片名识别线程启动失败：{error}")
+
+    def _start_selected_title(
+            self,
+            record: Dict[str, Any],
+            identity: Dict[str, Any],
+    ) -> None:
+        """把命中记录交给宿主创建订阅（异步，避免拖慢搜索调用）。"""
+        try:
+            Thread(
+                target=self._handle_selected_title,
+                args=(record, identity),
+                daemon=True,
+                name="cloudsubscribe-selected-title",
+            ).start()
+        except Exception as error:
+            logger.error(f"选定片名接入线程启动失败：{error}")
+
+    def _recognize_selected_title(self, identity: Dict[str, Any]) -> None:
+        """把只有媒体身份的搜索识别成标题，再与候选片名比对。"""
+        store = get_pending_title_store()
+        if not len(store):
+            return
+        try:
+            mediainfo = self._sync_handler._recognize_media_once(
+                (
+                    "selected_search",
+                    str(identity.get("media_source") or ""),
+                    str(identity.get("media_id") or ""),
+                    str(identity.get("title") or ""),
+                ),
+                meta=identity.get("meta"),
+                mtype=identity.get("mtype_raw"),
+                media_source=identity.get("media_source"),
+                media_id=identity.get("media_id"),
+                cache=True,
+            )
+        except Exception as error:
+            logger.debug(f"搜索结果识别失败：{error}")
+            return
+        if not mediainfo:
+            return
+        enriched = dict(identity)
+        enriched["mediainfo"] = mediainfo
+        enriched["title"] = getattr(mediainfo, "title", None) or identity.get("title")
+        enriched["tmdbid"] = self._tmdb_id_of(mediainfo) or identity.get("tmdbid")
+        enriched["mtype"] = (
+            media_type_value(getattr(mediainfo, "type", None)) or identity.get("mtype")
+        )
+        record = store.consume(
+            titles=[enriched.get("title")],
+            tmdbid=enriched.get("tmdbid"),
+            mtype=enriched.get("mtype"),
+        )
+        if not record:
+            return
+        self._handle_selected_title(record, enriched)
 
     def _is_platform_search_blocked(self) -> bool:
         return (

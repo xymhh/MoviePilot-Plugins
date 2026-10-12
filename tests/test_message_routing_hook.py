@@ -32,6 +32,11 @@ def fake_resource_type_from_url(url: str) -> str:
 
 search_types.resource_type_from_url = fake_resource_type_from_url
 
+# 片名候选登记表：hook 模块加载时即需要（1.6.27 片名先登记、选定后再接入）
+load_module(
+    "cloudsubscribe.core.pending_titles",
+    "plugins.v2/cloudsubscribe/core/pending_titles.py",
+)
 MessageRoutingHook = load_module(
     "cloudsubscribe.core.hook.message",
     "plugins.v2/cloudsubscribe/core/hook/message.py",
