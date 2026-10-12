@@ -110,7 +110,8 @@ class MessageRoutingHook(OwnerDelegator):
         """接管消息中的资源链接；纯片名只登记候选，消息原样交回平台。
 
         1.6.27 起纯片名不再直接建订阅：先让平台给出候选列表，用户在候选里
-        选定后平台会发起真实搜索，由搜索钩子命中登记记录再创建订阅。
+        选定后平台会走「候选选定 → 搜索资源」（1.6.28 起该入口被订阅钩子接管），
+        由搜索钩子命中登记记录再创建订阅。
         """
         payload = self._message_payload(arguments)
         if not payload:

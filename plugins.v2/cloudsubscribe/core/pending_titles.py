@@ -5,6 +5,7 @@
 只有在用户选定后平台发起的真实搜索里命中该片名，才创建订阅并入队网盘搜索。
 """
 
+import difflib
 import re
 import threading
 import time
@@ -15,6 +16,10 @@ from typing import Any, Dict, Iterable, List, Optional
 DEFAULT_TTL_SECONDS = 900.0
 # 同时挂起的片名上限，避免长期无人点选时内存无界增长
 DEFAULT_MAX_RECORDS = 64
+# 模糊同名阈值：覆盖「机智医生生活」vs「机智的医生生活」这类差一字的输入
+DEFAULT_FUZZY_MIN_RATIO = 0.85
+# 模糊同名只对足够长的片名生效，避免两字名之间误撞
+FUZZY_MIN_TITLE_LENGTH = 3
 
 # 归一化：去掉空白、标点与下划线，只比较「名字本身」
 _NORMALIZE = re.compile(r"[\s\W_]+", re.UNICODE)
@@ -41,11 +46,13 @@ class PendingTitleStore:
             self,
             ttl: float = DEFAULT_TTL_SECONDS,
             max_records: int = DEFAULT_MAX_RECORDS,
+            fuzzy_min_ratio: float = DEFAULT_FUZZY_MIN_RATIO,
     ) -> None:
         self._lock = threading.Lock()
         self._records: List[Dict[str, Any]] = []
         self._ttl = float(ttl)
         self._max_records = int(max_records)
+        self._fuzzy_min_ratio = float(fuzzy_min_ratio)
 
     # ------------------------------------------------------------ 写入
     def remember(
@@ -120,9 +127,13 @@ class PendingTitleStore:
             tmdbid: Any = None,
             mtype: Any = None,
     ) -> Optional[Dict[str, Any]]:
-        """匹配并消费一条记录：优先 TMDB 身份完全一致，其次片名完全同名。
+        """匹配并消费一条记录，三级顺序：TMDB 身份 > 片名同名 > 片名模糊同名。
 
-        同名片名不误建的前提是这里只认「归一化后完全相等」，不做包含匹配。
+        用户点选的那一项自带 TMDB 身份与正式片名，所以身份优先；但登记时 TMDB 可能
+        识别失败（例如输入比正式片名少一个字），因此补一级「模糊同名」兜底 —— 它只在
+        候选类型相容、且两侧片名都够长时生效。宁可漏也不错建：片名对不上就不消费，
+        记录留到过期。
+        返回的记录带 ``match`` 字段标明命中级别，便于日志核对。
         """
         wanted_keys = {key for key in (normalize_title(item) for item in titles) if key}
         wanted_id = self._as_int(tmdbid)
@@ -134,18 +145,37 @@ class PendingTitleStore:
             self._purge_locked(now)
             identity_hit: Optional[int] = None
             title_hit: Optional[int] = None
+            fuzzy_hit: Optional[int] = None
+            best_ratio = 0.0
             for index, record in enumerate(self._records):
                 if not self._compatible(record, wanted_type):
                     continue
                 if wanted_id and record.get("tmdbid") == wanted_id:
                     identity_hit = index
                     break
-                if title_hit is None and wanted_keys & (record.get("keys") or set()):
+                record_keys = record.get("keys") or set()
+                if title_hit is None and wanted_keys & record_keys:
                     title_hit = index
-            index = identity_hit if identity_hit is not None else title_hit
+                    continue
+                ratio = self._best_ratio(wanted_keys, record_keys)
+                if ratio > best_ratio:
+                    best_ratio = ratio
+                    fuzzy_hit = index
+            index: Optional[int] = None
+            reason: Optional[str] = None
+            if identity_hit is not None:
+                index, reason = identity_hit, "tmdbid"
+            elif title_hit is not None:
+                index, reason = title_hit, "title"
+            elif fuzzy_hit is not None and best_ratio >= self._fuzzy_min_ratio:
+                index, reason = fuzzy_hit, "fuzzy"
             if index is None:
                 return None
-            return self._records.pop(index)
+            record = self._records.pop(index)
+            record["match"] = reason
+            if reason == "fuzzy":
+                record["match_ratio"] = round(best_ratio, 3)
+            return record
 
     def peek(self) -> List[Dict[str, Any]]:
         """返回未过期记录的副本（测试与日志用，不消费）。"""
@@ -174,6 +204,25 @@ class PendingTitleStore:
     @staticmethod
     def _keys(*values: Any) -> set:
         return {key for key in (normalize_title(item) for item in values) if key}
+
+    @staticmethod
+    def _best_ratio(wanted_keys: Iterable[Any], record_keys: Iterable[Any]) -> float:
+        """两侧片名集合里最相似的一对有多像（0~1），供模糊同名兜底判定。"""
+        best = 0.0
+        for wanted in wanted_keys:
+            wanted_text = str(wanted or "")
+            if len(wanted_text) < FUZZY_MIN_TITLE_LENGTH:
+                continue
+            for candidate in record_keys:
+                candidate_text = str(candidate or "")
+                if len(candidate_text) < FUZZY_MIN_TITLE_LENGTH:
+                    continue
+                ratio = difflib.SequenceMatcher(
+                    None, wanted_text, candidate_text
+                ).ratio()
+                if ratio > best:
+                    best = ratio
+        return best
 
     @staticmethod
     def _as_int(value: Any) -> Optional[int]:

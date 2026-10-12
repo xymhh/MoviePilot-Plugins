@@ -57,6 +57,16 @@ def fake_kwargs_search(chain, **kwargs):
     return []
 
 
+def fake_process_search(chain, mediainfo=None, keyword=None, no_exists=None, **kwargs):
+    """模拟 SearchChain.process 的签名（平台点选候选后走的入口）。"""
+    return ["contexts"]
+
+
+def fake_search_media_resources(chain_self, request=None, mediainfo=None, *args, **kwargs):
+    """模拟 InteractionChain._search_media_resources 的签名。"""
+    return "platform-search"
+
+
 class TestPendingTitleStore(unittest.TestCase):
     """片名登记表单元测试。"""
 
@@ -128,6 +138,37 @@ class TestPendingTitleStore(unittest.TestCase):
         store.remember(text="仙逆")
         store.clear()
         self.assertEqual(len(store), 0)
+
+    # ------------------------------------------- 1.6.28 选定结果对齐用模糊同名兜底
+    def test_consume_matches_title_with_one_char_difference(self):
+        """用户输入比正式片名少一个字时也要接上（机智医生生活 / 机智的医生生活）。"""
+        store = PendingTitleStore()
+        store.remember(text="机智医生生活")
+        hit = store.consume(titles=["机智的医生生活"], mtype="tv")
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["match"], "fuzzy")
+        self.assertGreaterEqual(hit["match_ratio"], 0.85)
+        self.assertEqual(len(store), 0)
+
+    def test_fuzzy_skips_short_titles(self):
+        """两字片名不参与模糊匹配，避免「仙逆」撞上「仙逆传」。"""
+        store = PendingTitleStore()
+        store.remember(text="仙逆")
+        self.assertIsNone(store.consume(titles=["仙逆传"], mtype="tv"))
+        self.assertEqual(len(store), 1)
+
+    def test_fuzzy_keeps_record_when_not_similar_enough(self):
+        """部分同名（相似度不到阈值）不消费记录，宁可漏也不错建。"""
+        store = PendingTitleStore()
+        store.remember(text="机智医生生活")
+        self.assertIsNone(store.consume(titles=["机智医生"], mtype="tv"))
+        self.assertEqual(len(store), 1)
+
+    def test_fuzzy_skips_incompatible_type(self):
+        """类型不相容（登记为电影、点选为剧集）不命中。"""
+        store = PendingTitleStore()
+        store.remember(text="机智医生生活", mtype="movie")
+        self.assertIsNone(store.consume(titles=["机智的医生生活"], mtype="tv"))
 
 
 class TestPendingTitleSearchHook(unittest.TestCase):
@@ -318,6 +359,132 @@ class TestPendingTitleSearchHook(unittest.TestCase):
         self.assertEqual(events[0]["items"], [])
         self._wait_async()
         self.assertEqual(len(self.selected), 1)
+
+
+    # ------------------------------------------------- 点选候选入口（1.6.28）
+    def test_process_wrapper_passes_through_without_pending_hit(self):
+        """没有登记候选时，process 原样透传（订阅搜索等调用不受影响）。"""
+        self._blocked()
+        wrapper = self.hook._create_platform_search_wrapper(
+            "process", "pending", fake_process_search
+        )
+        result = wrapper(object(), mediainfo=FakeMediaInfo(title="别的片子", mtype="tv"))
+        self.assertEqual(result, ["contexts"])
+        self.assertEqual(self.selected, [])
+
+    def test_process_wrapper_blocks_clicked_candidate(self):
+        """点选的那一项（机智的医生生活）要能接上「机智医生生活」这条登记。"""
+        self._blocked()
+        self.store.remember(text="机智医生生活", mtype="tv")
+        wrapper = self.hook._create_platform_search_wrapper(
+            "process", "pending", fake_process_search
+        )
+        self.assertEqual(
+            wrapper(
+                object(),
+                mediainfo=FakeMediaInfo(title="机智的医生生活", mtype="tv", tmdbid=96102),
+            ),
+            [],
+        )
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+        self.assertEqual(self.selected[0][0]["match"], "fuzzy")
+        self.assertEqual(len(self.store), 0)
+
+    def test_pending_async_wrapper_blocks(self):
+        self._blocked()
+        self.store.remember(text="仙逆", mtype="tv")
+
+        async def original(chain, mediainfo=None, **kwargs):
+            return ["contexts"]
+
+        wrapper = self.hook._create_platform_search_wrapper(
+            "async_process", "pending_async", original
+        )
+        result = asyncio.run(
+            wrapper(object(), mediainfo=FakeMediaInfo(title="仙逆", mtype="tv"))
+        )
+        self.assertEqual(result, [])
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+
+    def test_pending_stream_wrapper_blocks(self):
+        self._blocked()
+        self.store.remember(text="仙逆", mtype="tv")
+
+        async def original(chain, mediainfo=None, **kwargs):
+            yield {"type": "done", "items": ["contexts"]}
+
+        wrapper = self.hook._create_platform_search_wrapper(
+            "async_process_stream", "pending_stream", original
+        )
+
+        async def collect():
+            return [event async for event in wrapper(object(), mediainfo=FakeMediaInfo(mtype="tv"))]
+
+        events = asyncio.run(collect())
+        self.assertEqual(events[0]["items"], [])
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+
+    def test_interaction_wrapper_skips_platform_search(self):
+        """媒体点选接管器：命中登记就直接接管，不落到平台搜索、也不再回「未搜索到」。"""
+        self._blocked()
+        self.store.remember(text="机智医生生活", mtype="tv")
+        calls = []
+
+        def original(chain_self, request=None, mediainfo=None, *args, **kwargs):
+            calls.append(mediainfo)
+            return "platform-search"
+
+        wrapper = self.hook._create_interaction_media_wrapper(original)
+        request = MagicMock()
+        request.meta = None
+        result = wrapper(
+            object(),
+            request=request,
+            mediainfo=FakeMediaInfo(title="机智的医生生活", mtype="tv", tmdbid=96102),
+        )
+        self.assertIsNone(result)
+        self.assertEqual(calls, [])
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+        self.assertEqual(self.selected[0][1]["tmdbid"], 96102)
+        self.assertEqual(len(self.store), 0)
+
+    def test_interaction_wrapper_uses_request_keyword(self):
+        """用户原始输入（request.keyword）能直接对上登记，判级为同名。"""
+        self._blocked()
+        self.store.remember(text="机智医生生活", mtype="tv")
+        wrapper = self.hook._create_interaction_media_wrapper(fake_search_media_resources)
+        request = MagicMock()
+        request.meta = None
+        request.keyword = "机智医生生活"
+        self.assertIsNone(
+            wrapper(
+                object(),
+                request=request,
+                mediainfo=FakeMediaInfo(title="机智的医生生活", mtype="tv", tmdbid=96102),
+            )
+        )
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+        self.assertEqual(self.selected[0][0]["match"], "title")
+
+    def test_interaction_wrapper_passes_through_other_searches(self):
+        self._blocked()
+        wrapper = self.hook._create_interaction_media_wrapper(fake_search_media_resources)
+        request = MagicMock()
+        request.meta = None
+        self.assertEqual(
+            wrapper(
+                object(),
+                request=request,
+                mediainfo=FakeMediaInfo(title="别的片子", mtype="tv"),
+            ),
+            "platform-search",
+        )
+        self.assertEqual(self.selected, [])
 
 
 if __name__ == "__main__":

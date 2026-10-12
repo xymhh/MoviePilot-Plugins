@@ -100,7 +100,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.27"
+    plugin_version = "1.6.28"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -233,6 +233,7 @@ class CloudSubscribe(_PluginBase):
     _subscribe_search_originals: Dict[str, Callable[..., Any]] = {}
     _subscribe_chain_originals: Dict[str, Callable[..., Any]] = {}
     _platform_search_originals: Dict[str, Callable[..., Any]] = {}
+    _interaction_originals: Dict[str, Callable[..., Any]] = {}
     _stop_event: Optional[ThreadEvent] = None
     _sync_running: bool = False
     _sync_status: str = "idle"
@@ -564,6 +565,7 @@ class CloudSubscribe(_PluginBase):
             self._subscribe_search_originals = {}
             self._subscribe_chain_originals = {}
             self._platform_search_originals = {}
+            self._interaction_originals = {}
         else:
             if self._sync_tasks_lock is None:
                 self._sync_tasks_lock = RLock()

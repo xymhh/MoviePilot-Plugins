@@ -25,12 +25,19 @@ class SubscriptionSearchHook(OwnerDelegator):
         "async_search_by_title": "async",
         "async_search_by_title_stream": "stream",
         "async_search_by_id_stream": "stream",
+        # 平台「候选选定 → 搜索资源」走的是 process（app/chain/interaction.py 的
+        # _search_media_resources），不在上面几个公开入口里，单独按 pending 语义挂接：
+        # 只有真的消费到用户点选的那条片名候选才拦截，其余调用原样透传。
+        "process": "pending",
+        "async_process": "pending_async",
+        "async_process_stream": "pending_stream",
     }
 
     def _install_subscribe_search_takeover(self) -> None:
         if not self._enabled:
             return
         self._install_platform_search_block()
+        self._install_interaction_media_hook()
         self._install_subscribe_chain_takeover()
         try:
             from app.scheduler import Scheduler
@@ -68,6 +75,7 @@ class SubscriptionSearchHook(OwnerDelegator):
 
     def _restore_subscribe_search_takeover(self) -> None:
         self._restore_platform_search_block()
+        self._restore_interaction_media_hook()
         self._restore_subscribe_chain_takeover()
         originals = dict(self._subscribe_search_originals or {})
         if not originals:
@@ -186,9 +194,203 @@ class SubscriptionSearchHook(OwnerDelegator):
 
             wrapper = sync_wrapper
 
+        if method_type in {"pending", "pending_async", "pending_stream"}:
+            wrapper = self._create_pending_wrapper(original, method_type)
+
         wrapper.__cloudsubscribe_owner__ = self
         wrapper.__cloudsubscribe_original__ = original
         return wrapper
+
+    def _create_pending_wrapper(self, original: Callable, method_type: str) -> Callable:
+        """按「命中片名候选才拦截」的语义包装平台搜索入口（process 系列）。
+
+        与 ``sync``/``async``/``stream`` 的差别：后者在接管态下一律拦截平台搜索，这里
+        只在真的消费到用户点选的那条片名候选时才拦截，其余调用原样透传，避免影响订阅
+        搜索、扫描等其它同样调用 ``process`` 的路径。
+        """
+        owner = self
+
+        if method_type == "pending_stream":
+            @wraps(original)
+            async def pending_stream_wrapper(chain, *args, **kwargs):
+                if owner._is_platform_search_blocked() \
+                        and owner._dispatch_pending_title_search(
+                            original, (chain, *args), kwargs
+                        ):
+                    yield {
+                        "type": "done",
+                        "stage": "done",
+                        "value": 100,
+                        "text": "网盘订阅接管中，已阻止平台搜索",
+                        "items": [],
+                        "total_items": 0,
+                    }
+                    return
+                async for event in original(chain, *args, **kwargs):
+                    yield event
+
+            return pending_stream_wrapper
+
+        if method_type == "pending_async":
+            @wraps(original)
+            async def pending_async_wrapper(chain, *args, **kwargs):
+                if owner._is_platform_search_blocked() \
+                        and owner._dispatch_pending_title_search(
+                            original, (chain, *args), kwargs
+                        ):
+                    return []
+                return await original(chain, *args, **kwargs)
+
+            return pending_async_wrapper
+
+        @wraps(original)
+        def pending_wrapper(chain, *args, **kwargs):
+            if owner._is_platform_search_blocked() \
+                    and owner._dispatch_pending_title_search(
+                        original, (chain, *args), kwargs
+                    ):
+                return []
+            return original(chain, *args, **kwargs)
+
+        return pending_wrapper
+
+    # ------------------------------------------------ 媒体点选接入（1.6.28）
+    def _install_interaction_media_hook(self) -> None:
+        """挂接平台「候选选定 → 搜索资源」入口，点选后不再走平台站点搜索。"""
+        try:
+            from app.chain.interaction import InteractionChain
+        except Exception as error:
+            logger.debug(f"媒体点选接管跳过（平台无 InteractionChain）：{error}")
+            return
+        method_name = "_search_media_resources"
+        current = getattr(InteractionChain, method_name, None)
+        if not callable(current):
+            logger.warning(f"搜索入口不存在：InteractionChain.{method_name}")
+            return
+        if getattr(current, "__cloudsubscribe_owner__", None) is self:
+            return
+        original = getattr(current, "__cloudsubscribe_original__", current)
+        originals = getattr(self, "_interaction_originals", None)
+        if originals is not None:
+            originals.setdefault(method_name, original)
+        setattr(
+            InteractionChain,
+            method_name,
+            self._create_interaction_media_wrapper(original),
+        )
+        logger.info(f"媒体点选接管器已安装：InteractionChain.{method_name}")
+
+    def _restore_interaction_media_hook(self) -> None:
+        originals = dict(getattr(self, "_interaction_originals", None) or {})
+        if not originals:
+            return
+        try:
+            from app.chain.interaction import InteractionChain
+
+            for method_name, original in originals.items():
+                current = getattr(InteractionChain, method_name, None)
+                if getattr(current, "__cloudsubscribe_owner__", None) is self:
+                    setattr(InteractionChain, method_name, original)
+        except Exception as error:
+            logger.warning(f"恢复媒体点选接管器失败：{error}")
+        finally:
+            if hasattr(self, "_interaction_originals"):
+                self._interaction_originals = {}
+
+    def _create_interaction_media_wrapper(self, original: Callable) -> Callable:
+        """用户点选候选后的落点：命中片名候选就接入订阅并跳过平台搜索。"""
+        owner = self
+
+        @wraps(original)
+        def media_resources_wrapper(
+                chain_self,
+                request=None,
+                mediainfo=None,
+                *args,
+                **kwargs,
+        ):
+            if owner._is_platform_search_blocked() and owner._consume_pending_identity(
+                    owner._identity_from_media_selection(
+                        mediainfo,
+                        meta=getattr(request, "meta", None),
+                        keyword=getattr(request, "keyword", None),
+                    )
+            ):
+                return None
+            return original(chain_self, request, mediainfo, *args, **kwargs)
+
+        media_resources_wrapper.__cloudsubscribe_owner__ = self
+        media_resources_wrapper.__cloudsubscribe_original__ = original
+        return media_resources_wrapper
+
+    def _identity_from_media_selection(
+            self,
+            mediainfo: Any,
+            meta: Any = None,
+            season: Any = None,
+            keyword: Any = None,
+    ) -> Dict[str, Any]:
+        """按「用户点选的那一项」构造搜索身份，结构与 ``_search_identity`` 一致。
+
+        点选项自带 TMDB 身份与正式片名，所以这里以它为准；片名只用于匹配登记记录
+        （决定回执发给谁、用哪条记录的渠道），其中 ``keyword`` 是用户原始输入，
+        与登记记录的片名最可能完全同名，排在最前面。
+        """
+        titles: List[str] = []
+        if isinstance(keyword, str) and keyword.strip():
+            titles.append(keyword.strip())
+        for candidate in (meta, mediainfo):
+            if candidate is None:
+                continue
+            for attribute in ("name", "title"):
+                value = getattr(candidate, attribute, None)
+                if isinstance(value, str) and value.strip() and value.strip() not in titles:
+                    titles.append(value.strip())
+        raw_type = getattr(mediainfo, "type", None) or getattr(meta, "type", None)
+        if season is None:
+            season = (
+                    getattr(mediainfo, "begin_season", None)
+                    or getattr(mediainfo, "season", None)
+            )
+        media_id = getattr(mediainfo, "media_id", None)
+        media_source = getattr(mediainfo, "media_source", None)
+        tmdbid = self._tmdb_id_of(mediainfo)
+        if not tmdbid and media_id and self._is_tmdb_source(media_source):
+            tmdbid = media_id
+        return {
+            "titles": titles,
+            "title": titles[0] if titles else None,
+            "media_id": media_id,
+            "media_source": media_source,
+            "mtype": media_type_value(raw_type),
+            "mtype_raw": raw_type,
+            "season": season,
+            "tmdbid": tmdbid,
+            "meta": meta,
+            "mediainfo": mediainfo,
+        }
+
+    def _consume_pending_identity(self, identity: Optional[Dict[str, Any]]) -> bool:
+        """按身份消费一条片名候选；命中就异步接入订阅并返回 True。"""
+        if not identity:
+            return False
+        store = get_pending_title_store()
+        if not len(store):
+            return False
+        record = store.consume(
+            titles=identity.get("titles") or (),
+            tmdbid=identity.get("tmdbid"),
+            mtype=identity.get("mtype"),
+        )
+        if not record:
+            return False
+        match = record.get("match")
+        ratio = record.get("match_ratio")
+        logger.info(
+            f"片名候选命中（{match}{f' {ratio}' if ratio else ''}）：{record.get('text')}"
+        )
+        self._start_selected_title(record, identity)
+        return True
 
     # -------------------------------------------------- 片名候选命中（1.6.27）
     @staticmethod
@@ -278,26 +480,21 @@ class SubscriptionSearchHook(OwnerDelegator):
             original: Callable,
             args: Tuple[Any, ...],
             kwargs: Dict[str, Any],
-    ) -> None:
+    ) -> bool:
         """平台搜索被阻止时，检查是否为「用户刚发过的片名被选定」，命中就接入网盘订阅。
 
         ``args`` 需带上链实例（``(chain, *args)``），以便按原函数签名解析参数。
         只有存在未过期的片名候选时才做参数解析，平时零开销。
+        返回 True 表示已命中并接管（调用方据此阻止平台搜索）。
         """
         store = get_pending_title_store()
         if not len(store):
-            return
+            return False
         identity = self._search_identity(original, args, kwargs)
         if not identity:
-            return
-        record = store.consume(
-            titles=identity.get("titles") or (),
-            tmdbid=identity.get("tmdbid"),
-            mtype=identity.get("mtype"),
-        )
-        if record:
-            self._start_selected_title(record, identity)
-            return
+            return False
+        if self._consume_pending_identity(identity):
+            return True
         if identity.get("media_id") or identity.get("meta") is not None:
             # 只有媒体身份、没有片名：后台识别出标题再比对，避免阻塞搜索调用
             try:
@@ -309,6 +506,7 @@ class SubscriptionSearchHook(OwnerDelegator):
                 ).start()
             except Exception as error:
                 logger.debug(f"选定片名识别线程启动失败：{error}")
+        return False
 
     def _start_selected_title(
             self,
