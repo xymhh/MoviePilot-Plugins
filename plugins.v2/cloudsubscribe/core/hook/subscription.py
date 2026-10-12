@@ -1,6 +1,8 @@
 """订阅与平台搜索钩子。"""
 
+import contextvars
 import inspect
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
 from threading import Thread
@@ -12,6 +14,24 @@ from app.log import logger
 
 from .. import OwnerDelegator
 from ..pending_titles import get_pending_title_store, media_type_value
+
+_season_expansion_suppressed = contextvars.ContextVar(
+    "cloudsubscribe_season_expansion_suppressed", default=0
+)
+
+
+@contextmanager
+def suppress_season_expansion():
+    token = _season_expansion_suppressed.set(_season_expansion_suppressed.get() + 1)
+    try:
+        yield
+    finally:
+        _season_expansion_suppressed.reset(token)
+
+
+def _is_tv_media_type(value: Any) -> bool:
+    """判断媒体类型是否为电视剧（兼容 MediaType 枚举与中英文文本值）。"""
+    return str(value or "").strip().lower() in {"tv", "电视剧", "media_type.tv"}
 
 
 class SubscriptionSearchHook(OwnerDelegator):
@@ -39,6 +59,7 @@ class SubscriptionSearchHook(OwnerDelegator):
         self._install_platform_search_block()
         self._install_interaction_media_hook()
         self._install_subscribe_chain_takeover()
+        self._install_subscribe_add_expansion()
         try:
             from app.scheduler import Scheduler
 
@@ -596,6 +617,149 @@ class SubscriptionSearchHook(OwnerDelegator):
             logger.debug("已安装订阅执行接管器")
         except Exception as error:
             logger.warning(f"安装订阅执行接管器失败：{error}")
+
+    def _install_subscribe_add_expansion(self) -> None:
+        for method_name in ("add", "async_add"):
+            current = getattr(SubscribeChain, method_name, None)
+            if not callable(current) or getattr(current, "__cloudsubscribe_owner__", None) is self:
+                continue
+            original = getattr(current, "__cloudsubscribe_original__", current)
+            originals = getattr(self, "_subscribe_chain_originals", None)
+            if originals is not None:
+                originals.setdefault(method_name, original)
+            wrapper = self._create_subscribe_add_expansion(original)
+            wrapper.__cloudsubscribe_owner__ = self
+            wrapper.__cloudsubscribe_original__ = original
+            setattr(SubscribeChain, method_name, wrapper)
+
+    def _create_subscribe_add_expansion(self, original: Callable) -> Callable:
+        owner = self
+        is_async = inspect.iscoroutinefunction(original)
+
+        def expansion_context(args, kwargs):
+            """
+            解析本次 add 调用的季号与媒体身份。
+
+            MoviePilot 的 ``SubscribeChain.add`` 只接收 media_source / media_id
+            （interaction.py 的片名选定路径即如此），因此缺 mediainfo 时靠身份重新识别。
+            """
+            try:
+                values = inspect.signature(original).bind_partial(
+                    None, *args, **kwargs
+                ).arguments
+            except (TypeError, ValueError):
+                values = {}
+            mediainfo = values.get("mediainfo") or kwargs.get("mediainfo")
+            mtype = (
+                values.get("mtype")
+                or kwargs.get("mtype")
+                or getattr(mediainfo, "type", None)
+            )
+            return {
+                "values": values,
+                "mediainfo": mediainfo,
+                "mtype": mtype,
+                "season": values.get("season", kwargs.get("season")),
+                "media_source": values.get("media_source") or kwargs.get("media_source"),
+                "media_id": values.get("media_id") or kwargs.get("media_id"),
+                "is_tv": _is_tv_media_type(getattr(mtype, "value", mtype)),
+            }
+
+        def resolve_seasons(context):
+            from ..subscribe.seasons import resolve_subscribe_seasons
+
+            return resolve_subscribe_seasons(
+                context["mediainfo"],
+                media_source=context["media_source"],
+                media_id=context["media_id"],
+                mtype=context["mtype"],
+                skip_season_zero=getattr(owner, "_subscribe_skip_season_zero", True),
+                limit=getattr(owner, "_subscribe_season_limit", 0),
+            )
+
+        def should_expand(context):
+            """只有「电视剧 + 未指定季号 + 开关开启 + 非抑制态」才按季展开。"""
+            return bool(
+                context["is_tv"]
+                and context["season"] is None
+                and getattr(owner, "_subscribe_all_missing_seasons", True)
+                and not _season_expansion_suppressed.get()
+            )
+
+        async def run_async(chain, args, kwargs):
+            context = expansion_context(args, kwargs)
+            if not should_expand(context):
+                return await original(chain, *args, **kwargs)
+            seasons = resolve_seasons(context)
+            if not seasons:
+                return await original(chain, *args, **kwargs)
+            return await invoke_seasons(
+                chain, args, kwargs, context["values"], seasons, True
+            )
+
+        def invoke_seasons(chain, args, kwargs, values, seasons, async_mode):
+            results = []
+            try:
+                parameter_names = list(inspect.signature(original).parameters)
+            except (TypeError, ValueError):
+                parameter_names = []
+
+            def set_argument(positional, keyword, name, value):
+                try:
+                    index = parameter_names.index(name) - 1
+                except ValueError:
+                    index = -1
+                if 0 <= index < len(positional):
+                    positional[index] = value
+                    keyword.pop(name, None)
+                else:
+                    keyword[name] = value
+
+            for season in seasons:
+                call_kwargs = dict(kwargs)
+                positional = list(args)
+                set_argument(positional, call_kwargs, "season", season)
+                if season != seasons[0]:
+                    set_argument(positional, call_kwargs, "message", False)
+                result = original(chain, *positional, **call_kwargs)
+                results.append(result)
+            if async_mode:
+                async def collect():
+                    first = None
+                    last = None
+                    for season, pending in zip(seasons, results):
+                        result = await pending
+                        logger.info(f"手动订阅按缺集季展开：{values.get('title', '')} S{season:02d} -> {result}")
+                        if first is None and isinstance(result, tuple) and result and result[0]:
+                            first = result
+                        last = result
+                    return first if first is not None else last
+                return collect()
+            first = None
+            for season, result in zip(seasons, results):
+                logger.info(f"手动订阅按缺集季展开：{values.get('title', '')} S{season:02d} -> {result}")
+                if first is None and isinstance(result, tuple) and result and result[0]:
+                    first = result
+            return first if first is not None else results[-1]
+
+        if is_async:
+            @wraps(original)
+            async def async_wrapper(chain, *args, **kwargs):
+                return await run_async(chain, args, kwargs)
+            return async_wrapper
+
+        @wraps(original)
+        def sync_wrapper(chain, *args, **kwargs):
+            context = expansion_context(args, kwargs)
+            if not should_expand(context):
+                return original(chain, *args, **kwargs)
+            seasons = resolve_seasons(context)
+            if not seasons:
+                return original(chain, *args, **kwargs)
+            return invoke_seasons(
+                chain, args, kwargs, context["values"], seasons, False
+            )
+        return sync_wrapper
 
     def _restore_subscribe_chain_takeover(self) -> None:
         """恢复 SubscribeChain 的原始搜索执行方法。"""

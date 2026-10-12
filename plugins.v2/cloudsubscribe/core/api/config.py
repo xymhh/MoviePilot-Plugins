@@ -131,6 +131,18 @@ class ConfigApi(OwnerDelegator):
             if not isinstance(payload, dict):
                 return {"success": False, "message": "配置数据格式错误"}
             UIConfig.normalize_config(payload)
+            payload["subscribe_all_missing_seasons"] = bool(
+                payload.get("subscribe_all_missing_seasons", True)
+            )
+            payload["subscribe_skip_season_zero"] = bool(
+                payload.get("subscribe_skip_season_zero", True)
+            )
+            try:
+                payload["subscribe_season_limit"] = max(
+                    0, int(payload.get("subscribe_season_limit", 0))
+                )
+            except (TypeError, ValueError):
+                payload["subscribe_season_limit"] = 0
             self._validate_search_proxy_config(payload)
             auto_subscribe_error = self._validate_auto_subscribe_config(payload)
             if auto_subscribe_error:

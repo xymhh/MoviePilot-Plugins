@@ -38,6 +38,28 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             cols: 4,
           },
           {
+            key: "subscribe_all_missing_seasons",
+            label: "手动订阅补齐缺集季",
+            type: "switch",
+            hint: "发片名或手动建订阅时，按媒体库缺集为每一季各建一条订阅，而不是只订第 1 季",
+            cols: 4,
+          },
+          {
+            key: "subscribe_skip_season_zero",
+            label: "跳过第 0 季",
+            type: "switch",
+            hint: "不订阅特辑 (S00)",
+            cols: 4,
+          },
+          {
+            key: "subscribe_season_limit",
+            label: "最多补建季数",
+            type: "number",
+            hint: "0 表示不限",
+            min: 0,
+            cols: 4,
+          },
+          {
             key: "platform_transfer_history_enabled",
             label: "写入整理历史",
             type: "switch",

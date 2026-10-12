@@ -100,7 +100,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.28"
+    plugin_version = "1.6.29"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -121,6 +121,9 @@ class CloudSubscribe(_PluginBase):
     _agent_enabled: bool = True
     _direct_transfer_enabled: bool = True
     _title_subscribe_enabled: bool = True
+    _subscribe_all_missing_seasons: bool = True
+    _subscribe_skip_season_zero: bool = True
+    _subscribe_season_limit: int = 0
     _organize_after_transfer: bool = True
     _organize_subtitles: bool = True
     _subtitle_traditional_to_simplified: bool = False
@@ -485,6 +488,9 @@ class CloudSubscribe(_PluginBase):
             "agent_enabled",
             "direct_transfer_enabled",
             "title_subscribe_enabled",
+            "subscribe_all_missing_seasons",
+            "subscribe_skip_season_zero",
+            "subscribe_season_limit",
             "notify",
             "notification_type",
             "webhook_enabled",
@@ -518,6 +524,12 @@ class CloudSubscribe(_PluginBase):
                 self._title_subscribe_enabled = bool(
                     config.get("title_subscribe_enabled", True)
                 )
+                self._subscribe_all_missing_seasons = bool(config.get("subscribe_all_missing_seasons", True))
+                self._subscribe_skip_season_zero = bool(config.get("subscribe_skip_season_zero", True))
+                try:
+                    self._subscribe_season_limit = max(0, int(config.get("subscribe_season_limit", 0)))
+                except (TypeError, ValueError):
+                    self._subscribe_season_limit = 0
                 if "video_extensions" in changed_keys or "subtitle_extensions" in changed_keys:
                     video_exts, sub_exts = MediaFileParser.configure_extensions(
                         video_extensions=config.get("video_extensions"),
@@ -712,6 +724,12 @@ class CloudSubscribe(_PluginBase):
         self._title_subscribe_enabled = bool(
             config.get("title_subscribe_enabled", True)
         )
+        self._subscribe_all_missing_seasons = bool(config.get("subscribe_all_missing_seasons", True))
+        self._subscribe_skip_season_zero = bool(config.get("subscribe_skip_season_zero", True))
+        try:
+            self._subscribe_season_limit = max(0, int(config.get("subscribe_season_limit", 0)))
+        except (TypeError, ValueError):
+            self._subscribe_season_limit = 0
 
         self._cron = (config.get("cron", self._cron) or "").strip()
         if self._cron and not self._cron_is_valid(self._cron):

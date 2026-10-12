@@ -44,6 +44,7 @@ from ...utils.http_client import (
     requests,
     validate_proxy_address,
 )
+from .seasons import probe_season_progress
 
 
 @dataclass
@@ -856,9 +857,9 @@ class AutoSubscribeService:
                     getattr(item.mediainfo, "bangumi_id", None)
                     or item.candidate.bangumi_id
             )
-        sid, message = self.subscribe_chain.add(
-            **add_kwargs,
-        )
+        from ..hook.subscription import suppress_season_expansion
+        with suppress_season_expansion():
+            sid, message = self.subscribe_chain.add(**add_kwargs)
         return SubscribeOutcome(
             SubscribeStatus.SUBSCRIBED if sid else SubscribeStatus.ERROR,
             item.candidate,
@@ -1158,24 +1159,11 @@ class AutoSubscribeService:
             if not target_episodes:
                 return _LibraryProgress(start_episode=target_season)
             target_episodes = sorted({int(episode) for episode in target_episodes})
-            media.season = target_season
-            media.seasons = {target_season: target_episodes}
-            exists, no_exists = self.download_chain.get_no_exists_info(meta=meta, mediainfo=media)
-            missing: set[int] = set()
-            for seasons in (no_exists or {}).values():
-                for info in (seasons or {}).values():
-                    if getattr(info, "season", None) == target_season:
-                        episodes = getattr(info, "episodes", None) or []
-                        missing.update(
-                            target_episodes
-                            if not episodes
-                            else (int(episode) for episode in episodes)
-                        )
-            if not exists and not missing:
-                missing.update(target_episodes)
+            progress = probe_season_progress(media, target_season, self.download_chain)
+            missing = set(progress.missing_episodes or [])
             existing = sorted(set(target_episodes) - missing)
             return _LibraryProgress(
-                complete=bool(exists),
+                complete=progress.complete,
                 existing_episodes=existing,
                 missing_episodes=sorted(missing),
                 total_episode=max(target_episodes),
