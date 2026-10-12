@@ -65,6 +65,12 @@ class HDHavenClient:
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
             "Referer": f"{self.base_url}/",
             "Origin": self.base_url,
+            # 站点自 2026-10-12 起按浏览器 Fetch Metadata 判定来源：缺少 Sec-Fetch-*
+            # 的网页接口请求一律 403 BROWSER_REQUIRED（"程序接入请使用 OPENAPI 授权"），
+            # 现场表现为签到取不到 Cloudflare site key。这里补齐浏览器 XHR 的头。
+            "Sec-Fetch-Site": "same-origin",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Dest": "empty",
         })
 
         self._lock = threading.RLock()
