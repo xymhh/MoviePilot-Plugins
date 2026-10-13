@@ -16,6 +16,7 @@ from ...core import (
     OwnerDelegator,
     SearchCapability,
 )
+from ...core.services.skip_stats import SkipStatsCollector
 from ...search.types import (
     CANDIDATE_RESOURCE_TYPES,
     normalize_resource_type,
@@ -645,6 +646,37 @@ class ResourceTransferService(OwnerDelegator):
             resources, resource_index, resource, unlocked
         )
 
+    def _record_skip_candidate(
+            self,
+            kind: str,
+            share_url: str,
+            reason: str = "",
+            resource_label: str = "",
+    ) -> None:
+        """记录被跳过的候选资源；统计缺失或异常时静默忽略，绝不影响转存主流程。"""
+        try:
+            collector = getattr(self, "_skip_stats", None)
+            if collector is None:
+                # 同步处理器组件的宿主是 SyncHandler，插件实例挂在 _plugin 上。
+                plugin = getattr(self, "_plugin", None)
+                collector = getattr(plugin, "_skip_stats", None)
+            if collector is None:
+                return
+            resource_type = resource_type_from_url(share_url)
+            provider = (
+                resource_type_name(resource_type, "")
+                if resource_type
+                else str(resource_label or "").strip()
+            ) or "未知来源"
+            collector.record(
+                kind,
+                provider,
+                reason=reason,
+                reference=self._resource_log_reference(share_url),
+            )
+        except Exception:  # noqa: BLE001 - 统计失败不得影响转存主流程
+            return
+
     def _validate_resource_url(
             self,
             share_url: str,
@@ -668,6 +700,12 @@ class ResourceTransferService(OwnerDelegator):
         logger.debug(
             f"{prefix}{resource_label}无效："
             f"{self._resource_log_reference(share_url)}，原因：{status.status_text}"
+        )
+        self._record_skip_candidate(
+            SkipStatsCollector.KIND_INVALID,
+            share_url,
+            reason=status.status_text,
+            resource_label=resource_label,
         )
         return False
 
@@ -789,6 +827,12 @@ class ResourceTransferService(OwnerDelegator):
             label = resource_title or self._resource_log_reference(share_url)
             logger.debug(
                 f"{log_prefix + ' ' if log_prefix else ''}分享链接无内容：{label}"
+            )
+            self._record_skip_candidate(
+                SkipStatsCollector.KIND_EMPTY,
+                share_url,
+                reason="无可用文件",
+                resource_label="分享链接",
             )
             return files
         return self._filter_files_by_explicit_selection(

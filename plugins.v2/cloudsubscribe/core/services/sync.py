@@ -12,6 +12,7 @@ from app.log import logger
 from app.schemas.types import MediaType
 
 from .runtime import sync_lock
+from .skip_stats import SkipStatsCollector
 from ...core import CloudDriveCapability, OwnerDelegator
 from ...core.media import media_identity, tmdb_id_of
 from ...utils.cache import create_platform_ttl_cache
@@ -1019,6 +1020,7 @@ class SyncExecutionService(OwnerDelegator):
                         f"{transferred_count} 个文件。"
                     )
                 )
+            self._take_skip_stats()
             return False
 
         self._set_sync_status(
@@ -1068,6 +1070,11 @@ class SyncExecutionService(OwnerDelegator):
                 f"网盘订阅同步完成，共{action_name} {transferred_count} 个文件"
             )
 
+        skip_snapshot = self._take_skip_stats()
+        skip_summary = SkipStatsCollector.format_summary(skip_snapshot)
+        if skip_summary:
+            logger.info(skip_summary)
+
         if self._sync_handler:
             sync_metrics = self._sync_handler.get_sync_metrics()
             if sync_metrics:
@@ -1090,12 +1097,13 @@ class SyncExecutionService(OwnerDelegator):
                 ]
                 logger.debug(f"搜索性能汇总：{'；'.join(summary)}")
 
-        if self._notify and transferred_count == 0 and not manual_resources and not pending_finalize_count:
-            self.post_message(
-                mtype=self._notification_type,
-                title="【网盘订阅助手】执行完成",
-                text=f"本次同步未发现需要{action_name}的新资源。"
-            )
+        self._notify_sync_completed(
+            action_name,
+            transferred_count,
+            bool(manual_resources),
+            pending_finalize_count,
+            skip_snapshot,
+        )
 
         return True
 
@@ -1139,6 +1147,52 @@ class SyncExecutionService(OwnerDelegator):
                 self._apply_pending_config()
         finally:
             sync_lock.release()
+
+    def _reset_skip_stats(self) -> None:
+        """运行开始时清零被跳过的候选资源统计；统计缺失或异常时静默忽略。"""
+        try:
+            collector = getattr(self, "_skip_stats", None)
+            if collector is not None:
+                collector.reset()
+        except Exception:  # noqa: BLE001 - 统计失败不得影响转存主流程
+            return
+
+    def _take_skip_stats(self) -> Dict[str, Any]:
+        """取走本次运行的跳过统计快照并清零；统计缺失或异常时返回空汇总。"""
+        try:
+            collector = getattr(self, "_skip_stats", None)
+            if collector is None:
+                return {}
+            snapshot = collector.take()
+            return snapshot if isinstance(snapshot, dict) else {}
+        except Exception:  # noqa: BLE001 - 统计失败不得影响转存主流程
+            return {}
+
+    def _notify_sync_completed(
+            self,
+            action_name: str,
+            transferred_count: int,
+            manual_resources: bool,
+            pending_finalize_count: int,
+            skip_snapshot: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """发送「执行完成」通知；无跳过记录时正文与历史文案逐字一致。"""
+        if not (
+                self._notify
+                and transferred_count == 0
+                and not manual_resources
+                and not pending_finalize_count
+        ):
+            return
+        text = f"本次同步未发现需要{action_name}的新资源。"
+        skip_line = SkipStatsCollector.format_notify(skip_snapshot)
+        if skip_line:
+            text = f"{text}\n{skip_line}"
+        self.post_message(
+            mtype=self._notification_type,
+            title="【网盘订阅助手】执行完成",
+            text=text,
+        )
 
     def sync_subscribes(
             self,
@@ -1202,6 +1256,7 @@ class SyncExecutionService(OwnerDelegator):
         run_context: Dict[str, Any] = {}
         task_counts: Dict[str, int] = {}
         stop_requested = False
+        self._reset_skip_stats()
         try:
             self._apply_pending_config_if_idle()
             # 首次成功运行时才应用系统级配置（避免安装失败却污染MP配置）
@@ -1331,6 +1386,7 @@ class SyncExecutionService(OwnerDelegator):
                 ))
             return success
         finally:
+            self._take_skip_stats()
             self._release_sync_resources(notification_batch_started)
 
     @staticmethod

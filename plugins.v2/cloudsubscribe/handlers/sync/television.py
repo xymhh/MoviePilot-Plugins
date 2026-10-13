@@ -10,6 +10,7 @@ from app.utils.string import StringUtils
 from .utils import normalize_season
 from ..notification import MediaServerResolver
 from ...core import OwnerDelegator
+from ...core.services.skip_stats import SkipStatsCollector
 
 
 class TelevisionSyncProcessor(OwnerDelegator):
@@ -516,6 +517,11 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 f"{reason}：{mediainfo.title_year} "
                                 f"S{season:02d}，已跳过该资源"
                             )
+                            self._record_skip_candidate(
+                                SkipStatsCollector.KIND_MISMATCH,
+                                share_url,
+                                reason=reason,
+                            )
                             continue
                         if absent_episode_numbers:
                             logger.debug(
@@ -587,6 +593,11 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             logger.debug(
                                 f"该{resource_input_label}未匹配到 S{season} 的任何缺失剧集，"
                                 "可能是季数不匹配或文件名无法识别"
+                            )
+                            self._record_skip_candidate(
+                                SkipStatsCollector.KIND_MISMATCH,
+                                share_url,
+                                reason=f"未匹配到 S{season} 的缺失剧集",
                             )
                             continue
 

@@ -4,6 +4,7 @@ from .checkin import CheckinService
 from .platform import PlatformIntegrationService
 from .runtime import SyncRuntimeService, sync_lock
 from .scoring import SubscriptionScoringService
+from .skip_stats import SkipStatsCollector
 from .subscription import SubscriptionControlService
 from .sync import SyncExecutionService
 
@@ -14,5 +15,6 @@ __all__ = [
     "SyncRuntimeService",
     "PlatformIntegrationService",
     "CheckinService",
+    "SkipStatsCollector",
     "sync_lock",
 ]

@@ -10,6 +10,7 @@ from app.schemas.types import MediaType
 
 from ...core import OwnerDelegator
 from ...core.media import tmdb_id_of
+from ...core.services.skip_stats import SkipStatsCollector
 from ...drive.common import format_size
 
 
@@ -386,6 +387,11 @@ class MovieSyncProcessor(OwnerDelegator):
                         )
                         if not matched:
                             logger.debug(f"Magnet 元数据未通过平台优先级规则：{provider_name}")
+                            self._record_skip_candidate(
+                                SkipStatsCollector.KIND_MISMATCH,
+                                share_url,
+                                reason="未通过平台优先级规则",
+                            )
                             continue
                         magnet_size = self._resource_size_bytes(
                             resource.get("size")
@@ -466,11 +472,18 @@ class MovieSyncProcessor(OwnerDelegator):
                                 f"跨盘分享内容未被平台识别为目标电影："
                                 f"{mediainfo.title_year}，已跳过该资源"
                             )
+                            reason = "跨盘分享内容未被平台识别为目标电影"
                         else:
                             logger.debug(
                                 f"目标网盘分享未找到符合规则的电影文件："
                                 f"{mediainfo.title_year}，已跳过该资源"
                             )
+                            reason = "目标网盘分享未找到符合规则的电影文件"
+                        self._record_skip_candidate(
+                            SkipStatsCollector.KIND_MISMATCH,
+                            share_url,
+                            reason=reason,
+                        )
                         continue
 
                     if matched_file:

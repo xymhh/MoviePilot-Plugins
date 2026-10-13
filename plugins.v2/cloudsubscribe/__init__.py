@@ -46,6 +46,7 @@ from .core.services import (
     SubscriptionScoringService,
     SyncExecutionService,
     SyncRuntimeService,
+    SkipStatsCollector,
 )
 from .core.storage import CloudSubscribeDataStore
 from .core.subscribe import AutoSubscribeService
@@ -100,7 +101,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.34"
+    plugin_version = "1.6.35"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -247,6 +248,8 @@ class CloudSubscribe(_PluginBase):
     _sync_task_text: str = "当前没有订阅处理任务"
     _sync_progress: int = 0
     _sync_context: Dict[str, Any] = {}
+    # 一次同步运行内被跳过的候选资源统计（运行期实例，类属性兜底为 None）
+    _skip_stats: Optional[SkipStatsCollector] = None
     _sync_run_started_at: float = 0
     _sync_last_finished_at: float = 0
     _sync_last_elapsed_ms: int = 0
@@ -556,6 +559,7 @@ class CloudSubscribe(_PluginBase):
             self._sync_task_text = "当前没有订阅处理任务"
             self._sync_progress = 0
             self._sync_context = {}
+            self._skip_stats = SkipStatsCollector()
             self._sync_run_started_at = 0
             self._sync_last_finished_at = 0
             self._sync_last_elapsed_ms = 0

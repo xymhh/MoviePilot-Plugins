@@ -40,6 +40,11 @@ load_module(
     "cloudsubscribe.handlers.sync.utils",
     "plugins.v2/cloudsubscribe/handlers/sync/utils.py",
 )
+# television.py 顶部引用 SkipStatsCollector 常量，先注册真实模块供相对导入
+load_module(
+    "cloudsubscribe.core.services.skip_stats",
+    "plugins.v2/cloudsubscribe/core/services/skip_stats.py",
+)
 _television = load_module(
     "cloudsubscribe.handlers.sync.television",
     "plugins.v2/cloudsubscribe/handlers/sync/television.py",
