@@ -3,7 +3,13 @@ import time
 import unittest
 from unittest.mock import MagicMock, patch
 
-from plugin_env import OwnerDelegator, load_module, register_mock, set_media_type
+from plugin_env import (
+    OwnerDelegator,
+    load_module,
+    register_mock,
+    register_module,
+    set_media_type,
+)
 
 # 构造 mock 的 app 模块依赖
 mock_logger = MagicMock()
@@ -24,10 +30,11 @@ pending_module = load_module(
 )
 PendingTitleStore = pending_module.PendingTitleStore
 normalize_title = pending_module.normalize_title
-SubscriptionSearchHook = load_module(
+subscription_module = load_module(
     "cloudsubscribe.core.hook.subscription",
     "plugins.v2/cloudsubscribe/core/hook/subscription.py",
-).SubscriptionSearchHook
+)
+SubscriptionSearchHook = subscription_module.SubscriptionSearchHook
 
 MediaType = set_media_type()
 
@@ -65,6 +72,13 @@ def fake_process_search(chain, mediainfo=None, keyword=None, no_exists=None, **k
 def fake_search_media_resources(chain_self, request=None, mediainfo=None, *args, **kwargs):
     """模拟 InteractionChain._search_media_resources 的签名。"""
     return "platform-search"
+
+
+class FakeMediaInteractionChain:
+    """模拟平台 v3.1.x 改名后的类：app.chain.interaction.MediaInteractionChain。"""
+
+    def _search_media_resources(self, request=None, mediainfo=None, *args, **kwargs):
+        return "platform-search"
 
 
 class TestPendingTitleStore(unittest.TestCase):
@@ -600,6 +614,125 @@ class TestPendingTitleSearchHook(unittest.TestCase):
         self.assertEqual(result, ["contexts"])
         self.assertEqual(self.selected, [])
         self.assertEqual(len(self.store), 1)
+
+    # ------------------------- 点选调用兜底：认参数形状（1.6.34）
+    def test_process_wrapper_treats_selection_call_as_click(self):
+        """点选那次 process 调用（只有 mediainfo + no_exists）允许走点选兜底。
+
+        线上事故复现：平台点选后是 InteractionChain._search_media_resources →
+        SearchChain().process(mediainfo=…, no_exists=…)，点选接入器一旦没装上，
+        这条调用就是唯一的落点。
+        """
+        self._blocked()
+        self.store.remember(text="画江湖")
+        wrapper = self.hook._create_platform_search_wrapper(
+            "process", "pending", fake_process_search
+        )
+        result = wrapper(
+            object(),
+            mediainfo=FakeMediaInfo(title="画江湖之不良人", mtype="tv", tmdbid=83463),
+            no_exists={"S1": {1: None}},
+        )
+        self.assertEqual(result, [])
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+        record, identity = self.selected[0]
+        self.assertEqual(record["text"], "画江湖")
+        self.assertEqual(record["match"], "sole")
+        self.assertEqual(identity["tmdbid"], 83463)
+        self.assertEqual(len(self.store), 0)
+
+    def test_process_wrapper_keeps_subscription_search_strict(self):
+        """订阅搜索的 process 调用带 keyword/sites，仍要求片名对得上。"""
+        self._blocked()
+        self.store.remember(text="画江湖", mtype="tv")
+        wrapper = self.hook._create_platform_search_wrapper(
+            "process", "pending", fake_process_search
+        )
+        result = wrapper(
+            object(),
+            mediainfo=FakeMediaInfo(title="画江湖之不良人", mtype="tv", tmdbid=83463),
+            keyword="画江湖之不良人",
+            sites=[1],
+            rule_groups=["高清"],
+            no_exists={"S1": {1: None}},
+        )
+        self.assertEqual(result, ["contexts"])
+        self.assertEqual(self.selected, [])
+        self.assertEqual(len(self.store), 1)
+
+    def test_selection_call_shape_detection(self):
+        """参数形状判定：只有 no_exists 才算点选，缺 no_exists 一律不算。"""
+        self.assertTrue(
+            self.hook._looks_like_media_selection({"mediainfo": object(), "no_exists": {"S1": {}}})
+        )
+        self.assertFalse(self.hook._looks_like_media_selection({"mediainfo": object()}))
+        self.assertFalse(
+            self.hook._looks_like_media_selection(
+                {"mediainfo": object(), "no_exists": {"S1": {}}, "sites": [1]}
+            )
+        )
+
+    # ------------------------- 点选接入器挂载（1.6.34）
+    def test_interaction_hook_binds_renamed_platform_class(self):
+        """平台把 InteractionChain 改名成 MediaInteractionChain 后，点选接入器照样装上。"""
+        self._blocked()
+        register_module(
+            "app.chain.interaction", MediaInteractionChain=FakeMediaInteractionChain
+        )
+        self.hook._install_interaction_media_hook()
+        self.assertIs(self.hook._interaction_chain_class, FakeMediaInteractionChain)
+        self.assertIs(
+            FakeMediaInteractionChain._search_media_resources.__cloudsubscribe_owner__,
+            self.hook,
+        )
+        # 装上之后，点选（登记名与点选项不一致）直接接入订阅，不再落到平台搜索
+        self.store.remember(text="画江湖")
+        request = MagicMock()
+        request.meta = None
+        self.assertIsNone(
+            FakeMediaInteractionChain()._search_media_resources(
+                request=request,
+                mediainfo=FakeMediaInfo(title="画江湖之不良人", mtype="tv", tmdbid=83463),
+            )
+        )
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+        self.assertEqual(self.selected[0][0]["match"], "sole")
+
+    def test_interaction_hook_prefers_renamed_class(self):
+        """两个名字都在时，优先用平台当前的名字（MediaInteractionChain）。"""
+        register_module(
+            "app.chain.interaction",
+            MediaInteractionChain=FakeMediaInteractionChain,
+            InteractionChain=type("InteractionChain", (), {}),
+        )
+        target, reason = subscription_module.resolve_interaction_chain_class()
+        self.assertIs(target, FakeMediaInteractionChain)
+        self.assertEqual(reason, "MediaInteractionChain")
+
+    def test_interaction_hook_reports_missing_platform_class(self):
+        """找不到承载点选的类时，返回原因且安装不抛异常（日志里有 WARNING）。"""
+        register_module("app.chain.interaction", OtherChain=type("OtherChain", (), {}))
+        target, reason = subscription_module.resolve_interaction_chain_class()
+        self.assertIsNone(target)
+        self.assertIn("_search_media_resources", reason)
+        self.hook._install_interaction_media_hook()
+
+    def test_interaction_hook_scans_module_for_unknown_class_name(self):
+        """平台再次改名时按方法扫描兜底，不会因为名字变了就静默失效。"""
+        register_module(
+            "app.chain.interaction",
+            WhateverInteractionChain=type(
+                "WhateverInteractionChain",
+                (),
+                {"_search_media_resources": lambda self, **kwargs: None},
+            ),
+        )
+        target, reason = subscription_module.resolve_interaction_chain_class()
+        self.assertIsNotNone(target)
+        self.assertEqual(target.__name__, "WhateverInteractionChain")
+        self.assertIn("扫描", reason)
 
 
 if __name__ == "__main__":

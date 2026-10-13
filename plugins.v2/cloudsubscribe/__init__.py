@@ -100,7 +100,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.33"
+    plugin_version = "1.6.34"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -642,7 +642,8 @@ class CloudSubscribe(_PluginBase):
         from app.core.plugin import PluginManager
         PluginManager().clear_plugin_agent_tools_cache()
         logger.info(
-            f"{action}：接管时段={self._block_start_time}~{self._block_end_time}, "
+            f"{action}：代码版本={self.plugin_version}, "
+            f"接管时段={self._block_start_time}~{self._block_end_time}, "
             f"平台下载策略={self._platform_download_policy}, "
             f"网盘洗版={'开启' if self._enable_cloud_upgrade else '关闭'}, "
             f"洗版模式={self._upgrade_mode}, "

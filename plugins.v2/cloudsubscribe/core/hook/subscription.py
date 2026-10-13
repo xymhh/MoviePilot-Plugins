@@ -34,6 +34,39 @@ def _is_tv_media_type(value: Any) -> bool:
     return str(value or "").strip().lower() in {"tv", "电视剧", "media_type.tv"}
 
 
+# 平台「用户点选候选 → 搜索资源」的入口类：v3.1.x 起由 InteractionChain 改名为
+# MediaInteractionChain（app/chain/interaction.py），两个名字都要认，防止再次改名后
+# 静默失效（1.6.28~1.6.33 期间点选接入器一直没装上，就是因为只认旧名字）。
+_INTERACTION_CHAIN_NAMES = ("MediaInteractionChain", "InteractionChain")
+_INTERACTION_METHOD = "_search_media_resources"
+
+
+def resolve_interaction_chain_class() -> Tuple[Optional[Any], str]:
+    """定位承载「点选候选 → 搜索资源」的平台类。
+
+    返回 ``(类, 说明)``；找不到时类为 None，说明里带上失败原因，便于日志排查。
+    """
+    try:
+        from app.chain import interaction as interaction_module
+    except Exception as error:
+        return None, f"平台无 app.chain.interaction：{error}"
+    for name in _INTERACTION_CHAIN_NAMES:
+        candidate = getattr(interaction_module, name, None)
+        if callable(getattr(candidate, _INTERACTION_METHOD, None)):
+            return candidate, name
+    for name, member in vars(interaction_module).items():
+        if isinstance(member, type) and callable(
+                getattr(member, _INTERACTION_METHOD, None)
+        ):
+            return member, f"{name}（按方法扫描命中）"
+    return None, "app.chain.interaction 里找不到带 %s 的类" % _INTERACTION_METHOD
+
+
+def _is_media_selection_frame(function_name: str) -> bool:
+    """调用栈里是否出现平台「点选候选」的处理函数。"""
+    return function_name in {"_search_media_resources", "_handle_media_selection"}
+
+
 class SubscriptionSearchHook(OwnerDelegator):
     """按接管时段分流订阅搜索，并精确恢复原函数。"""
 
@@ -52,6 +85,20 @@ class SubscriptionSearchHook(OwnerDelegator):
         "async_process": "pending_async",
         "async_process_stream": "pending_stream",
     }
+    # 「点选候选」那次 process 调用只会带 mediainfo/no_exists；订阅搜索、扫描等还会带
+    # 这些过滤/站点参数，用它们把两类调用区分开，避免点选兜底误吃订阅搜索。
+    _SELECTION_EXCLUSIVE_KEYS = (
+        "keyword",
+        "sites",
+        "rule_groups",
+        "filter_params",
+        "custom_words",
+        "candidate_filter",
+        "meta",
+        "metainfo",
+        "media_id",
+        "media_source",
+    )
 
     def _install_subscribe_search_takeover(self) -> None:
         if not self._enabled:
@@ -278,40 +325,45 @@ class SubscriptionSearchHook(OwnerDelegator):
     # ------------------------------------------------ 媒体点选接入（1.6.28）
     def _install_interaction_media_hook(self) -> None:
         """挂接平台「候选选定 → 搜索资源」入口，点选后不再走平台站点搜索。"""
-        try:
-            from app.chain.interaction import InteractionChain
-        except Exception as error:
-            logger.debug(f"媒体点选接管跳过（平台无 InteractionChain）：{error}")
+        target, reason = resolve_interaction_chain_class()
+        if target is None:
+            logger.warning(f"媒体点选接管器未安装：{reason}")
             return
-        method_name = "_search_media_resources"
-        current = getattr(InteractionChain, method_name, None)
+        method_name = _INTERACTION_METHOD
+        current = getattr(target, method_name, None)
         if not callable(current):
-            logger.warning(f"搜索入口不存在：InteractionChain.{method_name}")
+            logger.warning(f"媒体点选接管器未安装：{reason} 里没有 {method_name}")
             return
+        self._interaction_chain_class = target
         if getattr(current, "__cloudsubscribe_owner__", None) is self:
+            logger.debug(f"媒体点选接管器已保持接管：{target.__name__}.{method_name}")
             return
         original = getattr(current, "__cloudsubscribe_original__", current)
         originals = getattr(self, "_interaction_originals", None)
         if originals is not None:
             originals.setdefault(method_name, original)
         setattr(
-            InteractionChain,
+            target,
             method_name,
             self._create_interaction_media_wrapper(original),
         )
-        logger.info(f"媒体点选接管器已安装：InteractionChain.{method_name}")
+        logger.info(f"媒体点选接管器已安装：{target.__name__}.{method_name}")
 
     def _restore_interaction_media_hook(self) -> None:
         originals = dict(getattr(self, "_interaction_originals", None) or {})
         if not originals:
             return
         try:
-            from app.chain.interaction import InteractionChain
-
+            target = getattr(self, "_interaction_chain_class", None)
+            if target is None:
+                target, reason = resolve_interaction_chain_class()
+                if target is None:
+                    logger.warning(f"恢复媒体点选接管器失败：{reason}")
+                    return
             for method_name, original in originals.items():
-                current = getattr(InteractionChain, method_name, None)
+                current = getattr(target, method_name, None)
                 if getattr(current, "__cloudsubscribe_owner__", None) is self:
-                    setattr(InteractionChain, method_name, original)
+                    setattr(target, method_name, original)
         except Exception as error:
             logger.warning(f"恢复媒体点选接管器失败：{error}")
         finally:
@@ -535,9 +587,10 @@ class SubscriptionSearchHook(OwnerDelegator):
         identity = self._search_identity(original, args, kwargs)
         if not identity:
             return False
-        if self._consume_pending_identity(identity):
+        selection = self._is_media_selection_call(args, kwargs)
+        if self._consume_pending_identity(identity, allow_sole=selection):
             return True
-        if identity.get("media_id") or identity.get("meta") is not None:
+        if not selection and (identity.get("media_id") or identity.get("meta") is not None):
             # 只有媒体身份、没有片名：后台识别出标题再比对，避免阻塞搜索调用
             try:
                 Thread(
@@ -549,6 +602,34 @@ class SubscriptionSearchHook(OwnerDelegator):
             except Exception as error:
                 logger.debug(f"选定片名识别线程启动失败：{error}")
         return False
+
+    @classmethod
+    def _looks_like_media_selection(cls, kwargs: Dict[str, Any]) -> bool:
+        """按参数形状判断：这次调用是不是「点选候选 → 搜索资源」。"""
+        arguments = kwargs or {}
+        if not arguments.get("no_exists"):
+            return False
+        return not any(arguments.get(key) for key in cls._SELECTION_EXCLUSIVE_KEYS)
+
+    @classmethod
+    def _is_media_selection_call(
+            cls,
+            args: Tuple[Any, ...],
+            kwargs: Dict[str, Any],
+    ) -> bool:
+        """判断这次平台搜索调用是否来自「用户点选候选」。
+
+        两条判据互为备份：调用栈里出现平台点选处理函数（最准），或参数形状与点选调用一致
+        （只有 ``mediainfo``/``no_exists``，没有订阅搜索的过滤参数）。任何一条成立就按
+        「点选」处理，这样即使平台再给入口改名，点选接入仍然生效。
+        """
+        try:
+            for frame in inspect.stack():
+                if _is_media_selection_frame(frame.function):
+                    return True
+        except Exception as error:
+            logger.debug(f"点选调用栈判定失败：{error}")
+        return cls._looks_like_media_selection(kwargs)
 
     def _start_selected_title(
             self,
