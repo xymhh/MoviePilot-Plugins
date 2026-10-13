@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from typing import Any, Dict, List, Optional
 
-from .client import Dian115Client, Dian115Error
+from .client import Dian115Error
 from .provider import create_dian115_provider
 from ...core.definitions import (
     CheckinDefinition,
@@ -37,6 +37,12 @@ class Dian115SourceDefinition(SearchSourceDefinition):
         owner._dian115_request_interval = max(0.2, min(float(value("dian115_request_interval", 1) or 1), 10.0))
         owner._dian115_unlocks_per_minute = max(1, min(int(value("dian115_unlocks_per_minute", 6) or 6), 10))
         owner._dian115_timeout = max(5, min(int(value("dian115_timeout", 60) or 60), 120))
+        owner._dian115_lottery_enabled = bool(value("dian115_lottery_enabled", False))
+        try:
+            lottery_count = int(float(value("dian115_lottery_count", 1) or 1))
+        except (TypeError, ValueError):
+            lottery_count = 1
+        owner._dian115_lottery_count = max(0, min(lottery_count, 20))
         owner._dian115_client = None
         owner._dian115_resources = None
         owner._dian115_client_lock = threading.RLock()
@@ -221,30 +227,10 @@ class Dian115SourceDefinition(SearchSourceDefinition):
         ]
 
     @classmethod
-    def create_client(cls, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
-        ctx = context or {}
-        email = str(cls.config_value(config, "dian115_email", "") or "").strip()
-        password = str(cls.config_value(config, "dian115_password", "") or "").strip()
-        if not email or not password:
-            return None
-        owner = ctx.get("storage_owner")
-        return Dian115Client(
-            email=email,
-            password=password,
-            proxy=ctx.get("proxy"),
-            request_interval=float(cls.config_value(config, "dian115_request_interval", 1.0) or 1.0),
-            unlocks_per_minute=int(cls.config_value(config, "dian115_unlocks_per_minute", 6) or 6),
-            timeout=int(cls.config_value(config, "dian115_timeout", 30) or 30),
-            get_data_func=getattr(owner, "get_data", None),
-            save_data_func=getattr(owner, "save_data", None),
-            lottery_enabled=bool(cls.config_value(config, "dian115_lottery_enabled", False)),
-            lottery_count=int(cls.config_value(config, "dian115_lottery_count", 0) or 0),
-        )
-
-    @classmethod
     def create_provider(
             cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
     ) -> Any:
+        """组装 Provider；客户端统一由 Dian115SearchService 持有（含签到转盘配置）。"""
         ctx = context or {}
         dian115_service = ctx.get("dian115_service")
         if not dian115_service and ctx.get("owner"):

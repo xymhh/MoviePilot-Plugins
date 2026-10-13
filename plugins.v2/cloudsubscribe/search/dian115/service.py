@@ -45,6 +45,8 @@ class Dian115SearchService(OwnerDelegator):
     def _get_dian115_resources(self) -> Dian115ResourceService:
         """复用唯一认证客户端，返回独立的资源服务。"""
         proxy = self._search_proxy
+        lottery_enabled = bool(getattr(self, "_dian115_lottery_enabled", False))
+        lottery_count = int(getattr(self, "_dian115_lottery_count", 0) or 0)
         with self._dian115_client_lock:
             client = self._dian115_client
             if client is None or not client.matches_config(
@@ -53,6 +55,8 @@ class Dian115SearchService(OwnerDelegator):
                     proxy,
                     self._dian115_request_interval,
                     self._dian115_unlocks_per_minute,
+                    lottery_enabled=lottery_enabled,
+                    lottery_count=lottery_count,
             ):
                 if client:
                     client.close()
@@ -64,6 +68,8 @@ class Dian115SearchService(OwnerDelegator):
                     unlocks_per_minute=self._dian115_unlocks_per_minute,
                     get_data_func=getattr(self, "get_data", None),
                     save_data_func=getattr(self, "save_data", None),
+                    lottery_enabled=lottery_enabled,
+                    lottery_count=lottery_count,
                 )
                 self._dian115_client = client
                 self._dian115_resources = None

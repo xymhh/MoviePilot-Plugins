@@ -137,7 +137,14 @@ class Dian115Client:
     def matches_config(
             self, email: str, password: str, proxy: Any,
             request_interval: float, unlocks_per_minute: int,
+            lottery_enabled: Optional[bool] = None,
+            lottery_count: Optional[int] = None,
     ) -> bool:
+        """比对运行期配置；lottery_* 传 None 表示该维度不参与比对。"""
+        if lottery_enabled is not None and self._lottery_enabled != bool(lottery_enabled):
+            return False
+        if lottery_count is not None and self._lottery_count != max(0, int(lottery_count or 0)):
+            return False
         return (
                 self._email == str(email or "").strip()
                 and self._password == str(password or "").strip()
