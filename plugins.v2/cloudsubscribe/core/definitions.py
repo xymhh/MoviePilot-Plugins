@@ -423,9 +423,15 @@ class SearchSourceDefinition:
         cached = cls.__dict__.get("_config_keys_cache")
         if cached is not None:
             return cached
+        groups = list(cls.get_config_groups())
+        checkin_group = getattr(cls.get_checkin_definition(), "group", None)
+        if checkin_group is not None:
+            # 签到分组里的渠道专属配置（如幸运转盘）同样是运行期配置键，
+            # 必须纳入快照，否则宿主处理器取不到这些键、只能退回默认值。
+            groups.append(checkin_group)
         keys = {
             field.key
-            for group in cls.get_config_groups()
+            for group in groups
             for field in group.fields
             if field.key and not field.key.startswith("test_")
         }

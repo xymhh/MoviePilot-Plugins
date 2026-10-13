@@ -188,6 +188,53 @@ class TestDian115LotteryWiring(unittest.TestCase):
         self.assertEqual(_make_owner(**_base_config(
             dian115_lottery_count=None))._dian115_lottery_count, 1)
 
+    def test_config_keys_cover_checkin_group_fields(self):
+        """签到分组里的渠道配置（幸运转盘）必须算作配置键。
+
+        宿主处理器只按 get_config_keys() 播种运行期属性；漏键会让转盘开关静默
+        退回默认 False（1.6.36 线上仍不跑转盘的根因）。
+        """
+        keys = Dian115SourceDefinition.get_config_keys()
+        for key in ("dian115_email", "dian115_lottery_enabled",
+                    "dian115_lottery_count"):
+            self.assertIn(key, keys)
+
+    def test_host_seeding_wiring_keeps_lottery_enabled(self):
+        """端到端复刻宿主播种：插件属性 → handler 属性 → 客户端转盘开关。"""
+        plugin = types.SimpleNamespace(
+            **{f"_{key}": value for key, value in _base_config().items()}
+        )
+        owner = types.SimpleNamespace(
+            _plugin=plugin,
+            get_data=MagicMock(),
+            save_data=MagicMock(),
+            _search_proxy=None,
+            _resource_type_order_config=("115",),
+        )
+        for key in Dian115SourceDefinition.get_config_keys():
+            # 等价于 handlers/search/service.py 的 get_val：优先插件私有属性
+            setattr(owner, f"_{key}", getattr(plugin, f"_{key}", None))
+        Dian115SourceDefinition.configure_owner(owner, {})
+        self.assertTrue(owner._dian115_lottery_enabled)
+        self.assertEqual(owner._dian115_lottery_count, 20)
+        client = Dian115SearchService(owner).get_client()
+        self.assertTrue(client._lottery_enabled)
+        self.assertEqual(client._lottery_count, 20)
+
+    def test_configure_owner_falls_back_to_plugin_config(self):
+        """owner 属性快照缺键时回退宿主插件配置，不静默取默认值。"""
+        plugin = types.SimpleNamespace(
+            _dian115_email="user@example.com",
+            _dian115_password="secret",
+            _dian115_lottery_enabled=True,
+            _dian115_lottery_count=7,
+        )
+        owner = types.SimpleNamespace(_plugin=plugin)
+        Dian115SourceDefinition.configure_owner(owner, {})
+        self.assertTrue(owner._dian115_lottery_enabled)
+        self.assertEqual(owner._dian115_lottery_count, 7)
+        self.assertEqual(owner._dian115_email, "user@example.com")
+
     def test_service_client_carries_lottery_config(self):
         """签到链路复用的客户端必须带上转盘配置。"""
         owner = _make_owner(**_base_config())

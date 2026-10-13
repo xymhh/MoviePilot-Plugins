@@ -27,7 +27,19 @@ class Dian115SourceDefinition(SearchSourceDefinition):
 
     @classmethod
     def configure_owner(cls, owner: Any, config: Dict[str, Any]) -> None:
-        value = lambda key, default=None: cls.config_value(owner.__dict__, key, default)
+        plugin_owner = getattr(owner, "_plugin", None)
+
+        def value(key: str, default: Any = None) -> Any:
+            """取运行期配置：先查 owner 字典，缺失时回退宿主插件的同名键。
+
+            签到娱乐类配置键（幸运转盘）只声明在签到分组里，owner 的配置键快照
+            可能不含这些键，故回退到宿主插件的 ``_{key}`` 属性，避免静默取默认值。
+            """
+            resolved = cls.config_value(owner.__dict__, key, None)
+            if resolved is not None:
+                return resolved
+            plugin_dict = getattr(plugin_owner, "__dict__", None) or {}
+            return cls.config_value(plugin_dict, key, default)
         owner._dian115_email = str(value("dian115_email", "") or "").strip()
         owner._dian115_password = str(value("dian115_password", "") or "").strip()
         owner._dian115_auto_unlock = bool(value("dian115_auto_unlock", False))
