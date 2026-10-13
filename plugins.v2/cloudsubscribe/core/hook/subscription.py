@@ -335,7 +335,8 @@ class SubscriptionSearchHook(OwnerDelegator):
                         mediainfo,
                         meta=getattr(request, "meta", None),
                         keyword=getattr(request, "keyword", None),
-                    )
+                    ),
+                    allow_sole=True,
             ):
                 return None
             return original(chain_self, request, mediainfo, *args, **kwargs)
@@ -391,8 +392,18 @@ class SubscriptionSearchHook(OwnerDelegator):
             "mediainfo": mediainfo,
         }
 
-    def _consume_pending_identity(self, identity: Optional[Dict[str, Any]]) -> bool:
-        """按身份消费一条片名候选；命中就异步接入订阅并返回 True。"""
+    def _consume_pending_identity(
+            self,
+            identity: Optional[Dict[str, Any]],
+            *,
+            allow_sole: bool = False,
+    ) -> bool:
+        """按身份消费一条片名候选；命中就异步接入订阅并返回 True。
+
+        ``allow_sole`` 只在「用户点选候选项」这条路径上传 True（点选接入器）：点选是
+        用户明确的一次动作，登记表里还有类型相容的记录就直接用最近一条接入，订阅按
+        点选项自带的信息建，不再要求片名对得上。
+        """
         if not identity:
             return False
         store = get_pending_title_store()
@@ -402,13 +413,23 @@ class SubscriptionSearchHook(OwnerDelegator):
             titles=identity.get("titles") or (),
             tmdbid=identity.get("tmdbid"),
             mtype=identity.get("mtype"),
+            allow_sole=allow_sole,
         )
         if not record:
+            if allow_sole:
+                logger.info(
+                    "点选候选未接上片名登记（titles=%s / tmdbid=%s），登记保留待过期"
+                    % (identity.get("titles") or [], identity.get("tmdbid"))
+                )
             return False
         match = record.get("match")
         ratio = record.get("match_ratio")
+        extra = ""
+        if match == "sole":
+            candidates = int(record.get("match_candidates") or 1)
+            extra = f"，登记表共 {candidates} 条未消费"
         logger.info(
-            f"片名候选命中（{match}{f' {ratio}' if ratio else ''}）：{record.get('text')}"
+            f"片名候选命中（{match}{f' {ratio}' if ratio else ''}{extra}）：{record.get('text')}"
         )
         self._start_selected_title(record, identity)
         return True

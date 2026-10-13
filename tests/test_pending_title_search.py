@@ -170,6 +170,65 @@ class TestPendingTitleStore(unittest.TestCase):
         store.remember(text="机智医生生活", mtype="movie")
         self.assertIsNone(store.consume(titles=["机智的医生生活"], mtype="tv"))
 
+    # ------------------------------------------- 1.6.33 点选兜底（allow_sole）
+    def test_sole_fallback_consumes_record_with_unrelated_title(self):
+        """点选时片名完全对不上（画江湖 → 画江湖之不良人）也按点选接入。"""
+        store = PendingTitleStore()
+        store.remember(text="画江湖", userid="1")
+        hit = store.consume(titles=["画江湖之不良人"], tmdbid=83463, mtype="tv", allow_sole=True)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["text"], "画江湖")
+        self.assertEqual(hit["match"], "sole")
+        self.assertEqual(hit["match_candidates"], 1)
+        self.assertEqual(len(store), 0)
+
+    def test_sole_fallback_is_opt_in(self):
+        """默认（订阅搜索等路径）仍要求片名对得上，记录保留。"""
+        store = PendingTitleStore()
+        store.remember(text="画江湖", mtype="tv")
+        self.assertIsNone(store.consume(titles=["画江湖之不良人"], tmdbid=83463, mtype="tv"))
+        self.assertEqual(len(store), 1)
+
+    def test_sole_fallback_takes_latest_record(self):
+        """多条挂起记录时取最近一条，并留下同表候选条数。"""
+        store = PendingTitleStore()
+        store.remember(text="仙逆", mtype="tv")
+        store.remember(text="画江湖", mtype="tv")
+        hit = store.consume(titles=["画江湖之不良人"], mtype="tv", allow_sole=True)
+        self.assertEqual(hit["text"], "画江湖")
+        self.assertEqual(hit["match"], "sole")
+        self.assertEqual(hit["match_candidates"], 2)
+        self.assertEqual([item["text"] for item in store.peek()], ["仙逆"])
+
+    def test_sole_fallback_respects_media_type(self):
+        """类型不相容的记录不参与点选兜底。"""
+        store = PendingTitleStore()
+        store.remember(text="画江湖", mtype="movie")
+        self.assertIsNone(store.consume(titles=["画江湖之不良人"], mtype="tv", allow_sole=True))
+        self.assertEqual(len(store), 1)
+
+    def test_sole_fallback_requires_identity_signal(self):
+        """点选项没有任何身份信号时不消费，避免空手接入。"""
+        store = PendingTitleStore()
+        store.remember(text="画江湖", mtype="tv")
+        self.assertIsNone(store.consume(titles=[], tmdbid=None, allow_sole=True))
+        self.assertEqual(len(store), 1)
+
+    def test_identity_and_title_still_take_precedence(self):
+        """点选兜底只是兜底：身份/同名仍优先，别把另一条记录吃掉。"""
+        store = PendingTitleStore()
+        store.remember(text="画江湖", mtype="tv")
+        store.remember(text="仙逆", tmdbid=223911, mtype="tv")
+        hit = store.consume(titles=["仙逆"], tmdbid=223911, mtype="tv", allow_sole=True)
+        self.assertEqual(hit["match"], "tmdbid")
+        self.assertEqual([item["text"] for item in store.peek()], ["画江湖"])
+
+    def test_sole_fallback_skips_expired_record(self):
+        store = PendingTitleStore(ttl=0)
+        store.remember(text="画江湖", mtype="tv")
+        time.sleep(0.01)
+        self.assertIsNone(store.consume(titles=["画江湖之不良人"], mtype="tv", allow_sole=True))
+
 
 class TestPendingTitleSearchHook(unittest.TestCase):
     """搜索拦截命中片名候选的单元测试。"""
@@ -485,6 +544,62 @@ class TestPendingTitleSearchHook(unittest.TestCase):
             "platform-search",
         )
         self.assertEqual(self.selected, [])
+
+    # --------------------------------------- 点选兜底（1.6.33）
+    def test_interaction_wrapper_uses_sole_fallback(self):
+        """登记名与点选项对不上（画江湖 → 画江湖之不良人）时，按点选项接入。"""
+        self._blocked()
+        self.store.remember(text="画江湖")
+        wrapper = self.hook._create_interaction_media_wrapper(fake_search_media_resources)
+        request = MagicMock()
+        request.meta = None
+        self.assertIsNone(
+            wrapper(
+                object(),
+                request=request,
+                mediainfo=FakeMediaInfo(title="画江湖之不良人", mtype="tv", tmdbid=83463),
+            )
+        )
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+        record, identity = self.selected[0]
+        self.assertEqual(record["text"], "画江湖")
+        self.assertEqual(record["match"], "sole")
+        # 订阅用的是「点选的那一项」的信息
+        self.assertEqual(identity["tmdbid"], 83463)
+        self.assertEqual(identity["title"], "画江湖之不良人")
+        self.assertEqual(len(self.store), 0)
+
+    def test_interaction_wrapper_sole_fallback_needs_record(self):
+        """登记表为空时不猜、不接（点选照旧落到平台搜索）。"""
+        self._blocked()
+        wrapper = self.hook._create_interaction_media_wrapper(fake_search_media_resources)
+        request = MagicMock()
+        request.meta = None
+        self.assertEqual(
+            wrapper(
+                object(),
+                request=request,
+                mediainfo=FakeMediaInfo(title="画江湖之不良人", mtype="tv", tmdbid=83463),
+            ),
+            "platform-search",
+        )
+        self.assertEqual(self.selected, [])
+
+    def test_process_wrapper_keeps_record_without_title_match(self):
+        """process 系列（订阅搜索/扫描也走）不参与点选兜底，避免误建订阅。"""
+        self._blocked()
+        self.store.remember(text="画江湖", mtype="tv")
+        wrapper = self.hook._create_platform_search_wrapper(
+            "process", "pending", fake_process_search
+        )
+        result = wrapper(
+            object(),
+            mediainfo=FakeMediaInfo(title="画江湖之不良人", mtype="tv", tmdbid=83463),
+        )
+        self.assertEqual(result, ["contexts"])
+        self.assertEqual(self.selected, [])
+        self.assertEqual(len(self.store), 1)
 
 
 if __name__ == "__main__":

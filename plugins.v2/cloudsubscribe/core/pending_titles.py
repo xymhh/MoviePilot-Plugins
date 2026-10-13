@@ -3,6 +3,9 @@
 1.6.26 及更早：收到纯片名消息立刻识别并创建订阅，同名片名会误建。
 1.6.27 起：片名消息只登记候选，消息交回平台（由平台给出候选列表），
 只有在用户选定后平台发起的真实搜索里命中该片名，才创建订阅并入队网盘搜索。
+1.6.33 起：用户点选候选（InteractionChain 点选接入）这条路径上，只要登记表里还有
+类型相容的记录就用最近一条接入 —— 订阅本身按点选项自带的信息建，登记记录只决定
+回执走哪个渠道，所以不再强求片名对得上。其它调用方保持「宁可漏也不错建」。
 """
 
 import difflib
@@ -126,13 +129,19 @@ class PendingTitleStore:
             titles: Iterable[Any] = (),
             tmdbid: Any = None,
             mtype: Any = None,
+            allow_sole: bool = False,
     ) -> Optional[Dict[str, Any]]:
-        """匹配并消费一条记录，三级顺序：TMDB 身份 > 片名同名 > 片名模糊同名。
+        """匹配并消费一条记录，顺序：TMDB 身份 > 片名同名 > 片名模糊同名 > 点选兜底。
 
         用户点选的那一项自带 TMDB 身份与正式片名，所以身份优先；但登记时 TMDB 可能
         识别失败（例如输入比正式片名少一个字），因此补一级「模糊同名」兜底 —— 它只在
-        候选类型相容、且两侧片名都够长时生效。宁可漏也不错建：片名对不上就不消费，
-        记录留到过期。
+        候选类型相容、且两侧片名都够长时生效。
+        ``allow_sole`` 只给「用户点选候选项」那一条路径用：点选是用户明确的一次动作，
+        此时类型相容的登记记录里取最近一条接入（``match="sole"``）。订阅本身由点选项
+        携带的身份/片名决定，登记记录只决定回执发给谁，所以这里不必再要求片名对得上；
+        多用户同时挂起记录时取最近一条，并在记录里留下同表候选条数便于日志核对。
+        其它调用方（订阅搜索、扫描等）传 ``False``，保持「宁可漏也不错建」：片名对不上
+        就不消费，记录留到过期。
         返回的记录带 ``match`` 字段标明命中级别，便于日志核对。
         """
         wanted_keys = {key for key in (normalize_title(item) for item in titles) if key}
@@ -146,6 +155,8 @@ class PendingTitleStore:
             identity_hit: Optional[int] = None
             title_hit: Optional[int] = None
             fuzzy_hit: Optional[int] = None
+            sole_hit: Optional[int] = None
+            sole_candidates = 0
             best_ratio = 0.0
             for index, record in enumerate(self._records):
                 if not self._compatible(record, wanted_type):
@@ -161,6 +172,9 @@ class PendingTitleStore:
                 if ratio > best_ratio:
                     best_ratio = ratio
                     fuzzy_hit = index
+                # 记录按登记顺序追加，末条即最近一条登记
+                sole_hit = index
+                sole_candidates += 1
             index: Optional[int] = None
             reason: Optional[str] = None
             if identity_hit is not None:
@@ -169,12 +183,16 @@ class PendingTitleStore:
                 index, reason = title_hit, "title"
             elif fuzzy_hit is not None and best_ratio >= self._fuzzy_min_ratio:
                 index, reason = fuzzy_hit, "fuzzy"
+            elif allow_sole and sole_hit is not None:
+                index, reason = sole_hit, "sole"
             if index is None:
                 return None
             record = self._records.pop(index)
             record["match"] = reason
             if reason == "fuzzy":
                 record["match_ratio"] = round(best_ratio, 3)
+            if reason == "sole":
+                record["match_candidates"] = sole_candidates
             return record
 
     def peek(self) -> List[Dict[str, Any]]:
