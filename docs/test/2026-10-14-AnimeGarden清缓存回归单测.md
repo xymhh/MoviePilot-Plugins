@@ -65,6 +65,21 @@ AST 扫描 `plugins.v2/cloudsubscribe` 下所有类，取「读过的 `self.*` �
 实例级悬空属性只有 `AnimeGardenSearchService -> ['_cache', '_lock']` 一处
 （其它命中项均为类常量如 `_HEADERS`，或 OwnerDelegator 委托给 owner 的属性）。
 
-## 6. CI / Release
+## 6. CI 与发布资产读回（主 agent 亲跑）
 
-待推送后补录（本地单测、反证、lint 已全绿）。
+推送 `33657f0c`（main）后：
+
+| 工作流 | 结论 | run id |
+| --- | --- | --- |
+| Lint Python | success | 38510864478 |
+| Test cloudsubscribe (V2) | success | 38510864490 |
+| Auto Release triggered by xymhh | success | 38510864499 |
+
+- `local == origin/main == GitHub main = 33657f0c`
+- Release `CloudSubscribe_v1.6.38`（`published_at` 2026-10-14T04:21:05Z，非 draft）
+- 资产读回：`cloudsubscribe_v1.6.38.zip` 1,270,653B，
+  `sha256 e88fdac5dcb2a394e39e54cfb912eb19804bb75f8496c448d5d786b2311f99ad` == `.sha256`（逐字符一致），
+  361 条目，包内 `plugin_version = "1.6.38"`，
+  且 `cloudsubscribe/search/animegarden/service.py` 的 `clear_cache` 已是修复版（含 `_search_cache.items()` /
+  `.clear()`），确认平台上分发的就是这个修复。
+- **未验证（真机）**：用户更新插件后点一次「清理插件缓存」，应不再报错并回传各渠道清理条数。
