@@ -195,7 +195,7 @@ class AnimeGardenSearchService:
         return normalized[:limit]
 
     def clear_cache(self) -> int:
-        with self._lock:
-            count = len(self._cache)
-            self._cache.clear()
-            return count
+        """清空关键词检索 TTL 缓存，返回清理前条目数。"""
+        count = len(list(self._search_cache.items()))
+        self._search_cache.clear()
+        return count
