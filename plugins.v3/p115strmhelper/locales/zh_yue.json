@@ -108,6 +108,8 @@
     "upload_time_unknown": "唔知",
     "monitor_life_auto_restart_title": "【监控生活事件】自动重启啦！",
     "monitor_life_auto_restart_text": "生活事件监控线程已停超过5分钟\n守护线程正在自动重启，唤兔唔部！",
+    "monitor_life_stall_restart_title": "【监控生活事件】停摆警报啦！",
+    "monitor_life_stall_restart_text": "生活事件监控线程 {minutes} 分钟冇进度，判定停摆\n守护线程已经印出调用栈，回放重启紧！",
     "monitor_life_error_title": "【监控生活事件】运行异常啦！",
     "monitor_life_error_text": "生活事件监控出异常，30秒后自动重启。\n错误摘要：{error}",
     "monitor_life_exit_title": "【监控生活事件】线程异常退出！",

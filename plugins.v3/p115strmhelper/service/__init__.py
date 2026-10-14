@@ -16,6 +16,11 @@ from ..core.message import post_message
 from ..core.p115 import get_pid_by_path
 from ..helper.clean import Cleaner
 from ..helper.life import MonitorLife
+from ..helper.life.monitor_guard import (
+    DEFAULT_STALL_TIMEOUT_MINUTES,
+    detect_and_handle_stall,
+    normalize_stall_timeout_minutes,
+)
 from ..helper.mediainfo_download import MediaInfoDownloader
 from ..helper.monitor import directory_upload_stability_tracker
 from ..helper.monitor.directory_upload_queue import (
@@ -271,6 +276,11 @@ class ServiceHelper:
     def check_monitor_life_guard(self):
         """
         检查并守护生活事件监控线程
+
+        两条独立的守护路径：
+        1. 线程已停止（is_alive 为 False）：沿用原有的失败计时，满 5 分钟重启；
+        2. 线程活着但长时间无进度（2.8.78 静默停摆）：按心跳判停摆，
+           WARNING + 打印线程调用栈 + 通知 + 回放重启。
         """
         should_run = (
             configer.monitor_life_enabled
@@ -288,11 +298,12 @@ class ServiceHelper:
                     if self.monitor_life_fail_time is not None:
                         logger.debug("【监控生活事件】线程运行正常，清除失败时间记录")
                         self.monitor_life_fail_time = None
+                    self._check_monitor_life_stall()
                 else:
                     current_time = time()
                     if self.monitor_life_fail_time is None:
                         self.monitor_life_fail_time = current_time
-                        logger.debug(
+                        logger.info(
                             "【监控生活事件】检测到线程已停止，开始记录失败时间"
                         )
                     else:
@@ -323,6 +334,57 @@ class ServiceHelper:
                     self._stop_monitor_life_internal()
                 self.monitor_life_fail_time = None
 
+    def _check_monitor_life_stall(self) -> None:
+        """
+        心跳判停摆：线程 is_alive 但距上次进度超过阈值即判停摆并回放重启
+        """
+        timeout = normalize_stall_timeout_minutes(
+            getattr(
+                configer,
+                "monitor_life_stall_timeout_minutes",
+                DEFAULT_STALL_TIMEOUT_MINUTES,
+            )
+        )
+        if timeout <= 0:
+            logger.debug(
+                "【监控生活事件】停摆看门狗已关闭（monitor_life_stall_timeout_minutes=0）"
+            )
+            return
+        monitorlife = self.monitorlife
+        if monitorlife is None or self.monitor_life_thread is None:
+            return
+        stalled_minutes = detect_and_handle_stall(
+            last_progress_ts=monitorlife.last_progress_ts,
+            now=time(),
+            timeout_minutes=timeout,
+            thread=self.monitor_life_thread,
+            log=logger,
+            notify=self._notify_monitor_life_stall if configer.notify else None,
+            stop=self._stop_monitor_life_internal,
+            start=lambda: self._start_monitor_life_internal(replay=True),
+        )
+        if stalled_minutes is not None:
+            self.monitor_life_fail_time = None
+
+    def _notify_monitor_life_stall(self, stalled_minutes: float) -> None:
+        """
+        停摆告警通知
+
+        :param stalled_minutes (float): 已停摆分钟数
+        """
+        post_message(
+            mtype=MessageType.Plugin,
+            title=i18n.translate("monitor_life_stall_restart_title"),
+            text=(
+                "\n"
+                + i18n.translate(
+                    "monitor_life_stall_restart_text",
+                    minutes=int(stalled_minutes),
+                )
+                + "\n"
+            ),
+        )
+
     def start_monitor_life(self):
         """
         启动生活事件监控
@@ -349,13 +411,18 @@ class ServiceHelper:
             if self.monitor_stop_event:
                 self.monitor_stop_event = None
 
-    def _start_monitor_life_internal(self, register_guard_service: bool = True):
+    def _start_monitor_life_internal(
+        self, register_guard_service: bool = True, replay: bool = False
+    ):
         """
         启动生活事件监控线程
 
         :param register_guard_service: 是否在启动后调用 _update_monitor_life_guard_service
             初始化时（start_monitor_life）设为 False，让 get_service() 统一注册
             运行时恢复时（check_monitor_life_guard）保留 True，确保守护服务存在
+        :param replay: 是否以回放模式启动（从「持久化游标 - grace」起拉）。
+            只有看门狗停摆重启才传 True；用户手工重载/改配置重启保持 False，
+            仍按 monitor_life_first_pull_mode 的 latest/all/last 语义执行
         """
         if (
             configer.get_config("monitor_life_enabled")
@@ -384,6 +451,7 @@ class ServiceHelper:
                 args=(
                     self.monitorlife,
                     self.monitor_stop_event,
+                    replay,
                 ),
                 name="P115StrmHelper-MonitorLife",
                 daemon=False,

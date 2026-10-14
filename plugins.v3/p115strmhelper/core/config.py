@@ -572,6 +572,34 @@ class ConfigManager(BaseModel):
         ge=1,
         description="生活事件等待 MoviePilot 整理队列无进展的超时时间（分钟）",
     )
+    # 以下 4 项为 2.8.78 停摆看门狗配置：刻意不加 ge/le 约束——
+    # load_from_dict/update_config 一旦抛 ValidationError 会让整份配置加载失败，
+    # 边界钳制统一放在 helper/life/monitor_guard.py 的 normalize_* 里做。
+    monitor_life_stall_timeout_minutes: int = Field(
+        default=15,
+        description=(
+            "生活事件监控停摆看门狗阈值（分钟）：线程存活但超过该时长无进度即判停摆，"
+            "打印线程调用栈并以回放模式重启；最小 5，0=关闭看门狗"
+        ),
+    )
+    monitor_life_replay_grace_minutes: int = Field(
+        default=10,
+        description=(
+            "停摆重启回放宽限（分钟）：起始时间取 min(持久化游标, 当前时间) 再回退该分钟数；"
+            "0=不回放（直接从持久化游标起）"
+        ),
+    )
+    monitor_life_transfer_wait_max_hours: int = Field(
+        default=6,
+        description="生活事件等待 MoviePilot 整理的绝对上限（小时），超时恢复生活事件拉取",
+    )
+    monitor_life_large_window_warn_events: int = Field(
+        default=2000,
+        description=(
+            "生活事件单轮拉取条数告警阈值：超过只记 WARNING，不截断"
+            "（115 事件接口按「新→旧」产出且游标只记最新一条，截断会永久丢事件）"
+        ),
+    )
 
     share_strm_config: List[ShareStrmConfig] = Field(
         default_factory=list, description="分享 STRM 生成配置"

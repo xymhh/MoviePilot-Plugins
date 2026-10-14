@@ -27,6 +27,11 @@ from .core.cache import idpathcacher, DirectoryCache, r302cacher
 from .core.aliyunpan import AliyunPanLogin
 from .core.p115 import get_pid_by_path, get_pickcode_by_path
 from .helper.life.test import MonitorLifeTest
+from .helper.life.monitor_guard import (
+    evaluate_stall,
+    normalize_stall_timeout_minutes,
+)
+from .service.life import MONITOR_LIFE_CURSOR_KEY
 from .helper.strm import ApiSyncStrmHelper
 from .helper.backup import backup_helper
 from .schemas.offline import (
@@ -1537,6 +1542,43 @@ class Api:
         else:
             debug_info.append("   线程存在: 否")
             debug_info.append("   线程运行: 否")
+
+        stall_timeout = normalize_stall_timeout_minutes(
+            getattr(configer, "monitor_life_stall_timeout_minutes", None)
+        )
+        monitorlife = servicer.monitorlife
+        stalled_minutes = None
+        if monitorlife is not None:
+            last_progress = monitorlife.last_progress_ts
+            try:
+                progress_text = datetime.fromtimestamp(last_progress).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            except (OSError, OverflowError, ValueError):
+                progress_text = str(last_progress)
+            debug_info.append(f"   上次进度时间: {progress_text} ({last_progress})")
+            if stall_timeout <= 0:
+                debug_info.append("   停摆分钟数: 看门狗已关闭（阈值配置为 0）")
+            else:
+                stalled_minutes = evaluate_stall(
+                    last_progress, time(), stall_timeout
+                )
+                if stalled_minutes is None:
+                    debug_info.append("   停摆分钟数: 0（未超过阈值）")
+                else:
+                    debug_info.append(
+                        f"   停摆分钟数: {stalled_minutes:.1f}"
+                        f"（阈值 {stall_timeout} 分钟，判定为停摆）"
+                    )
+                    success = False
+                    error_messages.append(
+                        f"生活事件监控线程已 {stalled_minutes:.1f} 分钟无进度"
+                    )
+        else:
+            debug_info.append("   上次进度时间: 无（MonitorLife 未初始化）")
+            debug_info.append("   停摆分钟数: 未知")
+        persisted_cursor = configer.get_plugin_data(MONITOR_LIFE_CURSOR_KEY)
+        debug_info.append(f"   持久化游标: {persisted_cursor}")
         debug_info.append("")
 
         debug_info.append("5. 115客户端状态")

@@ -1,7 +1,7 @@
 from filecmp import cmp as files_equal
 from shutil import move as shutil_move, rmtree
 from collections import defaultdict
-from threading import Timer, Event, Thread
+from threading import Timer, Event, Thread, Lock
 from time import sleep, strftime, localtime, time
 from typing import Any, Dict, List, Optional, Set, Tuple
 from pathlib import Path
@@ -29,6 +29,12 @@ from ...helper.mediainfo_download import MediaInfoDownloader
 from ...helper.mediasyncdel import MediaSyncDelHelper
 from ...helper.mediaserver import MediaServerRefresh, emby_mediainfo_queue
 from .transfer_wait import wait_for_transfer_complete
+from .monitor_guard import (
+    advance_cursor_from_events,
+    drain_events_batch,
+    normalize_large_window_warn_events,
+    normalize_transfer_wait_max_hours,
+)
 
 from urllib.error import HTTPError
 
@@ -99,6 +105,10 @@ class MonitorLife:
         self.mediainfodownloader = mediainfodownloader
         self.stop_event = stop_event
 
+        # 心跳：守护线程靠它区分「活着但不干活」（任务书 2.8.78 A/B）
+        self._progress_lock = Lock()
+        self._last_progress_ts: float = time()
+
         self._monitor_life_notification_timer = None
         self._monitor_life_notification_queue = defaultdict(
             lambda: {"strm_count": 0, "mediainfo_count": 0}
@@ -124,6 +134,34 @@ class MonitorLife:
         )
 
         self.storagechain = StorageChain()
+
+    @property
+    def last_progress_ts(self) -> float:
+        """
+        最近一次进度心跳的时间戳（线程安全读）
+
+        :return float: Unix 时间戳
+        """
+        lock = getattr(self, "_progress_lock", None)
+        if lock is None:
+            # 绕过 __init__ 构造的实例（如单测里的 object.__new__）兜底
+            return float(getattr(self, "_last_progress_ts", 0.0))
+        with lock:
+            return self._last_progress_ts
+
+    def touch_progress(self, ts: Optional[float] = None) -> None:
+        """
+        记录一次进度心跳（线程安全写）
+
+        :param ts (Optional[float]): 心跳时间戳，缺省取当前时间
+        """
+        value = time() if ts is None else float(ts)
+        lock = getattr(self, "_progress_lock", None)
+        if lock is None:
+            self._last_progress_ts = value
+            return
+        with lock:
+            self._last_progress_ts = value
 
     def _schedule_notification(self):
         """
@@ -2019,6 +2057,10 @@ class MonitorLife:
             stall_timeout_minutes=configer.monitor_life_transfer_stall_timeout_minutes,
             stop_event=self.stop_event,
             log=logger,
+            max_wait_hours=normalize_transfer_wait_max_hours(
+                getattr(configer, "monitor_life_transfer_wait_max_hours", None)
+            ),
+            on_progress=self.touch_progress,
         )
 
     @staticmethod
@@ -2129,8 +2171,27 @@ class MonitorLife:
                 if "update_time" not in first_event or "id" not in first_event:
                     break
 
-                events_batch = [first_event]
-                events_batch.extend(list(events_iterator))
+                warn_events = normalize_large_window_warn_events(
+                    getattr(configer, "monitor_life_large_window_warn_events", None)
+                )
+                events_batch = drain_events_batch(
+                    first_event,
+                    events_iterator,
+                    on_progress=self.touch_progress,
+                    on_count=lambda count: logger.info(
+                        "【监控生活事件】本轮已拉取 %s 条事件，仍在继续拉取...", count
+                    ),
+                    progress_every=500,
+                )
+                # 只告警不截断：截断会让「比截断点更旧」的事件永久丢失
+                if len(events_batch) > warn_events:
+                    logger.warning(
+                        "【监控生活事件】单轮拉取事件数异常偏高：%s 条"
+                        "（告警阈值 %s）。本轮仍全量处理，不截断以避免丢事件，"
+                        "请留意生活事件窗口是否过大",
+                        len(events_batch),
+                        warn_events,
+                    )
                 break
             except Exception as e:
                 if self._is_405_error(e) and app == "ios":
@@ -2155,7 +2216,10 @@ class MonitorLife:
 
         :return Tuple: (from_time, from_id)
         """
-        if self._wait_for_transfer_complete():
+        stopped = self._wait_for_transfer_complete()
+        # 无论队列是否为空，这一轮已经走完一次等待判定，记一次心跳
+        self.touch_progress()
+        if stopped:
             return from_time, from_id
 
         app = self._get_life_event_app()
@@ -2196,6 +2260,9 @@ class MonitorLife:
 
                 self._record_ios_405()
 
+        # 拉取（含网络往返与重试）结束，记一次心跳
+        self.touch_progress()
+
         if not events_batch:
             if self.stop_event and self.stop_event.wait(timeout=self.WAIT_TIME_OUT):
                 return from_time, from_id
@@ -2206,9 +2273,12 @@ class MonitorLife:
         db_helper = LifeEventDbHelper()
         db_helper.upsert_batch_by_list(events_batch)
 
-        return_from_time: int = from_time
-        return_from_id: int = from_id
+        return_from_time, return_from_id = advance_cursor_from_events(
+            from_time, from_id, events_batch
+        )
         for event in reversed(events_batch):
+            # 逐条处理本身就是进度：每处理一条喂一次心跳
+            self.touch_progress()
             self.rmt_mediaext = [
                 f".{ext.strip()}"
                 for ext in configer.get_config("user_rmt_mediaext")
@@ -2226,9 +2296,6 @@ class MonitorLife:
             logger.debug(
                 f"【监控生活事件】{BEHAVIOR_TYPE_TO_NAME.get(event['type'], '未知类型')}: {event}"
             )
-
-            return_from_id = int(event["id"])
-            return_from_time = int(event["update_time"])
 
             if int(event["type"]) not in {1, 2, 5, 6, 14, 17, 18, 20, 22, 23, 24}:
                 continue
@@ -2296,6 +2363,8 @@ class MonitorLife:
                     )
                 )
 
+        # 本轮事件处理完毕，进入轮询间隔前再记一次心跳
+        self.touch_progress()
         if self.stop_event and self.stop_event.wait(timeout=self.WAIT_TIME_OUT):
             return return_from_time, return_from_id
         elif not self.stop_event:

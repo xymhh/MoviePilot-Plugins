@@ -108,6 +108,8 @@
     "upload_time_unknown": "未知",
     "monitor_life_auto_restart_title": "【监控生活事件】自动重启搬砖！",
     "monitor_life_auto_restart_text": "生活事件监控工人休息超过5分钟\n工头正在叫醺他继续搬砖",
+    "monitor_life_stall_restart_title": "【监控生活事件】停摆警报搬砖！",
+    "monitor_life_stall_restart_text": "监控工人趴窝：{minutes} 分钟冇进度，判定停摆\n工头已经抄下调用栈，回放重启开工！",
     "monitor_life_error_title": "【监控生活事件】搬砖出错了！",
     "monitor_life_error_text": "生活事件监控出现异常，30秒后重新开工\n错误摘要：{error}",
     "monitor_life_exit_title": "【监控生活事件】工人走了！",

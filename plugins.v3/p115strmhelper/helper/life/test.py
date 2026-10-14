@@ -41,6 +41,9 @@ class MonitorLifeTest:
         """
         测试拉取生活事件数据
 
+        用真实时间窗口（最近 300 秒）而不是 from_time=now：后者几乎永远「无新事件」，
+        会让自检在监控已经停摆时给出假阴性。
+
         :param client (P115Client): P115Client实例
 
         :return Tuple: tuple (success: bool, debug_info: List[str], error_messages: List[str])
@@ -48,11 +51,14 @@ class MonitorLifeTest:
         debug_info = []
         error_messages = []
         success = True
+        window_seconds = 300
+        from_ts = int(time()) - window_seconds
+        debug_info.append(f"   拉取窗口: 最近 {window_seconds} 秒 ({from_ts} 起)")
 
         try:
             events_iterator = iter_life_behavior_once(
                 client=client,
-                from_time=int(time()),
+                from_time=from_ts,
                 from_id=0,
                 cooldown=4,
                 **configer.get_ios_ua_app(),
@@ -73,7 +79,13 @@ class MonitorLifeTest:
                 debug_info.append(f"   拉取到事件数: {event_count}个")
             except StopIteration:
                 debug_info.append("   拉取测试: 成功")
-                debug_info.append("   获取到事件: 否（无新事件，正常情况）")
+                debug_info.append(
+                    f"   获取到事件: 否（最近 {window_seconds} 秒窗口内无新事件）"
+                )
+                debug_info.append(
+                    "   提示: 窗口内无新事件不等于监控线程正常，"
+                    "请结合「上次进度时间/停摆分钟数」判断"
+                )
             except P115AuthenticationError:
                 debug_info.append("   拉取测试: 失败")
                 debug_info.append("   错误: 登入失效，请重新扫码登入")

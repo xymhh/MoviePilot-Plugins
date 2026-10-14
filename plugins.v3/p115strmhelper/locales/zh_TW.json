@@ -108,6 +108,8 @@
     "upload_time_unknown": "未知",
     "monitor_life_auto_restart_title": "【監控生活事件】自動重啟",
     "monitor_life_auto_restart_text": "生活事件監控執行緒已停止超過5分鐘\n守護執行緒正在自動重啟監控服務",
+    "monitor_life_stall_restart_title": "【監控生活事件】停擺告警",
+    "monitor_life_stall_restart_text": "生活事件監控執行緒已 {minutes} 分鐘無進度，判定為停擺\n守護執行緒已印出執行緒呼叫堆疊，並以回放模式重啟監控",
     "monitor_life_error_title": "【監控生活事件】執行異常",
     "monitor_life_error_text": "生活事件監控出現異常，將在 30 秒後自動重啟。\n錯誤摘要：{error}",
     "monitor_life_exit_title": "【監控生活事件】執行緒異常退出",
