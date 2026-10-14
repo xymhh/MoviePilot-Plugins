@@ -49,6 +49,8 @@ class Yun139ShareService:
         self.upload = upload
         #: 分享节点 → 名称/大小，转存时用于兜底命名与进度展示。
         self._node_info: Dict[str, Dict[str, Any]] = {}
+        #: 最近一次列表接口返回的分享名（条目里不带该字段）。
+        self._share_title = ""
 
     @staticmethod
     def encode_node_id(link_id: str, password: str, node_id: str) -> str:
@@ -200,6 +202,8 @@ class Yun139ShareService:
             },
         })
         data = self._check_envelope(payload, "读取分享目录")
+        # 分享名挂在信封上，条目里没有，先记下来给分享校验用。
+        self._share_title = str(data.get("lkName") or "").strip()
         folders = [
             item for item in (data.get("caLst") or []) if isinstance(item, dict)
         ]
@@ -207,6 +211,15 @@ class Yun139ShareService:
             item for item in (data.get("coLst") or []) if isinstance(item, dict)
         ]
         return folders, files
+
+    @staticmethod
+    def _entry_value(entry: Dict[str, Any], *keys: str) -> str:
+        """取条目字段；线上接口用 ``caID``/``coID``，历史版本用 ``caId``/``coId``。"""
+        for key in keys:
+            value = entry.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+        return ""
 
     @staticmethod
     def _modified_at(value: Any) -> str:
@@ -222,12 +235,12 @@ class Yun139ShareService:
     def _share_node(
             self, link_id: str, password: str, entry: Dict[str, Any], is_directory: bool
     ) -> Optional[CloudFile]:
-        node_id = str(
-            (entry.get("caId") if is_directory else entry.get("coId")) or ""
-        ).strip()
-        name = str(
-            (entry.get("caName") if is_directory else entry.get("coName")) or ""
-        ).strip()
+        node_id = (
+            self._entry_value(entry, "caID", "caId")
+            if is_directory
+            else self._entry_value(entry, "coID", "coId")
+        )
+        name = self._entry_value(entry, "caName" if is_directory else "coName")
         if not node_id or not name:
             return None
         item = CloudFile(
@@ -256,7 +269,8 @@ class Yun139ShareService:
             status.is_valid = True
             status.share_info = {
                 "share_title": str(
-                    (files[0].get("lkName") if files else "")
+                    self._share_title
+                    or (files[0].get("lkName") if files else "")
                     or (folders[0].get("lkName") if folders else "")
                     or ""
                 ),
