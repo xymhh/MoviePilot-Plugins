@@ -1,6 +1,7 @@
 """搜索渠道共享的资源类型定义。"""
 
 import re
+from typing import Any, List
 from urllib.parse import urlparse
 
 TYPE_ALIASES = {
@@ -29,7 +30,10 @@ TYPE_HOSTS = {
     "quark": {"quark.cn"},
     "alipan": {"alipan.com", "aliyundrive.com", "aliyundrive.net"},
     "tianyi": {"cloud.189.cn"},
-    "yun139": {"yun.139.com", "caiyun.feixin.10086.cn"},
+    # caiyun.139.com 是 PanSou 实际返回的移动云盘分享主域名
+    # （https://caiyun.139.com/w/i/xxx、https://caiyun.139.com/m/i?xxx），
+    # 缺失时分享链接会被当成「未知来源 → 115」，预览与跨盘转存双双失效。
+    "yun139": {"yun.139.com", "caiyun.139.com", "caiyun.feixin.10086.cn"},
     "guangya": {"guangyapan.com"},
 }
 #: 资源类型的展示元数据：名称、图标、配色、可预览与离线标记。
@@ -107,7 +111,7 @@ _TYPE_TEXT_MARKERS = {
     "quark": ("夸克", "quark"),
     "guangya": ("光鸭", "guangya"),
     "tianyi": ("天翼", "cloud.189.cn"),
-    "yun139": ("移动云盘", "中国移动云盘", "yun.139.com", "139云盘"),
+    "yun139": ("移动云盘", "中国移动云盘", "yun.139.com", "caiyun.139.com", "139云盘"),
     "alipan": ("阿里云盘", "阿里网盘", "alipan", "aliyundrive"),
     "ed2k": ("ed2k://", "电驴"),
     "magnet": ("magnet:?", "磁力"),
@@ -122,6 +126,20 @@ def normalize_resource_type(value: str) -> str:
 def to_pansou_api_type(value: str) -> str:
     """内部类型键 → PanSou 接口键（未列入映射的原样返回）。"""
     return PANSOU_API_TYPE_ALIASES.get(normalize_resource_type(value), normalize_resource_type(value))
+
+
+def configured_resource_types(configured: Any) -> List[str]:
+    """按「资源类型优先级」收窄后的类型列表（保持配置顺序、去重）。
+
+    资源页与订阅搜索共用同一份口径：只保留配置里出现、且插件支持的类型；
+    配置为空（或全是无效值）时退回全部支持类型，避免误伤没配过该字段的用户。
+    """
+    values: List[str] = []
+    for value in configured or ():
+        normalized = normalize_resource_type(value)
+        if normalized in SUPPORTED_RESOURCE_TYPES and normalized not in values:
+            values.append(normalized)
+    return values or list(RESOURCE_TYPE_ORDER)
 
 
 def resource_type_from_url(value: str) -> str:

@@ -29,6 +29,7 @@ from ...search.types import (
     RESOURCE_TYPE_ORDER,
     RESOURCE_TYPE_PRIORITY,
     SUPPORTED_RESOURCE_TYPES,
+    configured_resource_types,
     normalize_resource_type,
     resource_type_from_url,
     resource_type_name,
@@ -1227,6 +1228,10 @@ class SearchApi(OwnerDelegator):
 
         all_items = []
         resource_type_counts: Dict[str, int] = {}
+        allowed_resource_types = set(configured_resource_types(
+            getattr(handler, "_resource_type_order_config", None)
+            or getattr(self, "_resource_type_order", ())
+        ))
         for src, items in (source_results or {}).items():
             src_items_count = len(items) if isinstance(items, list) else 0
             logger.debug(
@@ -1237,8 +1242,9 @@ class SearchApi(OwnerDelegator):
                 url = str(item.get("url") or item.get("share_url") or "").strip()
                 raw_type = item.get("resource_type") or item.get("pan_type")
                 r_type = resource_type_from_url(url) or normalize_resource_type(raw_type)
-                # 资源弹窗保留各支持网盘的全部候选，但仍隐藏当前转存链路无法处理的类型。
-                if r_type not in SUPPORTED_RESOURCE_TYPES:
+                # 资源页与订阅搜索同口径：只保留「资源类型优先级」里勾选的类型，
+                # 未配置该字段时退回全部支持类型。
+                if r_type not in allowed_resource_types:
                     continue
 
                 item_copy = dict(item)

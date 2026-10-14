@@ -10,7 +10,12 @@ from app.schemas.types import MediaType
 
 from ..magnet import clear_cache, normalize_magnets
 from ..matching import normalize_season
-from ..types import PANSOU_RESOURCE_TYPES, normalize_resource_type, resource_type_name
+from ..types import (
+    PANSOU_RESOURCE_TYPES,
+    configured_resource_types,
+    normalize_resource_type,
+    resource_type_name,
+)
 from ...core import SearchQuery
 
 
@@ -320,16 +325,15 @@ class PanSouSearchService:
             max(1, int(query.result_limit or self._result_limit))
             if query.resource_list_mode else self._result_limit
         )
-        allowed_types = (
-            [
-                "aliyun" if value == "alipan" else value
-                for value in PANSOU_RESOURCE_TYPES
-            ] if query.resource_list_mode else
-            [
-                "aliyun" if value == "alipan" else value
-                for value in (self._resource_types or getattr(self._owner, "_resource_type_order_config", ()))
-            ]
+        # 资源页与订阅搜索同口径：只请求「资源类型优先级」里勾选的类型；
+        # 未配置该字段时 ``configured_resource_types`` 会退回全部支持类型。
+        configured_types = configured_resource_types(
+            self._resource_types or getattr(self._owner, "_resource_type_order_config", ())
         )
+        allowed_types = [
+            "aliyun" if value == "alipan" else value
+            for value in configured_types
+        ]
         if not query.resource_list_mode and query.subscribe is not None:
             target_drive = str(getattr(self._owner, "_cloud_drive_key", "") or "").strip().lower()
             if target_drive:

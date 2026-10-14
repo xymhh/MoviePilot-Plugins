@@ -30,6 +30,8 @@ ROOT_NODE_ID = "root"
 #: 分享链接中的分享标识：/w/i/<id>、linkID=<id> 与 <id>#提取码。
 _SHARE_ID_PATTERNS = (
     re.compile(r"/(?:w|s)/i/([A-Za-z0-9]+)", re.I),
+    # 移动端分享短链：https://caiyun.139.com/m/i?2jexBVfL4N87f（ID 直接跟在 ? 后面）
+    re.compile(r"/m/i\?([A-Za-z0-9]+)", re.I),
     re.compile(r"[?&](?:linkID|link_id|shareId|sID)=([A-Za-z0-9]+)", re.I),
 )
 _PASSWORD_PATTERNS = (

@@ -73,6 +73,7 @@ register_module(
     RESOURCE_TYPE_ORDER=[],
     RESOURCE_TYPE_PRIORITY={},
     SUPPORTED_RESOURCE_TYPES=set(),
+    configured_resource_types=lambda configured=(): list(configured or ()),
     normalize_resource_type=MagicMock(),
     resource_type_from_url=MagicMock(),
     resource_type_name=MagicMock(),
