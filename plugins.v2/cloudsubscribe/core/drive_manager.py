@@ -141,6 +141,8 @@ class CloudDriveManager:
 
     def _filter_supported_resource_types(self) -> None:
         """根据当前活动网盘的能力及跨盘配置，过滤不支持的资源类型。"""
+        # 每次重算，避免切换网盘后残留上一台的能力集合
+        self._plugin._cloud_drive_resource_types = ()
         if not self.active_drive:
             return
 
@@ -165,6 +167,16 @@ class CloudDriveManager:
         supported = [val for val in resource_types if resource_supported(val)]
         unsupported = [val for val in resource_types if not resource_supported(val)]
         self._plugin._resource_type_order = supported
+        # 订阅搜索要据此收窄允许类型：目标盘自身能转存的 + 可跨盘转存的来源盘类型。
+        # 之前这个属性只有读、没有写，搜索侧只能拿到「目标盘 + 直通链接」的兜底集合，
+        # 导致移动云盘（需跨盘）等来源在任何情况下都进不了候选。
+        supported_types = [
+            normalize_resource_type(getattr(self._plugin, "_cloud_drive_key", "")),
+            *supported,
+        ]
+        self._plugin._cloud_drive_resource_types = tuple(
+            dict.fromkeys(value for value in supported_types if value)
+        )
 
         if unsupported:
             logger.info(

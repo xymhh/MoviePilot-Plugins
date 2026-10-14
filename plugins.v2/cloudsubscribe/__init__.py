@@ -101,7 +101,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.38"
+    plugin_version = "1.6.39"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -142,6 +142,8 @@ class CloudSubscribe(_PluginBase):
     _webhook_timeout: int = 10
     _cloud_drive_key: str = "115"
     _resource_type_order: List[str] = ["115", "ed2k"]
+    # 订阅搜索可落地的资源类型（内部键），由 CloudDriveManager 按驱动能力回写
+    _cloud_drive_resource_types: Tuple[str, ...] = ()
     _magnet_metadata_url_template: str = "https://itorrents.org/torrent/{info_hash}.torrent"
 
     # 订阅过滤模式："exclude" 排除模式（处理除勾选外的全部订阅）/ "include" 指定模式（仅处理勾选的订阅）

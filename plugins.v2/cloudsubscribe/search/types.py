@@ -10,7 +10,15 @@ TYPE_ALIASES = {
     "aliyun": "alipan",
     "189": "tianyi",
     "139": "yun139",
+    # PanSou 接口侧对移动云盘使用 ``mobile``，聚合分组里还有一个 ``others`` 兜底桶。
+    "mobile": "yun139",
+    "others": "other",
     "magnetlink": "magnet",
+}
+#: 出站方向：插件内部类型键 → PanSou 接口键（仅列两侧不同名的）。
+PANSOU_API_TYPE_ALIASES = {
+    "yun139": "mobile",
+    "alipan": "aliyun",
 }
 TYPE_HOSTS = {
     "115": {"115.com", "115cdn.com", "anxia.com"},
@@ -62,6 +70,12 @@ PANSOU_RESOURCE_TYPES = (
     "aliyun", "quark", "guangya", "tianyi", "yun139",
     "115", "123", "magnet", "ed2k",
 )
+#: PanSou 接口侧真实可用的类型键（内部键经 ``to_pansou_api_type`` 映射后）；
+#: 接口会按这个词表过滤，收到不认识的键会整桶丢弃，因此出站前必须比对这一集合。
+PANSOU_API_TYPES = frozenset({
+    "aliyun", "quark", "guangya", "tianyi", "mobile",
+    "115", "123", "magnet", "ed2k",
+})
 #: 分享提取码的承载方式：写入查询参数，或作为“提取码: xxx”附言。
 SHARE_PASSWORD_QUERY_KEYS = {
     "115": "password",
@@ -103,6 +117,11 @@ _TYPE_TEXT_MARKERS = {
 def normalize_resource_type(value: str) -> str:
     normalized = str(value or "").strip().lower()
     return TYPE_ALIASES.get(normalized, normalized)
+
+
+def to_pansou_api_type(value: str) -> str:
+    """内部类型键 → PanSou 接口键（未列入映射的原样返回）。"""
+    return PANSOU_API_TYPE_ALIASES.get(normalize_resource_type(value), normalize_resource_type(value))
 
 
 def resource_type_from_url(value: str) -> str:

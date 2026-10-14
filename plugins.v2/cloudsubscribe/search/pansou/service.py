@@ -180,7 +180,9 @@ class PanSouSearchService:
             strict_year: bool = True,
     ) -> Dict[str, List[Dict[str, Any]]]:
         groups: Dict[str, List[Dict[str, Any]]] = {}
-        allowed = set(allowed_types)
+        # 允许集与接口返回的 ``link.type`` 都先归一化到内部键：
+        # 接口侧移动云盘叫 ``mobile``、阿里云盘叫 ``aliyun``，与内部键不同名。
+        allowed = {normalize_resource_type(value) for value in allowed_types}
         # 超出上限倍数后提前退出，避免大结果集浪费 CPU
         hard_cap = max(limit * 5, 50)
         total_matched = 0
@@ -210,7 +212,9 @@ class PanSouSearchService:
                         media_titles, media_year, title, strict_year=strict_year
                 ):
                     continue
-                resource_type = str(link.get("type") or "unknown").strip().lower()
+                resource_type = normalize_resource_type(
+                    str(link.get("type") or "unknown").strip().lower()
+                )
                 if allowed and resource_type not in allowed:
                     continue
                 group = groups.setdefault(
@@ -251,6 +255,28 @@ class PanSouSearchService:
         for group in groups.values():
             group.sort(key=lambda row: row.get("update_time", ""), reverse=True)
         return groups
+
+    @staticmethod
+    def _supported_resource_types(owner: Any, target_drive: str) -> set:
+        """订阅搜索可落地的资源类型集合（内部键）。
+
+        优先用驱动能力过滤后的结果（``_cloud_drive_resource_types``，由
+        ``CloudDriveManager`` 在启用跨盘转存时写入，含可跨盘来源的盘类型），
+        其次退回运行期已过滤的类型顺序；两者都拿不到时才退回
+        「目标盘自身 + 直通链接类型」的老兜底。
+        """
+        for values in (
+                getattr(owner, "_cloud_drive_resource_types", ()),
+                getattr(owner, "_resource_type_order", ()),
+        ):
+            supported = {
+                normalize_resource_type(value)
+                for value in (values or ())
+                if str(value or "").strip()
+            }
+            if supported:
+                return supported
+        return {target_drive} | ({"magnet", "ed2k"} if target_drive == "115" else set())
 
     @staticmethod
     def _round_robin(
@@ -307,9 +333,7 @@ class PanSouSearchService:
         if not query.resource_list_mode and query.subscribe is not None:
             target_drive = str(getattr(self._owner, "_cloud_drive_key", "") or "").strip().lower()
             if target_drive:
-                supported = set(getattr(self._owner, "_cloud_drive_resource_types", ()) or ())
-                if not supported:
-                    supported = {target_drive} | ({"magnet", "ed2k"} if target_drive == "115" else set())
+                supported = self._supported_resource_types(self._owner, target_drive)
                 allowed_types = [
                     value for value in allowed_types
                     if normalize_resource_type(value) in supported

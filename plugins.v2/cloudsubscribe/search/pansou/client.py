@@ -16,7 +16,10 @@ from ..http_client import (
     normalize_proxies,
     requests,
 )
-from ..types import PANSOU_RESOURCE_TYPES
+from ..types import (
+    PANSOU_API_TYPES,
+    to_pansou_api_type,
+)
 
 
 class PanSouClient:
@@ -272,9 +275,10 @@ class PanSouClient:
             effective_concurrency = None
         requested_cloud_types = cloud_types or []
         effective_cloud_types = list(dict.fromkeys(
-            str(item).strip().lower()
+            api_type
             for item in requested_cloud_types
-            if str(item).strip().lower() in PANSOU_RESOURCE_TYPES
+            for api_type in (to_pansou_api_type(item),)
+            if api_type in PANSOU_API_TYPES
         ))
 
         try:
