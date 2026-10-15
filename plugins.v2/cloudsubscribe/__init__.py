@@ -853,7 +853,7 @@ class CloudSubscribe(_PluginBase):
 
         self._cross_transfer_downloader = str(
             config.get("cross_transfer_downloader", "builtin") or "builtin"
-        )
+        ).strip().lower()
         if self._cross_transfer_downloader not in {"builtin", "gopeed"}:
             self._cross_transfer_downloader = "builtin"
         rapid_miss_action = str(
