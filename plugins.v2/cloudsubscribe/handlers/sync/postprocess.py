@@ -297,10 +297,16 @@ class PostprocessService(OwnerDelegator):
         grace = float(getattr(self, "_HISTORY_READY_GRACE_SECONDS", 600) or 600)
         if now - float(item.get("created_at") or now) < grace:
             return False
-        logger.warning(
+        message = (
             f"历史记录长时间未落盘，放行文件后处理："
             f"{item.get('file_name') or item.get('pending_key') or ''}"
         )
+        # 同一 pending 项的宽限放行告警只打一次，避免每轮复查都刷屏。
+        if item.get("history_grace_warned"):
+            logger.debug(message)
+        else:
+            item["history_grace_warned"] = True
+            logger.warning(message)
         return True
 
     def _due_pending_keys(
@@ -835,19 +841,77 @@ class PostprocessService(OwnerDelegator):
         limit = int(getattr(self, "_HISTORY_RESYNC_LIMIT", 10) or 10)
         retries = int(item.get("history_resync_count") or 0)
         if retries < limit:
-            item["history_resync_count"] = retries + 1
+            retries += 1
+            item["history_resync_count"] = retries
             item["history_ready"] = False
             item["next_check_at"] = time.time() + 60
-            logger.warning(
+            self._persist_history_resync_progress(item, pending_key)
+            message = (
                 f"历史记录尚未落盘，保留后处理任务稍后重写终态（{status}）："
                 f"{item.get('file_name') or pending_key}"
             )
+            # 同一 pending 项的「尚未落盘」告警只打一次，后续复查降为 debug。
+            if item.get("history_resync_warned"):
+                logger.debug(message)
+            else:
+                item["history_resync_warned"] = True
+                logger.warning(message)
             return False
-        logger.error(
+        logger.warning(
             f"历史记录长时间缺失，放弃写入终态（{status}）："
             f"{item.get('file_name') or pending_key}"
         )
+        # 达到上限后强制结算：无论是否命中历史记录都要移除 pending 项，
+        # 禁止无限重排队（命中路径已在本函数开头写入终态）。
+        self._settle_offline_pending_item(pending_key, item)
         return True
+
+    def _persist_history_resync_progress(
+            self, item: Dict[str, Any], pending_key: str
+    ) -> None:
+        """把重排队计数写回持久化数据，保证重启后仍能到达上限并终止。"""
+        if not self._get_data or not getattr(self, "_save_data", None):
+            return
+        try:
+            with self._offline_pending_lock:
+                current = self._get_data(self._OFFLINE_PENDING_KEY) or {}
+                stored = current.get(pending_key)
+                if not isinstance(stored, dict):
+                    return
+                if stored.get("_monitor_token") and (
+                        stored.get("_monitor_token") != item.get("_monitor_token")
+                ):
+                    return
+                for field in (
+                        "history_resync_count", "history_ready", "next_check_at",
+                        "history_grace_warned", "history_resync_warned",
+                ):
+                    if field in item:
+                        stored[field] = copy.deepcopy(item[field])
+                self._save_offline_pending(current)
+        except Exception as error:
+            logger.debug(f"持久化历史重排队计数失败：{error}")
+
+    def _settle_offline_pending_item(
+            self, pending_key: str, item: Dict[str, Any]
+    ) -> None:
+        """达到重排队上限后把 pending 项从持久化数据移除，终止后续复查循环。"""
+        if not self._get_data or not getattr(self, "_save_data", None):
+            return
+        try:
+            with self._offline_pending_lock:
+                current = self._get_data(self._OFFLINE_PENDING_KEY) or {}
+                stored = current.get(pending_key)
+                if not isinstance(stored, dict):
+                    return
+                if stored.get("_monitor_token") and (
+                        stored.get("_monitor_token") != item.get("_monitor_token")
+                ):
+                    return
+                current.pop(pending_key, None)
+                self._save_offline_pending(current)
+        except Exception as error:
+            logger.debug(f"结算历史重排队任务失败：{error}")
 
     def _commit_single_item(
             self,

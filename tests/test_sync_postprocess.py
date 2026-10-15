@@ -1,15 +1,19 @@
 """后处理任务完整测试套件（覆盖 DirectoryFileIndex、快照同步、文件定位、重命名与移动状态机、重试退避及关闭自动整理契约）。"""
 
+import sys
+import threading
 import types
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from plugin_env import (
     OwnerDelegator,
+    ensure_package,
     install_app_mocks,
     load_module,
     register_mock,
     register_package,
+    set_media_type,
 )
 
 # 构造 mock 的基础依赖
@@ -367,7 +371,6 @@ class TestBatchMutationsAndOrganizeContract(unittest.TestCase):
 
 class TestReconcilePendingState(unittest.TestCase):
     """测试状态调和持久化逻辑。"""
-
     def test_reconcile_removes_completed_items(self):
         service = DummyPostprocessService()
         service._OFFLINE_PENDING_KEY = "offline_pending"
@@ -417,6 +420,213 @@ class TestReconcilePendingState(unittest.TestCase):
         self.assertIn("task_still_pending", saved)
         self.assertEqual(saved["task_still_pending"]["fail_count"], 1)
         self.assertEqual(result["pending"], 1)
+
+
+# ---------------------------------------------------------------------------
+# 1.6.46：历史终态文件级兜底匹配 + 重排队终止保证 + 日志降噪
+# ---------------------------------------------------------------------------
+
+install_app_mocks(
+    "app.chain", "app.chain.mediaserver", "app.core", "app.core.context",
+    "app.core.metainfo", "app.db.downloadhistory_oper",
+    "app.db.models.downloadhistory", "app.db.models.mediaserver",
+    "app.helper", "app.helper.mediaserver",
+    "app.application", "app.application.mediaserver",
+    "app.utils", "app.utils.string", "sqlalchemy",
+)
+ensure_package("cloudsubscribe.core.history")
+ensure_package("cloudsubscribe.core.media")
+ensure_package("cloudsubscribe.drive")
+ensure_package("cloudsubscribe.drive.common")
+ensure_package("cloudsubscribe.search")
+ensure_package("cloudsubscribe.search.types")
+set_media_type(movie="电影", tv="电视剧")
+sys.modules["cloudsubscribe.core"].CloudFile = MagicMock()
+
+_history = load_module(
+    "cloudsubscribe.handlers.sync.history",
+    "plugins.v2/cloudsubscribe/handlers/sync/history.py",
+)
+HistoryService = _history.HistoryService
+
+_OFFLINE_KEY = "pending_offline_strm"
+
+
+class DummyHistoryService(HistoryService):
+    """内存存储版 HistoryService，用于批量匹配与持久化行为测试。"""
+
+    def __init__(self, store):
+        super().__init__(None)
+        object.__setattr__(self, "_store", store)
+        object.__setattr__(self, "_history_changed", None)
+        object.__setattr__(self, "_offline_pending_lock", threading.RLock())
+        object.__setattr__(self, "_OFFLINE_PENDING_KEY", _OFFLINE_KEY)
+
+    def _get_data(self, key):
+        return self._store.get(key)
+
+    def _save_data(self, key, value):
+        import copy as _copy
+        self._store[key] = _copy.deepcopy(value)
+
+    def _record_platform_transfer_histories(self, records):
+        pass
+
+
+class TestOfflineHistoryFallbackMatching(unittest.TestCase):
+    """文件级 (file_name, cloud_dir) 精确兜底匹配（禁止模糊/包含）。"""
+
+    def _service(self, history, pending):
+        store = {"history": history, _OFFLINE_KEY: pending}
+        return DummyHistoryService(store), store
+
+    def test_no_finalize_key_matches_by_file_name_and_cloud_dir(self):
+        """历史记录缺 finalize_key 但 (file_name, cloud_dir) 相同 → 能写终态。"""
+        service, store = self._service(
+            history=[{
+                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
+                "status": "处理中", "share_url": "https://pan.example.com/s/AAA",
+            }],
+            pending={"pansou:ABCDEF:123": {
+                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
+            }},
+        )
+        matched = service._mark_offline_history_status_batch(
+            {"pansou:ABCDEF:123"}, "成功"
+        )
+        self.assertEqual(matched, 1)
+        self.assertEqual(store["history"][0]["status"], "成功")
+        self.assertNotIn("finalize_key", store["history"][0])
+
+    def test_same_file_name_different_cloud_dir_not_matched(self):
+        """cloud_dir 不同（仅文件名相同）→ 禁止模糊匹配，不写终态。"""
+        service, store = self._service(
+            history=[{
+                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/other",
+                "status": "处理中", "share_url": "https://pan.example.com/s/BBB",
+            }],
+            pending={"pansou:ABCDEF:123": {
+                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
+            }},
+        )
+        matched = service._mark_offline_history_status_batch(
+            {"pansou:ABCDEF:123"}, "成功"
+        )
+        self.assertEqual(matched, 0)
+        self.assertEqual(store["history"][0]["status"], "处理中")
+
+    def test_finalize_key_match_path_unchanged(self):
+        """正常路径（key 能匹配）行为不变。"""
+        service, store = self._service(
+            history=[{
+                "finalize_key": "pansou:ABCDEF:123",
+                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
+                "status": "处理中", "share_url": "https://pan.example.com/s/CCC",
+            }],
+            pending={"pansou:ABCDEF:123": {
+                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
+            }},
+        )
+        matched = service._mark_offline_history_status_batch(
+            {"pansou:ABCDEF:123"}, "失败", reason="离线失败"
+        )
+        self.assertEqual(matched, 1)
+        self.assertEqual(store["history"][0]["status"], "失败")
+        self.assertEqual(store["history"][0]["failure_reason"], "离线失败")
+
+    def test_success_overwrite_failure_protection_unchanged(self):
+        """成功记录不被失败覆盖的保护语义不变（兜底命中也走该保护）。"""
+        service, store = self._service(
+            history=[{
+                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
+                "status": "成功", "share_url": "https://pan.example.com/s/DDD",
+            }],
+            pending={"pansou:ABCDEF:123": {
+                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
+            }},
+        )
+        matched = service._mark_offline_history_status_batch(
+            {"pansou:ABCDEF:123"}, "失败", reason="后处理失败"
+        )
+        self.assertEqual(matched, 1)
+        self.assertEqual(store["history"][0]["status"], "成功")
+        self.assertNotIn("failure_reason", store["history"][0])
+
+
+class TestHistoryResyncTermination(unittest.TestCase):
+    """history_resync_count 持久化、达上限结算移除 pending、日志降噪。"""
+
+    def _service(self):
+        service = DummyPostprocessService()
+        service._OFFLINE_PENDING_KEY = _OFFLINE_KEY
+        service._HISTORY_RESYNC_LIMIT = 10
+        service._save_data = lambda key, value: None
+        service._mark_offline_history_status = lambda *args, **kwargs: False
+        return service
+
+    @staticmethod
+    def _seed_pending(service, pending_key="pansou:ABCDEF:123"):
+        service._get_data_store[_OFFLINE_KEY] = {
+            pending_key: {
+                "file_name": "Show.S01E01.mkv",
+                "cloud_dir": "/media/tv",
+                "_monitor_token": "tok",
+            }
+        }
+
+    def test_resync_count_persists_between_calls(self):
+        """计数必须写回 _OFFLINE_PENDING_KEY 数据，重启后仍能到达上限。"""
+        service = self._service()
+        self._seed_pending(service)
+        pending_key = "pansou:ABCDEF:123"
+        item = {"file_name": "Show.S01E01.mkv", "_monitor_token": "tok"}
+        result = service._resolve_history_record(item, pending_key, "成功")
+        self.assertFalse(result)
+        stored = service._get_data_store[_OFFLINE_KEY][pending_key]
+        self.assertEqual(stored["history_resync_count"], 1)
+        self.assertEqual(item["history_resync_count"], 1)
+
+    def test_resync_at_limit_settles_and_removes_pending(self):
+        """达到上限后 pending 项被移除、返回放行，不再重复处理。"""
+        service = self._service()
+        self._seed_pending(service)
+        pending_key = "pansou:ABCDEF:123"
+        item = {
+            "file_name": "Show.S01E01.mkv", "_monitor_token": "tok",
+            "history_resync_count": service._HISTORY_RESYNC_LIMIT,
+        }
+        with patch.object(_postprocess, "logger") as mock_logger:
+            result = service._resolve_history_record(item, pending_key, "成功")
+        self.assertTrue(result)
+        self.assertNotIn(pending_key, service._get_data_store[_OFFLINE_KEY])
+        self.assertEqual(item["history_resync_count"], service._HISTORY_RESYNC_LIMIT)
+        # 达到上限那次保留一条 WARNING，且不再用 ERROR 刷屏
+        self.assertTrue(mock_logger.warning.called)
+        self.assertFalse(mock_logger.error.called)
+
+    def test_grace_and_resync_warnings_fire_once(self):
+        """宽限放行与尚未落盘两条 WARNING 各只打一次，之后降为 debug。"""
+        service = self._service()
+        self._seed_pending(service)
+        pending_key = "pansou:ABCDEF:123"
+        item = {
+            "file_name": "Show.S01E01.mkv",
+            "created_at": 1.0,
+            "_monitor_token": "tok",
+        }
+        now = 10_000.0  # 超过 600s 宽限期
+        with patch.object(_postprocess, "logger") as mock_logger:
+            for _ in range(3):
+                self.assertTrue(service._history_ready_for_finalize(item, now))
+            self.assertEqual(mock_logger.warning.call_count, 1)
+            self.assertEqual(mock_logger.debug.call_count, 2)
+            mock_logger.reset_mock()
+            for _ in range(3):
+                self.assertFalse(
+                    service._resolve_history_record(item, pending_key, "成功")
+                )
+            self.assertEqual(mock_logger.warning.call_count, 1)
+            self.assertEqual(mock_logger.debug.call_count, 2)
 
 
 if __name__ == "__main__":

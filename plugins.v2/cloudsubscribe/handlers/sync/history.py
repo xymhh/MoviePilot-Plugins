@@ -1097,6 +1097,21 @@ class HistoryService(OwnerDelegator):
         platform_records = []
         matched_records = 0
         with self._offline_pending_lock:
+            pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
+            # 文件级兜底匹配：历史记录缺 finalize_key（或值不同）时，
+            # 用 (file_name, cloud_dir) 精确相等定位，禁止模糊/包含匹配。
+            fallback_pairs: Dict[Tuple[str, str], str] = {}
+            if isinstance(pending, dict):
+                for key in normalized_keys:
+                    entry = pending.get(key)
+                    if not isinstance(entry, dict):
+                        continue
+                    pair = (
+                        str(entry.get("file_name") or "").strip(),
+                        str(entry.get("cloud_dir") or "").strip(),
+                    )
+                    if pair[0] and pair[1]:
+                        fallback_pairs.setdefault(pair, key)
             history = self._get_data("history") or []
             changed = False
             for item in history:
@@ -1107,6 +1122,13 @@ class HistoryService(OwnerDelegator):
                     matched_key = item_key
                 elif any(value in link for value in uppercase_keys):
                     matched_key = next((k for k in normalized_keys if k.upper() in link), None)
+                if not matched_key and fallback_pairs:
+                    record_pair = (
+                        str(item.get("file_name") or "").strip(),
+                        str(item.get("cloud_dir") or "").strip(),
+                    )
+                    if record_pair[0] and record_pair[1]:
+                        matched_key = fallback_pairs.get(record_pair)
                 if not matched_key:
                     continue
                 matched_records += 1

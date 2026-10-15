@@ -157,6 +157,25 @@ class RuntimeApi(OwnerDelegator):
             logger.error(f"提交历史记录重试异常：{error}")
             return {"success": False, "message": str(error)}
 
+    def api_vue_retry_history_batch(self, payload: Dict[str, Any]) -> dict:
+        if not self._sync_handler:
+            return {"success": False, "message": "同步处理器未初始化"}
+        try:
+            result = self._sync_handler.submit_history_retry_batch(
+                (payload or {}).get("records") or []
+            )
+            return {
+                "success": True,
+                "message": (
+                    f"已提交 {result.get('submitted', 0)} 条，"
+                    f"跳过 {result.get('skipped', 0)} 条"
+                ),
+                "data": result,
+            }
+        except Exception as error:
+            logger.error(f"提交批量历史重试异常：{error}")
+            return {"success": False, "message": str(error)}
+
     _CACHE_CATEGORIES = frozenset({
         "search", "cloud", "sync", "interface", "platform",
     })

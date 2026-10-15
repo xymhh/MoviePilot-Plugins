@@ -2,6 +2,7 @@
 历史记录重试与现场补偿执行服务。
 """
 import re
+import time
 from copy import deepcopy
 from threading import Lock, Thread
 from types import SimpleNamespace
@@ -24,6 +25,11 @@ from ...core.media import (
 
 _retry_inflight_lock = Lock()
 _retry_inflight_keys: set = set()
+
+# 批量重试护栏：单次上限、串行提交间隔、整批最大在飞数量。
+_RETRY_BATCH_MAX_RECORDS = 20
+_RETRY_BATCH_MIN_INTERVAL_SECONDS = 1.0
+_RETRY_BATCH_MAX_INFLIGHT = 2
 
 
 class HistoryRetryService(OwnerDelegator):
@@ -94,6 +100,91 @@ class HistoryRetryService(OwnerDelegator):
             name="cloudsubscribe-history-retry",
         ).start()
         return {"status": "处理中"}
+
+    def submit_history_retry_batch(
+            self, records: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """批量重试失败记录：同步完成逐条分类，限流提交放到后台线程执行。
+
+        入参 ``records`` 为 ``[{time, share_url, file_name}, ...]``；
+        单次最多 20 条，超出直接报错不静默截断。提交复用
+        :meth:`submit_history_retry` 的校验/去重/入队逻辑，不复制一份。
+        """
+        items = [record for record in (records or []) if isinstance(record, dict)]
+        if len(items) > _RETRY_BATCH_MAX_RECORDS:
+            raise ValueError(
+                f"单次最多重试 {_RETRY_BATCH_MAX_RECORDS} 条记录，"
+                f"当前 {len(items)} 条"
+            )
+        candidates: List[Dict[str, str]] = []
+        details: List[Dict[str, Any]] = []
+        skipped = 0
+        for record in items:
+            record_time = str(record.get("time") or "")
+            share_url = str(record.get("share_url") or "")
+            file_name = str(record.get("file_name") or "")
+            found = self._find_history_record(record_time, share_url, file_name)
+            if not found:
+                skipped += 1
+                details.append({
+                    "file_name": file_name, "ok": False, "message": "记录不存在",
+                })
+                continue
+            can_retry, retry_title = self._history_retry_state(found)
+            if not can_retry:
+                skipped += 1
+                details.append({
+                    "file_name": file_name, "ok": False, "message": retry_title,
+                })
+                continue
+            key = self._history_retry_key(record_time, share_url, file_name)
+            with _retry_inflight_lock:
+                if key in _retry_inflight_keys:
+                    skipped += 1
+                    details.append({
+                        "file_name": file_name, "ok": False, "message": "正在重试中",
+                    })
+                    continue
+            candidates.append({
+                "time": record_time, "share_url": share_url, "file_name": file_name,
+            })
+            details.append({
+                "file_name": file_name, "ok": True, "message": "已加入重试队列",
+            })
+        if candidates:
+            Thread(
+                target=self._run_history_retry_batch,
+                args=(candidates,),
+                daemon=True,
+                name="cloudsubscribe-history-retry-batch",
+            ).start()
+        return {"submitted": len(candidates), "skipped": skipped, "details": details}
+
+    def _run_history_retry_batch(self, candidates: List[Dict[str, str]]) -> None:
+        """串行提交批量重试：每条间隔限流，整批在飞数量不超过上限。"""
+        attempted_keys: List[str] = []
+        for index, candidate in enumerate(candidates):
+            if index:
+                time.sleep(_RETRY_BATCH_MIN_INTERVAL_SECONDS)
+            record_time = str(candidate.get("time") or "")
+            share_url = str(candidate.get("share_url") or "")
+            file_name = str(candidate.get("file_name") or "")
+            key = self._history_retry_key(record_time, share_url, file_name)
+            while True:
+                with _retry_inflight_lock:
+                    inflight = sum(
+                        1 for item in attempted_keys if item in _retry_inflight_keys
+                    )
+                if inflight < _RETRY_BATCH_MAX_INFLIGHT:
+                    break
+                time.sleep(_RETRY_BATCH_MIN_INTERVAL_SECONDS)
+            try:
+                self.submit_history_retry(record_time, share_url, file_name)
+                attempted_keys.append(key)
+            except Exception as error:
+                logger.debug(f"批量重试提交失败（{file_name}）：{error}")
+        if self._history_changed:
+            self._history_changed()
 
     def _run_history_retry(
             self, key: str, record_time: str, share_url: str, file_name: str

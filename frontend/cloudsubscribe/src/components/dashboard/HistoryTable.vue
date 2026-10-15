@@ -127,6 +127,29 @@
         </div>
         <v-spacer />
         <v-btn
+          class="retry-batch-button"
+          color="primary"
+          variant="text"
+          size="small"
+          :disabled="!retryableFailedCount"
+          :title="retryableFailedCount ? `重试全部失败（${retryableFailedCount} 条）` : '没有可重试的失败记录'"
+          @click.stop="retryAllFailed">
+          <v-icon icon="mdi-replay" class="history-action-icon" />
+          <span class="history-action-label">重试全部失败</span>
+        </v-btn>
+        <v-btn
+          v-if="selectedGroups.length"
+          class="retry-batch-button"
+          color="primary"
+          variant="text"
+          size="small"
+          :disabled="!retryableSelectedCount"
+          :title="retryableSelectedCount ? `重试选中（${retryableSelectedCount} 条）` : '所选记录没有可重试项'"
+          @click.stop="retrySelectedRecords">
+          <v-icon icon="mdi-replay" class="history-action-icon" />
+          <span class="history-action-label">重试选中</span>
+        </v-btn>
+        <v-btn
           class="delete-selected-button"
           color="error"
           variant="text"
@@ -716,6 +739,8 @@ const emit = defineEmits([
   "refresh",
   "clear",
   "retry",
+  "retry-failed",
+  "retry-selected",
   "delete",
   "delete-groups",
   "selection-change",
@@ -790,6 +815,20 @@ const selectedGroups = computed(() => {
 })
 const deletableSelectedGroups = computed(() => selectedGroups.value.filter((group) => group.deletable));
 const groupedItemKeys = computed(() => new Set(historyGroups.value.map((group) => group.group_key)));
+const allHistoryRecords = computed(() =>
+  historyGroups.value.flatMap((group) => group?.records || []),
+)
+const retryableFailedCount = computed(() =>
+  allHistoryRecords.value.filter(
+    (record) => record?.status === "失败" && Boolean(record?.can_retry),
+  ).length,
+)
+const selectedRecords = computed(() =>
+  selectedGroups.value.flatMap((group) => group?.records || []),
+)
+const retryableSelectedCount = computed(() =>
+  selectedRecords.value.filter((record) => Boolean(record?.can_retry)).length,
+)
 
 function historySeasonEpisodes(group) {
   const episodes = {};
@@ -1052,6 +1091,23 @@ function deleteSelected() {
     groupCount: deletableSelectedGroups.value.length,
     records: deletableSelectedGroups.value.flatMap((group) => group.records),
   })
+}
+
+function retryAllFailed() {
+  const records = allHistoryRecords.value.filter(
+    (record) => record?.status === "失败" && Boolean(record?.can_retry),
+  );
+  if (!records.length) return;
+  emit("retry-failed", { records });
+}
+
+function retrySelectedRecords() {
+  const records = selectedRecords.value.filter((record) => Boolean(record?.can_retry));
+  if (!records.length) return;
+  emit("retry-selected", {
+    groupCount: selectedGroups.value.length,
+    records,
+  });
 }
 
 function clearFilters() {

@@ -114,6 +114,8 @@
             @query-change="updateHistoryQuery"
             @clear="openClearHistory"
             @retry="confirmRetryHistory"
+            @retry-failed="confirmRetryFailedHistory"
+            @retry-selected="confirmRetrySelectedHistory"
             @delete="confirmDeleteHistory"
             @delete-groups="confirmDeleteGroups"
             @selection-change="updateHistorySelection"
@@ -159,6 +161,17 @@
       @confirm="retryHistory">
       确认恢复“{{ historyUpgradeLabel(retryingRecord ? {records: [retryingRecord]} : null) }}”的转存任务？
     </ConfirmDialog>
+    <ConfirmDialog
+      v-if="retryBatchVisible"
+      v-model="retryBatchVisible"
+      title="批量重试失败记录"
+      icon="mdi-replay"
+      icon-color="primary"
+      :body="`将重试 ${retryBatchRecords.length} 条失败记录，期间会产生新的搜索与转存任务，是否继续？`"
+      confirm-text="确认重试"
+      confirm-color="primary"
+      :loading="retryingHistoryKey === 'batch'"
+      @confirm="retryFailedBatch" />
     <ConfirmDialog
       v-model="upgradeVisible"
       title="确认历史洗版"
@@ -305,6 +318,8 @@ const clearingCache = ref(false)
 const retryingHistoryKey = ref("")
 const retryVisible = ref(false)
 const retryingRecord = ref(null)
+const retryBatchVisible = ref(false)
+const retryBatchRecords = ref([])
 const deleteVisible = ref(false)
 const deletingRecord = ref(null)
 const deletingRecords = ref([])
@@ -564,6 +579,53 @@ async function retryHistory() {
     notify(result.message || "已重新提交处理")
   } catch (e) {
     notify(e.message || "重试失败", "error")
+  } finally {
+    retryingHistoryKey.value = ""
+  }
+}
+
+function retryBatchIdentity(record) {
+  return {
+    time: record?.time,
+    share_url: record?.share_url,
+    file_name: record?.file_name,
+  }
+}
+
+function confirmRetryFailedHistory(payload) {
+  const records = (payload?.records || []).map(retryBatchIdentity)
+  if (!records.length) {
+    notify("没有可重试的失败记录", "warning")
+    return
+  }
+  retryBatchRecords.value = records
+  retryBatchVisible.value = true
+}
+
+function confirmRetrySelectedHistory(payload) {
+  const records = (payload?.records || []).map(retryBatchIdentity)
+  if (!records.length) {
+    notify("所选记录没有可重试项", "warning")
+    return
+  }
+  retryBatchRecords.value = records
+  retryBatchVisible.value = true
+}
+
+async function retryFailedBatch() {
+  const records = retryBatchRecords.value
+  if (!records.length || retryingHistoryKey.value) return
+  retryingHistoryKey.value = "batch"
+  try {
+    const result = await api.post(`plugin/${props.pluginId}/history/retry_batch`, { records })
+    if (!result?.success) throw new Error(result?.message || "批量重试失败")
+    const data = result?.data || {}
+    notify(`已提交 ${data.submitted ?? 0} 条，跳过 ${data.skipped ?? 0} 条`)
+    retryBatchVisible.value = false
+    retryBatchRecords.value = []
+    await Promise.all([loadPage(false), loadSummary(false)])
+  } catch (e) {
+    notify(e.message || "批量重试失败", "error")
   } finally {
     retryingHistoryKey.value = ""
   }

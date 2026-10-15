@@ -402,6 +402,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "重试单条失败转存记录",
             },
             {
+                "path": "/history/retry_batch",
+                "endpoint": self.api_vue_retry_history_batch,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量重试失败转存记录",
+            },
+            {
                 "path": "/cache/clear",
                 "endpoint": self.api_vue_clear_cache,
                 "methods": ["POST"],
