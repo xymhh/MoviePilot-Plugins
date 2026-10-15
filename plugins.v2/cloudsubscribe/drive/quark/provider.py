@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, FrozenSet
 
 from .client import QuarkClient
@@ -22,6 +22,10 @@ from ...core.transfer import LocalRapidUploadAdapter
 class QuarkDrive:
     client: QuarkClient
     page_size: int = 100
+    cross_transfer_downloader: str = "builtin"
+    gopeed_url: str = ""
+    gopeed_token: str = field(default="", repr=False)
+    gopeed_path_prefix: str = field(default="", repr=False)
 
     def close(self) -> None:
         """关闭底层 HTTP 会话。"""
@@ -38,7 +42,14 @@ class QuarkPlaybackReference:
 
 
 def create_quark_provider(drive: QuarkDrive) -> CloudDriveProvider:
-    files = QuarkFileService(drive.client, drive.page_size)
+    files = QuarkFileService(
+        drive.client,
+        drive.page_size,
+        cross_transfer_downloader=drive.cross_transfer_downloader,
+        gopeed_url=drive.gopeed_url,
+        gopeed_token=drive.gopeed_token,
+        gopeed_path_prefix=drive.gopeed_path_prefix,
+    )
     share = QuarkShareService(drive.client, files)
     upload = QuarkUploadService(drive.client, files)
     playback_reference = QuarkPlaybackReference()

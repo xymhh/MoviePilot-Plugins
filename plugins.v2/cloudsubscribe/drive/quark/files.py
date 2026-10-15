@@ -15,6 +15,7 @@ from ..common import (
     safe_int,
 )
 from ...core.cloud import CloudFile
+from ...core.gopeed import GopeedDownloadService
 from ...core.transfer import HttpFileDownloadService
 
 
@@ -65,6 +66,11 @@ class QuarkFileService(CloudDriveFileServiceBase):
     root_directory_id = "0"
     provider_name = "夸克"
     provider_key = "quark"
+    # 外部下载器分流（默认 builtin，行为与旧版逐字节一致）；token 不进 repr/日志
+    cross_transfer_downloader: str = "builtin"
+    gopeed_url: str = ""
+    gopeed_token: str = field(default="", repr=False)
+    gopeed_path_prefix: str = field(default="", repr=False)
     _directory_lock: RLock = field(default_factory=RLock, repr=False)
     _directory_cache: TTLCache = field(init=False, repr=False)
 
@@ -82,7 +88,20 @@ class QuarkFileService(CloudDriveFileServiceBase):
             concurrency=download_threads,
             part_size=10 * 1024 * 1024,
         )
-        return service.download_file(
+        if str(self.cross_transfer_downloader or "builtin").strip().lower() != "gopeed":
+            return service.download_file(
+                file_item, local_path, progress_callback, stop_requested,
+                preserve_partial=preserve_partial,
+            )
+        # Gopeed 侧任何异常自动回落内置下载器（GopeedDownloadService 内记一次 warning）
+        gopeed = GopeedDownloadService(
+            lambda _: self.resolve_download_link(file_item),
+            gopeed_url=self.gopeed_url,
+            gopeed_token=self.gopeed_token,
+            path_prefix=self.gopeed_path_prefix,
+            fallback_service=service,
+        )
+        return gopeed.download_file(
             file_item, local_path, progress_callback, stop_requested,
             preserve_partial=preserve_partial,
         )

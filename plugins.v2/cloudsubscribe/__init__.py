@@ -101,7 +101,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.42"
+    plugin_version = "1.6.43"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -180,6 +180,11 @@ class CloudSubscribe(_PluginBase):
     _cross_transfer_max_concurrent: int = 2
     _cross_transfer_direct_stream: bool = True
     _cross_transfer_upload_concurrency: int = 4
+    # 外部下载器（夸克→本地一步可选用 Gopeed；默认 builtin 与旧版行为一致）
+    _cross_transfer_downloader: str = "builtin"
+    _gopeed_url: str = "http://gopeed:9999"
+    _gopeed_token: str = ""
+    _gopeed_path_prefix: str = ""
     _subscription_concurrency: int = 2
     _batch_size: int = 20
     _batch_interval: float = 3
@@ -843,6 +848,15 @@ class CloudSubscribe(_PluginBase):
         # 0 表示关闭 115 分片并发上传（回退顺序上传），上限 16。
         self._cross_transfer_upload_concurrency = max(0, min(upload_concurrency, 16))
         self._sync_cross_transfer_upload_concurrency()
+
+        self._cross_transfer_downloader = str(
+            config.get("cross_transfer_downloader", "builtin") or "builtin"
+        ).strip().lower()
+        if self._cross_transfer_downloader not in {"builtin", "gopeed"}:
+            self._cross_transfer_downloader = "builtin"
+        self._gopeed_url = str(config.get("gopeed_url", "http://gopeed:9999") or "").strip()
+        self._gopeed_token = str(config.get("gopeed_token", "") or "").strip()
+        self._gopeed_path_prefix = str(config.get("gopeed_path_prefix", "") or "").strip()
 
         self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", 2) or 2), 5))
         self._batch_size = int(config.get("batch_size", 20) or 20)
