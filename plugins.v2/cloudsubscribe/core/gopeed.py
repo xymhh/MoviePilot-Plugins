@@ -79,7 +79,10 @@ class GopeedClient:
         """连通性/版本探测（路由见 Gopeed `pkg/rest/server.go:122`）。"""
         return self._request("GET", "/api/v1/info")
 
-    def create_task(self, url: str, headers: dict, path: str, name: str) -> str:
+    def create_task(
+            self, url: str, headers: dict, path: str, name: str,
+            connections: int = 0,
+    ) -> str:
         body = {
             "req": {
                 "url": str(url or ""),
@@ -92,6 +95,9 @@ class GopeedClient:
                 "selectFiles": [],
             },
         }
+        # Gopeed 任务级覆盖：仅 connections > 0 时传 extra，<= 0 沿用全局设置
+        if int(connections or 0) > 0:
+            body["opts"]["extra"] = {"connections": int(connections)}
         payload = self._request("POST", "/api/v1/tasks", json_body=body)
         task_id = str(payload.get("data") or "")
         if not task_id:
@@ -106,8 +112,10 @@ class GopeedClient:
     def pause_task(self, task_id: str) -> None:
         self._request("PUT", f"/api/v1/tasks/{task_id}/pause")
 
-    def delete_task(self, task_id: str) -> None:
-        self._request("DELETE", f"/api/v1/tasks/{task_id}")
+    def delete_task(self, task_id: str, force: bool = False) -> None:
+        # force=True：Gopeed 连同已下载文件一起删（pkg/rest/api.go 的 ?force=true）
+        suffix = "?force=true" if force else ""
+        self._request("DELETE", f"/api/v1/tasks/{task_id}{suffix}")
 
 
 def parse_path_prefixes(raw: str) -> List[Tuple[str, str]]:
@@ -140,6 +148,7 @@ class GopeedDownloadService:
             gopeed_url: str,
             gopeed_token: str = "",
             path_prefix: str = "",
+            connections: int = 0,
             timeout: float = 15.0,
             poll_interval: float = 1.0,
             max_attempts: int = 3,
@@ -151,6 +160,8 @@ class GopeedDownloadService:
         self._resolver = resolver
         self._client = client or GopeedClient(gopeed_url, gopeed_token, timeout)
         self._prefix_pairs = parse_path_prefixes(path_prefix)
+        # 0 = 沿用 Gopeed 全局连接数；>0 = 建任务时显式传 opts.extra.connections
+        self._connections = max(0, int(connections or 0))
         self._poll_interval = max(0.01, float(poll_interval or 1.0))
         self._max_attempts = max(1, int(max_attempts or 3))
         self._backoff_base = max(0.0, float(backoff_base or 0.0))
@@ -210,6 +221,7 @@ class GopeedDownloadService:
             try:
                 task_id = self._client.create_task(
                     url=url, headers=headers, path=remote_dir, name=target.name,
+                    connections=self._connections,
                 )
                 return self._wait_task(
                     task_id, file_item, target,
@@ -297,15 +309,21 @@ class GopeedDownloadService:
         return str(target)
 
     def _stop_task(self, task_id: str, preserve_partial: bool) -> None:
-        """停止：暂停任务；未要求保留断点时删除任务（保留文件语义与内置对齐）。"""
+        """停止：暂停（best-effort）后无条件 force 删除任务与 Gopeed 侧部分文件。
+
+        手动停止即清空中继（用户确认的需求 B1）；preserve_partial 仅约束失败重试
+        路径（_discard_task），不再影响停止路径的清理。
+        """
         if not task_id:
             return
         try:
             self._client.pause_task(task_id)
         except Exception as error:  # noqa: BLE001 - 停止路径不因清理失败而改道
             logger.debug(f"暂停 Gopeed 任务失败：task_id={task_id}；{error}")
-        if not preserve_partial:
-            self._discard_task(task_id, preserve_partial)
+        try:
+            self._client.delete_task(task_id, force=True)
+        except Exception as error:  # noqa: BLE001 - 异常不得改变「已停止」的判定
+            logger.debug(f"删除 Gopeed 任务失败：task_id={task_id}；{error}")
 
     def _discard_task(self, task_id: str, preserve_partial: bool) -> None:
         if not task_id or preserve_partial:

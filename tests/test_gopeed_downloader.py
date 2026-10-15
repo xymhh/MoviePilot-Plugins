@@ -1,23 +1,30 @@
-"""1.6.43 Gopeed 外部下载器单测。
+"""1.6.43/1.6.44 Gopeed 外部下载器单测。
 
 跨盘中继下载新增可选外部下载器 Gopeed（默认 builtin）。本文件固定：
 
 1. Gopeed 正常完成 → 文件落在 local_path 并返回该路径；
 2. 进度回调被调用且单调不减；
 3. 任务失败 → 重新取链 + 重建任务（resolver 被调用 ≥2 次）；
-4. stop_requested → 暂停/删除 Gopeed 任务并抛错（且不回落内置）；
+4. stop_requested → 暂停 + 无条件 force 删除 Gopeed 任务并抛错（且不回落内置），
+   preserve_partial=True 也照删（停止即清空中继）；
 5. Gopeed 不可用（连不上/401/建任务失败）→ 回落内置下载器（断言内置服务被调用、
    恰好记一次 warning）；
 6. gopeed_path_prefix 映射生效（create_task 收到换算后的 Gopeed 侧路径）；
 7. 夸克 QuarkFileService.download_file 分流：builtin（默认）不碰 Gopeed、gopeed 走
-   外部服务、gopeed 异常回落内置；
-8. GopeedClient 契约：X-Api-Token 鉴权、任务体形状、401/非零 code/连接异常报错且
-   消息不含 token。
+   外部服务、gopeed 异常回落内置；gopeed_connections 全程透传（写死 0 即失败）；
+8. GopeedClient 契约：X-Api-Token 鉴权、任务体形状（connections=0 不写 opts.extra，
+   >0 写 opts.extra.connections）、DELETE ?force=true、401/非零 code/连接异常报错
+   且消息不含 token；
+9. 传输层取消：完整缓存/部分缓存 + stop_event 置位 → .bin/.meta.json/.parts.json
+   全部删除且不碰同目录其它文件。
 """
 
+import hashlib
+import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -109,7 +116,7 @@ class FakeGopeedClient:
         self.paused = []
         self.deleted = []
 
-    def create_task(self, url, headers, path, name):
+    def create_task(self, url, headers, path, name, connections=0):
         self._counter += 1
         task_id = f"task-{self._counter}"
         steps = self._scripts.pop(0) if self._scripts else [
@@ -117,7 +124,7 @@ class FakeGopeedClient:
         ]
         self.created.append({
             "id": task_id, "url": url, "headers": dict(headers or {}),
-            "path": path, "name": name,
+            "path": path, "name": name, "connections": int(connections or 0),
         })
         self._tasks[task_id] = {"steps": steps, "index": 0, "name": name}
         return task_id
@@ -141,8 +148,8 @@ class FakeGopeedClient:
     def pause_task(self, task_id):
         self.paused.append(task_id)
 
-    def delete_task(self, task_id):
-        self.deleted.append(task_id)
+    def delete_task(self, task_id, force=False):
+        self.deleted.append((task_id, bool(force)))
 
 
 class GopeedDownloadServiceTests(unittest.TestCase):
@@ -183,8 +190,8 @@ class GopeedDownloadServiceTests(unittest.TestCase):
         self.assertEqual(
             client.created[0]["headers"].get("user-agent"), "quark-pc-ua"
         )
-        # 完成后清理 Gopeed 任务记录（不删文件）
-        self.assertEqual(client.deleted, ["task-1"])
+        # 完成后清理 Gopeed 任务记录（不删文件，force=False）
+        self.assertEqual(client.deleted, [("task-1", False)])
 
     def test_progress_callback_invoked_and_monotonic(self):
         client = FakeGopeedClient(
@@ -221,8 +228,8 @@ class GopeedDownloadServiceTests(unittest.TestCase):
         )
         self.assertEqual(len(client.created), 2, "必须重建第二个 Gopeed 任务")
         self.assertEqual(
-            client.deleted, ["task-1", "task-2"],
-            "失败任务与完成后的任务记录都应被清理（文件保留）",
+            client.deleted, [("task-1", False), ("task-2", False)],
+            "失败任务与完成后的任务记录都应被清理（文件保留，force=False）",
         )
 
     def test_stop_requested_pauses_and_deletes_task(self):
@@ -243,8 +250,49 @@ class GopeedDownloadServiceTests(unittest.TestCase):
             )
         self.assertEqual(len(client.created), 1)
         self.assertEqual(client.paused, ["task-1"], "停止时必须暂停 Gopeed 任务")
-        self.assertEqual(client.deleted, ["task-1"], "未保留断点时删除 Gopeed 任务")
+        self.assertEqual(
+            client.deleted, [("task-1", True)],
+            "停止路径必须无条件 force 删除（连同 Gopeed 侧部分文件）",
+        )
         service._fallback_service.download_file.assert_not_called()
+
+    def test_stop_requested_force_deletes_even_with_preserve_partial(self):
+        """preserve_partial=True 也不再保留 Gopeed 任务/部分文件（停止即清空中继）。"""
+        client = FakeGopeedClient(
+            [[{"status": "running", "downloaded": 1, "size": 10}]],
+            str(Path(self.local_path).parent),
+        )
+        service = self.make_service(client, fallback=MagicMock())
+        stop_calls = {"count": 0}
+
+        def stop_requested():
+            stop_calls["count"] += 1
+            return stop_calls["count"] > 1
+
+        with self.assertRaises(InterruptedError):
+            service.download_file(
+                self.file_item, self.local_path, stop_requested=stop_requested,
+                preserve_partial=True,
+            )
+        self.assertEqual(client.paused, ["task-1"])
+        self.assertEqual(
+            client.deleted, [("task-1", True)],
+            "停止路径即使 preserve_partial=True 也必须 force 删除",
+        )
+
+    def test_service_passes_connections_to_create_task(self):
+        """connections>0 时必须透传给 create_task（连接数用例：写死 0 即失败）。"""
+        client = FakeGopeedClient(
+            [[{"status": "done", "downloaded": 10, "size": 10, "write": True}]],
+            str(Path(self.local_path).parent),
+        )
+        service = self.make_service(client, connections=256)
+        service.download_file(self.file_item, self.local_path)
+        self.assertEqual(len(client.created), 1)
+        self.assertEqual(
+            client.created[0]["connections"], 256,
+            "connections=256 必须原样透传给 GopeedClient.create_task",
+        )
 
     def test_gopeed_unavailable_falls_back_to_builtin(self):
         broken = MagicMock()
@@ -360,6 +408,69 @@ class GopeedClientTests(unittest.TestCase):
         self.assertEqual(body["opts"]["path"], "/downloads")
         self.assertEqual(body["opts"]["name"], "f.mkv")
         self.assertEqual(body["opts"]["selectFiles"], [])
+        # connections 默认 0 → 不写 opts.extra（沿用 Gopeed 全局连接数）
+        self.assertNotIn("extra", body["opts"])
+
+    def test_create_task_with_connections_writes_opts_extra(self):
+        captured = {}
+
+        def fake_request(method, url, **kwargs):
+            captured.update(kwargs)
+            return self._response(payload={"code": 0, "data": "t-43"})
+
+        client = GopeedClient("http://gopeed:9999", "tok", timeout=5)
+        with patch.object(gopeed_module.requests, "request", side_effect=fake_request):
+            client.create_task(
+                "https://dl.example.com/f", {"user-agent": "ua"},
+                "/downloads", "f.mkv", connections=256,
+            )
+        self.assertEqual(captured["json"]["opts"]["extra"], {"connections": 256})
+
+    def test_create_task_with_zero_connections_omits_extra(self):
+        captured = {}
+
+        def fake_request(method, url, **kwargs):
+            captured.update(kwargs)
+            return self._response(payload={"code": 0, "data": "t-44"})
+
+        client = GopeedClient("http://gopeed:9999", "tok", timeout=5)
+        with patch.object(gopeed_module.requests, "request", side_effect=fake_request):
+            client.create_task(
+                "https://dl.example.com/f", {}, "/downloads", "f.mkv",
+                connections=0,
+            )
+        self.assertNotIn("extra", captured["json"]["opts"])
+
+    def test_delete_task_default_url_has_no_force(self):
+        captured = {}
+
+        def fake_request(method, url, **kwargs):
+            captured["method"] = method
+            captured["url"] = url
+            return self._response()
+
+        client = GopeedClient("http://gopeed:9999", "tok", timeout=5)
+        with patch.object(gopeed_module.requests, "request", side_effect=fake_request):
+            client.delete_task("t-1")
+        self.assertEqual(captured["method"], "DELETE")
+        self.assertEqual(captured["url"], "http://gopeed:9999/api/v1/tasks/t-1")
+
+    def test_delete_task_force_appends_force_true(self):
+        captured = {}
+
+        def fake_request(method, url, **kwargs):
+            captured["method"] = method
+            captured["url"] = url
+            return self._response()
+
+        client = GopeedClient("http://gopeed:9999", "tok", timeout=5)
+        with patch.object(gopeed_module.requests, "request", side_effect=fake_request):
+            client.delete_task("t-1", force=True)
+        self.assertEqual(captured["method"], "DELETE")
+        self.assertTrue(
+            captured["url"].endswith("/api/v1/tasks/t-1?force=true"),
+            f"force=true 必须以 ?force=true 结尾，实际：{captured['url']}",
+        )
 
     def test_401_raises_without_token_in_message(self):
         client = GopeedClient("http://gopeed:9999", "secret-token")
@@ -454,6 +565,41 @@ class QuarkDownload分流Tests(unittest.TestCase):
         )
         gopeed_instance.download_file.assert_called_once()
 
+    def test_gopeed_connections_passed_to_gopeed_service(self):
+        """QuarkFileService 必须把 gopeed_connections 透传给 GopeedDownloadService。"""
+        quark = self.make_quark(
+            cross_transfer_downloader="gopeed",
+            gopeed_url="http://gopeed:9999",
+            gopeed_token="tok",
+            gopeed_connections=256,
+        )
+        gopeed_instance = MagicMock()
+        gopeed_instance.download_file.return_value = "/gopeed/out.mkv"
+        gopeed_ctor = MagicMock(return_value=gopeed_instance)
+        with patch.object(files_module, "HttpFileDownloadService", self.http_cls), \
+                patch.object(files_module, "GopeedDownloadService", gopeed_ctor):
+            quark.download_file(self.file_item, self.local_path)
+        gopeed_ctor.assert_called_once()
+        self.assertEqual(
+            gopeed_ctor.call_args.kwargs.get("connections"), 256,
+            "gopeed_connections=256 必须透传到 GopeedDownloadService",
+        )
+
+    def test_gopeed_connections_default_zero_passthrough(self):
+        """未配置时（默认 0）同样显式透传 0（表示沿用 Gopeed 全局连接数）。"""
+        quark = self.make_quark(
+            cross_transfer_downloader="gopeed",
+            gopeed_url="http://gopeed:9999",
+        )
+        gopeed_instance = MagicMock()
+        gopeed_instance.download_file.return_value = "/gopeed/out.mkv"
+        gopeed_ctor = MagicMock(return_value=gopeed_instance)
+        with patch.object(files_module, "HttpFileDownloadService", self.http_cls), \
+                patch.object(files_module, "GopeedDownloadService", gopeed_ctor):
+            quark.download_file(self.file_item, self.local_path)
+        gopeed_ctor.assert_called_once()
+        self.assertEqual(gopeed_ctor.call_args.kwargs.get("connections"), 0)
+
     def test_gopeed_error_falls_back_to_builtin_with_warning(self):
         quark = self.make_quark(
             cross_transfer_downloader="gopeed",
@@ -479,6 +625,151 @@ class QuarkDownload分流Tests(unittest.TestCase):
         ]
         self.assertEqual(len(warnings), 1)
         self.assertNotIn("unit-test-token", warnings[0])
+
+
+class TransferCancel中继清理Tests(unittest.TestCase):
+    """传输层取消（B2）：取消即清空中继，含已下完的完整缓存与部分缓存。
+
+    只删本任务的 cloud-transfer-<hash>.bin 与 .meta.json/.parts.json（含 .tmp
+    变体），不碰同目录其它文件。
+    """
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.payload = PAYLOAD
+        self.file_item = CloudFile(
+            id="fid1", name="movie.mkv", is_directory=False,
+            size=len(self.payload),
+            sha1=hashlib.sha1(self.payload).hexdigest(),
+            md5=hashlib.md5(self.payload).hexdigest(),
+        )
+
+    def _make_manager(self, download_file=None, upload_file=None):
+        source = SimpleNamespace(
+            name="夸克网盘",
+            supports=lambda _capability: False,
+            require=lambda _capability: SimpleNamespace(download_file=download_file),
+        )
+
+        def require_target(capability):
+            cap = transfer_module.CloudDriveCapability
+            if capability == cap.LOCAL_UPLOAD:
+                return SimpleNamespace(
+                    upload_file=upload_file, upload_from_link=None,
+                    upload_progressive=None,
+                )
+            if capability == cap.FILE_QUERY:
+                return SimpleNamespace(find_file=lambda *_args: None)
+            raise AssertionError(f"测试不应 require {capability}")
+
+        target = SimpleNamespace(
+            name="115",
+            supports=lambda _capability: False,
+            require=require_target,
+        )
+
+        def resolver(key):
+            return target if key == "115" else source
+
+        manager = transfer_module.CrossTransferTaskManager(
+            resolver, download_path=self.tempdir.name,
+            download_threads=5, max_concurrent=1, direct_stream=False,
+        )
+        return manager
+
+    def _seed_complete_cache(self, manager, with_stale_parts=True):
+        cache_key = manager._cache_key("quark", self.file_item)
+        cache_path = manager._cache_path(cache_key)
+        cache_path.write_bytes(self.payload)
+        manager._mark_complete_cache(cache_path, cache_key, self.file_item)
+        if with_stale_parts:
+            manager._cache_parts_path(cache_path).write_text(
+                json.dumps({
+                    "version": 1, "total": len(self.payload),
+                    "part_size": 4, "completed": [0, 4],
+                }), encoding="utf-8",
+            )
+        return cache_path
+
+    def _wait_terminal(self, manager, task_id, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with manager._lock:
+                task = manager._tasks.get(task_id)
+                status = task["status"] if task else None
+            if task and status not in manager.ACTIVE:
+                return task
+            time.sleep(0.05)
+        self.fail("任务未在期限内进入终态")
+
+    def test_cancel_during_upload_deletes_complete_cache_and_parts(self):
+        """完整缓存 + 上传中取消 → .bin/.meta.json/.parts.json 全部删除。"""
+        def upload_file(source_path, save_path, target_name, progress_callback=None):
+            # 上传途中用户点停止：stop_event 置位后下一次进度回调立即中断
+            with manager._lock:
+                internal = next(iter(manager._tasks.values()))
+            internal["stop_event"].set()
+            progress_callback(1, len(self.payload))
+            return True
+
+        manager = self._make_manager(upload_file=upload_file)
+        cache_path = self._seed_complete_cache(manager)
+        meta_path = manager._cache_meta_path(cache_path)
+        parts_path = manager._cache_parts_path(cache_path)
+        bystander = Path(self.tempdir.name) / "keep-me.bin"
+        bystander.write_bytes(b"bystander")
+
+        public = manager.create(
+            source_key="quark", source_file=self.file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+        )
+        task = self._wait_terminal(manager, public["id"])
+
+        self.assertEqual(task["status"], "canceled")
+        self.assertIn("已清理中继缓存", task["message"])
+        self.assertFalse(cache_path.exists(), "取消必须删除完整缓存 .bin")
+        self.assertFalse(meta_path.exists(), "取消必须删除 .meta.json")
+        self.assertFalse(parts_path.exists(), "取消必须删除 .parts.json")
+        self.assertTrue(bystander.is_file(), "不得误删同目录其它文件")
+
+    def test_cancel_during_download_deletes_partial_cache_and_parts(self):
+        """下载中取消（部分缓存 + parts.json）→ 缓存与 parts.json 全部删除。"""
+        manager_ref = {}
+
+        def download_file(file_item, local_path, progress_callback=None,
+                          stop_requested=None, preserve_partial=True,
+                          download_threads=5):
+            manager = manager_ref["manager"]
+            cache_path = manager._cache_path(manager._cache_key("quark", file_item))
+            cache_path.write_bytes(self.payload[:4])
+            manager._cache_parts_path(cache_path).write_text(
+                json.dumps({
+                    "version": 1, "total": len(self.payload),
+                    "part_size": 4, "completed": [0],
+                }), encoding="utf-8",
+            )
+            with manager._lock:
+                internal = next(iter(manager._tasks.values()))
+            internal["stop_event"].set()
+            raise InterruptedError
+
+        manager = self._make_manager(download_file=download_file)
+        manager_ref["manager"] = manager
+        cache_path = manager._cache_path(manager._cache_key("quark", self.file_item))
+        meta_path = manager._cache_meta_path(cache_path)
+        parts_path = manager._cache_parts_path(cache_path)
+
+        public = manager.create(
+            source_key="quark", source_file=self.file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+        )
+        task = self._wait_terminal(manager, public["id"])
+
+        self.assertEqual(task["status"], "canceled")
+        self.assertFalse(cache_path.exists(), "取消必须删除部分缓存 .bin")
+        self.assertFalse(meta_path.exists(), "取消必须删除 .meta.json")
+        self.assertFalse(parts_path.exists(), "取消必须删除 .parts.json")
 
 
 if __name__ == "__main__":

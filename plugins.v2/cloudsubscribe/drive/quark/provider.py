@@ -26,6 +26,7 @@ class QuarkDrive:
     gopeed_url: str = ""
     gopeed_token: str = field(default="", repr=False)
     gopeed_path_prefix: str = field(default="", repr=False)
+    gopeed_connections: int = 0
 
     def close(self) -> None:
         """关闭底层 HTTP 会话。"""
@@ -49,6 +50,7 @@ def create_quark_provider(drive: QuarkDrive) -> CloudDriveProvider:
         gopeed_url=drive.gopeed_url,
         gopeed_token=drive.gopeed_token,
         gopeed_path_prefix=drive.gopeed_path_prefix,
+        gopeed_connections=drive.gopeed_connections,
     )
     share = QuarkShareService(drive.client, files)
     upload = QuarkUploadService(drive.client, files)

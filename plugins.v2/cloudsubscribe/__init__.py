@@ -101,7 +101,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.43"
+    plugin_version = "1.6.44"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -185,6 +185,7 @@ class CloudSubscribe(_PluginBase):
     _gopeed_url: str = "http://gopeed:9999"
     _gopeed_token: str = ""
     _gopeed_path_prefix: str = ""
+    _gopeed_connections: int = 0  # 0=沿用 Gopeed 全局连接数；夸克建议 256
     _subscription_concurrency: int = 2
     _batch_size: int = 20
     _batch_interval: float = 3
@@ -857,6 +858,12 @@ class CloudSubscribe(_PluginBase):
         self._gopeed_url = str(config.get("gopeed_url", "http://gopeed:9999") or "").strip()
         self._gopeed_token = str(config.get("gopeed_token", "") or "").strip()
         self._gopeed_path_prefix = str(config.get("gopeed_path_prefix", "") or "").strip()
+        try:
+            gopeed_connections = int(config.get("gopeed_connections", 0) or 0)
+        except (TypeError, ValueError):
+            gopeed_connections = 0
+        # 0 = 沿用 Gopeed 全局连接数；>0 = 建任务时显式传给 Gopeed（夸克建议 256）
+        self._gopeed_connections = max(0, gopeed_connections)
 
         self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", 2) or 2), 5))
         self._batch_size = int(config.get("batch_size", 20) or 20)

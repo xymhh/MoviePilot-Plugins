@@ -1403,13 +1403,13 @@ class CrossTransferTaskManager:
             if temporary_path:
                 self._delete_cache_path(Path(temporary_path))
         except InterruptedError:
-            if (
-                    'temporary_path' in locals() and temporary_path
-                    and not locals().get("cache_complete", False)
-                    and not self._cache_parts_path(Path(temporary_path)).is_file()
-            ):
+            # 手动取消即清空中继（含已下完的完整缓存）：只删本任务的
+            # cloud-transfer-<hash>.bin 及其 .meta.json/.parts.json（含 .tmp 变体），
+            # 不碰同目录下其它文件。
+            if 'temporary_path' in locals() and temporary_path:
                 self._delete_cache_path(Path(temporary_path))
-            self._update(task_id, status="canceled", phase="canceled", message="任务已取消",
+            self._update(task_id, status="canceled", phase="canceled",
+                         message="任务已取消并已清理中继缓存",
                          speed_bytes_per_second=0.0, finished_at=time.time())
         except Exception as error:
             if (

@@ -157,6 +157,12 @@ class QuarkDriverDefinition(DriverDefinition):
                 value = config.get(key, default)
             return str(value if value is not None else default or "").strip()
 
+        def config_int(key: str, default: int = 0) -> int:
+            try:
+                return int(config_value(key, str(default)) or default)
+            except (TypeError, ValueError):
+                return default
+
         return create_quark_provider(QuarkDrive(
             client=client,
             cross_transfer_downloader=(
@@ -165,4 +171,5 @@ class QuarkDriverDefinition(DriverDefinition):
             gopeed_url=config_value("gopeed_url", "http://gopeed:9999"),
             gopeed_token=config_value("gopeed_token"),
             gopeed_path_prefix=config_value("gopeed_path_prefix"),
+            gopeed_connections=max(0, config_int("gopeed_connections", 0)),
         ))

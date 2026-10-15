@@ -186,6 +186,7 @@ class UIConfig:
             "gopeed_url": "http://gopeed:9999",
             "gopeed_token": "",
             "gopeed_path_prefix": "",
+            "gopeed_connections": 0,
             "subscription_concurrency": 2,
             "batch_size": 20,
             "batch_interval": 3,

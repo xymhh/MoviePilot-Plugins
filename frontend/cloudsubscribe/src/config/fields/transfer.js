@@ -246,6 +246,18 @@ export function createTransferSection(options) {
               config.cross_transfer_downloader === "gopeed",
           },
           {
+            key: "gopeed_connections",
+            label: "Gopeed 连接数",
+            type: "number",
+            default: 0,
+            min: 0,
+            hint: "0=沿用 Gopeed 全局连接数；夸克建议 256",
+            cols: 4,
+            show: (config) =>
+              Boolean(config.cross_transfer_enabled) &&
+              config.cross_transfer_downloader === "gopeed",
+          },
+          {
             key: "gopeed_downloader_info",
             type: "info",
             label: "Gopeed 外部下载器说明",

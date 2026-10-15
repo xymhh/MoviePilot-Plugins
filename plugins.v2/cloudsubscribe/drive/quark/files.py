@@ -71,6 +71,7 @@ class QuarkFileService(CloudDriveFileServiceBase):
     gopeed_url: str = ""
     gopeed_token: str = field(default="", repr=False)
     gopeed_path_prefix: str = field(default="", repr=False)
+    gopeed_connections: int = 0
     _directory_lock: RLock = field(default_factory=RLock, repr=False)
     _directory_cache: TTLCache = field(init=False, repr=False)
 
@@ -99,6 +100,7 @@ class QuarkFileService(CloudDriveFileServiceBase):
             gopeed_url=self.gopeed_url,
             gopeed_token=self.gopeed_token,
             path_prefix=self.gopeed_path_prefix,
+            connections=self.gopeed_connections,
             fallback_service=service,
         )
         return gopeed.download_file(
