@@ -612,15 +612,25 @@ function confirmRetrySelectedHistory(payload) {
   retryBatchVisible.value = true
 }
 
+// 后端单次上限 20 条，超出时前端分批串行提交，避免整批被拒。
+const RETRY_BATCH_CHUNK_SIZE = 20
+
 async function retryFailedBatch() {
   const records = retryBatchRecords.value
   if (!records.length || retryingHistoryKey.value) return
   retryingHistoryKey.value = "batch"
   try {
-    const result = await api.post(`plugin/${props.pluginId}/history/retry_batch`, { records })
-    if (!result?.success) throw new Error(result?.message || "批量重试失败")
-    const data = result?.data || {}
-    notify(`已提交 ${data.submitted ?? 0} 条，跳过 ${data.skipped ?? 0} 条`)
+    let submitted = 0
+    let skipped = 0
+    for (let index = 0; index < records.length; index += RETRY_BATCH_CHUNK_SIZE) {
+      const chunk = records.slice(index, index + RETRY_BATCH_CHUNK_SIZE)
+      const result = await api.post(`plugin/${props.pluginId}/history/retry_batch`, { records: chunk })
+      if (!result?.success) throw new Error(result?.message || "批量重试失败")
+      const data = result?.data || {}
+      submitted += Number(data.submitted ?? 0)
+      skipped += Number(data.skipped ?? 0)
+    }
+    notify(`已提交 ${submitted} 条，跳过 ${skipped} 条`)
     retryBatchVisible.value = false
     retryBatchRecords.value = []
     await Promise.all([loadPage(false), loadSummary(false)])
