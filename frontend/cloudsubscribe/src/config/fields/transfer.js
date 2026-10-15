@@ -162,6 +162,18 @@ export function createTransferSection(options) {
             show: enabled("cross_transfer_enabled"),
           },
           {
+            key: "cross_transfer_rapid_miss_action",
+            label: "秒传未命中处理",
+            type: "select",
+            items: [
+              { title: "回落普通上传（默认）", value: "fallback" },
+              { title: "中止并清理（不上传）", value: "abort" },
+            ],
+            hint: "选「中止并清理」时秒传未命中直接中止该文件的转存：不会产生任何上传流量，也不会真正入库该文件，本地中继缓存一并删除；源文件有校验和时先零流量探测再决定是否下载",
+            cols: 4,
+            show: enabled("cross_transfer_enabled"),
+          },
+          {
             key: "cross_transfer_download_threads",
             label: "下载线程数",
             type: "number",

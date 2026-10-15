@@ -101,7 +101,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.44"
+    plugin_version = "1.6.45"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -182,6 +182,7 @@ class CloudSubscribe(_PluginBase):
     _cross_transfer_upload_concurrency: int = 4
     # 外部下载器（夸克→本地一步可选用 Gopeed；默认 builtin 与旧版行为一致）
     _cross_transfer_downloader: str = "builtin"
+    _cross_transfer_rapid_miss_action: str = "fallback"
     _gopeed_url: str = "http://gopeed:9999"
     _gopeed_token: str = ""
     _gopeed_path_prefix: str = ""
@@ -852,9 +853,17 @@ class CloudSubscribe(_PluginBase):
 
         self._cross_transfer_downloader = str(
             config.get("cross_transfer_downloader", "builtin") or "builtin"
-        ).strip().lower()
+        )
         if self._cross_transfer_downloader not in {"builtin", "gopeed"}:
             self._cross_transfer_downloader = "builtin"
+        rapid_miss_action = str(
+            config.get("cross_transfer_rapid_miss_action", "fallback") or "fallback"
+        ).strip().lower()
+        # 秒传未命中处理：fallback=回落普通上传（默认）；abort=中止且不真实上传。
+        # 非法值一律回退 fallback，保证老行为逐字节不变。
+        self._cross_transfer_rapid_miss_action = (
+            rapid_miss_action if rapid_miss_action in {"fallback", "abort"} else "fallback"
+        )
         self._gopeed_url = str(config.get("gopeed_url", "http://gopeed:9999") or "").strip()
         self._gopeed_token = str(config.get("gopeed_token", "") or "").strip()
         self._gopeed_path_prefix = str(config.get("gopeed_path_prefix", "") or "").strip()

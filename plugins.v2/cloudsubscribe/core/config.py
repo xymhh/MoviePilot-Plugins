@@ -183,6 +183,7 @@ class UIConfig:
             "cross_transfer_direct_stream": True,
             "cross_transfer_upload_concurrency": 4,
             "cross_transfer_downloader": "builtin",
+            "cross_transfer_rapid_miss_action": "fallback",
             "gopeed_url": "http://gopeed:9999",
             "gopeed_token": "",
             "gopeed_path_prefix": "",

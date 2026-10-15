@@ -241,6 +241,61 @@ class P115UploadService(OwnerDelegator):
         self._target_file_cache.clear()
         return True
 
+    def try_rapid_upload_by_hash(
+            self, save_path: str, target_name: str, algorithm: str,
+            checksum: str, size: int,
+            read_range_bytes_or_hash: Optional[Callable[[str], str]] = None,
+    ) -> Optional[bool]:
+        """无本地文件的秒传探测（abort 模式专用），只走 ``upload_file_init``。
+
+        返回 True=命中 / False=确认未命中 / None=无法探测（缺少二次校验数据源
+        或探测过程异常）。探测本身不产生真实上传；未命中时若 115 侧返回了可用
+        的上传会话信息，尽力取消后再返回（没有残留就跳过）。
+        """
+        if str(algorithm or "").lower() != "sha1" or not P115_AVAILABLE or not self.client:
+            return None
+        actual = str(checksum or "").strip().upper()
+        total = int(size or 0)
+        if not actual or total <= 0:
+            return None
+        files = self._owner._get_component(P115FileService)
+        lookup = P115DirectoryReader(files).resolve_directory(save_path, create=True)
+        if not lookup.checked or lookup.directory_id is None:
+            return None
+        # p115client：filesize >= 1MB 时 upload_file_init 会要求二次校验范围
+        # （sign_check，形如 "start-end"）的 SHA1；没有数据源就无法零流量探测。
+        if total >= 1024 * 1024 and read_range_bytes_or_hash is None:
+            return None
+        try:
+            response = self._rate_limited_call(
+                self.client.upload_file_init,
+                filename=target_name,
+                filesize=total,
+                filesha1=actual,
+                pid=int(lookup.directory_id or 0),
+                read_range_bytes_or_hash=read_range_bytes_or_hash,
+            )
+            check_response(response)
+        except Exception as error:  # noqa: BLE001 - 探测异常按无法判定处理，不误伤任务
+            logger.debug(f"115 秒传探测异常（{target_name}）：{error}")
+            return None
+        if response.get("reuse"):
+            self._target_file_cache.clear()
+            return True
+        self._cancel_probe_residue(response)
+        return False
+
+    @staticmethod
+    def _cancel_probe_residue(response: Mapping) -> None:
+        """探测未命中后清理 115 侧可能的上传会话；没有残留就跳过。"""
+        data = (response or {}).get("data") or {}
+        upload_id = data.get("upload_id") or data.get("UploadId")
+        target = data.get("url") or data.get("target")
+        if not (upload_id and target and P115OSS_AVAILABLE):
+            return
+        with contextlib.suppress(Exception):
+            oss_multipart_upload_cancel(target, upload_id)
+
     def upload_file(
             self,
             local_path: str,

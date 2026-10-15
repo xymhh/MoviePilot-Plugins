@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Semaphore, Thread
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -48,6 +48,47 @@ def _fd_safe_workers(requested: int, ceiling: int = 256) -> int:
 
 class _RangeDownloadUnsupported(RuntimeError):
     pass
+
+
+class RapidMissAborted(RuntimeError):
+    """秒传未命中且用户设置为「中止并清理」：不真实上传、不留缓存。"""
+
+
+class _RemoteSha1RangeReader:
+    """abort 秒传探测：按 115 二次校验范围从源盘直链读取并返回大写 SHA1。
+
+    sign_check 由 115 下发、形如 "start-end"（见 p115client upload_file_init）；
+    只读取该小段并返回其 SHA1，不落本地文件、不产生上传流量。
+    """
+
+    def __init__(
+            self, url: str, headers: Mapping | None, size: int,
+            stop_requested: Optional[Callable[[], bool]] = None,
+    ):
+        self._url = str(url or "")
+        self._headers = dict(headers or {})
+        self._size = int(size or 0)
+        self._stop_requested = stop_requested
+
+    def read_range_sha1(self, value: str) -> str:
+        if self._stop_requested and self._stop_requested():
+            raise InterruptedError
+        try:
+            start, end = (int(part) for part in str(value).split("-", 1))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"无效的 115 校验范围：{value}") from error
+        if not self._url or start < 0 or end < start or end >= self._size:
+            raise ValueError(f"115 校验范围不可用：{value}/{self._size}")
+        headers = dict(self._headers)
+        headers["Range"] = f"bytes={start}-{end}"
+        headers.setdefault("Accept-Encoding", "identity")
+        response = requests.get(self._url, headers=headers, timeout=(15, 60))
+        if response.status_code != 206:
+            raise IOError(f"源盘不支持 HTTP Range：HTTP {response.status_code}")
+        data = response.content
+        if len(data) != end - start + 1:
+            raise IOError(f"源盘 Range 读取不完整：{len(data)}/{end - start + 1}")
+        return hashlib.sha1(data).hexdigest().upper()
 
 
 def _describe_transfer_error(error: BaseException) -> str:
@@ -511,6 +552,38 @@ class LocalRapidUploadAdapter:
             raise RuntimeError("秒传成功后未找到目标文件")
         return RapidUploadResult(True, file=item, message="秒传命中")
 
+    def probe_by_hash(
+            self, save_path: str, target_name: str, algorithm: str,
+            checksum: str, size: int,
+            read_range_bytes_or_hash: Optional[Callable[[str], str]] = None,
+    ) -> Optional[RapidUploadResult]:
+        """无本地文件的秒传探测（abort 模式专用）。
+
+        返回 RapidUploadResult=已探测（reused 表示命中）/ None=无法探测
+        （提供方未实现或缺少探测条件），调用方在 None 时退回下载后再探测。
+        """
+        algorithm = str(algorithm or "").lower()
+        if algorithm not in self._algorithms:
+            return None
+        probe = getattr(self._upload, "try_rapid_upload_by_hash", None)
+        if not callable(probe):
+            return None
+        actual = str(checksum or "").lower()
+        if not actual:
+            return None
+        outcome = probe(
+            save_path, target_name, algorithm, actual.upper(),
+            int(size or 0), read_range_bytes_or_hash,
+        )
+        if outcome is None:
+            return None
+        if not outcome:
+            return RapidUploadResult(False, message="未命中秒传")
+        item = self._files.find_file(save_path, target_name)
+        if not item:
+            raise RuntimeError("秒传成功后未找到目标文件")
+        return RapidUploadResult(True, file=item, message="秒传命中")
+
 
 @dataclass(frozen=True)
 class CrossDriveTransferResult:
@@ -570,11 +643,17 @@ class CrossTransferTaskManager:
                  download_path: str = "", download_threads: int = 5,
                  max_concurrent: int = 2,
                  direct_stream: bool = True,
+                 rapid_miss_action: str = "fallback",
                  on_change: Optional[Callable[[], None]] = None):
         self._provider_resolver = provider_resolver
         self._download_path = str(download_path or "").strip()
         self._download_threads = max(1, min(int(download_threads or 5), 256))
         self._direct_stream = bool(direct_stream)
+        # 秒传未命中处理：fallback=回落普通上传（默认，行为不变）；abort=中止不上传。
+        # 非法值一律回退 fallback。
+        self._rapid_miss_action = (
+            "abort" if str(rapid_miss_action or "").strip().lower() == "abort" else "fallback"
+        )
         self._transfer_slots = Semaphore(max(1, min(int(max_concurrent or 2), 10)))
         self._tasks: dict[str, dict] = {}
         self._lock = Lock()
@@ -1081,6 +1160,7 @@ class CrossTransferTaskManager:
             target_name_text = str(
                 getattr(target, "name", "") or target_key or "目标网盘"
             )
+            rapid_miss_abort = self._rapid_miss_action == "abort"
             remote_rapid_attempted = False
             if (
                     not source_path and algorithm and checksum
@@ -1113,6 +1193,9 @@ class CrossTransferTaskManager:
                             finished_at=time.time(),
                         )
                         return
+                    if rapid_miss_abort:
+                        # abort 模式：下载前探测未命中即中止（不下载、不上传）
+                        raise RapidMissAborted()
             source_provider = None
             source_name = ""
             if not source_path:
@@ -1122,8 +1205,75 @@ class CrossTransferTaskManager:
                     or task["source_provider"] or "源网盘"
                 )
             if (
+                    rapid_miss_abort and not source_path
+                    and not remote_rapid_attempted
+                    and algorithm and checksum
+                    and target.supports(CloudDriveCapability.RAPID_UPLOAD)
+            ):
+                # abort 模式（先探测后下载）：115 这类探测器需要本地文件的提供方
+                # 走无本地文件的秒传探测；源文件有校验和时零流量，≥1MB 时用源盘
+                # 直链读取 115 二次校验小段（不落本地）；无法探测才继续下载。
+                probe = getattr(
+                    target.require(CloudDriveCapability.RAPID_UPLOAD),
+                    "probe_by_hash", None,
+                )
+                if callable(probe):
+                    expected_size = int(task["total"] or 0)
+                    read_range = None
+                    if (
+                            expected_size >= 1024 * 1024
+                            and source_provider.supports(
+                                CloudDriveCapability.FILE_DOWNLOAD
+                            )
+                    ):
+                        try:
+                            download_url, download_headers = source_provider.require(
+                                CloudDriveCapability.FILE_DOWNLOAD
+                            ).resolve_download_link(task["source_file"])
+                            read_range = _RemoteSha1RangeReader(
+                                download_url, download_headers, expected_size,
+                                stop_requested=stop_event.is_set,
+                            ).read_range_sha1
+                        except Exception as error:  # noqa: BLE001 - 取链失败退回下载后探测
+                            logger.debug(f"秒传探测取链失败，转为下载后探测：{error}")
+                            read_range = None
+                    self._update(
+                        task_id, phase="rapid_upload",
+                        message=f"正在向{target_name_text}尝试秒传（先探测后下载）",
+                        progress=5,
+                    )
+                    probe_result = probe(
+                        target_path, target_name, algorithm, checksum,
+                        expected_size, read_range,
+                    )
+                    if (
+                            probe_result is not None and probe_result.reused
+                            and probe_result.file
+                    ):
+                        result_file = probe_result.file
+                        # 探测命中也可能已有完整缓存，先清理再标成功（避免观测到
+                        # success 时缓存还在）
+                        self._delete_cache_path(Path(self._temporary_path(task)))
+                        self._update(
+                            task_id, status="success", phase="done", progress=100,
+                            transferred=task["total"], speed_bytes_per_second=0.0,
+                            stage_transferred=0, stage_total=0,
+                            message=f"已秒传到{target_name_text}", method="rapid",
+                            result_file_id=str(result_file.id or ""),
+                            result_file_name=str(result_file.name or target_name),
+                            result_file_size=int(result_file.size or task["total"] or 0),
+                            result_sha1=str(result_file.sha1 or ""),
+                            result_md5=str(result_file.md5 or ""),
+                            finished_at=time.time(),
+                        )
+                        return
+                    if probe_result is not None and not probe_result.reused:
+                        raise RapidMissAborted()
+                    # probe_result is None：无法零流量探测 → 继续下载后再按 abort 处理
+            if (
                     not source_path
                     and self._direct_stream
+                    and not rapid_miss_abort
                     and fallback
                     and algorithm == "sha1"
                     and bool(checksum)
@@ -1247,7 +1397,7 @@ class CrossTransferTaskManager:
                     download_message = f"正在从{source_name}下载到本地缓存"
                     downloader = source_provider.require(CloudDriveCapability.FILE_DOWNLOAD)
                     can_stream = (
-                            fallback
+                            fallback and not rapid_miss_abort
                             and algorithm == "md5"
                             and bool(checksum)
                             and expected_size > 0
@@ -1382,9 +1532,13 @@ class CrossTransferTaskManager:
             result = CrossDriveTransfer().transfer(
                 source_path, target, target_path, target_name,
                 transfer_algorithm, transfer_checksum,
-                fallback=fallback, progress_callback=progress,
+                # abort 模式：秒传未命中时不进入真实上传（fallback 模式参数不变）
+                fallback=(fallback and not rapid_miss_abort),
+                progress_callback=progress,
             )
             if not result:
+                if rapid_miss_abort:
+                    raise RapidMissAborted()
                 raise RuntimeError("秒传未命中且普通上传失败" if fallback else "秒传未命中")
             result_file = result.file
             rapid = result.method == "rapid"
@@ -1410,6 +1564,17 @@ class CrossTransferTaskManager:
                 self._delete_cache_path(Path(temporary_path))
             self._update(task_id, status="canceled", phase="canceled",
                          message="任务已取消并已清理中继缓存",
+                         speed_bytes_per_second=0.0, finished_at=time.time())
+        except RapidMissAborted:
+            # abort 模式（秒传未命中即中止）：无条件清理本任务中继缓存——即使
+            # cache_complete 为真也不保留（与 fallback 保留完整缓存供重试不同）；
+            # 探测在下载前发生时 temporary_path 尚未赋值，无需清理。
+            if 'temporary_path' in locals() and temporary_path:
+                self._delete_cache_path(Path(temporary_path))
+            message = "未命中秒传，已按设置中止（未上传任何数据）"
+            self._update(task_id, status="failed", phase="aborted",
+                         message=message, error=message,
+                         abort_reason="rapid_miss",
                          speed_bytes_per_second=0.0, finished_at=time.time())
         except Exception as error:
             if (
