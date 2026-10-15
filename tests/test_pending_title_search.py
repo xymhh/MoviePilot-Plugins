@@ -214,11 +214,38 @@ class TestPendingTitleStore(unittest.TestCase):
         self.assertEqual(hit["match_candidates"], 2)
         self.assertEqual([item["text"] for item in store.peek()], ["仙逆"])
 
-    def test_sole_fallback_respects_media_type(self):
-        """类型不相容的记录不参与点选兜底。"""
+    def test_sole_fallback_prefers_compatible_type(self):
+        """点选兜底优先取类型相容的记录，别被更近的不相容记录抢走。"""
         store = PendingTitleStore()
-        store.remember(text="画江湖", mtype="movie")
-        self.assertIsNone(store.consume(titles=["画江湖之不良人"], mtype="tv", allow_sole=True))
+        store.remember(text="洛基", mtype="movie")
+        store.remember(text="画江湖", mtype="tv")
+        hit = store.consume(titles=["画江湖之不良人"], mtype="tv", allow_sole=True)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["text"], "画江湖")
+        self.assertEqual(hit["match"], "sole")
+        self.assertEqual(hit["match_candidates"], 1)
+
+    def test_sole_fallback_accepts_incompatible_type(self):
+        """1.6.42：登记被后台识别成电影、用户点选的是电视剧时，点选兜底仍要接上。
+
+        线上案例（2026-10-15 11:58）：发「洛基」→ 后台 TMDB 把登记记录补成
+        电影 洛基 (2021) 636901，用户点选的是 电视剧 洛基 (2021) 84958 →
+        类型硬过滤让四级匹配全不中 → 订阅没建、搜索落到平台、回「未搜索到资源」。
+        """
+        store = PendingTitleStore()
+        store.remember(text="洛基", mtype="movie", tmdbid=636901)
+        hit = store.consume(titles=["洛基"], tmdbid=84958, mtype="tv", allow_sole=True)
+        self.assertIsNotNone(hit)
+        self.assertEqual(hit["text"], "洛基")
+        self.assertEqual(hit["match"], "sole")
+        self.assertEqual(hit["match_candidates"], 1)
+        self.assertEqual(len(store), 0)
+
+    def test_incompatible_type_still_keeps_record_for_other_callers(self):
+        """非点选路径（订阅搜索、扫描）不变：类型不相容就不消费，记录留到过期。"""
+        store = PendingTitleStore()
+        store.remember(text="洛基", mtype="movie", tmdbid=636901)
+        self.assertIsNone(store.consume(titles=["洛基"], tmdbid=84958, mtype="tv"))
         self.assertEqual(len(store), 1)
 
     def test_sole_fallback_requires_identity_signal(self):
@@ -582,6 +609,39 @@ class TestPendingTitleSearchHook(unittest.TestCase):
         # 订阅用的是「点选的那一项」的信息
         self.assertEqual(identity["tmdbid"], 83463)
         self.assertEqual(identity["title"], "画江湖之不良人")
+        self.assertEqual(len(self.store), 0)
+
+    def test_interaction_wrapper_handles_type_mismatched_registration(self):
+        """1.6.42：登记被后台识别成电影、点选电视剧时，点选接入器仍要建订阅。
+
+        复刻 2026-10-15 11:58 的线上案例（洛基）：登记记录 enrich 成
+        电影 洛基 (2021) 636901，用户点选 电视剧 洛基 (2021) 84958。
+        """
+        self._blocked()
+        record = self.store.remember(text="洛基")
+        self.store.enrich(
+            record["id"], title="洛基", year="2021", mtype="movie", tmdbid=636901
+        )
+        wrapper = self.hook._create_interaction_media_wrapper(fake_search_media_resources)
+        request = MagicMock()
+        request.meta = None
+        request.keyword = "洛基"
+        self.assertIsNone(
+            wrapper(
+                object(),
+                request=request,
+                mediainfo=FakeMediaInfo(
+                    title="洛基", year="2021", mtype="tv", tmdbid=84958
+                ),
+            )
+        )
+        self._wait_async()
+        self.assertEqual(len(self.selected), 1)
+        record, identity = self.selected[0]
+        self.assertEqual(record["match"], "sole")
+        # 订阅按「点选的那一项」建（电视剧 84958），登记记录只决定回执渠道
+        self.assertEqual(identity["tmdbid"], 84958)
+        self.assertEqual(identity["title"], "洛基")
         self.assertEqual(len(self.store), 0)
 
     def test_interaction_wrapper_sole_fallback_needs_record(self):

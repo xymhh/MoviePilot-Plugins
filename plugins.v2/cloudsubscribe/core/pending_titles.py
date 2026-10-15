@@ -6,6 +6,10 @@
 1.6.33 起：用户点选候选（InteractionChain 点选接入）这条路径上，只要登记表里还有
 类型相容的记录就用最近一条接入 —— 订阅本身按点选项自带的信息建，登记记录只决定
 回执走哪个渠道，所以不再强求片名对得上。其它调用方保持「宁可漏也不错建」。
+1.6.42 起：点选路径不再要求类型相容 —— 后台识别会把「洛基」补成同名电影（TMDB
+636901），用户点选的却是电视剧（84958），类型硬过滤把四级匹配全部挡死，点选接入
+彻底失效（2026-10-15 线上实测）。点选是用户明确的一次动作、登记记录只决定回执渠道，
+所以类型相容降为**优先**而非否决条件；非点选调用方（订阅搜索、扫描）行为不变。
 """
 
 import difflib
@@ -137,11 +141,13 @@ class PendingTitleStore:
         识别失败（例如输入比正式片名少一个字），因此补一级「模糊同名」兜底 —— 它只在
         候选类型相容、且两侧片名都够长时生效。
         ``allow_sole`` 只给「用户点选候选项」那一条路径用：点选是用户明确的一次动作，
-        此时类型相容的登记记录里取最近一条接入（``match="sole"``）。订阅本身由点选项
+        此时取登记表里最近一条记录接入（``match="sole"``），**类型相容的记录优先**，
+        没有类型相容的才退而用类型不相容的最近一条（后台识别把「洛基」认成同名电影、
+        用户点的却是电视剧时，硬过滤会让点选接入整体失效）。订阅本身由点选项
         携带的身份/片名决定，登记记录只决定回执发给谁，所以这里不必再要求片名对得上；
         多用户同时挂起记录时取最近一条，并在记录里留下同表候选条数便于日志核对。
         其它调用方（订阅搜索、扫描等）传 ``False``，保持「宁可漏也不错建」：片名对不上
-        就不消费，记录留到过期。
+        就不消费，记录留到过期；类型不相容也不消费。
         返回的记录带 ``match`` 字段标明命中级别，便于日志核对。
         """
         wanted_keys = {key for key in (normalize_title(item) for item in titles) if key}
@@ -156,15 +162,28 @@ class PendingTitleStore:
             title_hit: Optional[int] = None
             fuzzy_hit: Optional[int] = None
             sole_hit: Optional[int] = None
+            sole_fallback_hit: Optional[int] = None
             sole_candidates = 0
+            sole_fallback_candidates = 0
             best_ratio = 0.0
             for index, record in enumerate(self._records):
-                if not self._compatible(record, wanted_type):
+                record_keys = record.get("keys") or set()
+                compatible = self._compatible(record, wanted_type)
+                if allow_sole:
+                    # 记录按登记顺序追加，末条即最近一条登记
+                    if compatible:
+                        sole_hit = index
+                        sole_candidates += 1
+                    else:
+                        # 类型不相容的记录仍留作点选兜底的最后一级：后台识别的类型
+                        # 可能只是认错（洛基 → 同名电影），用户点选才是权威信号
+                        sole_fallback_hit = index
+                        sole_fallback_candidates += 1
+                if not compatible:
                     continue
                 if wanted_id and record.get("tmdbid") == wanted_id:
                     identity_hit = index
                     break
-                record_keys = record.get("keys") or set()
                 if title_hit is None and wanted_keys & record_keys:
                     title_hit = index
                     continue
@@ -172,9 +191,6 @@ class PendingTitleStore:
                 if ratio > best_ratio:
                     best_ratio = ratio
                     fuzzy_hit = index
-                # 记录按登记顺序追加，末条即最近一条登记
-                sole_hit = index
-                sole_candidates += 1
             index: Optional[int] = None
             reason: Optional[str] = None
             if identity_hit is not None:
@@ -185,6 +201,8 @@ class PendingTitleStore:
                 index, reason = fuzzy_hit, "fuzzy"
             elif allow_sole and sole_hit is not None:
                 index, reason = sole_hit, "sole"
+            elif allow_sole and sole_fallback_hit is not None:
+                index, reason = sole_fallback_hit, "sole"
             if index is None:
                 return None
             record = self._records.pop(index)
@@ -192,7 +210,9 @@ class PendingTitleStore:
             if reason == "fuzzy":
                 record["match_ratio"] = round(best_ratio, 3)
             if reason == "sole":
-                record["match_candidates"] = sole_candidates
+                record["match_candidates"] = (
+                    sole_candidates if sole_hit is not None else sole_fallback_candidates
+                )
             return record
 
     def peek(self) -> List[Dict[str, Any]]:
