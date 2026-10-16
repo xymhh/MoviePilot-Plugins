@@ -179,6 +179,13 @@ class _PathAlignmentTests(unittest.TestCase):
         self.assertIn("media_server_path_mappings", str(ctx.exception))
 
 
+    def test_6_suffix_landing_on_root_is_rejected(self):
+        """6. 尾部对齐退化到 root 本身不算命中（不把整个媒体库当条目）。"""
+        raw = "/media" + str(self.root)
+        with self.assertRaises(ValueError):
+            self.handler._configured_media_path(raw)
+
+
 class _DiagnosticsTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

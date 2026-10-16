@@ -1623,7 +1623,8 @@ class HistoryService(OwnerDelegator):
             candidate = Path(
                 "/" + "/".join(parts[index:])
             ).expanduser().resolve(strict=False)
-            if candidate != root and root not in candidate.parents:
+            # 必须严格落在 root 之下：退化成 root 本身不算命中（避免把整库当条目）
+            if root not in candidate.parents:
                 continue
             if not candidate.exists():
                 continue
