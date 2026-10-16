@@ -62,7 +62,7 @@ from .subscribe import (  # noqa: F401 - 导入即注册自动订阅渠道
     create_netflix_provider,
     create_tmdb_provider,
 )
-from .utils import configure_magnet_metadata_url
+from .utils import FileMatcher, configure_magnet_metadata_url
 from .utils.file_parser import MediaFileParser
 from .utils.http_client import build_proxy_url, validate_proxy_address
 
@@ -101,7 +101,7 @@ class CloudSubscribe(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/odomu/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.46"
+    plugin_version = "1.6.47"
     # 插件作者
     plugin_author = "odomu"
     # 作者主页
@@ -192,6 +192,7 @@ class CloudSubscribe(_PluginBase):
     _batch_interval: float = 3
     _transfer_risk_cooldown: int = 1800
     _skip_other_season_dirs: bool = True
+    _cross_season_path_guard: bool = True
     _video_extensions: List[str] = [".mkv", ".mp4", ".avi", ".iso"]
     _subtitle_extensions: List[str] = [
         ".srt", ".ass", ".ssa", ".vtt", ".sub", ".sup", ".idx", ".smi", ".mks"
@@ -879,6 +880,9 @@ class CloudSubscribe(_PluginBase):
         self._batch_interval = max(0, min(float(config.get("batch_interval", 3) or 0), 60))
         self._transfer_risk_cooldown = max(60, min(int(config.get("transfer_risk_cooldown", 1800) or 1800), 86400))
         self._skip_other_season_dirs = config.get("skip_other_season_dirs", True)
+        # 跨季路径守卫：分享目录季号与目标季冲突时拒绝进候选（file_matcher 类级开关）
+        self._cross_season_path_guard = bool(config.get("cross_season_path_guard", True))
+        FileMatcher.path_season_guard_enabled = self._cross_season_path_guard
         configured_video_exts, configured_sub_exts = MediaFileParser.configure_extensions(
             video_extensions=config.get("video_extensions"),
             subtitle_extensions=config.get("subtitle_extensions"),

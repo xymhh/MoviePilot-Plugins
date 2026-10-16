@@ -98,6 +98,40 @@ _COMPONENT_TYPES = (
     PlatformHistoryService,
 )
 
+# 跨盘暂存文件引用计数（1.6.47 同源并发互删兜底）：
+# 计数对象为暂存文件的绝对路径字符串，归零才允许删除。
+_STAGING_REFS: Dict[str, int] = {}
+_STAGING_REFS_LOCK = threading.Lock()
+
+
+def _staging_ref_key(staged_path: str, item: Any) -> str:
+    """暂存文件绝对路径字符串（引用计数键）；缺路径或缺文件名时为空。"""
+    name = str(getattr(item, "name", "") or "")
+    base = str(staged_path or "").strip().rstrip("/")
+    if not name or not base:
+        return ""
+    return f"{base}/{name}"
+
+
+def _acquire_staging_ref(key: str) -> None:
+    if not key:
+        return
+    with _STAGING_REFS_LOCK:
+        _STAGING_REFS[key] = _STAGING_REFS.get(key, 0) + 1
+
+
+def _release_staging_ref(key: str) -> int:
+    """归零返回 0（可删）；否则返回剩余引用数（必须跳过删除）。"""
+    if not key:
+        return 0
+    with _STAGING_REFS_LOCK:
+        remaining = _STAGING_REFS.get(key, 0) - 1
+        if remaining > 0:
+            _STAGING_REFS[key] = remaining
+            return remaining
+        _STAGING_REFS.pop(key, None)
+        return 0
+
 
 class SyncHandler:
     """同步处理器"""
@@ -2585,11 +2619,20 @@ class SyncHandler:
     ) -> None:
         """清理跨盘转存生成的临时源盘文件。
         
+        同一暂存路径被多个任务共用时按引用计数归零才删（1.6.47 兜底）。
         注意：绝对不能删除 staged_path 目录本身！因为该目录直接复用用户配置的转存路径（如 /整理/待整理）。
         """
         if not source or not source.supports(CloudDriveCapability.FILE_MUTATION):
             return
         if item and getattr(item, "id", None):
+            ref_key = _staging_ref_key(staged_path, item)
+            remaining = _release_staging_ref(ref_key)
+            if remaining > 0:
+                logger.debug(
+                    f"跨盘暂存文件仍被其它任务使用，跳过清理：{ref_key}"
+                    f"（剩余引用 {remaining}）"
+                )
+                return
             try:
                 mutation = source.require(CloudDriveCapability.FILE_MUTATION)
                 mutation.delete_file(item.id)
@@ -2683,6 +2726,8 @@ class SyncHandler:
                     )
                     self._cleanup_cross_transfer_staging(source, "")
                     return False
+                # 暂存文件已可见即登记引用：同路径兄弟任务在飞时 finally 不删（1.6.47）
+                _acquire_staging_ref(_staging_ref_key(staged_path, item))
             if source_sha1 and not item.sha1:
                 item = CloudFile(
                     item.id,
@@ -2753,7 +2798,8 @@ class SyncHandler:
             finally:
                 if not cloud_resource:
                     # 只清理分享转存产生的源盘暂存文件，绝不删除用户选择的网盘文件。
-                    self._cleanup_cross_transfer_staging(source, "", item)
+                    # 传入 staged_path 供引用计数归零判定（1.6.47）。
+                    self._cleanup_cross_transfer_staging(source, staged_path, item)
         if source and not source.supports(CloudDriveCapability.SHARE_TRANSFER):
             logger.warning(
                 f"{source.name}暂不支持分享转存，已跳过该资源：{share_url}"

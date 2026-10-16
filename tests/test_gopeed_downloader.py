@@ -16,7 +16,11 @@
    >0 写 opts.extra.connections）、DELETE ?force=true、401/非零 code/连接异常报错
    且消息不含 token；
 9. 传输层取消：完整缓存/部分缓存 + stop_event 置位 → .bin/.meta.json/.parts.json
-   全部删除且不碰同目录其它文件。
+   全部删除且不碰同目录其它文件；
+10. 1.6.47：建任务前清本任务中继残留（含 Gopeed 改名副本，范围不越界、不碰
+    目录与非本任务文件）；校验容忍改名副本（大小相符时归位到规范路径，归位
+    失败才按副本路径通过）；
+    缺文件异常含期望路径 + Gopeed 侧映射目录 + 排查提示且不含令牌。
 """
 
 import hashlib
@@ -770,6 +774,195 @@ class TransferCancel中继清理Tests(unittest.TestCase):
         self.assertFalse(cache_path.exists(), "取消必须删除部分缓存 .bin")
         self.assertFalse(meta_path.exists(), "取消必须删除 .meta.json")
         self.assertFalse(parts_path.exists(), "取消必须删除 .parts.json")
+
+
+class GopeedRelayResidueTests(unittest.TestCase):
+    """1.6.47 Gopeed 中继残留清理与改名副本容忍（A3）。"""
+
+    KEY = "cloud-transfer-abc123"
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.relay_dir = Path(self.tempdir.name)
+        self.local_path = str(self.relay_dir / f"{self.KEY}.bin")
+        self.file_item = make_file_item(size=len(PAYLOAD))
+
+    def make_service(self, client=None, **kwargs):
+        kwargs.setdefault("gopeed_url", "http://gopeed:9999")
+        kwargs.setdefault("gopeed_token", "unit-test-token")
+        kwargs.setdefault("poll_interval", 0.01)
+        kwargs.setdefault("backoff_base", 0.0)
+        return GopeedDownloadService(
+            self.resolver, fallback_service=None, client=client, **kwargs
+        )
+
+    def resolver(self, _file_item=None):
+        return "https://dl.example.com/f", {"user-agent": "ua"}
+
+    def _touch(self, name, content=b"x"):
+        path = self.relay_dir / name
+        path.write_bytes(content)
+        return path
+
+    def test_clear_residue_strict_scope(self):
+        """范围严格：只删本任务 bin/meta/parts（含 .tmp 与改名副本）。"""
+        bin_path = self._touch(f"{self.KEY}.bin")
+        parts = self._touch(f"{self.KEY}.bin.parts.json")
+        parts_tmp = self._touch(f"{self.KEY}.bin.parts.json.tmp")
+        meta_tmp = self._touch(f"{self.KEY}.bin.meta.json.tmp")
+        renamed = self._touch(f"{self.KEY} (1).bin")
+        meta_dir = self.relay_dir / f"{self.KEY}.bin.meta.json"
+        meta_dir.mkdir()  # 同名目录不得删（is_file 守卫）
+        keepers = [
+            self._touch(f"{self.KEY}4.bin"),          # 不同 key
+            self._touch("keep-me.bin"),               # 同目录其它文件
+            self._touch("cloud-transfer-other.bin"),
+            self._touch(f"{self.KEY}.bin.bak"),       # 变体之外的后缀
+        ]
+
+        service = self.make_service(client=MagicMock())
+        removed = service._clear_relay_residue(Path(self.local_path))
+
+        self.assertEqual(removed, 5, "应删除本任务 5 个残留文件")
+        for gone in (bin_path, parts, parts_tmp, meta_tmp, renamed):
+            self.assertFalse(gone.exists(), f"残留必须删除：{gone.name}")
+        self.assertTrue(meta_dir.is_dir(), "同名目录不得删除")
+        for kept in keepers:
+            self.assertTrue(kept.is_file(), f"不得越界删除：{kept.name}")
+
+    def test_clear_residue_non_relay_target_is_noop(self):
+        """非中继目标（普通文件名）不做任何清理。"""
+        target = self.relay_dir / "movie.mkv"
+        keep = self._touch("movie.mkv")
+        other = self._touch("cloud-transfer-abc123.txt")
+        service = self.make_service(client=MagicMock())
+        self.assertEqual(service._clear_relay_residue(target), 0)
+        self.assertTrue(keep.is_file())
+        self.assertTrue(other.is_file())
+
+    def test_find_renamed_relay_requires_size_match(self):
+        """改名副本：key 相符 + 大小相符才返回；size 未知（<=0）放行。"""
+        service = self.make_service(client=MagicMock())
+        target = Path(self.local_path)
+        renamed = self._touch(f"{self.KEY} (1).bin", PAYLOAD)
+        wrong_key = self._touch("cloud-transfer-zzz (1).bin", PAYLOAD)
+
+        found = service._find_renamed_relay(target, len(PAYLOAD))
+        self.assertIsNotNone(found)
+        self.assertEqual(found.name, renamed.name)
+        self.assertIsNone(
+            service._find_renamed_relay(target, len(PAYLOAD) + 5),
+            "大小不符必须拒绝",
+        )
+        self.assertIsNotNone(
+            service._find_renamed_relay(target, 0),
+            "源大小未知时允许按改名副本通过",
+        )
+        renamed.write_bytes(b"")
+        self.assertIsNone(
+            service._find_renamed_relay(target, len(PAYLOAD)),
+            "改名副本大小不符时不得误认",
+        )
+        self.assertTrue(wrong_key.is_file())
+
+    def test_verify_result_accepts_renamed_copy(self):
+        """校验：精确路径缺失但改名副本大小相符 → 归位到规范路径后通过。"""
+        service = self.make_service(client=MagicMock())
+        target = Path(self.local_path)
+        renamed = self._touch(f"{self.KEY} (1).bin", PAYLOAD)
+
+        result = service._verify_result(self.file_item, target)
+        self.assertEqual(
+            result, str(target),
+            "必须归位到规范路径（缓存标记/复用/清理都按规范路径操作）",
+        )
+        self.assertTrue(target.is_file(), "归位后规范路径必须存在")
+        self.assertFalse(renamed.exists(), "改名副本不得残留")
+
+    def test_verify_result_keeps_renamed_path_when_move_fails(self):
+        """归位失败时按改名副本路径继续（不因清理动作把成功的下载判失败）。"""
+        service = self.make_service(client=MagicMock())
+        target = Path(self.local_path)
+        renamed = self._touch(f"{self.KEY} (1).bin", PAYLOAD)
+
+        with patch.object(Path, "replace", side_effect=OSError("busy")):
+            result = service._verify_result(self.file_item, target)
+
+        self.assertEqual(result, str(renamed), "归位失败必须回退到副本路径")
+        self.assertTrue(renamed.is_file())
+
+    def test_missing_file_raises_diagnostics(self):
+        """缺文件异常：期望路径 + Gopeed 侧映射目录 + 排查提示，不含令牌。"""
+        service = self.make_service(
+            client=MagicMock(),
+            path_prefix=f"/downloads={self.relay_dir}",
+        )
+        target = Path(self.local_path)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            service._verify_result(self.file_item, target)
+        message = str(ctx.exception)
+        self.assertIn(str(target), message)
+        self.assertIn("Gopeed 侧映射目录=/downloads", message)
+        self.assertIn("同源任务并发", message)
+        self.assertIn("gopeed_path_prefix", message)
+        self.assertNotIn("unit-test-token", message)
+
+    def test_full_download_wraps_diagnostics_after_retries(self):
+        """三次都落空：最终异常仍携带可诊断信息（不是裸 Errno）。"""
+        client = FakeGopeedClient(
+            [
+                [{"status": "done", "downloaded": 10, "size": 10, "write": False}],
+                [{"status": "done", "downloaded": 10, "size": 10, "write": False}],
+                [{"status": "done", "downloaded": 10, "size": 10, "write": False}],
+            ],
+            str(self.relay_dir),
+        )
+        service = self.make_service(client)
+
+        with self.assertRaises(RuntimeError) as ctx:
+            service.download_file(self.file_item, self.local_path)
+        message = str(ctx.exception)
+        self.assertIn("本机未见文件", message)
+        self.assertIn(self.local_path, message)
+        self.assertIn("Gopeed 侧映射目录=", message)
+        self.assertNotIn("unit-test-token", message)
+        self.assertEqual(len(client.created), 3, "耗尽重试次数")
+
+    def test_residue_cleared_before_create_task(self):
+        """每次建任务前先清本任务残留（含改名副本），Gopeed 侧不再 AutoRename。"""
+        stale = self._touch(f"{self.KEY}.bin")
+        renamed = self._touch(f"{self.KEY} (1).bin")
+        keeper = self._touch("keep-me.bin")
+        snapshots = []
+        relay_dir = self.relay_dir
+        base_client_cls = FakeGopeedClient
+
+        class RecordingClient(base_client_cls):
+            def create_task(self, url, headers, path, name, connections=0):
+                snapshots.append(
+                    sorted(entry.name for entry in relay_dir.iterdir())
+                )
+                return super().create_task(
+                    url=url, headers=headers, path=path, name=name,
+                    connections=connections,
+                )
+
+        client = RecordingClient(
+            [[{"status": "done", "downloaded": 10, "size": 10, "write": True}]],
+            str(self.relay_dir),
+        )
+        service = self.make_service(client)
+
+        result = service.download_file(self.file_item, self.local_path)
+
+        self.assertEqual(result, self.local_path)
+        self.assertEqual(len(snapshots), 1)
+        at_create = snapshots[0]
+        self.assertNotIn(stale.name, at_create, "残留 .bin 必须在建任务前删除")
+        self.assertNotIn(renamed.name, at_create, "改名副本必须在建任务前删除")
+        self.assertIn(keeper.name, at_create, "不得误删同目录其它文件")
 
 
 if __name__ == "__main__":

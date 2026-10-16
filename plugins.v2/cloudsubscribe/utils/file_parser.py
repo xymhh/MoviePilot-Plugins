@@ -19,6 +19,11 @@ class MediaFileParser:
     _SEASON_EPISODE_PATTERN = re.compile(r"[Ss](\d{1,2})[Ee]")
     _CN_SEASON_PATTERN = re.compile(r"第\s*(\d{1,2})\s*季")
     _EN_SEASON_PATTERN = re.compile(r"[Ss]eason\s*(\d{1,2})", re.IGNORECASE)
+    # 裸季号标记（如目录名「21806-极恶老大 S2」/「Show S02」）：无 E/季/season 伴随，
+    # 上面三个既有模式都匹配不到，路径季号守卫需单独补这一类。
+    _BARE_SEASON_PATTERN = re.compile(
+        r"(?:^|[^0-9A-Za-z])[Ss]0?(\d{1,2})(?![0-9A-Za-z])"
+    )
     ANY_SEASON_PATTERN = re.compile(
         r"[Ss]\d+[Ee]|第\s*\d+\s*季|[Ss]eason\s*\d+", re.IGNORECASE
     )
@@ -95,6 +100,32 @@ class MediaFileParser:
             if match:
                 return int(match.group(1)) == target_season
         return False
+
+    @classmethod
+    def path_season(cls, text: str) -> Optional[int]:
+        """识别目录/路径文本中的显式季号，识别不到返回 None。
+
+        依次匹配 ``SxxExx``、``第N季``、``Season N``，最后补上裸 ``S2``/``S02``
+        这类目录名季号（既有 :meth:`contains_other_season` 的三个模式匹配不到）。
+        """
+        for pattern in (
+                cls._SEASON_EPISODE_PATTERN,
+                cls._CN_SEASON_PATTERN,
+                cls._EN_SEASON_PATTERN,
+                cls._BARE_SEASON_PATTERN,
+        ):
+            match = pattern.search(text or "")
+            if match:
+                return int(match.group(1))
+        return None
+
+    @classmethod
+    def path_conflicts_season(cls, text: str, target_season: int) -> bool:
+        """路径显式季号存在且与目标季不一致时为 True。"""
+        season = cls.path_season(text)
+        if season is None:
+            return False
+        return season != int(target_season)
 
     @classmethod
     def extract_season_episode(

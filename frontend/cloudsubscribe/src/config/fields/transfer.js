@@ -68,6 +68,13 @@ export function createTransferSection(options) {
             cols: 4,
           },
           {
+            key: "cross_season_path_guard",
+            label: "跨季路径守卫",
+            type: "switch",
+            hint: "文件所在分享目录含与目标季冲突的季号标记（如目录「极恶老大 S2」被 S01 认领）时，该文件不进匹配候选，防止同一文件被匹配到多个季；关闭后恢复旧匹配行为",
+            cols: 4,
+          },
+          {
             key: "organize_subtitles",
             label: "整理伴随字幕",
             type: "switch",

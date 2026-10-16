@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Callable, List, Optional, Tuple
@@ -179,6 +180,82 @@ class GopeedDownloadService:
                 return gopeed_side.rstrip("/") + path[len(local_side):]
         return path
 
+    @staticmethod
+    def _relay_residue_pattern(target: Path) -> Optional[re.Pattern]:
+        """本任务中继残留的严格匹配式：cloud-transfer-<本任务key> + 改名副本。
+
+        覆盖 ``.bin`` 本体、``.bin.meta.json``/``.bin.parts.json``（含 ``.tmp``）
+        与 Gopeed 改名副本 ``… (1).bin``；key 不同的文件一律不匹配（不越界）。
+        """
+        name = target.name
+        if not name.startswith("cloud-transfer-") or not name.endswith(".bin"):
+            return None
+        base = re.escape(name[:-len(".bin")])
+        return re.compile(
+            rf"^{base}(?: \(\d+\))?"
+            rf"\.bin(?:\.meta\.json(?:\.tmp)?|\.parts\.json(?:\.tmp)?)?$"
+        )
+
+    def _clear_relay_residue(self, target: Path) -> int:
+        """建任务前删除本任务中继残留（本体/变体/Gopeed 改名副本），最多3次重试。
+
+        残留不清会触发 Gopeed AutoRename 改名 → 校验永远找不到原路径 → 重试连败。
+        """
+        pattern = self._relay_residue_pattern(target)
+        if pattern is None:
+            return 0
+        try:
+            entries = list(target.parent.iterdir())
+        except OSError:
+            return 0
+        removed = 0
+        for candidate in entries:
+            if not candidate.is_file() or not pattern.match(candidate.name):
+                continue
+            try:
+                candidate.unlink()
+                removed += 1
+            except OSError as error:
+                logger.debug(f"清理 Gopeed 中继残留失败：{candidate.name}；{error}")
+        if removed:
+            logger.debug(
+                f"建任务前清理 Gopeed 中继残留 {removed} 个文件：{target.parent}"
+            )
+        return removed
+
+    def _find_renamed_relay(self, target: Path, expected: int) -> Optional[Path]:
+        """精确路径不存在时，找同目录 Gopeed 改名副本中大小相符者。"""
+        name = target.name
+        if not name.startswith("cloud-transfer-") or not name.endswith(".bin"):
+            return None
+        base = re.escape(name[:-len(".bin")])
+        pattern = re.compile(rf"^{base} \(\d+\)\.bin$")
+        try:
+            entries = sorted(target.parent.iterdir())
+        except OSError:
+            return None
+        for candidate in entries:
+            if not candidate.is_file() or not pattern.match(candidate.name):
+                continue
+            try:
+                size = candidate.stat().st_size
+            except OSError:
+                continue
+            if expected <= 0 or size == expected:
+                return candidate
+        return None
+
+    def _missing_relay_file_message(self, target: Path) -> str:
+        """「本机未见文件」可诊断信息：期望路径 + Gopeed 侧目录 + 排查提示（不含令牌）。"""
+        mapped_dir = self._map_dir_for_gopeed(str(target.parent))
+        return (
+            f"Gopeed 任务完成但本机未见文件：{target}；"
+            f"Gopeed 侧映射目录={mapped_dir}；"
+            f"提示：若为同源任务并发写同一路径可直接重试（插件已按 cache_key 串行化），"
+            f"否则可能是 Gopeed 容器目录与下载目录不是同一宿主目录"
+            f"（检查 gopeed_path_prefix 与挂载是否一致）"
+        )
+
     def download_file(
             self, file_item: CloudFile, local_path: str,
             progress_callback=None, stop_requested=None,
@@ -219,6 +296,8 @@ class GopeedDownloadService:
                 raise RuntimeError("源网盘未返回下载地址")
             task_id = ""
             try:
+                # 建任务前清本任务残留（含 Gopeed 改名副本），避免 AutoRename 连败
+                self._clear_relay_residue(target)
                 task_id = self._client.create_task(
                     url=url, headers=headers, path=remote_dir, name=target.name,
                     connections=self._connections,
@@ -296,17 +375,33 @@ class GopeedDownloadService:
             time.sleep(self._poll_interval)
 
     def _verify_result(self, file_item: CloudFile, target: Path) -> str:
-        if not target.is_file():
-            raise RuntimeError(f"Gopeed 任务完成但本机未见文件：{target}")
-        actual = target.stat().st_size
         expected = int(getattr(file_item, "size", 0) or 0)
+        path = target
+        if not target.is_file():
+            renamed = self._find_renamed_relay(target, expected)
+            if renamed is None:
+                raise RuntimeError(self._missing_relay_file_message(target))
+            logger.debug(
+                f"Gopeed 落盘文件被改名，按改名副本校验通过："
+                f"{target.name} -> {renamed.name}"
+            )
+            # 归位到规范路径：中继缓存标记/复用/清理都按规范路径操作，
+            # 留改名副本会写出「(1).bin.meta.json」这类孤儿文件、缓存也无法复用。
+            try:
+                renamed.replace(target)
+            except OSError as error:
+                logger.debug(
+                    f"Gopeed 改名副本归位失败，按副本路径继续：{renamed.name}；{error}"
+                )
+                path = renamed
+        actual = path.stat().st_size
         if expected > 0 and actual != expected:
             raise RuntimeError(
                 f"Gopeed 下载文件大小不符：预期 {expected}，实际 {actual}"
             )
         if expected <= 0 and actual <= 0:
             raise RuntimeError("源网盘下载为空文件")
-        return str(target)
+        return str(path)
 
     def _stop_task(self, task_id: str, preserve_partial: bool) -> None:
         """停止：暂停（best-effort）后无条件 force 删除任务与 Gopeed 侧部分文件。

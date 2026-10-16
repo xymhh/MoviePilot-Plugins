@@ -23,6 +23,11 @@ class FileMatcher:
         r"^(?:第\s*)?(?:[Ee](?:[Pp])?)?0*(\d{1,4})(?:\s*集)?(?=[ ._~-]|$)",
         re.IGNORECASE,
     )
+    # 跨季路径守卫：只看文件所在的分享目录/相对路径（文件名自身的季号仍走
+    # contains_other_season 原逻辑）。开关由插件配置 cross_season_path_guard 写入。
+    path_season_guard_enabled: bool = True
+    _PATH_SEASON_DIR_FIELDS = ("_relative_path", "relative_path")
+    _PATH_SEASON_DIR_AS_IS_FIELDS = ("parent_path", "cloud_path")
 
     @staticmethod
     def _matches_target_media(meta: Any, mediainfo: Any, season: int | None = None) -> bool:
@@ -173,6 +178,50 @@ class FileMatcher:
         )
 
     @classmethod
+    def _path_season_conflict(cls, item: Any, season: Any) -> tuple[bool, str, int]:
+        """文件所在分享目录含与目标季冲突的显式季号时返回 (True, 命中目录, 季号)。
+
+        ``_relative_path``/``relative_path`` 去掉文件名后按目录处理；
+        ``parent_path``/``cloud_path`` 直接当目录串。无季号信息或开关关闭时不变。
+        """
+        if not cls.path_season_guard_enabled or season is None:
+            return False, "", 0
+        try:
+            target = int(season)
+        except (TypeError, ValueError):
+            return False, "", 0
+        data = item if isinstance(item, dict) else {}
+        dir_texts: List[str] = []
+        for field in cls._PATH_SEASON_DIR_FIELDS:
+            text = str(data.get(field) or "").strip()
+            if not text:
+                continue
+            parts = [part for part in text.strip("/").split("/") if part]
+            if len(parts) < 2:
+                continue
+            dir_text = "/".join(parts[:-1])
+            if dir_text and dir_text not in dir_texts:
+                dir_texts.append(dir_text)
+        for field in cls._PATH_SEASON_DIR_AS_IS_FIELDS:
+            text = str(data.get(field) or "").strip().strip("/")
+            if text and text not in dir_texts:
+                dir_texts.append(text)
+        for dir_text in dir_texts:
+            if MediaFileParser.path_conflicts_season(dir_text, target):
+                found = MediaFileParser.path_season(dir_text)
+                return True, dir_text, int(found) if found is not None else 0
+        return False, "", 0
+
+    @classmethod
+    def _log_path_season_rejection(
+            cls, conflict_path: str, season: Any, found_season: int,
+    ) -> None:
+        logger.debug(
+            f"分享目录季号与目标季冲突，拒绝候选：{conflict_path}；"
+            f"目标=S{int(season):02d}，识别到=S{found_season:02d}"
+        )
+
+    @classmethod
     def episode_from_file(
             cls, item: Any, season: int, mediainfo: Any = None
     ) -> int | None:
@@ -181,6 +230,10 @@ class FileMatcher:
         if not name or not MediaFileParser.is_video(name):
             return None
         if MediaFileParser.contains_other_season(name, season):
+            return None
+        conflict, conflict_path, found_season = cls._path_season_conflict(item, season)
+        if conflict:
+            cls._log_path_season_rejection(conflict_path, season, found_season)
             return None
         meta = cls._platform_meta(name)
         if not meta:
@@ -247,6 +300,15 @@ class FileMatcher:
             file_name = str(item.get("name") or "")
             total_files += 1
             if not MediaFileParser.is_video(file_name):
+                continue
+            conflict, conflict_path, found_season = FileMatcher._path_season_conflict(
+                item, season
+            )
+            if conflict:
+                # 目录季号冲突的文件不得进入 strict/loose/loosest 任何候选
+                FileMatcher._log_path_season_rejection(
+                    conflict_path, season, found_season
+                )
                 continue
             found_episode = FileMatcher.episode_from_file(item, season, mediainfo)
             if found_episode is not None:

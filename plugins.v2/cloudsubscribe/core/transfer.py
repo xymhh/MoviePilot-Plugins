@@ -658,6 +658,11 @@ class CrossTransferTaskManager:
         self._tasks: dict[str, dict] = {}
         self._lock = Lock()
         self._on_change = on_change
+        # 同一 cache_key 的任务严格串行 + 中继文件引用计数（1.6.47 同源并发互删）
+        self._cache_key_locks: dict[str, Lock] = {}
+        self._cache_key_locks_guard = Lock()
+        self._cache_refs: dict[str, int] = {}
+        self._cache_refs_lock = Lock()
 
     def _notify_change(self) -> None:
         if self._on_change:
@@ -681,6 +686,20 @@ class CrossTransferTaskManager:
 
     def _cache_path(self, cache_key: str) -> Path:
         return self._cache_root() / f"cloud-transfer-{cache_key}.bin"
+
+    @staticmethod
+    def _task_cache_key(task: dict | None) -> str:
+        """任务级中继 cache_key：与 _temporary_path/_cache_key 同源。
+
+        本地源文件任务（source_file 为空）不使用中继缓存，返回空串（不加锁、不计数）。
+        """
+        data = task or {}
+        source_file = data.get("source_file")
+        if source_file is None:
+            return ""
+        return CrossTransferTaskManager._cache_key(
+            str(data.get("source_provider") or ""), source_file
+        )
 
     @staticmethod
     def _cache_meta_path(path: Path) -> Path:
@@ -708,9 +727,61 @@ class CrossTransferTaskManager:
                 deleted += 1
         return deleted
 
+    def _cache_key_lock(self, cache_key: str) -> Lock:
+        """同一 cache_key 的任务串行执行：第二个任务排在第一个之后。"""
+        with self._cache_key_locks_guard:
+            lock = self._cache_key_locks.get(cache_key)
+            if lock is None:
+                lock = Lock()
+                self._cache_key_locks[cache_key] = lock
+            return lock
+
+    def _acquire_cache_ref(self, cache_key: str) -> None:
+        if not cache_key:
+            return
+        with self._cache_refs_lock:
+            self._cache_refs[cache_key] = self._cache_refs.get(cache_key, 0) + 1
+
+    def _release_cache_ref(self, cache_key: str) -> None:
+        if not cache_key:
+            return
+        with self._cache_refs_lock:
+            remaining = self._cache_refs.get(cache_key, 0) - 1
+            if remaining > 0:
+                self._cache_refs[cache_key] = remaining
+            else:
+                self._cache_refs.pop(cache_key, None)
+
+    def _cache_ref_count(self, cache_key: str) -> int:
+        if not cache_key:
+            return 0
+        with self._cache_refs_lock:
+            return self._cache_refs.get(cache_key, 0)
+
+    def _cache_retained_for_others(self, task: dict | None) -> bool:
+        """任务自身持有 1 个引用；计数 > 1 说明还有兄弟任务在用同一中继文件。"""
+        cache_key = self._task_cache_key(task)
+        return bool(cache_key) and self._cache_ref_count(cache_key) > 1
+
+    def _delete_cache_path_for_task(self, task: dict | None, path: Path) -> int:
+        """任务级中继清理：仍有兄弟任务使用时保留文件（连同 meta/parts），供其复用。"""
+        if self._cache_retained_for_others(task):
+            logger.debug(
+                f"中继缓存仍被其它任务使用，保留不删：{path.name}"
+                f"（在用引用 {self._cache_ref_count(self._task_cache_key(task))}）"
+            )
+            return 0
+        return self._delete_cache_path(path)
+
     def delete_cache(self, cache_key: str) -> int:
         normalized = str(cache_key or "").strip().lower()
         if len(normalized) != 32 or any(value not in "0123456789abcdef" for value in normalized):
+            return 0
+        in_use = self._cache_ref_count(normalized)
+        if in_use > 0:
+            logger.debug(
+                f"中继缓存正在使用中，跳过清理：{normalized}（在用引用 {in_use}）"
+            )
             return 0
         return self._delete_cache_path(self._cache_path(normalized))
 
@@ -874,6 +945,7 @@ class CrossTransferTaskManager:
             for stale_id in terminal[:-49]:
                 self._tasks.pop(stale_id, None)
             self._tasks[task["id"]] = task
+        self._acquire_cache_ref(self._task_cache_key(task))
         self._notify_change()
         Thread(target=self._run, args=(task["id"], checksum), daemon=True).start()
         return self._public(task)
@@ -1134,10 +1206,23 @@ class CrossTransferTaskManager:
         return CrossDriveTransferResult(item, "progressive") if item else None
 
     def _run(self, task_id: str, checksum: str) -> None:
+        # 同一 cache_key 的任务严格串行：第二个任务排在第一个之后，
+        # 兄弟任务先完成时由引用计数保留完整缓存供其复用（1.6.47 同源并发互删）。
+        with self._lock:
+            task = self._tasks.get(task_id)
+        cache_key = self._task_cache_key(task)
+        if not cache_key:
+            self._run_locked(task_id, checksum, cache_key)
+            return
+        with self._cache_key_lock(cache_key):
+            self._run_locked(task_id, checksum, cache_key)
+
+    def _run_locked(self, task_id: str, checksum: str, cache_key: str) -> None:
         self._transfer_slots.acquire()
         with self._lock:
             task = self._tasks.get(task_id)
             if not task:
+                self._release_cache_ref(cache_key)
                 self._transfer_slots.release()
                 return
             source_path = task["source_path"]
@@ -1252,8 +1337,10 @@ class CrossTransferTaskManager:
                     ):
                         result_file = probe_result.file
                         # 探测命中也可能已有完整缓存，先清理再标成功（避免观测到
-                        # success 时缓存还在）
-                        self._delete_cache_path(Path(self._temporary_path(task)))
+                        # success 时缓存还在）；同 cache_key 兄弟任务在用时保留
+                        self._delete_cache_path_for_task(
+                            task, Path(self._temporary_path(task))
+                        )
                         self._update(
                             task_id, status="success", phase="done", progress=100,
                             transferred=task["total"], speed_bytes_per_second=0.0,
@@ -1473,7 +1560,7 @@ class CrossTransferTaskManager:
                     result_md5=str(result_file.md5 or ""),
                     finished_at=time.time(),
                 )
-                self._delete_cache_path(Path(temporary_path))
+                self._delete_cache_path_for_task(task, Path(temporary_path))
                 return
             had_download = bool(temporary_path)
             hash_message = (
@@ -1555,22 +1642,31 @@ class CrossTransferTaskManager:
                          result_md5=str(result_file.md5 or ""),
                          finished_at=time.time())
             if temporary_path:
-                self._delete_cache_path(Path(temporary_path))
+                self._delete_cache_path_for_task(task, Path(temporary_path))
         except InterruptedError:
             # 手动取消即清空中继（含已下完的完整缓存）：只删本任务的
             # cloud-transfer-<hash>.bin 及其 .meta.json/.parts.json（含 .tmp 变体），
-            # 不碰同目录下其它文件。
-            if 'temporary_path' in locals() and temporary_path:
+            # 不碰同目录下其它文件；同 cache_key 还有任务在用时保留。
+            retained = (
+                'temporary_path' in locals() and temporary_path
+                and self._cache_retained_for_others(task)
+            )
+            if 'temporary_path' in locals() and temporary_path and not retained:
                 self._delete_cache_path(Path(temporary_path))
-            self._update(task_id, status="canceled", phase="canceled",
-                         message="任务已取消并已清理中继缓存",
-                         speed_bytes_per_second=0.0, finished_at=time.time())
+            if retained:
+                logger.debug("任务取消：中继缓存仍有其它任务使用，保留文件")
+            self._update(
+                task_id, status="canceled", phase="canceled",
+                message=("任务已取消，中继缓存保留（其它任务使用中）"
+                         if retained else "任务已取消并已清理中继缓存"),
+                speed_bytes_per_second=0.0, finished_at=time.time(),
+            )
         except RapidMissAborted:
             # abort 模式（秒传未命中即中止）：无条件清理本任务中继缓存——即使
             # cache_complete 为真也不保留（与 fallback 保留完整缓存供重试不同）；
             # 探测在下载前发生时 temporary_path 尚未赋值，无需清理。
             if 'temporary_path' in locals() and temporary_path:
-                self._delete_cache_path(Path(temporary_path))
+                self._delete_cache_path_for_task(task, Path(temporary_path))
             message = "未命中秒传，已按设置中止（未上传任何数据）"
             self._update(task_id, status="failed", phase="aborted",
                          message=message, error=message,
@@ -1582,9 +1678,10 @@ class CrossTransferTaskManager:
                     and not locals().get("cache_complete", False)
                     and not self._cache_parts_path(Path(temporary_path)).is_file()
             ):
-                self._delete_cache_path(Path(temporary_path))
+                self._delete_cache_path_for_task(task, Path(temporary_path))
             self._update(task_id, status="failed", phase="failed", message="跨盘传输失败",
                          error=_describe_transfer_error(error),
                          speed_bytes_per_second=0.0, finished_at=time.time())
         finally:
+            self._release_cache_ref(cache_key)
             self._transfer_slots.release()
