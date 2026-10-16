@@ -28,10 +28,19 @@ class UpgradeRuleScoringService(OwnerDelegator):
             old_size: int = 0,
             new_size: int = 0,
             has_existing: bool = True,
+            old_file_name: str = "",
+            subscribe=None,
+            mediainfo: Optional[MediaInfo] = None,
+            season: Optional[int] = None,
+            episode: Optional[int] = None,
     ) -> tuple[bool, str]:
         """按评分和洗版模式判断候选是否应进入原有转存流程。"""
         if not has_existing:
             return True, "无现有版本"
+        old_file_name = str(old_file_name or "").strip()
+        if old_file_name and self._version_matches_rename_template(
+                subscribe, mediainfo, old_file_name, season, episode):
+            return False, f"现有版本已符合当前重命名模板，保留 {old_file_name}"
         old_score = int(old_score or 0)
         new_score = int(new_score or 0)
         old_size = max(0, int(old_size or 0))
@@ -55,6 +64,62 @@ class UpgradeRuleScoringService(OwnerDelegator):
                 )
             return False, "同评分且候选文件未更小"
         return False, "同评分不执行替换"
+
+    def _version_matches_rename_template(
+            self,
+            subscribe,
+            mediainfo: Optional[MediaInfo],
+            file_name: str,
+            season: Optional[int] = None,
+            episode: Optional[int] = None,
+    ) -> bool:
+        """现有文件名是否已由当前重命名模板生成（渲染幂等即视为符合）。
+
+        渲染方式与转存落位完全一致（``_platform_rename_path``），用文件名自身的
+        元数据回填模板；结果与原名一致说明它已符合「现有重命名规则」，应当保留。
+        渲染失败（宿主接口异常、无模板）时返回 False，回退评分判定。
+        """
+        if not bool(getattr(self, "_prefer_template_named_version", True)):
+            return False
+        name = str(file_name or "").strip()
+        if not name or mediainfo is None:
+            return False
+        try:
+            expected = self._platform_rename_path(
+                getattr(self, "_CLOUD_MEDIA_ROOT", "/"),
+                subscribe,
+                mediainfo,
+                name,
+                season,
+                episode,
+            )
+        except Exception as error:
+            logger.debug(f"重命名模板比对失败，回退评分判定：{name}，{error}")
+            return False
+        if not expected:
+            return False
+        expected_stem = Path(str(getattr(expected, "name", "") or "")).stem.strip()
+        return bool(expected_stem) and expected_stem == Path(name).stem.strip()
+
+    def _template_conformant_version(
+            self,
+            versions,
+            subscribe,
+            mediainfo: Optional[MediaInfo],
+            season: Optional[int] = None,
+            episode: Optional[int] = None,
+    ) -> Optional[dict]:
+        """挑出第一个已符合当前重命名模板的现有版本。"""
+        for version in versions or []:
+            if not isinstance(version, dict):
+                continue
+            file_name = str(
+                version.get("file_name") or version.get("target_file_name") or ""
+            ).strip()
+            if self._version_matches_rename_template(
+                    subscribe, mediainfo, file_name, season, episode):
+                return version
+        return None
 
     def _upgrade_replaces_existing(self) -> bool:
         return self._upgrade_mode != "coexist"

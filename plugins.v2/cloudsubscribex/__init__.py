@@ -107,7 +107,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.49"
+    plugin_version = "1.6.50"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -214,6 +214,7 @@ class CloudSubscribeX(_PluginBase):
     _enable_pt_upgrade: bool = False
     _upgrade_mode: str = "largest"
     _episode_dedup_enabled: bool = True
+    _prefer_template_named_version: bool = True
     _local_resource_path: str = ""
     # 媒体库一级目录（按媒体类型分层：电影/剧集），仅作用于网盘媒体库与本地 STRM 目录结构
     _type_folder_enabled: bool = False
@@ -920,6 +921,9 @@ class CloudSubscribeX(_PluginBase):
         if self._upgrade_mode not in {"coexist", "replace", "largest", "smallest"}:
             self._upgrade_mode = "largest"
         self._episode_dedup_enabled = bool(config.get("episode_dedup_enabled", True))
+        self._prefer_template_named_version = bool(
+            config.get("prefer_template_named_version", True)
+        )
         self._local_resource_path = str(config.get("local_resource_path", "") or "").strip()
         self._type_folder_enabled = bool(config.get("type_folder_enabled", False))
         self._type_folder_movie = (

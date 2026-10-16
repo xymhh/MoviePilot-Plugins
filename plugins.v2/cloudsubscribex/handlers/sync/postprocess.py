@@ -2003,6 +2003,11 @@ class PostprocessService(OwnerDelegator):
                     current_score,
                     int(old_baseline.get("size") or 0),
                     source_size,
+                    old_file_name=str(old_baseline.get("file_name") or ""),
+                    subscribe=subscribe,
+                    mediainfo=mediainfo,
+                    season=season,
+                    episode=episode,
                 )
                 if not should_upgrade:
                     label = f"E{int(episode):02d}" if episode else mediainfo.title

@@ -375,6 +375,9 @@ class SyncHandler:
             raw_mode if raw_mode in {"coexist", "replace", "largest", "smallest"} else "largest"
         )
         self._episode_dedup_enabled = bool(_get_val("episode_dedup_enabled", True))
+        self._prefer_template_named_version = bool(
+            _get_val("prefer_template_named_version", True)
+        )
         self._local_resource_path = str(_get_val("local_resource_path", "") or "").strip()
         # 媒体库一级目录：在网盘媒体库目录/本地媒体根路径下先建 电影/剧集 目录，再放二级分类
         self._type_folder_enabled = bool(_get_val("type_folder_enabled", False))

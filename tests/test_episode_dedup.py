@@ -202,6 +202,21 @@ def _make_handler(**overrides):
     handler._cloud_drive_name = lambda: "测试网盘"
     handler._upgrade_mode = overrides.get("upgrade_mode", "largest")
     handler._episode_dedup_enabled = overrides.get("episode_dedup_enabled", True)
+    # 1.6.50「保留符合重命名格式的版本」：默认关闭（下面这版 _platform_rename_path
+    # 桩是恒等的，会让任何文件名都判成「符合模板」），需要时用 overrides 打开并配桩。
+    handler._prefer_template_named_version = overrides.get(
+        "prefer_template_named_version", False
+    )
+    handler._version_matches_rename_template = (
+        UpgradeRuleScoringService._version_matches_rename_template.__get__(
+            handler, EpisodeDedupService
+        )
+    )
+    handler._template_conformant_version = (
+        UpgradeRuleScoringService._template_conformant_version.__get__(
+            handler, EpisodeDedupService
+        )
+    )
     handler._CLOUD_MEDIA_ROOT = "/"
     handler._cloud_directories = overrides.get("cloud_directories")
     handler._cloud_mutations = overrides.get("cloud_mutations")
@@ -212,10 +227,12 @@ def _make_handler(**overrides):
         "build_baseline", lambda *a, **k: {}
     )
     # _platform_rename_path 桩：固定返回 /媒体/剧集/Show/Season 01/name
-    handler._platform_rename_path = lambda root_path, subscribe, mediainfo, source_name, season=None, episode=None: (
-        SimpleNamespace(
-            parent=SimpleNamespace(as_posix=lambda: f"/媒体/剧集/Show/Season {int(season or 1):02d}"),
-            name=str(source_name),
+    handler._platform_rename_path = overrides.get("platform_rename_path") or (
+        lambda root_path, subscribe, mediainfo, source_name, season=None, episode=None: (
+            SimpleNamespace(
+                parent=SimpleNamespace(as_posix=lambda: f"/媒体/剧集/Show/Season {int(season or 1):02d}"),
+                name=str(source_name),
+            )
         )
     )
     return handler
@@ -597,6 +614,163 @@ class FindCloudMovieFileTests(unittest.TestCase):
         handler = self._handler(files)
         result = handler._find_cloud_movie_file(_SUB, _MEDIA)
         self.assertIsNone(result)
+
+
+class TemplateNamedVersionTests(unittest.TestCase):
+    """组7（1.6.50）：现有版本已符合当前重命名模板 → 保留，不被评分更高的候选替换。"""
+
+    @staticmethod
+    def _template_aware_rename(root_path, subscribe, mediainfo, source_name, season=None, episode=None):
+        """桩：只有已按模板命名的名字（剧集 SxxExx / 电影 title_year）渲染后才等于自身。"""
+        suffix = os.path.splitext(str(source_name))[1]
+        if episode:
+            canonical = f"{subscribe.name} - S{int(season or 1):02d}E{int(episode):02d}{suffix}"
+        else:
+            canonical = f"{mediainfo.title_year}{suffix}"
+        return SimpleNamespace(
+            parent=SimpleNamespace(as_posix=lambda: "/媒体/剧集/Show/Season 01"),
+            name=canonical,
+        )
+
+    def _handler(self, **overrides):
+        overrides.setdefault("platform_rename_path", self._template_aware_rename)
+        return _make_handler(**overrides)
+
+    def test_keep_when_existing_matches_template(self):
+        """20. 现有版本名 == 模板渲染结果 → skip，即使候选评分更高。"""
+        handler = self._handler(prefer_template_named_version=True)
+        existing = {1: [{
+            "file_id": "f1",
+            "file_name": "正相反的你与我 - S01E01.mkv",
+            "cloud_dir": "/d",
+            "file_size": 100,
+            "score": 3,
+        }]}
+        action, old, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=99, new_size=9999, existing_versions=existing
+        )
+        self.assertEqual(action, "skip")
+        self.assertEqual(len(old), 1)
+        self.assertIn("已符合当前重命名模板", reason)
+        self.assertIn("S01E01", reason)
+
+    def test_replace_when_existing_not_template_named(self):
+        """21. 现有版本是老命名（渲染结果不同）→ 仍按评分 replace。"""
+        handler = self._handler(prefer_template_named_version=True)
+        existing = {1: [{
+            "file_id": "f1",
+            "file_name": "正相反的你与我.第1集.mkv",
+            "cloud_dir": "/d",
+            "file_size": 50,
+            "score": 3,
+        }]}
+        action, old, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=8, new_size=100, existing_versions=existing
+        )
+        self.assertEqual(action, "replace")
+        self.assertNotIn("已符合当前重命名模板", reason)
+
+    def test_gate_off_falls_back_to_score(self):
+        """22. 开关关闭 → 即使名字已符合模板也按评分替换（= 1.6.49 行为）。"""
+        handler = self._handler(prefer_template_named_version=False)
+        existing = {1: [{
+            "file_id": "f1",
+            "file_name": "正相反的你与我 - S01E01.mkv",
+            "cloud_dir": "/d",
+            "file_size": 50,
+            "score": 3,
+        }]}
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=8, new_size=100, existing_versions=existing
+        )
+        self.assertEqual(action, "replace")
+        self.assertIn("评分提升", reason)
+
+    def test_render_failure_falls_back_to_score(self):
+        """23. 模板渲染异常 → 不阻断，回退评分判定。"""
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("宿主接口不可用")
+
+        handler = self._handler(
+            prefer_template_named_version=True, platform_rename_path=_boom
+        )
+        existing = {1: [{
+            "file_id": "f1",
+            "file_name": "正相反的你与我 - S01E01.mkv",
+            "cloud_dir": "/d",
+            "file_size": 50,
+            "score": 3,
+        }]}
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=8, new_size=100, existing_versions=existing
+        )
+        self.assertEqual(action, "replace")
+        self.assertIn("评分提升", reason)
+
+    def test_movie_keep_when_matches_template(self):
+        """24. 电影侧同规则：现有网盘电影名已符合模板 → skip。"""
+        files = [_FakeCloudFile(id="m1", name="正相反的你与我 (2024).mkv", size=100)]
+        dirs = _FakeDirectories(files=files)
+        handler = self._handler(
+            prefer_template_named_version=True, cloud_directories=dirs
+        )
+        versions = handler._find_cloud_movie_versions(_SUB, _MEDIA)
+        versions[0]["score"] = 3
+        action, _, reason = handler._movie_dedup_decision(
+            _SUB, _MEDIA, new_score=99, new_size=9999, existing_versions=versions
+        )
+        self.assertEqual(action, "skip")
+        self.assertIn("已符合当前重命名模板", reason)
+
+    def test_should_upgrade_candidate_accepts_existing_name(self):
+        """25. _should_upgrade_candidate 传现有文件名即命中模板门槛。"""
+        handler = self._handler(prefer_template_named_version=True)
+        should_upgrade, reason = handler._should_upgrade_candidate(
+            3,
+            99,
+            100,
+            9999,
+            old_file_name="正相反的你与我 - S01E01.mkv",
+            subscribe=_SUB,
+            mediainfo=_MEDIA,
+            season=1,
+            episode=1,
+        )
+        self.assertFalse(should_upgrade)
+        self.assertIn("已符合当前重命名模板", reason)
+        # 未传文件名时行为不变
+        should_upgrade2, reason2 = handler._should_upgrade_candidate(3, 99, 100, 9999)
+        self.assertTrue(should_upgrade2)
+        self.assertIn("评分提升", reason2)
+
+    def test_config_and_frontend_contract(self):
+        """26. 开关在默认配置、运行期装配与前端表单里都存在。"""
+        with open(
+            os.path.join(project_root, "plugins.v2/cloudsubscribex/core/config.py"),
+            encoding="utf-8",
+        ) as handle:
+            self.assertIn('"prefer_template_named_version": True', handle.read())
+        with open(
+            os.path.join(project_root, "plugins.v2/cloudsubscribex/handlers/sync/service.py"),
+            encoding="utf-8",
+        ) as handle:
+            service_source = handle.read()
+        self.assertIn("_prefer_template_named_version", service_source)
+        with open(
+            os.path.join(project_root, "plugins.v2/cloudsubscribex/__init__.py"),
+            encoding="utf-8",
+        ) as handle:
+            plugin_source = handle.read()
+        self.assertIn("_prefer_template_named_version", plugin_source)
+        with open(
+            os.path.join(
+                project_root,
+                "frontend/cloudsubscribex/src/config/fields/upgrade.js",
+            ),
+            encoding="utf-8",
+        ) as handle:
+            self.assertIn("prefer_template_named_version", handle.read())
 
 
 if __name__ == "__main__":

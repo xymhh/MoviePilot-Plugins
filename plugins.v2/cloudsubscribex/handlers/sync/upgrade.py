@@ -272,6 +272,14 @@ class UpgradeService(OwnerDelegator):
                                         int(baseline.get(episode, {}).get("file_size") or 0),
                                         self._resource_size_bytes(file_item.get("size")),
                                         has_existing=episode in baseline,
+                                        old_file_name=str(
+                                            baseline.get(episode, {}).get("target_file_name")
+                                            or baseline.get(episode, {}).get("file_name") or ""
+                                        ),
+                                        subscribe=subscribe,
+                                        mediainfo=mediainfo,
+                                        season=season,
+                                        episode=episode,
                                     )[0]
                                     for episode, file_item, score in preview_candidates
                                 )
@@ -474,6 +482,14 @@ class UpgradeService(OwnerDelegator):
                             int(baseline.get(episode, {}).get("file_size") or 0),
                             candidate_size,
                             has_existing=episode in baseline,
+                            old_file_name=str(
+                                baseline.get(episode, {}).get("target_file_name")
+                                or baseline.get(episode, {}).get("file_name") or ""
+                            ),
+                            subscribe=subscribe,
+                            mediainfo=mediainfo,
+                            season=season,
+                            episode=episode,
                         )
                         if not should_upgrade:
                             logger.debug(

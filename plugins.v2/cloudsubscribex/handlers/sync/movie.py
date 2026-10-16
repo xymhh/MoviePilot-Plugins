@@ -320,6 +320,11 @@ class MovieSyncProcessor(OwnerDelegator):
                             preview_score,
                             movie_history_size,
                             preview_size,
+                            old_file_name=(
+                                existing_movie[1] if existing_movie else ""
+                            ),
+                            subscribe=subscribe,
+                            mediainfo=mediainfo,
                         )
                         if preview_matched and preview_size and not preview_decision[0]:
                             logger.info(
@@ -404,6 +409,11 @@ class MovieSyncProcessor(OwnerDelegator):
                                 current_score,
                                 movie_history_size,
                                 magnet_size,
+                                old_file_name=(
+                                    existing_movie[1] if existing_movie else ""
+                                ),
+                                subscribe=subscribe,
+                                mediainfo=mediainfo,
                             )
                             if not magnet_upgrade:
                                 logger.info(
@@ -503,6 +513,11 @@ class MovieSyncProcessor(OwnerDelegator):
                                 current_score,
                                 movie_history_size,
                                 candidate_size,
+                                old_file_name=(
+                                    existing_movie[1] if existing_movie else ""
+                                ),
+                                subscribe=subscribe,
+                                mediainfo=mediainfo,
                             )
                             if not should_upgrade:
                                 logger.info(

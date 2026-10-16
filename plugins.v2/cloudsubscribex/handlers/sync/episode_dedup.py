@@ -206,6 +206,17 @@ class EpisodeDedupService(OwnerDelegator):
         new_score = int(new_score or 0)
         new_size = max(0, int(new_size or 0))
 
+        template_version = self._template_conformant_version(
+            versions, subscribe, mediainfo, season, episode
+        )
+        if template_version:
+            template_name = str(template_version.get("file_name") or "").strip()
+            return (
+                "skip",
+                list(versions),
+                f"现有版本已符合当前重命名模板，保留 {template_name}",
+            )
+
         best_old_score = max(int(v.get("score") or 0) for v in versions)
         best_old_size = max(int(v.get("file_size") or 0) for v in versions)
         should_upgrade, reason = self._should_upgrade_candidate(
@@ -352,6 +363,16 @@ class EpisodeDedupService(OwnerDelegator):
                     0,
                     mediainfo,
                 )
+        template_version = self._template_conformant_version(
+            versions, subscribe, mediainfo
+        )
+        if template_version:
+            template_name = str(template_version.get("file_name") or "").strip()
+            return (
+                "skip",
+                list(versions),
+                f"现有版本已符合当前重命名模板，保留 {template_name}",
+            )
         best_old_score = max(int(v.get("score") or 0) for v in versions)
         best_old_size = max(int(v.get("file_size") or 0) for v in versions)
         should_upgrade, reason = self._should_upgrade_candidate(

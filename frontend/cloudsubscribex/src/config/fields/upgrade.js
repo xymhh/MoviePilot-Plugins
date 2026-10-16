@@ -43,6 +43,13 @@ export function createUpgradeSection(options) {
             hint: "转存前按「季集」判重（不再依赖文件名）：新版本不差于已有版本时删旧写新，更差则跳过；旧文件含手动入库/老模板遗留也会删除。关闭后回退为仅按目标文件名判重。",
             cols: 4,
           },
+          {
+            key: "prefer_template_named_version",
+            label: "保留符合重命名格式的版本",
+            type: "switch",
+            hint: "现有文件名已等于当前「重命名格式」渲染结果时直接保留，不再被评分更高的候选替换（按现有重命名规则优先）；关闭后完全按评分/体积决定替换。",
+            cols: 4,
+          },
         ],
       },
       {
