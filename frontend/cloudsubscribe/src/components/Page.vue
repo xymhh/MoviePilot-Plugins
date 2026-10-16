@@ -647,7 +647,7 @@ async function confirmHistoryUpgrade() {
 }
 
 function confirmDeleteHistory(record) {
-  if (!["成功", "失败"].includes(record?.status) && !record?.finalize_key) {
+  if (!["成功", "失败", "跳过"].includes(record?.status) && !record?.finalize_key) {
     notify("任务仍在处理，完成后才能删除历史记录", "warning")
     return
   }
@@ -659,7 +659,7 @@ function confirmDeleteHistory(record) {
 
 function confirmDeleteGroups({ records, groupCount }) {
   const deletableRecords = (records || []).filter(
-    (record) => ["成功", "失败"].includes(record?.status) || Boolean(record?.finalize_key),
+    (record) => ["成功", "失败", "跳过"].includes(record?.status) || Boolean(record?.finalize_key),
   )
   if (!deletableRecords.length) {
     notify("所选汇总项没有可删除的历史记录", "warning")

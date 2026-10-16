@@ -594,7 +594,11 @@ class SyncNamingService(OwnerDelegator):
             subscribe,
             mediainfo: MediaInfo,
     ) -> Optional[Tuple[str, str, CloudFile]]:
-        """检查平台规则生成的网盘电影目录，不递归扫描其他路径。"""
+        """检查平台规则生成的网盘电影目录，不递归扫描其他路径。
+
+        1.6.48：目录内任一视频文件即视为已有版本（不再要求文件名与模板一致），
+        避免命名模板变更后同一电影被重复转存。
+        """
         cloud_media_root = getattr(self, "_CLOUD_MEDIA_ROOT", "/")
         try:
             cloud_dir, expected_name = self._platform_target(
@@ -618,6 +622,7 @@ class SyncNamingService(OwnerDelegator):
         listing = cloud_directories.list_directory(lookup.directory_id)
         if not listing.checked:
             return None
+        fallback: Optional[Tuple[str, str, CloudFile]] = None
         for item in listing.files:
             if item.is_directory:
                 continue
@@ -627,7 +632,9 @@ class SyncNamingService(OwnerDelegator):
                 continue
             if path.stem == expected_stem:
                 return cloud_dir, name, item
-        return None
+            if fallback is None:
+                fallback = (cloud_dir, name, item)
+        return fallback
 
     @staticmethod
     def _summarize_share_episodes(

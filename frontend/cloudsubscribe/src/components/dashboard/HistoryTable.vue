@@ -296,6 +296,10 @@
             <span class="text-warning">待完成 {{ item.pending_count }}</span>
             <span class="summary-separator">/</span>
             <span class="text-error">失败 {{ item.failed_count }}</span>
+            <template v-if="item.skipped_count">
+              <span class="summary-separator">/</span>
+              <span class="text-medium-emphasis">跳过 {{ item.skipped_count }}</span>
+            </template>
           </div>
         </template>
 
@@ -584,6 +588,7 @@
                         待完成 {{ item.pending_count }}
                       </span>
                       <span v-if="item.failed_count" class="text-caption text-error">失败 {{ item.failed_count }}</span>
+                      <span v-if="item.skipped_count" class="text-caption text-medium-emphasis">跳过 {{ item.skipped_count }}</span>
                     </div>
                     <span class="history-mobile-summary-time text-caption text-medium-emphasis">
                       {{ item.latest_time || "-" }}
@@ -764,7 +769,7 @@ const filtersVisible = ref(false);
 const searchVisible = ref(false);
 let lastQuerySignature = "";
 
-const statusOptions = ["处理中", "下载中", "成功", "失败"];
+const statusOptions = ["处理中", "下载中", "成功", "失败", "跳过"];
 const taskTypeOptions = [
   {title: "跨盘", value: "cross_transfer"},
   {title: "洗版", value: "upgrade"},
@@ -999,7 +1004,9 @@ function playItemId(item) {
 }
 
 function statusColor(status) {
-  return status === "成功" ? "success" : ["处理中", "下载中"].includes(status) ? "info" : "error";
+  if (status === "成功") return "success";
+  if (status === "跳过") return "warning";
+  return ["处理中", "下载中"].includes(status) ? "info" : "error";
 }
 
 function formatSize(bytes) {
@@ -1126,7 +1133,7 @@ function retryTitle(record) {
 }
 
 function canDeleteRecord(record) {
-  return ["成功", "失败"].includes(record?.status) || Boolean(record?.finalize_key);
+  return ["成功", "失败", "跳过"].includes(record?.status) || Boolean(record?.finalize_key);
 }
 
 function deleteTitle(record) {

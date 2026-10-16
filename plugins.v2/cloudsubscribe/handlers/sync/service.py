@@ -41,6 +41,7 @@ except Exception:
 
 from .baseline import UpgradeBaselineService
 from .cleanup import HistoryCleanupService
+from .episode_dedup import EpisodeDedupService
 from .history import HistoryService
 from .matching import FileMatchingService
 from .metadata import SyncMetadataService
@@ -88,6 +89,7 @@ _COMPONENT_TYPES = (
     PostprocessService,
     UpgradeBaselineService,
     UpgradeRuleScoringService,
+    EpisodeDedupService,
     ResourceTransferService,
     SubtitleService,
     UpgradeService,
@@ -372,6 +374,7 @@ class SyncHandler:
         self._upgrade_mode = (
             raw_mode if raw_mode in {"coexist", "replace", "largest", "smallest"} else "largest"
         )
+        self._episode_dedup_enabled = bool(_get_val("episode_dedup_enabled", True))
         self._local_resource_path = str(_get_val("local_resource_path", "") or "").strip()
         # 媒体库一级目录：在网盘媒体库目录/本地媒体根路径下先建 电影/剧集 目录，再放二级分类
         self._type_folder_enabled = bool(_get_val("type_folder_enabled", False))

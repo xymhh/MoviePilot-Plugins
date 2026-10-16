@@ -36,6 +36,13 @@ export function createUpgradeSection(options) {
             hint: "评分更高时执行洗版；同评分时最大/最小模式按文件大小决定，默认保留最大文件。",
             cols: 4,
           },
+          {
+            key: "episode_dedup_enabled",
+            label: "按季集判重替换",
+            type: "switch",
+            hint: "转存前按「季集」判重（不再依赖文件名）：新版本不差于已有版本时删旧写新，更差则跳过；旧文件含手动入库/老模板遗留也会删除。关闭后回退为仅按目标文件名判重。",
+            cols: 4,
+          },
         ],
       },
       {

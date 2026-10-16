@@ -363,7 +363,7 @@ class HistoryService(OwnerDelegator):
                     merged["previous_file_size"] = current.get("file_size")
                     merged["previous_rule_score"] = current.get("rule_score")
                 if (
-                        current_status in {"成功", "失败"}
+                        current_status in {"成功", "失败", "跳过"}
                         and incoming_status not in {"成功", "失败"}
                         and not reopen_terminal
                 ):
@@ -686,8 +686,10 @@ class HistoryService(OwnerDelegator):
         prepared["pending_count"] = sum(1 for r in records if r.get("status") in {"处理中", "下载中"})
         prepared["failed_count"] = sum(
             1 for r in records
-            if r.get("status") == "失败" or (r.get("status") not in {"成功", "处理中", "下载中"})
+            if r.get("status") == "失败"
+            or (r.get("status") not in {"成功", "处理中", "下载中", "跳过"})
         )
+        prepared["skipped_count"] = sum(1 for r in records if r.get("status") == "跳过")
         prepared["total_size"] = sum(int(r.get("file_size") or 0) for r in records)
         prepared.update({
             "tmdb_id": first.get("tmdb_id"),
@@ -731,7 +733,7 @@ class HistoryService(OwnerDelegator):
         )
         prepared["selectable"] = bool(records)
         prepared["deletable"] = bool(records) and all(
-            record.get("status") in {"成功", "失败"}
+            record.get("status") in {"成功", "失败", "跳过"}
             or bool(record.get("finalize_key"))
             for record in records
         )
@@ -1272,7 +1274,7 @@ class HistoryService(OwnerDelegator):
     @staticmethod
     def _history_record_deletable(record: Dict[str, Any]) -> bool:
         return (
-                str(record.get("status") or "") in {"成功", "失败"}
+                str(record.get("status") or "") in {"成功", "失败", "跳过"}
                 or bool(record.get("finalize_key"))
         )
 

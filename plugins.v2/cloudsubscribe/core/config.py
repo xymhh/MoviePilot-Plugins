@@ -197,6 +197,7 @@ class UIConfig:
             "enable_cloud_upgrade": False,
             "enable_pt_upgrade": False,
             "upgrade_mode": "largest",
+            "episode_dedup_enabled": True,
             "upgrade_subscribe_ids": [],
             "local_resource_path": "",
             "type_folder_enabled": False,

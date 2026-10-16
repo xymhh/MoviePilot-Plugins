@@ -548,6 +548,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             require_media_match=is_cross_batch,
                         )
 
+                        # 1.6.48 按季集判重：懒加载现有版本（目录扫描 + 基线并集）
+                        dedup_versions = None
+                        if self._episode_dedup_active() and episodes_to_match:
+                            dedup_versions = self._collect_episode_versions(
+                                subscribe, mediainfo, season
+                            )
+
                         for episode in episodes_to_match:
                             matched_file, current_score = matched_files.get(
                                 episode, (None, 0)
@@ -558,6 +565,51 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 logger.debug(f"找到匹配文件：{file_name} -> E{episode:02d}")
 
                                 is_upgrade = False
+                                candidate_size = self._resource_size_bytes(
+                                    matched_file.get("size")
+                                )
+                                dedup_old_versions: list = []
+                                if dedup_versions is not None:
+                                    dedup_action, dedup_old, dedup_reason = (
+                                        self._episode_dedup_decision(
+                                            subscribe,
+                                            mediainfo,
+                                            season,
+                                            episode,
+                                            current_score,
+                                            candidate_size,
+                                            dedup_versions,
+                                        )
+                                    )
+                                    if dedup_action == "skip":
+                                        logger.info(
+                                            f"{mediainfo.title} S{season:02d}E{episode:02d} "
+                                            f"按季集判重跳过：{dedup_reason}"
+                                        )
+                                        history.append(
+                                            self._build_transfer_history_item(
+                                                mediainfo=mediainfo,
+                                                subscribe=subscribe,
+                                                status="跳过",
+                                                share_url=share_url,
+                                                file_name=file_name,
+                                                source_file_name=file_name,
+                                                cloud_dir="",
+                                                resource=resource_by_url.get(
+                                                    str(matched_file.get("url") or "").strip(),
+                                                    resource,
+                                                ),
+                                                season=season,
+                                                episode=episode,
+                                                file_size=candidate_size,
+                                                rule_score=current_score,
+                                                skip_reason=f"同集已有更优版本：{dedup_reason}",
+                                            )
+                                        )
+                                        continue
+                                    if dedup_action == "replace":
+                                        is_upgrade = True
+                                        dedup_old_versions = dedup_old
 
                                 organize_enabled = getattr(self, "_organize_after_transfer", True)
                                 if organize_enabled:
@@ -571,7 +623,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                         matched_file,
                                     )
                                     target_name = file_name
-                                matched_items.append({
+                                item_entry = {
                                     "file": matched_file,
                                     "resource": resource_by_url.get(
                                         str(matched_file.get("url") or "").strip(), resource
@@ -587,7 +639,29 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                         season=season,
                                         episode=episode,
                                     ),
-                                })
+                                }
+                                if is_upgrade and dedup_old_versions:
+                                    primary_old = dedup_old_versions[0]
+                                    item_entry["upgrade_old_cloud_dir"] = str(
+                                        primary_old.get("cloud_dir") or ""
+                                    )
+                                    item_entry["upgrade_old_file_name"] = str(
+                                        primary_old.get("file_name") or ""
+                                    )
+                                    item_entry["upgrade_old_file_id"] = str(
+                                        primary_old.get("file_id") or ""
+                                    )
+                                    item_entry["upgrade_old_size"] = int(
+                                        primary_old.get("file_size") or 0
+                                    )
+                                    # 额外旧版本（>1）在转存成功后批量删除
+                                    if len(dedup_old_versions) > 1:
+                                        item_entry["dedup_extra_old_versions"] = (
+                                            dedup_old_versions[1:]
+                                        )
+                                        item_entry["dedup_new_score"] = current_score
+                                        item_entry["dedup_new_size"] = candidate_size
+                                matched_items.append(item_entry)
 
                         if not matched_items:
                             logger.debug(
@@ -688,6 +762,19 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 upgrade_info = " [洗版升级]" if is_upgrade else ""
                                 logger.debug(
                                     f"成功转存：{mediainfo.title} S{season:02d}E{episode:02d} {score_info}{upgrade_info}")
+
+                                # 1.6.48 判重替换：主旧版本由 postprocess 备份删除，其余旧版本此处批量删除
+                                extra_old = item.get("dedup_extra_old_versions") or []
+                                if extra_old:
+                                    self._apply_episode_dedup(
+                                        extra_old,
+                                        new_score=int(item.get("dedup_new_score") or current_score or 0),
+                                        new_size=int(item.get("dedup_new_size") or 0),
+                                        subscribe=subscribe,
+                                        mediainfo=mediainfo,
+                                        season=season,
+                                        episode=episode,
+                                    )
 
                                 if not pending_key:
                                     notification_kind = (

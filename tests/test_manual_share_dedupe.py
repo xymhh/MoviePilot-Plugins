@@ -99,6 +99,9 @@ class FakeOwner:
         self._search_handler = MagicMock()
         self._search_handler.get_enabled_sources.return_value = ["manual"]
         self._search_handler._search_label.return_value = "label"
+        # 1.6.48 判重：默认关闭，避免 MagicMock 脏数据干扰现有转存断言
+        self._episode_dedup_enabled = False
+        self._upgrade_mode = "largest"
 
     def _cloud_drive_name(self):
         return "115网盘"
@@ -113,6 +116,10 @@ class FakeOwner:
         return value
 
     def _is_cloud_upgrade_subscribe(self, subscribe):
+        return False
+
+    def _episode_dedup_active(self):
+        # 显式关闭判重门：__getattr__ 的 MagicMock 默认为真，会污染转存路径。
         return False
 
     def _process_tv_subscribe_upgrade(self, **kwargs):

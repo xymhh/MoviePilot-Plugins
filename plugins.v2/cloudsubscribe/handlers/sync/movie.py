@@ -493,6 +493,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         is_upgrade = False
                         # 洗版模式下检查是否需要升级资源
                         upgrade_old_size = movie_history_size
+                        dedup_movie_versions: list = []
                         if upgrade_target_exists and movie_history_score >= 0:
                             candidate_size = self._resource_size_bytes(
                                 matched_file.get("size")
@@ -512,6 +513,20 @@ class MovieSyncProcessor(OwnerDelegator):
                             logger.info(
                                 f"电影 {mediainfo.title} 洗版：{reason}"
                             )
+                            # 1.6.48 判重：收集目录内全部旧版本，主旧版本走 postprocess，其余成功后批量删除
+                            if self._episode_dedup_active():
+                                try:
+                                    dedup_movie_versions = self._timed_sync_call(
+                                        "cloud_scan",
+                                        self._find_cloud_movie_versions,
+                                        subscribe,
+                                        mediainfo,
+                                    ) or []
+                                except Exception as dedup_err:
+                                    logger.debug(
+                                        f"电影 {mediainfo.title} 判重版本收集失败：{dedup_err}"
+                                    )
+                                    dedup_movie_versions = []
 
                         organize_enabled = getattr(self, "_organize_after_transfer", True)
                         staging_dir = self._resource_staging_dir(
@@ -607,6 +622,22 @@ class MovieSyncProcessor(OwnerDelegator):
                             movie_transferred = True
                             movie_history_score = current_score
                             self._set_task_phase(subscribe, "登记文件后处理", 95)
+                            # 1.6.48 判重：主旧版本走 postprocess 备份删除，其余成功后批量删除
+                            primary_old = dedup_movie_versions[0] if dedup_movie_versions else None
+                            extra_old_versions = dedup_movie_versions[1:] if len(dedup_movie_versions) > 1 else []
+                            if primary_old:
+                                upgrade_old_cloud_dir = str(primary_old.get("cloud_dir") or "")
+                                upgrade_old_file_name = str(primary_old.get("file_name") or "")
+                                upgrade_old_file_id = str(primary_old.get("file_id") or "")
+                                if int(primary_old.get("file_size") or 0):
+                                    upgrade_old_size = int(primary_old.get("file_size") or 0)
+                            else:
+                                upgrade_old_cloud_dir = existing_movie[0] if existing_movie else ""
+                                upgrade_old_file_name = existing_movie[1] if existing_movie else ""
+                                upgrade_old_file_id = (
+                                    getattr(existing_movie[2], "id", "")
+                                    if existing_movie else ""
+                                )
                             strm_path, pending_key = self._generate_or_queue_strm(
                                 share_url,
                                 save_dir,
@@ -631,16 +662,9 @@ class MovieSyncProcessor(OwnerDelegator):
                                 ),
                                 upgrade=is_upgrade,
                                 upgrade_mode=self._upgrade_mode,
-                                upgrade_old_cloud_dir=(
-                                    existing_movie[0] if existing_movie else ""
-                                ),
-                                upgrade_old_file_name=(
-                                    existing_movie[1] if existing_movie else ""
-                                ),
-                                upgrade_old_file_id=(
-                                    getattr(existing_movie[2], "id", "")
-                                    if existing_movie else ""
-                                ),
+                                upgrade_old_cloud_dir=upgrade_old_cloud_dir,
+                                upgrade_old_file_name=upgrade_old_file_name,
+                                upgrade_old_file_id=upgrade_old_file_id,
                                 upgrade_old_size=upgrade_old_size,
                                 subtitles=subtitles,
                             )
@@ -661,6 +685,17 @@ class MovieSyncProcessor(OwnerDelegator):
                                 history_item["status"] = (
                                     "下载中" if self._is_offline_url(share_url)
                                     else "处理中"
+                                )
+                            # 1.6.48 判重：额外旧版本在转存成功后批量删除
+                            if extra_old_versions:
+                                self._apply_episode_dedup(
+                                    extra_old_versions,
+                                    new_score=current_score,
+                                    new_size=self._resource_size_bytes(matched_file.get("size")),
+                                    subscribe=subscribe,
+                                    mediainfo=mediainfo,
+                                    season=0,
+                                    episode=1,
                                 )
                             if strm_path:
                                 self._media_server_notifier.notify(

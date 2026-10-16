@@ -155,7 +155,7 @@ class UpgradeBaselineService(OwnerDelegator):
                 continue
             if self._int_or_zero(record.get("season") or 1) != season:
                 continue
-            if str(record.get("status") or "") in {"失败", "转存失败", "已删除"}:
+            if str(record.get("status") or "") in {"失败", "转存失败", "已删除", "跳过"}:
                 continue
             episode = self._int_or_zero(record.get("episode"))
             file_name = str(
