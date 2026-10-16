@@ -551,6 +551,11 @@ class SyncHandler:
             "sync:baseline_media_server", self, maxsize=256,
             ttl=self._RUNTIME_CACHE_TTL,
         )
+        # 目标季目录列目录结果：判重与「历史记录存在性校验」共用（1.6.51）
+        self._season_listing_cache = create_platform_ttl_cache(
+            "sync:season_listing", self, maxsize=256,
+            ttl=self._RUNTIME_CACHE_TTL,
+        )
 
     def append_history_records(
             self,
@@ -625,9 +630,13 @@ class SyncHandler:
             baseline_transfer = len(self._baseline_transfer_cache)
             baseline_plugin = len(self._baseline_plugin_cache)
             baseline_media_server = len(self._baseline_media_server_cache)
+            season_listing = len(getattr(self, "_season_listing_cache", {}) or {})
             self._baseline_transfer_cache.clear()
             self._baseline_plugin_cache.clear()
             self._baseline_media_server_cache.clear()
+            season_listing_cache = getattr(self, "_season_listing_cache", None)
+            if season_listing_cache is not None:
+                season_listing_cache.clear()
         return {
             "media_recognition": media_recognition,
             "resource_season_dirs": resource_season_dirs,
@@ -637,6 +646,7 @@ class SyncHandler:
             "baseline_transfer": baseline_transfer,
             "baseline_plugin": baseline_plugin,
             "baseline_media_server": baseline_media_server,
+            "season_listing": season_listing,
         }
 
     def reset_sync_metrics(self) -> None:

@@ -12,6 +12,7 @@ from app.log import logger
 from app.schemas import MediaInfo
 
 from ...core import OwnerDelegator
+from ...utils.cache import normalize_platform_cache_key
 from ...utils.file_parser import MediaFileParser
 
 
@@ -27,13 +28,35 @@ class EpisodeDedupService(OwnerDelegator):
     # ------------------------------------------------------------------
     # 数据源
     # ------------------------------------------------------------------
-    def _scan_episode_versions_in_dir(
+    def _season_dir_files(
             self,
             subscribe,
             mediainfo: MediaInfo,
             season: int,
-    ) -> Dict[int, List[Dict[str, Any]]]:
-        """扫描目标季目录，用 MetaInfo 解析每条视频的季集，返回全部版本。"""
+    ) -> Tuple[bool, str, List[Dict[str, Any]]]:
+        """列出目标季目录里的正片文件，返回 ``(是否拿到实测数据, 目录路径, 文件条目)``。
+
+        判重与「历史记录存在性校验」共用这一份列目录结果，避免同一季重复请求网盘。
+        ``verified=False`` 表示目录解析/列目录失败（网络或鉴权问题），此时调用方
+        必须按「没有实测数据」处理，不能据此判定某集不存在。
+        """
+        key = None
+        cache = getattr(self, "_season_listing_cache", None)
+        cache_key_builder = getattr(self, "_baseline_key", None)
+        if cache is not None and cache_key_builder is not None:
+            try:
+                key = normalize_platform_cache_key(
+                    (cache_key_builder(subscribe, season), int(season))
+                )
+            except Exception:
+                key = None
+            if key is not None:
+                cached = cache.get(key)
+                if cached is not None:
+                    return bool(cached[0]), str(cached[1]), [
+                        dict(item) for item in (cached[2] or [])
+                    ]
+
         cloud_media_root = getattr(self, "_CLOUD_MEDIA_ROOT", "/")
         try:
             cloud_dir = self._resolve_resource_season_dir(
@@ -41,20 +64,53 @@ class EpisodeDedupService(OwnerDelegator):
             )
         except Exception as error:
             logger.debug(f"判重季目录解析失败：{mediainfo.title_year}，{error}")
-            return {}
+            return False, "", []
         if not cloud_dir:
-            return {}
+            return False, "", []
         cloud_directories = getattr(self, "_cloud_directories", None)
         if not cloud_directories:
-            return {}
+            return False, "", []
         lookup = cloud_directories.resolve_directory(cloud_dir.as_posix())
-        if not lookup.checked or lookup.directory_id is None:
-            return {}
+        if not lookup.checked:
+            return False, "", []
+        if lookup.directory_id is None:
+            # 目录确实不存在（而不是请求失败）：该季一盘皆无，按实测空目录处理
+            return True, cloud_dir.as_posix(), []
         listing = cloud_directories.list_directory(lookup.directory_id)
         if not listing.checked:
-            return {}
+            return False, "", []
 
         cloud_path = cloud_dir.as_posix()
+        files: List[Dict[str, Any]] = []
+        for item in listing.files:
+            if getattr(item, "is_directory", False):
+                continue
+            name = str(getattr(item, "name", "") or "")
+            if not MediaFileParser.is_video(name) or self._is_extra_clip(name):
+                continue
+            files.append({
+                "file_id": str(getattr(item, "id", "") or ""),
+                "file_name": name,
+                "cloud_dir": cloud_path,
+                "file_size": int(getattr(item, "size", 0) or 0),
+            })
+        if cache is not None and key is not None:
+            cache.set(key, (True, cloud_path, [dict(item) for item in files]))
+        return True, cloud_path, files
+
+    def _scan_episode_versions_in_dir(
+            self,
+            subscribe,
+            mediainfo: MediaInfo,
+            season: int,
+    ) -> Dict[int, List[Dict[str, Any]]]:
+        """扫描目标季目录，用 MetaInfo 解析每条视频的季集，返回全部版本。"""
+        verified, cloud_path, files = self._season_dir_files(
+            subscribe, mediainfo, season
+        )
+        if not verified:
+            return {}
+
         result: Dict[int, List[Dict[str, Any]]] = {}
         custom_words = None
         raw_words = getattr(subscribe, "custom_words", None)
@@ -65,12 +121,8 @@ class EpisodeDedupService(OwnerDelegator):
                 ) if w.strip()
             ]
 
-        for item in listing.files:
-            if item.is_directory:
-                continue
-            name = item.name
-            if not MediaFileParser.is_video(name) or self._is_extra_clip(name):
-                continue
+        for item in files:
+            name = str(item.get("file_name") or "")
             file_meta = self._dedup_meta_info(Path(name).stem, custom_words)
             file_season = getattr(file_meta, "begin_season", None) or season
             if file_season != season:
@@ -78,8 +130,8 @@ class EpisodeDedupService(OwnerDelegator):
             episodes = list(getattr(file_meta, "episode_list", None) or [])
             if not episodes and getattr(file_meta, "begin_episode", None):
                 episodes = [file_meta.begin_episode]
-            size = int(getattr(item, "size", 0) or 0)
-            file_id = str(getattr(item, "id", "") or "")
+            size = int(item.get("file_size") or 0)
+            file_id = str(item.get("file_id") or "")
             # 目录扫描出的旧版本同样要按规则组评分，否则会被当成 0 分而被无条件替换
             score = self._get_mp_rule_score(name, size, subscribe, season, mediainfo)
             for episode in episodes:
@@ -140,12 +192,57 @@ class EpisodeDedupService(OwnerDelegator):
             result.setdefault(episode_number, []).append({
                 "file_id": file_id,
                 "file_name": file_name,
+                "target_file_name": str(item.get("target_file_name") or "").strip(),
                 "cloud_dir": cloud_dir,
                 "file_size": int(item.get("file_size") or 0),
                 "score": int(item.get("score") or item.get("rule_score") or 0),
                 "source": "插件基线",
+                # 保留上游来源（MoviePilot整理记录 / 插件转存记录 / 媒体服务器 …），
+                # 判重时据此决定要不要做「目标目录有实物」校验
+                "origin": str(item.get("source") or "").strip(),
             })
         return result
+
+    # 判重只信「有实物」的来源：整理记录与转存记录都可能是假成功
+    _HISTORY_BASELINE_SOURCES = frozenset({"MoviePilot整理记录", "插件转存记录"})
+
+    def _baseline_entry_backed_by_storage(
+            self,
+            episode: int,
+            entry: Dict[str, Any],
+            scanned: Dict[int, List[Dict[str, Any]]],
+            verified: bool,
+            season_dir: str,
+            present_names: set,
+            present_ids: set,
+    ) -> bool:
+        """历史来源的旧版本必须在云盘上找得到实物，否则按缺失处理。
+
+        1.6.50 之前的口径：只要历史里有该集的「成功」记录就当作已有版本。跨盘转存
+        偶发「记录成功但文件没落进季目录」（cloud_dir 为空、MP 整理历史里只有源文件名），
+        这种幻影版本会让该集被永久跳过，缺失集再也补不上。
+        """
+        if not verified:
+            # 拿不到实测数据（目录解析失败/列目录失败）→ 保持旧行为，避免误判成缺失
+            return True
+        if str(entry.get("origin") or "") not in self._HISTORY_BASELINE_SOURCES:
+            # 媒体服务器、手动基线这类来源不在本轮实测范围内，维持原判重口径
+            return True
+        if int(episode) in scanned:
+            return True
+        entry_dir = str(entry.get("cloud_dir") or "").strip().rstrip("/")
+        season_dir = str(season_dir or "").strip().rstrip("/")
+        if entry_dir and season_dir and entry_dir != season_dir:
+            # 记录落在别的目录（媒体库/其它路径），本轮没扫，不越权判定
+            return True
+        for name_field in ("target_file_name", "file_name"):
+            name = str(entry.get(name_field) or "").strip()
+            if name and name in present_names:
+                return True
+        file_id = str(entry.get("file_id") or "").strip()
+        if file_id and file_id in present_ids:
+            return True
+        return False
 
     def _collect_episode_versions(
             self,
@@ -153,7 +250,11 @@ class EpisodeDedupService(OwnerDelegator):
             mediainfo: MediaInfo,
             season: int,
     ) -> Dict[int, List[Dict[str, Any]]]:
-        """两路数据源取并集，按 file_id（无则 目录+文件名）去重。"""
+        """两路数据源取并集，按 file_id（无则 目录+文件名）去重。
+
+        基线里的历史条目先过一遍「目标目录有没有实物」的校验：查无实据的按缺失处理
+        （自动修复缺失集），只留日志说明，绝不静默丢弃。
+        """
         merged: Dict[int, List[Dict[str, Any]]] = {}
         seen: Dict[int, set] = {}
 
@@ -169,15 +270,37 @@ class EpisodeDedupService(OwnerDelegator):
             bucket.add(key)
             merged.setdefault(episode, []).append(entry)
 
-        for episode, entries in self._scan_episode_versions_in_dir(
-                subscribe, mediainfo, season
-        ).items():
+        scanned = self._scan_episode_versions_in_dir(subscribe, mediainfo, season)
+        for episode, entries in scanned.items():
             for entry in entries:
                 _add(int(episode), entry)
+
+        verified, season_dir, season_files = self._season_dir_files(
+            subscribe, mediainfo, season
+        )
+        present_names = {
+            str(item.get("file_name") or "") for item in season_files
+        }
+        present_ids = {
+            str(item.get("file_id") or "") for item in season_files if item.get("file_id")
+        }
+
         for episode, entries in self._baseline_episode_versions(
                 subscribe, mediainfo, season
         ).items():
             for entry in entries:
+                if not self._baseline_entry_backed_by_storage(
+                        int(episode), entry, scanned, verified, season_dir,
+                        present_names, present_ids,
+                ):
+                    logger.info(
+                        f"判重忽略历史记录：{mediainfo.title_year} "
+                        f"S{int(season):02d}E{int(episode):02d} 历史显示已存在，"
+                        f"但目标目录里找不到该文件，按缺失处理"
+                        f"（来源={entry.get('origin') or '未知'}，"
+                        f"文件={entry.get('target_file_name') or entry.get('file_name') or '未记录'}）"
+                    )
+                    continue
                 _add(int(episode), entry)
         return merged
 

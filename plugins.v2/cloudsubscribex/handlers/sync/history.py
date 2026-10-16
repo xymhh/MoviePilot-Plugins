@@ -375,8 +375,26 @@ class HistoryService(OwnerDelegator):
                             merged.pop(state_key, None)
                 if incoming_status != "失败":
                     merged.pop("failure_reason", None)
+                skip_onto_success = (
+                    incoming_status == "跳过" and current_status == "成功"
+                )
+                if skip_onto_success:
+                    # 「跳过」只说明本轮没转存，不代表平台上发生了什么：不能用它覆盖
+                    # 成功记录的落盘信息（文件名/目录/大小），否则该记录会变成
+                    # 「成功但找不到文件」的幻影版本，下一轮判重把整集当下载好。
+                    for keep_key in (
+                        "file_name", "target_file_name", "cloud_dir",
+                        "cloud_file_id", "cloud_drive_name", "file_size",
+                    ):
+                        if keep_key in current:
+                            merged[keep_key] = current[keep_key]
+                        else:
+                            merged.pop(keep_key, None)
                 history[index] = merged
-                platform_records.append(copy.deepcopy(merged))
+                if not skip_onto_success:
+                    # 也不要把这种「假成功」写进 MP 整理历史：写进去后，下一轮基线
+                    # 会把它当成已有的更优版本，缺失集就再也补不上。
+                    platform_records.append(copy.deepcopy(merged))
                 if scope:
                     upgrade_scope_index[scope] = index
                     if self._is_workflow_history(merged):
@@ -569,10 +587,27 @@ class HistoryService(OwnerDelegator):
         }
 
     @classmethod
+    def _cross_success_needs_repair(cls, record: Dict[str, Any]) -> bool:
+        """跨盘「成功」但查无落盘痕迹 → 留一条人工重新转存入口（1.6.51）。
+
+        判重不再采信查无实据的历史版本后，这类记录已挡不住缺失集自动补齐；但历史页
+        仍要能手动重转，用户不必靠「删记录 + 重跑订阅」绕过。
+        """
+        if not str(record.get("cloud_dir") or "").strip():
+            return True
+        file_name = str(record.get("file_name") or "").strip()
+        source_name = str(record.get("source_file_name") or "").strip()
+        return bool(source_name) and source_name == file_name
+
+    @classmethod
     def _history_retry_state(cls, record: Dict[str, Any]) -> Tuple[bool, str]:
         status = str(record.get("status") or "")
         is_cross = str(record.get("transfer_mode") or "") == "cross"
         if status == "成功" and is_cross:
+            if cls._cross_success_needs_repair(record):
+                if not str(record.get("share_url") or "").strip():
+                    return False, "历史记录缺少资源链接，无法重试"
+                return True, "重新转存此记录"
             return False, "跨盘任务已成功完成，无需重试"
         if not str(record.get("share_url") or "").strip():
             return False, "历史记录缺少资源链接，无法重试"

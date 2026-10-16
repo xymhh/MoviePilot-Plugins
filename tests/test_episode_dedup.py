@@ -773,5 +773,146 @@ class TemplateNamedVersionTests(unittest.TestCase):
             self.assertIn("prefer_template_named_version", handle.read())
 
 
+class _UncheckedDirectories(_FakeDirectories):
+    """列目录失败（checked=False）：判重不得据此判定「该集不存在」。"""
+
+    def list_directory(self, directory_id):
+        self.list_calls += 1
+        return _FakeListing([], checked=False)
+
+
+def _history_baseline(episode, **item):
+    return {episode: {"source": "MoviePilot整理记录", **item}}
+
+
+class EpisodeDedupHistoryTrustTests(unittest.TestCase):
+    """组8（1.6.51）：判重只信「目标目录里有实物」的历史版本。
+
+    背景：跨盘转存偶发「记录成功但文件没落进季目录」，历史里的幻影版本会让该集
+    被永久跳过，缺失集再也补不上（真机案例：季目录只有 E04，E01–E03 被幻影挡住）。
+    """
+
+    def setUp(self):
+        register_module("app.core.metainfo", MetaInfo=_fake_metainfo)
+        logger_ref.reset_mock()
+
+    @staticmethod
+    def _dirs(entries):
+        return _FakeDirectories(files=[
+            _FakeCloudFile(id=file_id, name=name, size=size)
+            for file_id, name, size in entries
+        ])
+
+    def test_phantom_history_entry_dropped(self):
+        """27. 无 cloud_dir 的 MP 整理历史幻影版本 → 不参与判重并记 info 日志。"""
+        baseline = _history_baseline(
+            1, file_name="01..mp4", file_size=100, score=10,
+        )
+        handler = _make_handler(
+            cloud_directories=self._dirs([("f4", "Show - S01E04.mp4", 400)]),
+            build_baseline=lambda *a, **k: baseline,
+        )
+        result = handler._collect_episode_versions(_SUB, _MEDIA, season=1)
+        self.assertNotIn(1, result, "幻影版本不得挡住缺失集补齐")
+        self.assertEqual(result[4][0]["file_id"], "f4")
+        logged = " ".join(str(call) for call in logger_ref.info.call_args_list)
+        self.assertIn("判重忽略历史记录", logged)
+        self.assertIn("S01E01", logged)
+
+    def test_history_entry_with_cloud_dir_kept(self):
+        """28. 记录带落盘目录且不是本季目录（我们没扫）→ 维持原口径，不越权判定。"""
+        baseline = _history_baseline(
+            2, file_name="Show - 别处.mkv", file_size=100, score=10,
+            cloud_dir="/媒体/其它库/Show/Season 01",
+        )
+        handler = _make_handler(
+            cloud_directories=self._dirs([("f4", "Show - S01E04.mp4", 400)]),
+            build_baseline=lambda *a, **k: baseline,
+        )
+        result = handler._collect_episode_versions(_SUB, _MEDIA, season=1)
+        self.assertIn(2, result)
+        self.assertEqual(result[2][0]["file_id"], "")
+        logger_ref.info.assert_not_called()
+
+    def test_media_server_entry_kept_without_cloud_dir(self):
+        """29. 媒体服务器来源（库里真有该集）不参与「目标目录实物」校验。"""
+        baseline = {2: {"file_name": "Show - S01E02.mkv", "source": "媒体服务器", "score": 10}}
+        handler = _make_handler(
+            cloud_directories=self._dirs([("f4", "Show - S01E04.mp4", 400)]),
+            build_baseline=lambda *a, **k: baseline,
+        )
+        result = handler._collect_episode_versions(_SUB, _MEDIA, season=1)
+        self.assertIn(2, result)
+
+    def test_unchecked_listing_keeps_history_entries(self):
+        """30. 列目录失败（拿不到实测数据）→ 保留历史条目，避免误判成缺失后重复转存。"""
+        baseline = _history_baseline(1, file_name="01..mp4", file_size=100, score=10)
+        handler = _make_handler(
+            cloud_directories=_UncheckedDirectories(),
+            build_baseline=lambda *a, **k: baseline,
+        )
+        result = handler._collect_episode_versions(_SUB, _MEDIA, season=1)
+        self.assertIn(1, result)
+
+    def test_unparsable_file_in_dir_protects_entry(self):
+        """31. 目录里确有同名文件（解析不出季集）→ 保留条目，不重复转存。"""
+        baseline = _history_baseline(1, file_name="01..mp4", file_size=100, score=10)
+        handler = _make_handler(
+            cloud_directories=self._dirs([("f1", "01..mp4", 100)]),
+            build_baseline=lambda *a, **k: baseline,
+        )
+        result = handler._collect_episode_versions(_SUB, _MEDIA, season=1)
+        self.assertIn(1, result)
+
+    def test_scan_hit_keeps_episode(self):
+        """32. 目录里真有该集 → 照旧参与判重（不因新校验漏判）。"""
+        baseline = _history_baseline(1, file_name="01..mp4", file_size=100, score=1)
+        handler = _make_handler(
+            cloud_directories=self._dirs([("f1", "Show - S01E01.mkv", 100)]),
+            build_baseline=lambda *a, **k: baseline,
+        )
+        result = handler._collect_episode_versions(_SUB, _MEDIA, season=1)
+        self.assertIn(1, result)
+        self.assertTrue(any(entry["source"] == "目标目录扫描" for entry in result[1]))
+
+    def test_baseline_entry_carries_origin(self):
+        """33. 基线条目必须带来源标记，否则无法区分「历史」与「媒体服务器」。"""
+        handler = _make_handler(
+            cloud_directories=self._dirs([]),
+            build_baseline=lambda *a, **k: {
+                1: {"file_name": "Show - S01E01.mkv", "source": "插件转存记录",
+                    "cloud_file_id": "f1", "cloud_dir": "/媒体/剧集/Show/Season 01"},
+            },
+        )
+        result = handler._baseline_episode_versions(_SUB, _MEDIA, season=1)
+        self.assertEqual(result[1][0]["origin"], "插件转存记录")
+        self.assertEqual(result[1][0]["source"], "插件基线")
+
+
+class SkipMergeDoesNotPoisonHistoryTests(unittest.TestCase):
+    """组9（1.6.51）：跳过记录不得污染成功记录的落盘信息，也不得写进 MP 整理历史。"""
+
+    @staticmethod
+    def _read(relative_path):
+        with open(os.path.join(project_root, relative_path), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_skip_merge_keeps_landing_fields(self):
+        """34. 跳过合并进成功记录时保留 cloud_dir / 文件名，防止再造幻影版本。"""
+        source = self._read("plugins.v2/cloudsubscribex/handlers/sync/history.py")
+        self.assertIn("skip_onto_success", source)
+        block = source.split("skip_onto_success = (", 1)[1]
+        for key in ("cloud_dir", "cloud_file_id", "file_size", "file_name"):
+            self.assertIn(f'"{key}"', block.split("history[index] = merged", 1)[0])
+        # 假成功不得进入平台整理历史
+        self.assertIn("if not skip_onto_success:", source)
+
+    def test_cross_success_repair_path_exists(self):
+        """35. 手动保底链路：查无落盘的跨盘成功记录可人工重新转存。"""
+        source = self._read("plugins.v2/cloudsubscribex/handlers/sync/history.py")
+        self.assertIn("_cross_success_needs_repair", source)
+        self.assertIn('return True, "重新转存此记录"', source)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -284,5 +284,54 @@ class TestSubmitHistoryRetryBatch(unittest.TestCase):
             service.submit_history_retry("t1", "https://pan.example.com/s/AAA", "f1.mkv")
 
 
+    def test_cross_success_without_landing_can_be_retried(self):
+        """1.6.51 手动保底：跨盘「成功」但查无落盘痕迹 → 允许人工重新转存。"""
+        cases = [
+            (
+                "cloud_dir 为空（记录里没有落盘目录）",
+                {"cloud_dir": "", "file_name": "01..mp4", "source_file_name": "01..mp4"},
+                True,
+                "重新转存此记录",
+            ),
+            (
+                "有落盘目录但文件名没换成目标名",
+                {"cloud_dir": "/媒体/剧集/Show/Season 01", "file_name": "01..mp4",
+                 "source_file_name": "01..mp4"},
+                True,
+                "重新转存此记录",
+            ),
+            (
+                "真落盘（目录 + 改名后的目标文件名）",
+                {"cloud_dir": "/媒体/剧集/Show/Season 01",
+                 "file_name": "Show - S01E01.mkv", "source_file_name": "01..mp4"},
+                False,
+                "跨盘任务已成功完成，无需重试",
+            ),
+        ]
+        for title, extra, expected_can, expected_title in cases:
+            with self.subTest(title=title):
+                record = {
+                    "time": "t1", "share_url": "https://pan.example.com/s/AAA",
+                    "status": "成功", "transfer_mode": "cross", **extra,
+                }
+                can_retry, retry_title = HistoryService._history_retry_state(record)
+                self.assertEqual(can_retry, expected_can)
+                self.assertEqual(retry_title, expected_title)
+
+    def test_cross_success_repair_submit_accepted(self):
+        """人工重转入口可用：查无落盘的跨盘成功记录能真的提交重试。"""
+        record = {
+            "time": "t1", "share_url": "https://pan.example.com/s/AAA",
+            "file_name": "01..mp4", "source_file_name": "01..mp4",
+            "status": "成功", "transfer_mode": "cross", "cloud_dir": "",
+        }
+        service = SingleRetryDummy([record])
+        result = service.submit_history_retry(
+            "t1", "https://pan.example.com/s/AAA", "01..mp4"
+        )
+        self.assertEqual(result, {"status": "处理中"})
+        self.assertEqual(len(service._ran), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
