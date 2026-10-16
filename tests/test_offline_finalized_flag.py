@@ -31,20 +31,20 @@ install_app_mocks(
     "app.db.subscribe_oper", "app.helper", "app.helper.mediaserver",
     "app.application", "app.application.mediaserver", "app.log",
     "app.utils", "app.utils.string", "sqlalchemy",
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.core.history",
-    "cloudsubscribe.core.media", "cloudsubscribe.drive",
-    "cloudsubscribe.drive.common", "cloudsubscribe.search",
-    "cloudsubscribe.search.types",
-    "cloudsubscribe.handlers",
-    "cloudsubscribe.handlers.sync", "cloudsubscribe.handlers.sync.utils",
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.core.history",
+    "cloudsubscribex.core.media", "cloudsubscribex.drive",
+    "cloudsubscribex.drive.common", "cloudsubscribex.search",
+    "cloudsubscribex.search.types",
+    "cloudsubscribex.handlers",
+    "cloudsubscribex.handlers.sync", "cloudsubscribex.handlers.sync.utils",
 )
 set_media_type(movie="电影", tv="电视剧")
-sys.modules["cloudsubscribe.core"].OwnerDelegator = OwnerDelegator
-sys.modules["cloudsubscribe.core"].CloudFile = MagicMock()
+sys.modules["cloudsubscribex.core"].OwnerDelegator = OwnerDelegator
+sys.modules["cloudsubscribex.core"].CloudFile = MagicMock()
 
 HistoryService = load_module(
-    "cloudsubscribe.handlers.sync.history",
-    "plugins.v2/cloudsubscribe/handlers/sync/history.py",
+    "cloudsubscribex.handlers.sync.history",
+    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
 ).HistoryService
 
 INFO_HASH = "3F1A4C2B5D6E7F80912A3B4C5D6E7F8091A2B3C4"
@@ -116,7 +116,7 @@ class OfflineFinalizedFlagTest(unittest.TestCase):
 class OfflineFinalizedApiContractTest(unittest.TestCase):
     """列表接口必须只加展示字段，不得污染完成判定字段。"""
 
-    RUNTIME_FILE = "plugins.v2/cloudsubscribe/core/services/runtime.py"
+    RUNTIME_FILE = "plugins.v2/cloudsubscribex/core/services/runtime.py"
 
     def setUp(self):
         with open(self.RUNTIME_FILE, encoding="utf-8") as handle:

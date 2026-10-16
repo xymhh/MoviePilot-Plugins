@@ -36,11 +36,11 @@ class _MediaType:
     TV = "tv"
 
 
-register_module("cloudsubscribe", package=True)
-register_module("cloudsubscribe.search", package=True)
+register_module("cloudsubscribex", package=True)
+register_module("cloudsubscribex.search", package=True)
 types_module = load_module(
-    "cloudsubscribe.search.types",
-    "plugins.v2/cloudsubscribe/search/types.py",
+    "cloudsubscribex.search.types",
+    "plugins.v2/cloudsubscribex/search/types.py",
 )
 
 register_module("app", package=True)
@@ -50,13 +50,13 @@ register_module("app.log", logger=MagicMock())
 register_module("app.schemas", package=True, MediaInfo=MagicMock())
 register_module("app.schemas.types", MediaType=_MediaType)
 
-register_mock("cloudsubscribe.core", OwnerDelegator=OwnerDelegator, SearchQuery=MagicMock())
-register_mock("cloudsubscribe.search.magnet", clear_cache=MagicMock(), normalize_magnets=MagicMock())
-register_mock("cloudsubscribe.search.matching", normalize_season=MagicMock())
+register_mock("cloudsubscribex.core", OwnerDelegator=OwnerDelegator, SearchQuery=MagicMock())
+register_mock("cloudsubscribex.search.magnet", clear_cache=MagicMock(), normalize_magnets=MagicMock())
+register_mock("cloudsubscribex.search.matching", normalize_season=MagicMock())
 
 PanSouSearchService = load_module(
-    "cloudsubscribe.search.pansou.service",
-    "plugins.v2/cloudsubscribe/search/pansou/service.py",
+    "cloudsubscribex.search.pansou.service",
+    "plugins.v2/cloudsubscribex/search/pansou/service.py",
 ).PanSouSearchService
 
 configured_resource_types = types_module.configured_resource_types

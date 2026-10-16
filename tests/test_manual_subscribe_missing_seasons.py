@@ -125,21 +125,21 @@ class FakeSubscribeChain:
 
 register_mock("app.chain.subscribe", SubscribeChain=FakeSubscribeChain)
 register_mock("app.db.subscribe_oper", SubscribeOper=MagicMock())
-register_mock("cloudsubscribe")
-register_mock("cloudsubscribe.core", OwnerDelegator=OwnerDelegator)
-register_mock("cloudsubscribe.core.hook")
+register_mock("cloudsubscribex")
+register_mock("cloudsubscribex.core", OwnerDelegator=OwnerDelegator)
+register_mock("cloudsubscribex.core.hook")
 
 load_module(
-    "cloudsubscribe.core.pending_titles",
-    "plugins.v2/cloudsubscribe/core/pending_titles.py",
+    "cloudsubscribex.core.pending_titles",
+    "plugins.v2/cloudsubscribex/core/pending_titles.py",
 )
 seasons_module = load_module(
-    "cloudsubscribe.core.subscribe.seasons",
-    "plugins.v2/cloudsubscribe/core/subscribe/seasons.py",
+    "cloudsubscribex.core.subscribe.seasons",
+    "plugins.v2/cloudsubscribex/core/subscribe/seasons.py",
 )
 hook_module = load_module(
-    "cloudsubscribe.core.hook.subscription",
-    "plugins.v2/cloudsubscribe/core/hook/subscription.py",
+    "cloudsubscribex.core.hook.subscription",
+    "plugins.v2/cloudsubscribex/core/hook/subscription.py",
 )
 
 

@@ -12,40 +12,40 @@ register_mock("app.log", logger=MagicMock())
 register_mock("app.core")
 register_mock("app.core.config", settings=MagicMock(TZ="Asia/Shanghai"))
 
-# 构造 mock 的 cloudsubscribe 包结构
-register_mock("cloudsubscribe")
-register_mock("cloudsubscribe.core", OwnerDelegator=OwnerDelegator)
-register_mock("cloudsubscribe.core.checkin_manager")
-register_mock("cloudsubscribe.core.definitions")
-register_mock("cloudsubscribe.core.search")
-register_mock("cloudsubscribe.core.services")
-register_mock("cloudsubscribe.search")
-register_mock("cloudsubscribe.search.hdhaven")
-register_mock("cloudsubscribe.search.hdhaven.security")
-register_mock("cloudsubscribe.search.cloudflare")
-register_mock("cloudsubscribe.search.http_client")
-register_mock("cloudsubscribe.utils")
-register_mock("cloudsubscribe.utils.cache")
+# 构造 mock 的 cloudsubscribex 包结构
+register_mock("cloudsubscribex")
+register_mock("cloudsubscribex.core", OwnerDelegator=OwnerDelegator)
+register_mock("cloudsubscribex.core.checkin_manager")
+register_mock("cloudsubscribex.core.definitions")
+register_mock("cloudsubscribex.core.search")
+register_mock("cloudsubscribex.core.services")
+register_mock("cloudsubscribex.search")
+register_mock("cloudsubscribex.search.hdhaven")
+register_mock("cloudsubscribex.search.hdhaven.security")
+register_mock("cloudsubscribex.search.cloudflare")
+register_mock("cloudsubscribex.search.http_client")
+register_mock("cloudsubscribex.utils")
+register_mock("cloudsubscribex.utils.cache")
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 plugins_v2_path = os.path.join(project_root, "plugins.v2")
 
 # 加载 hdhaven client
-hdhaven_client_path = os.path.join(plugins_v2_path, "cloudsubscribe/search/hdhaven/client.py")
-spec_h = importlib.util.spec_from_file_location("cloudsubscribe.search.hdhaven.client", hdhaven_client_path)
+hdhaven_client_path = os.path.join(plugins_v2_path, "cloudsubscribex/search/hdhaven/client.py")
+spec_h = importlib.util.spec_from_file_location("cloudsubscribex.search.hdhaven.client", hdhaven_client_path)
 mod_h = importlib.util.module_from_spec(spec_h)
-mod_h.__package__ = "cloudsubscribe.search.hdhaven"
-sys.modules["cloudsubscribe.search.hdhaven.client"] = mod_h
+mod_h.__package__ = "cloudsubscribex.search.hdhaven"
+sys.modules["cloudsubscribex.search.hdhaven.client"] = mod_h
 spec_h.loader.exec_module(mod_h)
 HDHavenClient = mod_h.HDHavenClient
 HDHavenError = mod_h.HDHavenError
 
 # 加载 checkin service
-checkin_service_path = os.path.join(plugins_v2_path, "cloudsubscribe/core/services/checkin.py")
-spec_c = importlib.util.spec_from_file_location("cloudsubscribe.core.services.checkin", checkin_service_path)
+checkin_service_path = os.path.join(plugins_v2_path, "cloudsubscribex/core/services/checkin.py")
+spec_c = importlib.util.spec_from_file_location("cloudsubscribex.core.services.checkin", checkin_service_path)
 mod_c = importlib.util.module_from_spec(spec_c)
-mod_c.__package__ = "cloudsubscribe.core.services"
-sys.modules["cloudsubscribe.core.services.checkin"] = mod_c
+mod_c.__package__ = "cloudsubscribex.core.services"
+sys.modules["cloudsubscribex.core.services.checkin"] = mod_c
 mod_c.settings = MagicMock()
 mod_c.settings.TZ = "Asia/Shanghai"
 spec_c.loader.exec_module(mod_c)
@@ -219,21 +219,21 @@ class TestP115ClientCheckin(unittest.TestCase):
 
     def setUp(self):
         import types
-        for p in ["cloudsubscribe.drive", "cloudsubscribe.drive.p115"]:
+        for p in ["cloudsubscribex.drive", "cloudsubscribex.drive.p115"]:
             if p not in sys.modules:
                 m = types.ModuleType(p)
                 m.__path__ = []
                 sys.modules[p] = m
-        sys.modules.setdefault("cloudsubscribe.drive.p115.files", MagicMock())
-        sys.modules.setdefault("cloudsubscribe.drive.p115.share", MagicMock())
-        sys.modules.setdefault("cloudsubscribe.drive.p115.offline", MagicMock())
-        sys.modules.setdefault("cloudsubscribe.drive.p115.upload", MagicMock())
-        sys.modules.setdefault("cloudsubscribe.drive.common", MagicMock())
-        p115_client_path = os.path.join(plugins_v2_path, "cloudsubscribe/drive/p115/client.py")
-        spec_115 = importlib.util.spec_from_file_location("cloudsubscribe.drive.p115.client", p115_client_path)
+        sys.modules.setdefault("cloudsubscribex.drive.p115.files", MagicMock())
+        sys.modules.setdefault("cloudsubscribex.drive.p115.share", MagicMock())
+        sys.modules.setdefault("cloudsubscribex.drive.p115.offline", MagicMock())
+        sys.modules.setdefault("cloudsubscribex.drive.p115.upload", MagicMock())
+        sys.modules.setdefault("cloudsubscribex.drive.common", MagicMock())
+        p115_client_path = os.path.join(plugins_v2_path, "cloudsubscribex/drive/p115/client.py")
+        spec_115 = importlib.util.spec_from_file_location("cloudsubscribex.drive.p115.client", p115_client_path)
         mod_115 = importlib.util.module_from_spec(spec_115)
-        mod_115.__package__ = "cloudsubscribe.drive.p115"
-        sys.modules["cloudsubscribe.drive.p115.client"] = mod_115
+        mod_115.__package__ = "cloudsubscribex.drive.p115"
+        sys.modules["cloudsubscribex.drive.p115.client"] = mod_115
         spec_115.loader.exec_module(mod_115)
         self.P115ClientManager = mod_115.P115ClientManager
 

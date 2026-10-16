@@ -35,7 +35,7 @@ if plugins_v2_path not in sys.path:
 
 
 def _plugin_dir(*parts):
-    return os.path.join(plugins_v2_path, "cloudsubscribe", *parts)
+    return os.path.join(plugins_v2_path, "cloudsubscribex", *parts)
 
 
 # ---- app.* 占位依赖 ----
@@ -59,56 +59,56 @@ def _iter_transfer_batches(values, batch_size, batch_interval, provider_limit):
         yield normalized[offset:offset + size]
 
 
-# ---- cloudsubscribe 包层级与占位依赖 ----
-register_module("cloudsubscribe", package=True)
+# ---- cloudsubscribex 包层级与占位依赖 ----
+register_module("cloudsubscribex", package=True)
 register_module(
-    "cloudsubscribe.core",
+    "cloudsubscribex.core",
     package=True,
     OwnerDelegator=OwnerDelegator,
     CloudDriveCapability=MagicMock(),
     SearchCapability=MagicMock(),
 )
 register_mock(
-    "cloudsubscribe.core.cloud",
+    "cloudsubscribex.core.cloud",
     ShareLinkStatus=MagicMock(),
     CloudDriveCapability=MagicMock(),
 )
-register_mock("cloudsubscribe.core.media")
-register_mock("cloudsubscribe.core.transfer", HttpFileDownloadService=MagicMock())
-register_mock("cloudsubscribe.search.matching", positive_ints=MagicMock())
+register_mock("cloudsubscribex.core.media")
+register_mock("cloudsubscribex.core.transfer", HttpFileDownloadService=MagicMock())
+register_mock("cloudsubscribex.search.matching", positive_ints=MagicMock())
 register_module(
-    "cloudsubscribe.search.types",
+    "cloudsubscribex.search.types",
     normalize_resource_type=lambda value, *a, **k: str(value or "").strip().lower(),
     resource_type_from_text=lambda value, *a, **k: "",
     resource_type_from_url=lambda value, *a, **k: "",
     resource_type_name=lambda value, *a, **k: str(value),
 )
 register_mock(
-    "cloudsubscribe.utils.cache",
+    "cloudsubscribex.utils.cache",
     create_platform_ttl_cache=MagicMock(return_value=MagicMock()),
 )
 
-drive_common = ensure_package("cloudsubscribe.drive.common")
+drive_common = ensure_package("cloudsubscribex.drive.common")
 drive_common.iter_transfer_batches = _iter_transfer_batches
 drive_common.extract_list = lambda data, keys: data if isinstance(data, list) else []
 drive_common.CloudDriveFileServiceBase = object
 
-drive_package = ensure_package("cloudsubscribe.drive")
+drive_package = ensure_package("cloudsubscribex.drive")
 drive_package.__path__ = [_plugin_dir()]
-ensure_package("cloudsubscribe.drive.alipan").__path__ = [_plugin_dir("alipan")]
-ensure_package("cloudsubscribe.drive.yun139").__path__ = [_plugin_dir("yun139")]
-register_mock("cloudsubscribe.drive.yun139.client")
+ensure_package("cloudsubscribex.drive.alipan").__path__ = [_plugin_dir("alipan")]
+ensure_package("cloudsubscribex.drive.yun139").__path__ = [_plugin_dir("yun139")]
+register_mock("cloudsubscribex.drive.yun139.client")
 AliPanShareService = load_module(
-    "cloudsubscribe.drive.alipan.share",
-    "plugins.v2/cloudsubscribe/drive/alipan/share.py",
+    "cloudsubscribex.drive.alipan.share",
+    "plugins.v2/cloudsubscribex/drive/alipan/share.py",
 ).AliPanShareService
 Yun139ShareService = load_module(
-    "cloudsubscribe.drive.yun139.share",
-    "plugins.v2/cloudsubscribe/drive/yun139/share.py",
+    "cloudsubscribex.drive.yun139.share",
+    "plugins.v2/cloudsubscribex/drive/yun139/share.py",
 ).Yun139ShareService
 sync_module = load_module(
-    "cloudsubscribe.core.api.sync",
-    "plugins.v2/cloudsubscribe/core/api/sync.py",
+    "cloudsubscribex.core.api.sync",
+    "plugins.v2/cloudsubscribex/core/api/sync.py",
 )
 
 

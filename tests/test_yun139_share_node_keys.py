@@ -46,7 +46,7 @@ register_module("app.log", logger=MagicMock())
 # 注意：本文件在 discover 里排在最后，注册会覆盖其它测试的桩，因此占位包一律用
 # 「属性自动返回 Mock」的形式（AutoMock / MagicMock），避免打断别人的导入。
 register_mock(
-    "cloudsubscribe.core",
+    "cloudsubscribex.core",
     OwnerDelegator=OwnerDelegator,
     CloudDriveCapability=MagicMock(),
     CloudDriveProvider=MagicMock(),
@@ -54,21 +54,21 @@ register_mock(
     SearchCapability=MagicMock(),
 )
 load_module(
-    "cloudsubscribe.core.cloud",
-    "plugins.v2/cloudsubscribe/core/cloud.py",
+    "cloudsubscribex.core.cloud",
+    "plugins.v2/cloudsubscribex/core/cloud.py",
 )
-register_mock("cloudsubscribe.core.transfer", HttpFileDownloadService=MagicMock())
+register_mock("cloudsubscribex.core.transfer", HttpFileDownloadService=MagicMock())
 
 # ---- drive 包层级与占位依赖 ----
-register_module("cloudsubscribe.drive", package=True)
-register_module("cloudsubscribe.drive.yun139", package=True)
+register_module("cloudsubscribex.drive", package=True)
+register_module("cloudsubscribex.drive.yun139", package=True)
 
 
 class Yun139ApiError(RuntimeError):
     """与线上实现同名的异常类型。"""
 
 
-register_package("cloudsubscribe.drive.yun139.client", Yun139ApiError=Yun139ApiError)
+register_package("cloudsubscribex.drive.yun139.client", Yun139ApiError=Yun139ApiError)
 
 
 def _safe_int(value):
@@ -79,14 +79,14 @@ def _safe_int(value):
 
 
 register_package(
-    "cloudsubscribe.drive.common",
+    "cloudsubscribex.drive.common",
     safe_int=_safe_int,
     CloudDriveFileServiceBase=object,
 )
 
 share_module = load_module(
-    "cloudsubscribe.drive.yun139.share",
-    "plugins.v2/cloudsubscribe/drive/yun139/share.py",
+    "cloudsubscribex.drive.yun139.share",
+    "plugins.v2/cloudsubscribex/drive/yun139/share.py",
 )
 Yun139ShareService = share_module.Yun139ShareService
 

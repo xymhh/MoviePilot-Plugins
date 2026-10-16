@@ -24,36 +24,36 @@ install_app_mocks(
     "app.db.subscribe_oper",
 )
 
-# 构造 cloudsubscribe 包结构
-register_mock("cloudsubscribe")
+# 构造 cloudsubscribex 包结构
+register_mock("cloudsubscribex")
 register_package(
-    "cloudsubscribe.core",
+    "cloudsubscribex.core",
     OwnerDelegator=OwnerDelegator,
     CloudDriveCapability=MagicMock(),
 )
-register_mock("cloudsubscribe.search", subs_filter=MagicMock())
-register_mock("cloudsubscribe.search.subs_filter")
+register_mock("cloudsubscribex.search", subs_filter=MagicMock())
+register_mock("cloudsubscribex.search.subs_filter")
 
 # 加载 file_parser
 utils_file_parser = load_module(
-    "cloudsubscribe.utils.file_parser",
-    "plugins.v2/cloudsubscribe/utils/file_parser.py",
+    "cloudsubscribex.utils.file_parser",
+    "plugins.v2/cloudsubscribex/utils/file_parser.py",
 )
 register_package(
-    "cloudsubscribe.utils",
+    "cloudsubscribex.utils",
     MediaFileParser=utils_file_parser.MediaFileParser,
 )
 
-register_package("cloudsubscribe.handlers")
-register_package("cloudsubscribe.handlers.sync")
+register_package("cloudsubscribex.handlers")
+register_package("cloudsubscribex.handlers.sync")
 load_module(
-    "cloudsubscribe.handlers.sync.utils",
-    "plugins.v2/cloudsubscribe/handlers/sync/utils.py",
+    "cloudsubscribex.handlers.sync.utils",
+    "plugins.v2/cloudsubscribex/handlers/sync/utils.py",
 )
 
 _postprocess = load_module(
-    "cloudsubscribe.handlers.sync.postprocess",
-    "plugins.v2/cloudsubscribe/handlers/sync/postprocess.py",
+    "cloudsubscribex.handlers.sync.postprocess",
+    "plugins.v2/cloudsubscribex/handlers/sync/postprocess.py",
 )
 DirectoryFileIndex = _postprocess.DirectoryFileIndex
 PostprocessBatchContext = _postprocess.PostprocessBatchContext
@@ -211,7 +211,7 @@ class TestPostprocessServiceHelpers(unittest.TestCase):
             "monitored_item": {"next_check_at": 900.0, "_monitor_until": 1200.0, "skip_history": True},
         }
         # _due_pending_keys 已从静态方法改为实例方法（新增 pending_keys 参数），
-        # 真实实现见 plugins.v2/cloudsubscribe/handlers/sync/postprocess.py:306。
+        # 真实实现见 plugins.v2/cloudsubscribex/handlers/sync/postprocess.py:306。
         service = DummyPostprocessService()
         due = service._due_pending_keys(pending, now)
         self.assertEqual(due, ["due_item"])
@@ -434,18 +434,18 @@ install_app_mocks(
     "app.application", "app.application.mediaserver",
     "app.utils", "app.utils.string", "sqlalchemy",
 )
-ensure_package("cloudsubscribe.core.history")
-ensure_package("cloudsubscribe.core.media")
-ensure_package("cloudsubscribe.drive")
-ensure_package("cloudsubscribe.drive.common")
-ensure_package("cloudsubscribe.search")
-ensure_package("cloudsubscribe.search.types")
+ensure_package("cloudsubscribex.core.history")
+ensure_package("cloudsubscribex.core.media")
+ensure_package("cloudsubscribex.drive")
+ensure_package("cloudsubscribex.drive.common")
+ensure_package("cloudsubscribex.search")
+ensure_package("cloudsubscribex.search.types")
 set_media_type(movie="电影", tv="电视剧")
-sys.modules["cloudsubscribe.core"].CloudFile = MagicMock()
+sys.modules["cloudsubscribex.core"].CloudFile = MagicMock()
 
 _history = load_module(
-    "cloudsubscribe.handlers.sync.history",
-    "plugins.v2/cloudsubscribe/handlers/sync/history.py",
+    "cloudsubscribex.handlers.sync.history",
+    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
 )
 HistoryService = _history.HistoryService
 

@@ -19,20 +19,20 @@ register_mock("app.log", logger=mock_logger)
 register_mock("app.chain.subscribe", SubscribeChain=MagicMock())
 register_mock("app.db.subscribe_oper", SubscribeOper=MagicMock())
 
-# 构造 mock 的 cloudsubscribe 包结构
-register_mock("cloudsubscribe")
-register_mock("cloudsubscribe.core", OwnerDelegator=OwnerDelegator)
-register_mock("cloudsubscribe.core.hook")
+# 构造 mock 的 cloudsubscribex 包结构
+register_mock("cloudsubscribex")
+register_mock("cloudsubscribex.core", OwnerDelegator=OwnerDelegator)
+register_mock("cloudsubscribex.core.hook")
 
 pending_module = load_module(
-    "cloudsubscribe.core.pending_titles",
-    "plugins.v2/cloudsubscribe/core/pending_titles.py",
+    "cloudsubscribex.core.pending_titles",
+    "plugins.v2/cloudsubscribex/core/pending_titles.py",
 )
 PendingTitleStore = pending_module.PendingTitleStore
 normalize_title = pending_module.normalize_title
 subscription_module = load_module(
-    "cloudsubscribe.core.hook.subscription",
-    "plugins.v2/cloudsubscribe/core/hook/subscription.py",
+    "cloudsubscribex.core.hook.subscription",
+    "plugins.v2/cloudsubscribex/core/hook/subscription.py",
 )
 SubscriptionSearchHook = subscription_module.SubscriptionSearchHook
 

@@ -82,13 +82,13 @@ register_module(
     MediaType=SimpleNamespace(TV="tv", MOVIE="movie"),
 )
 
-# ---- cloudsubscribe 包层级 ----
+# ---- cloudsubscribex 包层级 ----
 install_app_mocks(
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.core.media",
-    "cloudsubscribe.utils", "cloudsubscribe.utils.file_parser",
-    "cloudsubscribe.handlers", "cloudsubscribe.handlers.sync",
-    "cloudsubscribe.handlers.sync.utils",
-    "cloudsubscribe.drive", "cloudsubscribe.drive.common",
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.core.media",
+    "cloudsubscribex.utils", "cloudsubscribex.utils.file_parser",
+    "cloudsubscribex.handlers", "cloudsubscribex.handlers.sync",
+    "cloudsubscribex.handlers.sync.utils",
+    "cloudsubscribex.drive", "cloudsubscribex.drive.common",
 )
 
 # OwnerDelegator 桩：与 plugin_env 一致
@@ -101,41 +101,41 @@ class _OwnerStub(_BaseDelegator):
 
 # 对包用 ensure_package（保留 AutoMockModule），对叶子模块用 register_module
 _ensure = ensure_package
-_ensure("cloudsubscribe.core").OwnerDelegator = _OwnerStub
-_ensure("cloudsubscribe.core").CloudFile = SimpleNamespace
-_ensure("cloudsubscribe.core.media").apply_media_identity = MagicMock()
-_ensure("cloudsubscribe.core.media").tmdb_id_of = MagicMock(return_value=123)
-_ensure("cloudsubscribe.core.media").get_transfer_history_by = MagicMock(return_value=[])
-_ensure("cloudsubscribe.core.media").media_identity = MagicMock(return_value=("themoviedb", "123"))
-_ensure("cloudsubscribe.utils").FileMatcher = SimpleNamespace(episode_from_file=MagicMock(return_value=None))
-_ensure("cloudsubscribe.utils").MediaFileParser = SimpleNamespace(
+_ensure("cloudsubscribex.core").OwnerDelegator = _OwnerStub
+_ensure("cloudsubscribex.core").CloudFile = SimpleNamespace
+_ensure("cloudsubscribex.core.media").apply_media_identity = MagicMock()
+_ensure("cloudsubscribex.core.media").tmdb_id_of = MagicMock(return_value=123)
+_ensure("cloudsubscribex.core.media").get_transfer_history_by = MagicMock(return_value=[])
+_ensure("cloudsubscribex.core.media").media_identity = MagicMock(return_value=("themoviedb", "123"))
+_ensure("cloudsubscribex.utils").FileMatcher = SimpleNamespace(episode_from_file=MagicMock(return_value=None))
+_ensure("cloudsubscribex.utils").MediaFileParser = SimpleNamespace(
     is_video=lambda name: str(name).lower().endswith((".mkv", ".mp4", ".avi", ".ts"))
 )
-_ensure("cloudsubscribe.utils.cache").normalize_platform_cache_key = lambda key: key
-_ensure("cloudsubscribe.drive.common").format_size = lambda n: f"{n}B"
-_ensure("cloudsubscribe.handlers.sync.utils").normalize_season = lambda s: int(s or 1)
-_ensure("cloudsubscribe.handlers.sync.utils").extract_ed2k_filename = MagicMock()
-_ensure("cloudsubscribe.handlers.sync.utils").format_episode_ranges = MagicMock(return_value="")
-_ensure("cloudsubscribe.handlers.sync.baseline").normalize_platform_cache_key = lambda key: key
+_ensure("cloudsubscribex.utils.cache").normalize_platform_cache_key = lambda key: key
+_ensure("cloudsubscribex.drive.common").format_size = lambda n: f"{n}B"
+_ensure("cloudsubscribex.handlers.sync.utils").normalize_season = lambda s: int(s or 1)
+_ensure("cloudsubscribex.handlers.sync.utils").extract_ed2k_filename = MagicMock()
+_ensure("cloudsubscribex.handlers.sync.utils").format_episode_ranges = MagicMock(return_value="")
+_ensure("cloudsubscribex.handlers.sync.baseline").normalize_platform_cache_key = lambda key: key
 
 # 加载被测模块
 episode_dedup_module = load_module(
-    "cloudsubscribe.handlers.sync.episode_dedup",
-    "plugins.v2/cloudsubscribe/handlers/sync/episode_dedup.py",
+    "cloudsubscribex.handlers.sync.episode_dedup",
+    "plugins.v2/cloudsubscribex/handlers/sync/episode_dedup.py",
 )
 EpisodeDedupService = episode_dedup_module.EpisodeDedupService
 
 # 加载 rule_scoring（被 _should_upgrade_candidate 依赖）
 rule_scoring_module = load_module(
-    "cloudsubscribe.handlers.sync.rule_scoring",
-    "plugins.v2/cloudsubscribe/handlers/sync/rule_scoring.py",
+    "cloudsubscribex.handlers.sync.rule_scoring",
+    "plugins.v2/cloudsubscribex/handlers/sync/rule_scoring.py",
 )
 UpgradeRuleScoringService = rule_scoring_module.UpgradeRuleScoringService
 
 # 加载 naming（被 _find_cloud_movie_file / _platform_target 依赖）
 naming_module = load_module(
-    "cloudsubscribe.handlers.sync.naming",
-    "plugins.v2/cloudsubscribe/handlers/sync/naming.py",
+    "cloudsubscribex.handlers.sync.naming",
+    "plugins.v2/cloudsubscribex/handlers/sync/naming.py",
 )
 SyncNamingService = naming_module.SyncNamingService
 
@@ -485,25 +485,25 @@ class EpisodeDedupSkipStatusContractTests(unittest.TestCase):
 
     def test_baseline_excludes_skipped_records(self):
         """17. 跳过记录不得进入洗版基线（否则被当成已有的幻影版本）。"""
-        source = self._read("plugins.v2/cloudsubscribe/handlers/sync/baseline.py")
+        source = self._read("plugins.v2/cloudsubscribex/handlers/sync/baseline.py")
         match = re.search(r"status.*?in \{([^}]*)\}", source)
         self.assertIsNotNone(match, "未找到 baseline 的状态排除集合")
         self.assertIn("跳过", match.group(1))
 
     def test_backend_terminal_status_includes_skipped(self):
         """18. 后端可删除判定与合并终态保护都认「跳过」。"""
-        source = self._read("plugins.v2/cloudsubscribe/handlers/sync/history.py")
+        source = self._read("plugins.v2/cloudsubscribex/handlers/sync/history.py")
         self.assertIn('"跳过"', source)
         # _history_record_deletable 与 prepare_history_group 的 failed_count 不得把跳过算成失败
         self.assertIn('{"成功", "处理中", "下载中", "跳过"}', source)
 
     def test_frontend_supports_skipped_status(self):
         """19. 前端状态筛选/配色/可删除判定都认「跳过」。"""
-        table = self._read("frontend/cloudsubscribe/src/components/dashboard/HistoryTable.vue")
+        table = self._read("frontend/cloudsubscribex/src/components/dashboard/HistoryTable.vue")
         self.assertIn('"处理中", "下载中", "成功", "失败", "跳过"', table)
         self.assertIn('status === "跳过"', table)
         self.assertIn('["成功", "失败", "跳过"]', table)
-        app_page = self._read("frontend/cloudsubscribe/src/components/AppPage.vue")
+        app_page = self._read("frontend/cloudsubscribex/src/components/AppPage.vue")
         self.assertIn('["成功", "失败", "跳过"]', app_page)
 
 

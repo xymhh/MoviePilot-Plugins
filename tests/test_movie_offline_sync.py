@@ -25,109 +25,109 @@ install_app_mocks(
     "app.db", "app.db.subscribe_oper", "app.modules",
     "app.modules.filemanager", "app.modules.filemanager.transhandler",
     "app.utils", "app.utils.http", "app.helper", "app.application", "app.adapters",
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.core.media",
-    "cloudsubscribe.drive", "cloudsubscribe.drive.scanner",
-    "cloudsubscribe.handlers", "cloudsubscribe.handlers.sync",
-    "cloudsubscribe.handlers.notification", "cloudsubscribe.handlers.search",
-    "cloudsubscribe.handlers.subscription", "cloudsubscribe.utils",
-    "cloudsubscribe.utils.cache", "cloudsubscribe.search", "cloudsubscribe.search.types",
-    *[f"cloudsubscribe.handlers.sync.{name}" for name in _SYNC_COMPONENTS],
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.core.media",
+    "cloudsubscribex.drive", "cloudsubscribex.drive.scanner",
+    "cloudsubscribex.handlers", "cloudsubscribex.handlers.sync",
+    "cloudsubscribex.handlers.notification", "cloudsubscribex.handlers.search",
+    "cloudsubscribex.handlers.subscription", "cloudsubscribex.utils",
+    "cloudsubscribex.utils.cache", "cloudsubscribex.search", "cloudsubscribex.search.types",
+    *[f"cloudsubscribex.handlers.sync.{name}" for name in _SYNC_COMPONENTS],
 )
 MediaType = set_media_type(movie="movie", tv="tv")
 
-mock_notif = ensure_package("cloudsubscribe.handlers.notification")
+mock_notif = ensure_package("cloudsubscribex.handlers.notification")
 mock_notif.MediaServerNotifier = MagicMock()
 mock_notif.MediaServerResolver = MagicMock()
-ensure_package("cloudsubscribe.handlers.search").SearchHandler = MagicMock()
-ensure_package("cloudsubscribe.handlers.subscription").SubscribeHandler = MagicMock()
+ensure_package("cloudsubscribex.handlers.search").SearchHandler = MagicMock()
+ensure_package("cloudsubscribex.handlers.subscription").SubscribeHandler = MagicMock()
 
-mock_core = ensure_package("cloudsubscribe.core")
+mock_core = ensure_package("cloudsubscribex.core")
 mock_core.OwnerDelegator = OwnerDelegator
 mock_core.CloudDriveCapability = MagicMock()
 
-mock_core_search = types.ModuleType("cloudsubscribe.core.search")
+mock_core_search = types.ModuleType("cloudsubscribex.core.search")
 mock_core_search.SearchQuery = MagicMock()
-sys.modules["cloudsubscribe.core.search"] = mock_core_search
+sys.modules["cloudsubscribex.core.search"] = mock_core_search
 
 # 加载 matching.py
 matching_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/search/matching.py")
+    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/search/matching.py")
 )
-spec_match = importlib.util.spec_from_file_location("cloudsubscribe.search.matching", matching_path)
+spec_match = importlib.util.spec_from_file_location("cloudsubscribex.search.matching", matching_path)
 mod_match = importlib.util.module_from_spec(spec_match)
-mod_match.__package__ = "cloudsubscribe.search"
-sys.modules["cloudsubscribe.search.matching"] = mod_match
+mod_match.__package__ = "cloudsubscribex.search"
+sys.modules["cloudsubscribex.search.matching"] = mod_match
 spec_match.loader.exec_module(mod_match)
 resource_title_matches = mod_match.resource_title_matches
 extract_season = mod_match.extract_season
 # 加载 utils/file_parser.py
 parser_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/utils/file_parser.py")
+    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/utils/file_parser.py")
 )
-spec_p = importlib.util.spec_from_file_location("cloudsubscribe.utils.file_parser", parser_path)
+spec_p = importlib.util.spec_from_file_location("cloudsubscribex.utils.file_parser", parser_path)
 mod_p = importlib.util.module_from_spec(spec_p)
 spec_p.loader.exec_module(mod_p)
-mock_utils = sys.modules["cloudsubscribe.utils"]
+mock_utils = sys.modules["cloudsubscribex.utils"]
 mock_utils.MediaFileParser = mod_p.MediaFileParser
-sys.modules["cloudsubscribe.utils.file_parser"] = mod_p
+sys.modules["cloudsubscribex.utils.file_parser"] = mod_p
 
 # 加载 utils/magnet.py
 utils_mag_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/utils/magnet.py")
+    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/utils/magnet.py")
 )
-spec_umag = importlib.util.spec_from_file_location("cloudsubscribe.utils.magnet", utils_mag_path)
+spec_umag = importlib.util.spec_from_file_location("cloudsubscribex.utils.magnet", utils_mag_path)
 mod_umag = importlib.util.module_from_spec(spec_umag)
-mod_umag.__package__ = "cloudsubscribe.utils"
-sys.modules["cloudsubscribe.utils.magnet"] = mod_umag
+mod_umag.__package__ = "cloudsubscribex.utils"
+sys.modules["cloudsubscribex.utils.magnet"] = mod_umag
 spec_umag.loader.exec_module(mod_umag)
 mock_utils.parse_magnet_metadata = mod_umag.parse_magnet_metadata
 
 # 加载 search/magnet.py
 magnet_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/search/magnet.py")
+    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/search/magnet.py")
 )
-spec_mag = importlib.util.spec_from_file_location("cloudsubscribe.search.magnet", magnet_path)
+spec_mag = importlib.util.spec_from_file_location("cloudsubscribex.search.magnet", magnet_path)
 mod_mag = importlib.util.module_from_spec(spec_mag)
-mod_mag.__package__ = "cloudsubscribe.search"
-sys.modules["cloudsubscribe.search.magnet"] = mod_mag
+mod_mag.__package__ = "cloudsubscribex.search"
+sys.modules["cloudsubscribex.search.magnet"] = mod_mag
 spec_mag.loader.exec_module(mod_mag)
 media_titles = mod_mag.media_titles
 
 # 加载 piratebay/service.py
-mock_pb_client = types.ModuleType("cloudsubscribe.search.piratebay.client")
+mock_pb_client = types.ModuleType("cloudsubscribex.search.piratebay.client")
 mock_pb_client.PirateBayClient = MagicMock()
 mock_pb_client.PirateBayError = RuntimeError
-sys.modules["cloudsubscribe.search.piratebay"] = types.ModuleType("cloudsubscribe.search.piratebay")
-sys.modules["cloudsubscribe.search.piratebay"].__path__ = []
-sys.modules["cloudsubscribe.search.piratebay.client"] = mock_pb_client
+sys.modules["cloudsubscribex.search.piratebay"] = types.ModuleType("cloudsubscribex.search.piratebay")
+sys.modules["cloudsubscribex.search.piratebay"].__path__ = []
+sys.modules["cloudsubscribex.search.piratebay.client"] = mock_pb_client
 
 pb_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/search/piratebay/service.py")
+    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/search/piratebay/service.py")
 )
-spec_pb = importlib.util.spec_from_file_location("cloudsubscribe.search.piratebay.service", pb_path)
+spec_pb = importlib.util.spec_from_file_location("cloudsubscribex.search.piratebay.service", pb_path)
 mod_pb = importlib.util.module_from_spec(spec_pb)
-mod_pb.__package__ = "cloudsubscribe.search.piratebay"
-sys.modules["cloudsubscribe.search.piratebay.service"] = mod_pb
+mod_pb.__package__ = "cloudsubscribex.search.piratebay"
+sys.modules["cloudsubscribex.search.piratebay.service"] = mod_pb
 spec_pb.loader.exec_module(mod_pb)
 PirateBaySearchService = mod_pb.PirateBaySearchService
 
 # 加载 handlers/sync/utils.py
 utils_sync_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/handlers/sync/utils.py")
+    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/handlers/sync/utils.py")
 )
-spec_u = importlib.util.spec_from_file_location("cloudsubscribe.handlers.sync.utils", utils_sync_path)
+spec_u = importlib.util.spec_from_file_location("cloudsubscribex.handlers.sync.utils", utils_sync_path)
 mod_u = importlib.util.module_from_spec(spec_u)
 spec_u.loader.exec_module(mod_u)
-sys.modules["cloudsubscribe.handlers.sync.utils"] = mod_u
+sys.modules["cloudsubscribex.handlers.sync.utils"] = mod_u
 
 # 加载 handlers/sync/service.py
 service_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/handlers/sync/service.py")
+    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/handlers/sync/service.py")
 )
-spec_serv = importlib.util.spec_from_file_location("cloudsubscribe.handlers.sync.service", service_path)
+spec_serv = importlib.util.spec_from_file_location("cloudsubscribex.handlers.sync.service", service_path)
 mod_serv = importlib.util.module_from_spec(spec_serv)
-mod_serv.__package__ = "cloudsubscribe.handlers.sync"
-sys.modules["cloudsubscribe.handlers.sync.service"] = mod_serv
+mod_serv.__package__ = "cloudsubscribex.handlers.sync"
+sys.modules["cloudsubscribex.handlers.sync.service"] = mod_serv
 spec_serv.loader.exec_module(mod_serv)
 SyncHandler = mod_serv.SyncHandler
 

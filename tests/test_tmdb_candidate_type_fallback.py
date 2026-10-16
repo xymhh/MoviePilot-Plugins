@@ -36,22 +36,22 @@ register_mock("app.utils.string")
 
 MEDIA_TYPE = set_media_type()
 
-# ---- cloudsubscribe.* 占位依赖 ----
-register_module("cloudsubscribe", package=True)
+# ---- cloudsubscribex.* 占位依赖 ----
+register_module("cloudsubscribex", package=True)
 register_module(
-    "cloudsubscribe.core",
+    "cloudsubscribex.core",
     package=True,
     OwnerDelegator=OwnerDelegator,
     SearchCapability=MagicMock(),
     CloudDriveCapability=MagicMock(),
 )
-register_module("cloudsubscribe.core.cloud", CloudDriveCapability=MagicMock())
+register_module("cloudsubscribex.core.cloud", CloudDriveCapability=MagicMock())
 register_module(
-    "cloudsubscribe.core.api.page",
+    "cloudsubscribex.core.api.page",
     _platform_image_url=MagicMock(return_value=""),
 )
 register_module(
-    "cloudsubscribe.core.media",
+    "cloudsubscribex.core.media",
     apply_media_identity=MagicMock(),
     legacy_media_ids=MagicMock(),
     media_identity=MagicMock(),
@@ -60,14 +60,14 @@ register_module(
     tmdb_id_of=MagicMock(),
     tmdb_identity_update=MagicMock(),
 )
-register_module("cloudsubscribe.core.config", UIConfig=MagicMock())
-register_module("cloudsubscribe.handlers.search", SearchHandler=MagicMock())
-register_module("cloudsubscribe.search.hdhive", HDHIVE_DETAIL_RESOURCE_TYPES=set())
-register_module("cloudsubscribe.search.magnet", parse_size_str=MagicMock())
-register_module("cloudsubscribe.search.matching", extract_resource_tags=MagicMock())
-register_module("cloudsubscribe.search.scanner", SearchSourceRegistry=MagicMock())
+register_module("cloudsubscribex.core.config", UIConfig=MagicMock())
+register_module("cloudsubscribex.handlers.search", SearchHandler=MagicMock())
+register_module("cloudsubscribex.search.hdhive", HDHIVE_DETAIL_RESOURCE_TYPES=set())
+register_module("cloudsubscribex.search.magnet", parse_size_str=MagicMock())
+register_module("cloudsubscribex.search.matching", extract_resource_tags=MagicMock())
+register_module("cloudsubscribex.search.scanner", SearchSourceRegistry=MagicMock())
 register_module(
-    "cloudsubscribe.search.types",
+    "cloudsubscribex.search.types",
     PREVIEW_PROVIDER_KEYS=set(),
     PREVIEW_RESOURCE_TYPES=set(),
     RESOURCE_TYPE_ORDER=[],
@@ -78,9 +78,9 @@ register_module(
     resource_type_from_url=MagicMock(),
     resource_type_name=MagicMock(),
 )
-register_module("cloudsubscribe.utils", parse_magnet_metadata=MagicMock())
+register_module("cloudsubscribex.utils", parse_magnet_metadata=MagicMock())
 register_module(
-    "cloudsubscribe.utils.http_client",
+    "cloudsubscribex.utils.http_client",
     build_proxy_url=MagicMock(),
     normalize_proxies=MagicMock(),
     request_error_summary=MagicMock(),
@@ -89,8 +89,8 @@ register_module(
 )
 
 search_api_module = load_module(
-    "cloudsubscribe.core.api.search",
-    "plugins.v2/cloudsubscribe/core/api/search.py",
+    "cloudsubscribex.core.api.search",
+    "plugins.v2/cloudsubscribex/core/api/search.py",
 )
 
 

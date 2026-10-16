@@ -57,20 +57,20 @@ def _fake_metainfo(name):
 
 register_module("app.core.metainfo", MetaInfo=_fake_metainfo)
 install_app_mocks(
-    "cloudsubscribe", "cloudsubscribe.utils", "cloudsubscribe.search",
+    "cloudsubscribex", "cloudsubscribex.utils", "cloudsubscribex.search",
 )
 
 file_parser_module = load_module(
-    "cloudsubscribe.utils.file_parser",
-    "plugins.v2/cloudsubscribe/utils/file_parser.py",
+    "cloudsubscribex.utils.file_parser",
+    "plugins.v2/cloudsubscribex/utils/file_parser.py",
 )
 matching_module = load_module(
-    "cloudsubscribe.search.matching",
-    "plugins.v2/cloudsubscribe/search/matching.py",
+    "cloudsubscribex.search.matching",
+    "plugins.v2/cloudsubscribex/search/matching.py",
 )
 file_matcher_module = load_module(
-    "cloudsubscribe.utils.file_matcher",
-    "plugins.v2/cloudsubscribe/utils/file_matcher.py",
+    "cloudsubscribex.utils.file_matcher",
+    "plugins.v2/cloudsubscribex/utils/file_matcher.py",
 )
 
 MediaFileParser = file_parser_module.MediaFileParser

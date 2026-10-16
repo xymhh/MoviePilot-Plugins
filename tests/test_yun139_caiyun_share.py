@@ -41,15 +41,15 @@ if plugins_v2_path not in sys.path:
 
 
 def _plugin_dir(*parts):
-    return os.path.join(plugins_v2_path, "cloudsubscribe", *parts)
+    return os.path.join(plugins_v2_path, "cloudsubscribex", *parts)
 
 
 # 用真实 search.types：本测试的核心就是它的域名识别表
-register_module("cloudsubscribe", package=True)
-register_module("cloudsubscribe.search", package=True)
+register_module("cloudsubscribex", package=True)
+register_module("cloudsubscribex.search", package=True)
 types_module = load_module(
-    "cloudsubscribe.search.types",
-    "plugins.v2/cloudsubscribe/search/types.py",
+    "cloudsubscribex.search.types",
+    "plugins.v2/cloudsubscribex/search/types.py",
 )
 
 # ---- app.* 占位依赖 ----
@@ -65,9 +65,9 @@ register_module("app.utils", package=True)
 register_mock("app.utils.string")
 register_module("app.schemas.types", MediaType=MagicMock())
 
-# ---- cloudsubscribe 包层级与占位依赖 ----
+# ---- cloudsubscribex 包层级与占位依赖 ----
 register_mock(
-    "cloudsubscribe.core",
+    "cloudsubscribex.core",
     OwnerDelegator=OwnerDelegator,
     CloudDriveCapability=MagicMock(),
     CloudDriveProvider=MagicMock(),
@@ -75,52 +75,52 @@ register_mock(
     SearchCapability=MagicMock(),
 )
 register_mock(
-    "cloudsubscribe.core.cloud",
+    "cloudsubscribex.core.cloud",
     ShareLinkStatus=MagicMock(),
     CloudDriveCapability=MagicMock(),
 )
-register_mock("cloudsubscribe.core.media")
-register_mock("cloudsubscribe.core.transfer", HttpFileDownloadService=MagicMock())
-register_mock("cloudsubscribe.search.matching", positive_ints=MagicMock())
+register_mock("cloudsubscribex.core.media")
+register_mock("cloudsubscribex.core.transfer", HttpFileDownloadService=MagicMock())
+register_mock("cloudsubscribex.search.matching", positive_ints=MagicMock())
 register_mock(
-    "cloudsubscribe.utils.cache",
+    "cloudsubscribex.utils.cache",
     create_platform_ttl_cache=MagicMock(return_value=MagicMock()),
 )
 
-drive_common = ensure_package("cloudsubscribe.drive.common")
+drive_common = ensure_package("cloudsubscribex.drive.common")
 drive_common.iter_transfer_batches = lambda values, *a, **k: []
 drive_common.extract_list = lambda data, keys: data if isinstance(data, list) else []
 drive_common.CloudDriveFileServiceBase = object
 drive_common.safe_int = lambda value, default=0: default
 
-drive_package = ensure_package("cloudsubscribe.drive")
+drive_package = ensure_package("cloudsubscribex.drive")
 drive_package.__path__ = [_plugin_dir()]
-ensure_package("cloudsubscribe.drive.yun139").__path__ = [_plugin_dir("yun139")]
-register_mock("cloudsubscribe.drive.yun139.client")
+ensure_package("cloudsubscribex.drive.yun139").__path__ = [_plugin_dir("yun139")]
+register_mock("cloudsubscribex.drive.yun139.client")
 
 Yun139ShareService = load_module(
-    "cloudsubscribe.drive.yun139.share",
-    "plugins.v2/cloudsubscribe/drive/yun139/share.py",
+    "cloudsubscribex.drive.yun139.share",
+    "plugins.v2/cloudsubscribex/drive/yun139/share.py",
 ).Yun139ShareService
 
 sync_module = load_module(
-    "cloudsubscribe.core.api.sync",
-    "plugins.v2/cloudsubscribe/core/api/sync.py",
+    "cloudsubscribex.core.api.sync",
+    "plugins.v2/cloudsubscribex/core/api/sync.py",
 )
 
 # 转存归类模块（handlers/sync/resources.py）依赖：占位掉与本次回归无关的部分
 register_mock(
-    "cloudsubscribe.core.services.skip_stats",
+    "cloudsubscribex.core.services.skip_stats",
     SkipStatsCollector=MagicMock(),
 )
 register_mock(
-    "cloudsubscribe.utils",
+    "cloudsubscribex.utils",
     MediaFileParser=MagicMock(),
     parse_magnet_metadata=MagicMock(),
 )
-handlers_package = ensure_package("cloudsubscribe.handlers")
+handlers_package = ensure_package("cloudsubscribex.handlers")
 handlers_package.__path__ = [_plugin_dir("handlers")]
-sync_package = ensure_package("cloudsubscribe.handlers.sync")
+sync_package = ensure_package("cloudsubscribex.handlers.sync")
 sync_package.__path__ = [_plugin_dir("handlers", "sync")]
 
 resource_type_from_url = types_module.resource_type_from_url
@@ -232,8 +232,8 @@ class TestTransferClassification(unittest.TestCase):
 
     def _service(self):
         module = load_module(
-            "cloudsubscribe.handlers.sync.resources",
-            "plugins.v2/cloudsubscribe/handlers/sync/resources.py",
+            "cloudsubscribex.handlers.sync.resources",
+            "plugins.v2/cloudsubscribex/handlers/sync/resources.py",
         )
         return module.ResourceTransferService.__new__(module.ResourceTransferService)
 

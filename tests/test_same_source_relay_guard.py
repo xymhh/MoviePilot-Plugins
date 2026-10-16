@@ -58,20 +58,20 @@ install_app_mocks(
 )
 set_media_type(movie="电影", tv="电视剧")
 
-# ---- cloudsubscribe 包层级 ----
+# ---- cloudsubscribex 包层级 ----
 install_app_mocks(
-    "cloudsubscribe",
-    "cloudsubscribe.core",
-    "cloudsubscribe.core.history", "cloudsubscribe.core.media",
-    "cloudsubscribe.drive", "cloudsubscribe.drive.common",
-    "cloudsubscribe.drive.scanner", "cloudsubscribe.drive.types",
-    "cloudsubscribe.search", "cloudsubscribe.search.magnet",
-    "cloudsubscribe.search.types", "cloudsubscribe.search.matching",
-    "cloudsubscribe.search.cache",
-    "cloudsubscribe.handlers", "cloudsubscribe.handlers.sync",
-    "cloudsubscribe.handlers.notification", "cloudsubscribe.handlers.search",
-    "cloudsubscribe.handlers.subscription",
-    "cloudsubscribe.utils", "cloudsubscribe.utils.cache",
+    "cloudsubscribex",
+    "cloudsubscribex.core",
+    "cloudsubscribex.core.history", "cloudsubscribex.core.media",
+    "cloudsubscribex.drive", "cloudsubscribex.drive.common",
+    "cloudsubscribex.drive.scanner", "cloudsubscribex.drive.types",
+    "cloudsubscribex.search", "cloudsubscribex.search.magnet",
+    "cloudsubscribex.search.types", "cloudsubscribex.search.matching",
+    "cloudsubscribex.search.cache",
+    "cloudsubscribex.handlers", "cloudsubscribex.handlers.sync",
+    "cloudsubscribex.handlers.notification", "cloudsubscribex.handlers.search",
+    "cloudsubscribex.handlers.subscription",
+    "cloudsubscribex.utils", "cloudsubscribex.utils.cache",
 )
 sync_siblings = (
     "baseline", "cleanup", "history", "matching", "metadata", "movie", "naming",
@@ -79,17 +79,17 @@ sync_siblings = (
     "retry", "rule_scoring", "subtitles", "television", "upgrade", "utils",
 )
 for _name in sync_siblings:
-    install_app_mocks(f"cloudsubscribe.handlers.sync.{_name}")
+    install_app_mocks(f"cloudsubscribex.handlers.sync.{_name}")
 
 cloud_module = load_module(
-    "cloudsubscribe.core.cloud", "plugins.v2/cloudsubscribe/core/cloud.py"
+    "cloudsubscribex.core.cloud", "plugins.v2/cloudsubscribex/core/cloud.py"
 )
 transfer_module = load_module(
-    "cloudsubscribe.core.transfer", "plugins.v2/cloudsubscribe/core/transfer.py"
+    "cloudsubscribex.core.transfer", "plugins.v2/cloudsubscribex/core/transfer.py"
 )
 service_module = load_module(
-    "cloudsubscribe.handlers.sync.service",
-    "plugins.v2/cloudsubscribe/handlers/sync/service.py",
+    "cloudsubscribex.handlers.sync.service",
+    "plugins.v2/cloudsubscribex/handlers/sync/service.py",
 )
 
 CloudFile = cloud_module.CloudFile

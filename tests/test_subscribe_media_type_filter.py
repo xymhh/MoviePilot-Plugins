@@ -28,23 +28,23 @@ install_app_mocks(
     "app.core.metainfo",
 )
 
-register_package("cloudsubscribe", paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribe")])
-register_package("cloudsubscribe.core", paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribe/core")])
-register_package("cloudsubscribe.core.subscribe",
-                 paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribe/core/subscribe")])
-register_package("cloudsubscribe.search", paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribe/search")])
-register_package("cloudsubscribe.utils", paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribe/utils")])
+register_package("cloudsubscribex", paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribex")])
+register_package("cloudsubscribex.core", paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribex/core")])
+register_package("cloudsubscribex.core.subscribe",
+                 paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribex/core/subscribe")])
+register_package("cloudsubscribex.search", paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribex/search")])
+register_package("cloudsubscribex.utils", paths=[os.path.join(REPO_ROOT, "plugins.v2/cloudsubscribex/utils")])
 
 # 预先加载依赖模块
-load_module("cloudsubscribe.core.subscribe.models", "plugins.v2/cloudsubscribe/core/subscribe/models.py")
-load_module("cloudsubscribe.core.subscribe.provider", "plugins.v2/cloudsubscribe/core/subscribe/provider.py")
-load_module("cloudsubscribe.core.subscribe.registry", "plugins.v2/cloudsubscribe/core/subscribe/registry.py")
-load_module("cloudsubscribe.core.media", "plugins.v2/cloudsubscribe/core/media.py")
-load_module("cloudsubscribe.search.matching", "plugins.v2/cloudsubscribe/search/matching.py")
+load_module("cloudsubscribex.core.subscribe.models", "plugins.v2/cloudsubscribex/core/subscribe/models.py")
+load_module("cloudsubscribex.core.subscribe.provider", "plugins.v2/cloudsubscribex/core/subscribe/provider.py")
+load_module("cloudsubscribex.core.subscribe.registry", "plugins.v2/cloudsubscribex/core/subscribe/registry.py")
+load_module("cloudsubscribex.core.media", "plugins.v2/cloudsubscribex/core/media.py")
+load_module("cloudsubscribex.search.matching", "plugins.v2/cloudsubscribex/search/matching.py")
 
 AutoSubscribeService = load_module(
-    "cloudsubscribe.core.subscribe.service",
-    "plugins.v2/cloudsubscribe/core/subscribe/service.py",
+    "cloudsubscribex.core.subscribe.service",
+    "plugins.v2/cloudsubscribex/core/subscribe/service.py",
 ).AutoSubscribeService
 
 

@@ -39,7 +39,7 @@ if plugins_v2_path not in sys.path:
 
 
 def _plugin_dir(*parts):
-    return os.path.join(plugins_v2_path, "cloudsubscribe", *parts)
+    return os.path.join(plugins_v2_path, "cloudsubscribex", *parts)
 
 
 def _register_real_package(name, path):
@@ -56,34 +56,34 @@ register_module("app.utils", package=True)
 register_mock("app.utils.string", StringUtils=MagicMock())
 register_mock("app.log", logger=MagicMock())
 
-# ---- cloudsubscribe 包层级 ----
-core_pkg = _register_real_package("cloudsubscribe", _plugin_dir())
-core_pkg = _register_real_package("cloudsubscribe.core", _plugin_dir("core"))
-_register_real_package("cloudsubscribe.drive", _plugin_dir("drive"))
-_register_real_package("cloudsubscribe.drive.p115", _plugin_dir("drive", "p115"))
-_register_real_package("cloudsubscribe.utils", _plugin_dir("utils"))
+# ---- cloudsubscribex 包层级 ----
+core_pkg = _register_real_package("cloudsubscribex", _plugin_dir())
+core_pkg = _register_real_package("cloudsubscribex.core", _plugin_dir("core"))
+_register_real_package("cloudsubscribex.drive", _plugin_dir("drive"))
+_register_real_package("cloudsubscribex.drive.p115", _plugin_dir("drive", "p115"))
+_register_real_package("cloudsubscribex.utils", _plugin_dir("utils"))
 core_pkg.OwnerDelegator = OwnerDelegator
 register_mock(
-    "cloudsubscribe.utils.cache",
+    "cloudsubscribex.utils.cache",
     create_platform_ttl_cache=MagicMock(return_value=MagicMock()),
 )
 
 # p115 files 用占位模块（upload 只需要类名做依赖注入）
 p115_files_module = register_module(
-    "cloudsubscribe.drive.p115.files", package=True
+    "cloudsubscribex.drive.p115.files", package=True
 )
 p115_files_module.P115DirectoryReader = MagicMock()
 p115_files_module.P115FileService = MagicMock()
 
 cloud_module = load_module(
-    "cloudsubscribe.core.cloud", "plugins.v2/cloudsubscribe/core/cloud.py"
+    "cloudsubscribex.core.cloud", "plugins.v2/cloudsubscribex/core/cloud.py"
 )
 transfer_module = load_module(
-    "cloudsubscribe.core.transfer", "plugins.v2/cloudsubscribe/core/transfer.py"
+    "cloudsubscribex.core.transfer", "plugins.v2/cloudsubscribex/core/transfer.py"
 )
 upload_module = load_module(
-    "cloudsubscribe.drive.p115.upload",
-    "plugins.v2/cloudsubscribe/drive/p115/upload.py",
+    "cloudsubscribex.drive.p115.upload",
+    "plugins.v2/cloudsubscribex/drive/p115/upload.py",
 )
 
 CloudFile = cloud_module.CloudFile

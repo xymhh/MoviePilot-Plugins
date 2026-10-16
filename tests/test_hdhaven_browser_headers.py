@@ -20,19 +20,19 @@ register_mock("app.log", logger=MagicMock())
 register_mock("app.core")
 register_mock("app.core.config", settings=MagicMock(TZ="Asia/Shanghai"))
 
-register_mock("cloudsubscribe")
-register_mock("cloudsubscribe.core", OwnerDelegator=OwnerDelegator)
-register_mock("cloudsubscribe.core.checkin_manager")
-register_mock("cloudsubscribe.core.definitions")
-register_mock("cloudsubscribe.core.search")
-register_mock("cloudsubscribe.core.services")
-register_mock("cloudsubscribe.search")
-register_mock("cloudsubscribe.search.hdhaven")
-register_mock("cloudsubscribe.search.hdhaven.security")
-register_mock("cloudsubscribe.search.cloudflare")
+register_mock("cloudsubscribex")
+register_mock("cloudsubscribex.core", OwnerDelegator=OwnerDelegator)
+register_mock("cloudsubscribex.core.checkin_manager")
+register_mock("cloudsubscribex.core.definitions")
+register_mock("cloudsubscribex.core.search")
+register_mock("cloudsubscribex.core.services")
+register_mock("cloudsubscribex.search")
+register_mock("cloudsubscribex.search.hdhaven")
+register_mock("cloudsubscribex.search.hdhaven.security")
+register_mock("cloudsubscribex.search.cloudflare")
 # http_client 必须暴露真实 requests：本文件断言的是真实的 Session 头合并结果
 register_mock(
-    "cloudsubscribe.search.http_client",
+    "cloudsubscribex.search.http_client",
     requests=real_requests,
     RequestGate=MagicMock(),
     RequestGateCancelled=type("RequestGateCancelled", (Exception,), {}),
@@ -40,18 +40,18 @@ register_mock(
     gated_idempotent_request=MagicMock(),
     normalize_proxies=MagicMock(return_value=None),
 )
-register_mock("cloudsubscribe.utils")
-register_mock("cloudsubscribe.utils.cache")
+register_mock("cloudsubscribex.utils")
+register_mock("cloudsubscribex.utils.cache")
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
 plugins_v2_path = os.path.join(project_root, "plugins.v2")
 
-hdhaven_client_path = os.path.join(plugins_v2_path, "cloudsubscribe/search/hdhaven/client.py")
-spec_h = importlib.util.spec_from_file_location("cloudsubscribe.search.hdhaven.client", hdhaven_client_path)
+hdhaven_client_path = os.path.join(plugins_v2_path, "cloudsubscribex/search/hdhaven/client.py")
+spec_h = importlib.util.spec_from_file_location("cloudsubscribex.search.hdhaven.client", hdhaven_client_path)
 mod_h = importlib.util.module_from_spec(spec_h)
-mod_h.__package__ = "cloudsubscribe.search.hdhaven"
-sys.modules["cloudsubscribe.search.hdhaven.client"] = mod_h
+mod_h.__package__ = "cloudsubscribex.search.hdhaven"
+sys.modules["cloudsubscribex.search.hdhaven.client"] = mod_h
 spec_h.loader.exec_module(mod_h)
 HDHavenClient = mod_h.HDHavenClient
 

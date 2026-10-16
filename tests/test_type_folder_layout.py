@@ -25,19 +25,19 @@ install_app_mocks(
     "app.modules.filemanager", "app.modules.filemanager.transhandler",
     "app.helper", "app.helper.directory", "app.sdk", "app.sdk.classification",
     "app.modules.themoviedb", "app.modules.themoviedb.category",
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.core.media",
-    "cloudsubscribe.handlers", "cloudsubscribe.handlers.sync",
-    "cloudsubscribe.utils", "cloudsubscribe.utils.cache",
-    *[f"cloudsubscribe.handlers.sync.{name}" for name in _SYNC_COMPONENTS],
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.core.media",
+    "cloudsubscribex.handlers", "cloudsubscribex.handlers.sync",
+    "cloudsubscribex.utils", "cloudsubscribex.utils.cache",
+    *[f"cloudsubscribex.handlers.sync.{name}" for name in _SYNC_COMPONENTS],
 )
 
-ensure_package("cloudsubscribe.core").OwnerDelegator = OwnerDelegator
-ensure_package("cloudsubscribe.core").CloudFile = MagicMock()
+ensure_package("cloudsubscribex.core").OwnerDelegator = OwnerDelegator
+ensure_package("cloudsubscribex.core").CloudFile = MagicMock()
 
 MediaType = set_media_type(movie="电影", tv="电视剧")
 naming = load_module(
-    "cloudsubscribe.handlers.sync.naming",
-    "plugins.v2/cloudsubscribe/handlers/sync/naming.py",
+    "cloudsubscribex.handlers.sync.naming",
+    "plugins.v2/cloudsubscribex/handlers/sync/naming.py",
 )
 SyncNamingService = naming.SyncNamingService
 naming.media_identity = lambda value: (

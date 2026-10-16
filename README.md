@@ -1,6 +1,6 @@
 # MoviePilot-Plugins
 
-MoviePilot 自用插件市场（个人 fork 版）——提供 **115网盘STRM助手**（P115StrmHelper，V3 线，含「整理跳过语义」补丁）与 **网盘订阅助手**（CloudSubscribe，V2 线）两个插件。
+MoviePilot 自用插件市场（个人 fork 版）——提供 **115网盘STRM助手**（P115StrmHelper，V3 线，含「整理跳过语义」补丁）与 **网盘订阅助手（跨盘优化版）**（CloudSubscribeX，V2 线）两个插件。
 
 插件市场源地址（仓库根地址，`main` 分支）：
 
@@ -46,9 +46,9 @@ https://github.com/xymhh/MoviePilot-Plugins
 | 插件 | 用途 | 适用版本 | 源码目录 |
 | --- | --- | --- | --- |
 | **115网盘STRM助手**（P115StrmHelper） | 115 网盘 STRM 生成、302 跳转、转移整理一条龙；本 fork 修补「库内质量更好→整理失败」 | MoviePilot >= 3.0.0（V3 插件线） | `plugins.v3/p115strmhelper` |
-| **网盘订阅助手**（CloudSubscribe） | 整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容 | MoviePilot >= 2.14.6（V2 插件线，MoviePilot V3 实测可用） | `plugins.v2/cloudsubscribe` |
+| **网盘订阅助手（跨盘优化版）**（CloudSubscribeX） | 整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容 | MoviePilot >= 2.14.6（V2 插件线，MoviePilot V3 实测可用） | `plugins.v2/cloudsubscribex` |
 
-配置项与注意事项见 [`plugins.v2/cloudsubscribe/README.md`](plugins.v2/cloudsubscribe/README.md)；
+配置项与注意事项见 [`plugins.v2/cloudsubscribex/README.md`](plugins.v2/cloudsubscribex/README.md)；
 两个插件的逐版本改动见 `package.v3.json` / `package.v2.json` 的 `history` 字段（P115StrmHelper 的 2.8.77 是本 fork 相对官方 2.8.76 的唯一功能性改动）。
 
 ---
@@ -74,9 +74,10 @@ https://github.com/xymhh/MoviePilot-Plugins
 | 市场里搜不到本仓库插件 | 本仓库 V3 插件读 `package.v3.json`、V2 插件读 `package.v2.json`（V3 宿主对 v2 条目也兼容）；确认填的是仓库根地址、齿轮按钮要用管理员账号可见，并点过「同步插件源」 |
 | 整理失败：失败阶段=**文件转移**，消息「媒体库存在同名文件，且质量更好」 | 官方 2.8.76 及更早会把它记成失败并**替换掉该路径原成功记录**，导致同一文件被反复重投 → 更新到本仓库 **2.8.77**（跳过语义版） |
 | 已装官方 2.8.76，市场却看不到 2.8.77 | 确认已把本仓库源加进插件市场设置并「同步插件源」；本版版本号高于官方，正常会显示为可更新 |
+| 插件市场里「网盘订阅助手」有两条，一条被顶成上游 1.7.x | 本 fork 自 **1.6.49** 起改用独立 ID **`CloudSubscribeX`**（显示名「网盘订阅助手（跨盘优化版）」），与上游 `odomu` 的同名插件彻底解耦，两者可在 MP 里并存、各自独立升级。升级到 1.6.49 后：装**新 ID 插件** → 它首次启动会**自动**从旧 ID `CloudSubscribe` 迁移配置、持久化数据与私有 SQLite 库（日志里会打「已从旧插件 CloudSubscribe 迁移到独立 ID CloudSubscribeX」）→ 迁移后新插件**保持停用**（防止新旧同时转存）→ 在 MP 里**停用或卸载旧 ID 插件** → 手动启用新插件。旧 ID 插件不装即可，装上也不会互相干扰 |
 | 跨盘转存（夸克→115）慢到几十 KB/s | 1.6.22 起固定 16MB 分片 + 115 分片并发 PUT（配置项「115 上传分片并发」0–16，`0` = 关闭并回退单流顺序上传，失败自动回退）；并发不要开太大，夸克有风控 |
 | 转存"实际成功却报失败" | 1.6.18 起修复后处理终态未落库导致的假失败；升级到最新版 |
-| 想换旧版本 | Release 资产按 `cloudsubscribe_v<版本>.zip` 命名，可在本仓库 Releases 里下载对应版本 |
+| 想换旧版本 | Release 资产按 `cloudsubscribex_v<版本>.zip` 命名（1.6.48 及更早为 `cloudsubscribe_v<版本>.zip`），可在本仓库 Releases 里下载对应版本 |
 | 对话框发片名只回「未搜索到资源」 | 升级到 **1.6.28** 并确认配置页「片名自动订阅」为开；1.6.25 把网盘候选塞进平台搜索的玩法已被用户判定方向错误并整条回退 |
 | 发片名后在候选里选定，**只**看到插件的「已创建订阅《xx》」 | 设计如此（1.6.28）：点选入口被插件接管，平台那次搜索被跳过，所以不再有平台那句「未搜索到需要的资源！」；订阅已建好、网盘搜索已排队，查插件日志里该订阅的搜索记录即可 |
 | 发片名后点了候选，却既没订阅也没回执 | 升级到 **1.6.34**。三层旧问题都在这一条路上：(a) 1.6.27 钩子挂错位置；(b) 1.6.28~1.6.33 点选接入器挂的类名 `InteractionChain` 在平台 v3.1.x 已改名 `MediaInteractionChain`，导入失败被吞掉 → 接入器从未装上（**日志里搜不到 `媒体点选接管器已安装` 就是这个症状**）；(c) 登记名与点选项名对不上（发「画江湖」、点选「画江湖之不良人」）时旧版不消费记录。1.6.33 起「点选即接入」，1.6.34 起自动识别平台新类名并加 process 层兜底。自查顺序：`代码版本=1.6.34` → `媒体点选接管器已安装：MediaInteractionChain._search_media_resources` → `已登记片名候选` → `片名候选命中（tmdbid/title/fuzzy/sole）`；若日志里连 `媒体点选接管器已安装` 都没有，说明平台没重载新代码，重启一次 MP 容器再看 |

@@ -34,7 +34,7 @@ if plugins_v2_path not in sys.path:
 
 
 def _plugin_dir(*parts):
-    return os.path.join(plugins_v2_path, "cloudsubscribe", *parts)
+    return os.path.join(plugins_v2_path, "cloudsubscribex", *parts)
 
 
 def _register_real_package(name, path):
@@ -50,31 +50,31 @@ register_module("app.log", logger=MagicMock())
 register_module("app.schemas", package=True, MediaInfo=MagicMock)
 media_type = set_media_type()
 
-# ---- cloudsubscribe 包层级（core / search 用真实路径，便于子模块按文件加载）----
-plugin_package = _register_real_package("cloudsubscribe", _plugin_dir())
-register_module("cloudsubscribe.core", package=True)
-sys.modules["cloudsubscribe.core"].__path__ = [_plugin_dir("core")]
-sys.modules["cloudsubscribe.core"].SearchQuery = MagicMock()
-_register_real_package("cloudsubscribe.search", _plugin_dir("search"))
-_register_real_package("cloudsubscribe.drive", _plugin_dir("drive"))
+# ---- cloudsubscribex 包层级（core / search 用真实路径，便于子模块按文件加载）----
+plugin_package = _register_real_package("cloudsubscribex", _plugin_dir())
+register_module("cloudsubscribex.core", package=True)
+sys.modules["cloudsubscribex.core"].__path__ = [_plugin_dir("core")]
+sys.modules["cloudsubscribex.core"].SearchQuery = MagicMock()
+_register_real_package("cloudsubscribex.search", _plugin_dir("search"))
+_register_real_package("cloudsubscribex.drive", _plugin_dir("drive"))
 register_mock(
-    "cloudsubscribe.search.magnet",
+    "cloudsubscribex.search.magnet",
     clear_cache=MagicMock(),
     normalize_magnets=lambda candidates, source=None: candidates,
 )
-register_mock("cloudsubscribe.search.matching", normalize_season=MagicMock(return_value=None))
+register_mock("cloudsubscribex.search.matching", normalize_season=MagicMock(return_value=None))
 
 # 真实类型定义表：归一化与展示名必须是线上那一份
 types_module = load_module(
-    "cloudsubscribe.search.types",
-    "plugins.v2/cloudsubscribe/search/types.py",
+    "cloudsubscribex.search.types",
+    "plugins.v2/cloudsubscribex/search/types.py",
 )
 
 # 网盘能力/跨盘任务/驱动扫描器都用真实模块（同进程内其它测试可能已把它们注册成
 # Mock，这里显式按文件加载覆盖，保证能力枚举是真实的）。
-load_module("cloudsubscribe.core.cloud", "plugins.v2/cloudsubscribe/core/cloud.py")
-load_module("cloudsubscribe.core.transfer", "plugins.v2/cloudsubscribe/core/transfer.py")
-load_module("cloudsubscribe.drive.scanner", "plugins.v2/cloudsubscribe/drive/scanner.py")
+load_module("cloudsubscribex.core.cloud", "plugins.v2/cloudsubscribex/core/cloud.py")
+load_module("cloudsubscribex.core.transfer", "plugins.v2/cloudsubscribex/core/transfer.py")
+load_module("cloudsubscribex.drive.scanner", "plugins.v2/cloudsubscribex/drive/scanner.py")
 
 # 出站请求捕获
 _SEARCH_PAYLOADS = []
@@ -100,25 +100,25 @@ def _fake_gated_request(gate, func, url, **kwargs):
 import requests  # noqa: E402  —— 客户端要引用 requests.exceptions.Timeout
 
 register_mock(
-    "cloudsubscribe.search.http_client",
+    "cloudsubscribex.search.http_client",
     RequestGate=MagicMock(),
     gated_request=_fake_gated_request,
     normalize_proxies=lambda value: value,
     requests=requests,
 )
-_register_real_package("cloudsubscribe.search.pansou", _plugin_dir("search", "pansou"))
+_register_real_package("cloudsubscribex.search.pansou", _plugin_dir("search", "pansou"))
 
 client_module = load_module(
-    "cloudsubscribe.search.pansou.client",
-    "plugins.v2/cloudsubscribe/search/pansou/client.py",
+    "cloudsubscribex.search.pansou.client",
+    "plugins.v2/cloudsubscribex/search/pansou/client.py",
 )
 service_module = load_module(
-    "cloudsubscribe.search.pansou.service",
-    "plugins.v2/cloudsubscribe/search/pansou/service.py",
+    "cloudsubscribex.search.pansou.service",
+    "plugins.v2/cloudsubscribex/search/pansou/service.py",
 )
 drive_manager_module = load_module(
-    "cloudsubscribe.core.drive_manager",
-    "plugins.v2/cloudsubscribe/core/drive_manager.py",
+    "cloudsubscribex.core.drive_manager",
+    "plugins.v2/cloudsubscribex/core/drive_manager.py",
 )
 
 PanSouClient = client_module.PanSouClient

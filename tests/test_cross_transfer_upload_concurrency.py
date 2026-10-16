@@ -30,19 +30,19 @@ if plugins_v2_path not in sys.path:
 
 install_app_mocks(
     "app.core", "app.utils",
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.drive",
-    "cloudsubscribe.drive.p115",
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.drive",
+    "cloudsubscribex.drive.p115",
 )
-ensure_package("cloudsubscribe.core").OwnerDelegator = OwnerDelegator
+ensure_package("cloudsubscribex.core").OwnerDelegator = OwnerDelegator
 
 # 目录解析依赖用桩替换，避免引入真实 115 客户端。
-files_module = ensure_package("cloudsubscribe.drive.p115.files")
+files_module = ensure_package("cloudsubscribex.drive.p115.files")
 files_module.P115DirectoryReader = MagicMock()
 files_module.P115FileService = MagicMock()
 
 upload_module = load_module(
-    "cloudsubscribe.drive.p115.upload",
-    "plugins.v2/cloudsubscribe/drive/p115/upload.py",
+    "cloudsubscribex.drive.p115.upload",
+    "plugins.v2/cloudsubscribex/drive/p115/upload.py",
 )
 
 

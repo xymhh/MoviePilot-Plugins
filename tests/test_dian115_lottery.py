@@ -43,28 +43,28 @@ class _FakeGate:
         )
 
 
-# ---- cloudsubscribe 包结构占位 ----
-register_module("cloudsubscribe", package=True)
+# ---- cloudsubscribex 包结构占位 ----
+register_module("cloudsubscribex", package=True)
 register_module(
-    "cloudsubscribe.core",
+    "cloudsubscribex.core",
     package=True,
     OwnerDelegator=OwnerDelegator,
     SearchQuery=MagicMock(),
     format_search_label=MagicMock(),
 )
-register_module("cloudsubscribe.core.media", tmdb_id_of=MagicMock())
-register_module("cloudsubscribe.utils", package=True)
-register_mock("cloudsubscribe.utils.cache", create_platform_ttl_cache=MagicMock())
-register_mock("cloudsubscribe.utils.file_parser", MediaFileParser=MagicMock())
-register_module("cloudsubscribe.search", package=True)
-register_module("cloudsubscribe.search.dian115", package=True)
-register_mock("cloudsubscribe.search.dian115.security", turnstile_token=MagicMock())
-register_mock("cloudsubscribe.search.dian115.resource", Dian115ResourceService=MagicMock())
-register_mock("cloudsubscribe.search.budget", PointBudgetLedger=MagicMock())
-register_mock("cloudsubscribe.search.matching", unique_texts=MagicMock())
-register_mock("cloudsubscribe.search.cloudflare", is_cloudflare_challenge=MagicMock())
+register_module("cloudsubscribex.core.media", tmdb_id_of=MagicMock())
+register_module("cloudsubscribex.utils", package=True)
+register_mock("cloudsubscribex.utils.cache", create_platform_ttl_cache=MagicMock())
+register_mock("cloudsubscribex.utils.file_parser", MediaFileParser=MagicMock())
+register_module("cloudsubscribex.search", package=True)
+register_module("cloudsubscribex.search.dian115", package=True)
+register_mock("cloudsubscribex.search.dian115.security", turnstile_token=MagicMock())
+register_mock("cloudsubscribex.search.dian115.resource", Dian115ResourceService=MagicMock())
+register_mock("cloudsubscribex.search.budget", PointBudgetLedger=MagicMock())
+register_mock("cloudsubscribex.search.matching", unique_texts=MagicMock())
+register_mock("cloudsubscribex.search.cloudflare", is_cloudflare_challenge=MagicMock())
 register_module(
-    "cloudsubscribe.search.http_client",
+    "cloudsubscribex.search.http_client",
     AccountActionGate=_FakeGate,
     RequestGate=_FakeGate,
     gated_idempotent_request=MagicMock(),
@@ -74,28 +74,28 @@ register_module(
 
 # ---- 动态加载真实模块 ----
 _search_core = load_module(
-    "cloudsubscribe.core.search",
-    "plugins.v2/cloudsubscribe/core/search.py",
+    "cloudsubscribex.core.search",
+    "plugins.v2/cloudsubscribex/core/search.py",
 )
 load_module(
-    "cloudsubscribe.core.definitions",
-    "plugins.v2/cloudsubscribe/core/definitions.py",
+    "cloudsubscribex.core.definitions",
+    "plugins.v2/cloudsubscribex/core/definitions.py",
 )
 client_module = load_module(
-    "cloudsubscribe.search.dian115.client",
-    "plugins.v2/cloudsubscribe/search/dian115/client.py",
+    "cloudsubscribex.search.dian115.client",
+    "plugins.v2/cloudsubscribex/search/dian115/client.py",
 )
 service_module = load_module(
-    "cloudsubscribe.search.dian115.service",
-    "plugins.v2/cloudsubscribe/search/dian115/service.py",
+    "cloudsubscribex.search.dian115.service",
+    "plugins.v2/cloudsubscribex/search/dian115/service.py",
 )
 load_module(
-    "cloudsubscribe.search.dian115.provider",
-    "plugins.v2/cloudsubscribe/search/dian115/provider.py",
+    "cloudsubscribex.search.dian115.provider",
+    "plugins.v2/cloudsubscribex/search/dian115/provider.py",
 )
 definition_module = load_module(
-    "cloudsubscribe.search.dian115.definition",
-    "plugins.v2/cloudsubscribe/search/dian115/definition.py",
+    "cloudsubscribex.search.dian115.definition",
+    "plugins.v2/cloudsubscribex/search/dian115/definition.py",
 )
 
 Dian115Client = client_module.Dian115Client

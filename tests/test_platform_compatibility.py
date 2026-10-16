@@ -15,19 +15,19 @@ register_mock("app.scheduler")
 register_mock("app.chain.subscribe", SubscribeChain=mock_subscribe_chain)
 register_mock("app.db.subscribe_oper", SubscribeOper=mock_subscribe_oper)
 
-# 构造 mock 的 cloudsubscribe 包结构
-register_mock("cloudsubscribe")
-register_mock("cloudsubscribe.core", OwnerDelegator=OwnerDelegator)
-register_mock("cloudsubscribe.core.hook")
+# 构造 mock 的 cloudsubscribex 包结构
+register_mock("cloudsubscribex")
+register_mock("cloudsubscribex.core", OwnerDelegator=OwnerDelegator)
+register_mock("cloudsubscribex.core.hook")
 
 # 片名候选登记表：hook 模块加载时即需要（1.6.27 片名先登记、选定后再接入）
 load_module(
-    "cloudsubscribe.core.pending_titles",
-    "plugins.v2/cloudsubscribe/core/pending_titles.py",
+    "cloudsubscribex.core.pending_titles",
+    "plugins.v2/cloudsubscribex/core/pending_titles.py",
 )
 SubscriptionSearchHook = load_module(
-    "cloudsubscribe.core.hook.subscription",
-    "plugins.v2/cloudsubscribe/core/hook/subscription.py",
+    "cloudsubscribex.core.hook.subscription",
+    "plugins.v2/cloudsubscribex/core/hook/subscription.py",
 ).SubscriptionSearchHook
 
 
@@ -251,7 +251,7 @@ class TestPlatformCompatibility(unittest.TestCase):
         from pathlib import Path
         from types import SimpleNamespace
 
-        history_file = Path("plugins.v2/cloudsubscribe/handlers/sync/history.py")
+        history_file = Path("plugins.v2/cloudsubscribex/handlers/sync/history.py")
         text = history_file.read_text(encoding="utf-8")
         match = re.search(r"def _transient_target_defaults\(\)[^:]*:\s*return\s*\{([^}]+)\}", text)
         self.assertIsNotNone(match)
@@ -270,7 +270,7 @@ class TestPlatformCompatibility(unittest.TestCase):
         from pathlib import Path
 
         # 验证 platform_rules.py 源码声明了 _safe_subscribe_params 并防御了质量分辨率字段
-        rules_src = Path("plugins.v2/cloudsubscribe/handlers/search/platform_rules.py").read_text(encoding="utf-8")
+        rules_src = Path("plugins.v2/cloudsubscribex/handlers/search/platform_rules.py").read_text(encoding="utf-8")
         self.assertIn("def _safe_subscribe_params", rules_src)
         for req in ("quality", "resolution", "effect", "include", "exclude"):
             self.assertIn(f'"{req}"', rules_src)
@@ -312,7 +312,7 @@ class TestPlatformCompatibility(unittest.TestCase):
             "Any", "Dict", "List", "Optional", "Tuple", "Set", "Union",
             "Callable", "Iterable", "Sequence", "Mapping"
         }
-        root = Path("plugins.v2/cloudsubscribe")
+        root = Path("plugins.v2/cloudsubscribex")
         missing_typing_report = []
 
         for py_file in root.rglob("*.py"):

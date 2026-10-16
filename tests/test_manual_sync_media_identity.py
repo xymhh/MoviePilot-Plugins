@@ -65,35 +65,35 @@ def _fake_media_identity(value):
     )
 
 
-# ---- cloudsubscribe.* 占位依赖 ----
-register_module("cloudsubscribe", package=True)
+# ---- cloudsubscribex.* 占位依赖 ----
+register_module("cloudsubscribex", package=True)
 register_module(
-    "cloudsubscribe.core",
+    "cloudsubscribex.core",
     package=True,
     OwnerDelegator=OwnerDelegator,
     SearchCapability=MagicMock(),
     CloudDriveCapability=MagicMock(),
 )
-register_module("cloudsubscribe.core.cloud", CloudDriveCapability=MagicMock())
+register_module("cloudsubscribex.core.cloud", CloudDriveCapability=MagicMock())
 register_module(
-    "cloudsubscribe.core.media",
+    "cloudsubscribex.core.media",
     recognize_media=MagicMock(),
     tmdb_id_of=_fake_tmdb_id_of,
     media_identity=_fake_media_identity,
 )
-register_module("cloudsubscribe.search.matching", positive_ints=MagicMock())
+register_module("cloudsubscribex.search.matching", positive_ints=MagicMock())
 register_module(
-    "cloudsubscribe.search.types",
+    "cloudsubscribex.search.types",
     normalize_resource_type=MagicMock(side_effect=lambda value, *a, **k: value),
     resource_type_from_text=MagicMock(side_effect=lambda value, *a, **k: "quark"),
     resource_type_from_url=MagicMock(side_effect=lambda value, *a, **k: "quark"),
     resource_type_name=MagicMock(side_effect=lambda value, *a, **k: str(value)),
 )
-register_module("cloudsubscribe.utils.cache", create_platform_ttl_cache=_FakeCache)
+register_module("cloudsubscribex.utils.cache", create_platform_ttl_cache=_FakeCache)
 
 sync_module = load_module(
-    "cloudsubscribe.core.api.sync",
-    "plugins.v2/cloudsubscribe/core/api/sync.py",
+    "cloudsubscribex.core.api.sync",
+    "plugins.v2/cloudsubscribex/core/api/sync.py",
 )
 
 

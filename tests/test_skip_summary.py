@@ -68,52 +68,52 @@ def _ensure_leaf(name, **attrs):
     return register_module(name, **attrs)
 
 
-# ---- cloudsubscribe 占位包 ----
-_ensure_package("cloudsubscribe")
-core_package = _ensure_package("cloudsubscribe.core")
+# ---- cloudsubscribex 占位包 ----
+_ensure_package("cloudsubscribex")
+core_package = _ensure_package("cloudsubscribex.core")
 if not isinstance(getattr(core_package, "OwnerDelegator", None), type):
     core_package.OwnerDelegator = OwnerDelegator
 for _attr in ("CloudDriveCapability", "CloudDriveProvider", "CloudFile", "SearchCapability"):
     if _attr not in vars(core_package):
         setattr(core_package, _attr, MagicMock())
-_ensure_package("cloudsubscribe.core.services")
-_ensure_package("cloudsubscribe.search")
+_ensure_package("cloudsubscribex.core.services")
+_ensure_package("cloudsubscribex.search")
 _ensure_attrs(
-    "cloudsubscribe.utils",
+    "cloudsubscribex.utils",
     MediaFileParser=MagicMock(),
     parse_magnet_metadata=MagicMock(),
 )
-_ensure_package("cloudsubscribe.handlers")
-_ensure_package("cloudsubscribe.handlers.sync")
-_ensure_leaf("cloudsubscribe.core.services.runtime", sync_lock=MagicMock())
+_ensure_package("cloudsubscribex.handlers")
+_ensure_package("cloudsubscribex.handlers.sync")
+_ensure_leaf("cloudsubscribex.core.services.runtime", sync_lock=MagicMock())
 _ensure_leaf(
-    "cloudsubscribe.core.media",
+    "cloudsubscribex.core.media",
     media_identity=MagicMock(),
     tmdb_id_of=MagicMock(),
 )
-_ensure_leaf("cloudsubscribe.utils.cache", create_platform_ttl_cache=MagicMock())
-if "cloudsubscribe.handlers.sync.utils" not in sys.modules:
+_ensure_leaf("cloudsubscribex.utils.cache", create_platform_ttl_cache=MagicMock())
+if "cloudsubscribex.handlers.sync.utils" not in sys.modules:
     load_module(
-        "cloudsubscribe.handlers.sync.utils",
-        "plugins.v2/cloudsubscribe/handlers/sync/utils.py",
+        "cloudsubscribex.handlers.sync.utils",
+        "plugins.v2/cloudsubscribex/handlers/sync/utils.py",
     )
 
 # ---- 被测模块 ----
 skip_stats_module = load_module(
-    "cloudsubscribe.core.services.skip_stats",
-    "plugins.v2/cloudsubscribe/core/services/skip_stats.py",
+    "cloudsubscribex.core.services.skip_stats",
+    "plugins.v2/cloudsubscribex/core/services/skip_stats.py",
 )
 SkipStatsCollector = skip_stats_module.SkipStatsCollector
 
 # 网盘中文名走真实实现（与候选摘要「光鸭网盘 1（可用 1）」同一套命名）。
 search_types_module = load_module(
-    "cloudsubscribe.search.types",
-    "plugins.v2/cloudsubscribe/search/types.py",
+    "cloudsubscribex.search.types",
+    "plugins.v2/cloudsubscribex/search/types.py",
 )
 
 resources_module = load_module(
-    "cloudsubscribe.handlers.sync.resources",
-    "plugins.v2/cloudsubscribe/handlers/sync/resources.py",
+    "cloudsubscribex.handlers.sync.resources",
+    "plugins.v2/cloudsubscribex/handlers/sync/resources.py",
 )
 ResourceTransferService = resources_module.ResourceTransferService
 
@@ -129,8 +129,8 @@ class _StubMediaFileParser:
 resources_module.MediaFileParser = _StubMediaFileParser
 
 sync_module = load_module(
-    "cloudsubscribe.core.services.sync",
-    "plugins.v2/cloudsubscribe/core/services/sync.py",
+    "cloudsubscribex.core.services.sync",
+    "plugins.v2/cloudsubscribex/core/services/sync.py",
 )
 SyncExecutionService = sync_module.SyncExecutionService
 
@@ -474,10 +474,10 @@ def _read_plugin_source(relative_path: str) -> str:
 
 
 TELEVISION_SOURCE = _read_plugin_source(
-    "plugins.v2/cloudsubscribe/handlers/sync/television.py"
+    "plugins.v2/cloudsubscribex/handlers/sync/television.py"
 )
 MOVIE_SOURCE = _read_plugin_source(
-    "plugins.v2/cloudsubscribe/handlers/sync/movie.py"
+    "plugins.v2/cloudsubscribex/handlers/sync/movie.py"
 )
 
 

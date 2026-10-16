@@ -27,27 +27,27 @@ install_app_mocks(
     "app.db.subscribe_oper", "app.helper", "app.helper.mediaserver",
     "app.application", "app.application.mediaserver", "app.log",
     "app.utils", "app.utils.string", "sqlalchemy",
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.core.history",
-    "cloudsubscribe.core.media", "cloudsubscribe.drive",
-    "cloudsubscribe.drive.common", "cloudsubscribe.search",
-    "cloudsubscribe.search.types", "cloudsubscribe.handlers",
-    "cloudsubscribe.handlers.sync", "cloudsubscribe.handlers.sync.utils",
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.core.history",
+    "cloudsubscribex.core.media", "cloudsubscribex.drive",
+    "cloudsubscribex.drive.common", "cloudsubscribex.search",
+    "cloudsubscribex.search.types", "cloudsubscribex.handlers",
+    "cloudsubscribex.handlers.sync", "cloudsubscribex.handlers.sync.utils",
 )
 set_media_type(movie="电影", tv="电视剧")
-core_pkg = sys.modules["cloudsubscribe.core"]
+core_pkg = sys.modules["cloudsubscribex.core"]
 core_pkg.OwnerDelegator = OwnerDelegator
 core_pkg.CloudDriveCapability = MagicMock()
 core_pkg.CloudFile = MagicMock()
 
 _history = load_module(
-    "cloudsubscribe.handlers.sync.history",
-    "plugins.v2/cloudsubscribe/handlers/sync/history.py",
+    "cloudsubscribex.handlers.sync.history",
+    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
 )
 HistoryService = _history.HistoryService
 
 _retry = load_module(
-    "cloudsubscribe.handlers.sync.retry",
-    "plugins.v2/cloudsubscribe/handlers/sync/retry.py",
+    "cloudsubscribex.handlers.sync.retry",
+    "plugins.v2/cloudsubscribex/handlers/sync/retry.py",
 )
 HistoryRetryService = _retry.HistoryRetryService
 

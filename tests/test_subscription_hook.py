@@ -15,19 +15,19 @@ register_mock("app.scheduler")
 register_mock("app.chain.subscribe", SubscribeChain=mock_subscribe_chain)
 register_mock("app.db.subscribe_oper", SubscribeOper=mock_subscribe_oper)
 
-# 构造 mock 的 cloudsubscribe 包结构
-register_mock("cloudsubscribe")
-register_mock("cloudsubscribe.core", OwnerDelegator=OwnerDelegator)
-register_mock("cloudsubscribe.core.hook")
+# 构造 mock 的 cloudsubscribex 包结构
+register_mock("cloudsubscribex")
+register_mock("cloudsubscribex.core", OwnerDelegator=OwnerDelegator)
+register_mock("cloudsubscribex.core.hook")
 
 # 片名候选登记表：hook 模块加载时即需要（1.6.27 片名先登记、选定后再接入）
 load_module(
-    "cloudsubscribe.core.pending_titles",
-    "plugins.v2/cloudsubscribe/core/pending_titles.py",
+    "cloudsubscribex.core.pending_titles",
+    "plugins.v2/cloudsubscribex/core/pending_titles.py",
 )
 SubscriptionSearchHook = load_module(
-    "cloudsubscribe.core.hook.subscription",
-    "plugins.v2/cloudsubscribe/core/hook/subscription.py",
+    "cloudsubscribex.core.hook.subscription",
+    "plugins.v2/cloudsubscribex/core/hook/subscription.py",
 ).SubscriptionSearchHook
 
 

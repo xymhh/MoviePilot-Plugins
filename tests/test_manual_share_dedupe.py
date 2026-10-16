@@ -22,36 +22,36 @@ install_app_mocks(
     "app.core", "app.core.context", "app.core.metainfo", "app.db",
     "app.db.subscribe_oper", "app.utils", "app.utils.string", "app.modules",
     "app.modules.filemanager", "app.modules.filemanager.transhandler",
-    "cloudsubscribe", "cloudsubscribe.core",
-    "cloudsubscribe.handlers", "cloudsubscribe.handlers.sync",
-    "cloudsubscribe.handlers.notification",
+    "cloudsubscribex", "cloudsubscribex.core",
+    "cloudsubscribex.handlers", "cloudsubscribex.handlers.sync",
+    "cloudsubscribex.handlers.notification",
 )
 MediaType = set_media_type(movie="电影", tv="电视剧")
 
-sys.modules["cloudsubscribe.core"].OwnerDelegator = OwnerDelegator
+sys.modules["cloudsubscribex.core"].OwnerDelegator = OwnerDelegator
 
-_notification = ensure_package("cloudsubscribe.handlers.notification")
+_notification = ensure_package("cloudsubscribex.handlers.notification")
 _notification.MediaServerResolver = MagicMock()
 _notification.MediaServerResolver.episode_numbers = MagicMock(return_value=(True, set()))
 _notification.MediaServerNotifier = MagicMock()
 
 # 真实加载 handlers/sync/utils.py（normalize_season/format_episode_ranges）
 load_module(
-    "cloudsubscribe.handlers.sync.utils",
-    "plugins.v2/cloudsubscribe/handlers/sync/utils.py",
+    "cloudsubscribex.handlers.sync.utils",
+    "plugins.v2/cloudsubscribex/handlers/sync/utils.py",
 )
 # television.py 顶部引用 SkipStatsCollector 常量，先注册真实模块供相对导入
 load_module(
-    "cloudsubscribe.core.services.skip_stats",
-    "plugins.v2/cloudsubscribe/core/services/skip_stats.py",
+    "cloudsubscribex.core.services.skip_stats",
+    "plugins.v2/cloudsubscribex/core/services/skip_stats.py",
 )
 _television = load_module(
-    "cloudsubscribe.handlers.sync.television",
-    "plugins.v2/cloudsubscribe/handlers/sync/television.py",
+    "cloudsubscribex.handlers.sync.television",
+    "plugins.v2/cloudsubscribex/handlers/sync/television.py",
 )
 _upgrade = load_module(
-    "cloudsubscribe.handlers.sync.upgrade",
-    "plugins.v2/cloudsubscribe/handlers/sync/upgrade.py",
+    "cloudsubscribex.handlers.sync.upgrade",
+    "plugins.v2/cloudsubscribex/handlers/sync/upgrade.py",
 )
 TelevisionSyncProcessor = _television.TelevisionSyncProcessor
 UpgradeService = _upgrade.UpgradeService
@@ -172,7 +172,7 @@ class FakeOwner:
         return False
 
     def _explicit_selection_values(self, resource):
-        # 真实实现见 plugins.v2/cloudsubscribe/handlers/sync/resources.py:675：
+        # 真实实现见 plugins.v2/cloudsubscribex/handlers/sync/resources.py:675：
         # 读取资源上用户显式勾选的文件标识（预览面板单条/批量转存用）；
         # 普通资源没有勾选信息，返回空 → 后续按整包处理。
         # 这里必须显式返回二元组：FakeOwner.__getattr__ 的 MagicMock 默认值
@@ -182,7 +182,7 @@ class FakeOwner:
 
     def _filter_files_by_explicit_selection(self, files, target_file_ids=None,
                                             target_file_names=None, log_prefix=""):
-        # 真实实现见 plugins.v2/cloudsubscribe/handlers/sync/resources.py:695：
+        # 真实实现见 plugins.v2/cloudsubscribex/handlers/sync/resources.py:695：
         # 未勾选任何文件时原样返回全部候选。
         if not target_file_ids and not target_file_names:
             return files
@@ -190,7 +190,7 @@ class FakeOwner:
 
     def _validated_resource_files(self, url, resource_title="", target_season=None, log_prefix="",
                                   target_file_ids=None, target_file_names=None):
-        # 签名对齐真实实现 plugins.v2/cloudsubscribe/handlers/sync/resources.py:746
+        # 签名对齐真实实现 plugins.v2/cloudsubscribex/handlers/sync/resources.py:746
         # （新增 target_file_ids / target_file_names，用于预览面板按勾选收敛文件）。
         return _share_files()
 

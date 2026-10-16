@@ -4,8 +4,8 @@ import unittest
 
 # 加载 MediaFileParser
 file_path = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/utils/file_parser.py"))
-spec = importlib.util.spec_from_file_location("cloudsubscribe.utils.file_parser", file_path)
+    os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/utils/file_parser.py"))
+spec = importlib.util.spec_from_file_location("cloudsubscribex.utils.file_parser", file_path)
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 

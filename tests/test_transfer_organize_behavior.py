@@ -10,12 +10,12 @@ install_app_mocks(
     "app.db", "app.db.subscribe_oper", "app.modules",
     "app.modules.filemanager", "app.modules.filemanager.transhandler",
     "app.utils", "app.utils.http", "app.helper", "app.application", "app.adapters",
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.core.media",
-    "cloudsubscribe.drive", "cloudsubscribe.drive.scanner",
-    "cloudsubscribe.handlers", "cloudsubscribe.handlers.sync",
-    "cloudsubscribe.handlers.notification", "cloudsubscribe.handlers.search",
-    "cloudsubscribe.handlers.subscription", "cloudsubscribe.utils",
-    "cloudsubscribe.utils.cache", "cloudsubscribe.search.types",
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.core.media",
+    "cloudsubscribex.drive", "cloudsubscribex.drive.scanner",
+    "cloudsubscribex.handlers", "cloudsubscribex.handlers.sync",
+    "cloudsubscribex.handlers.notification", "cloudsubscribex.handlers.search",
+    "cloudsubscribex.handlers.subscription", "cloudsubscribex.utils",
+    "cloudsubscribex.utils.cache", "cloudsubscribex.search.types",
 )
 
 
@@ -23,21 +23,21 @@ class OwnerDelegator:
     pass
 
 
-ensure_package("cloudsubscribe.core").OwnerDelegator = OwnerDelegator
-mock_utils = ensure_package("cloudsubscribe.utils")
+ensure_package("cloudsubscribex.core").OwnerDelegator = OwnerDelegator
+mock_utils = ensure_package("cloudsubscribex.utils")
 
 # 加载实际的 MediaFileParser
 MediaFileParser = load_module(
-    "cloudsubscribe.utils.file_parser",
-    "plugins.v2/cloudsubscribe/utils/file_parser.py",
+    "cloudsubscribex.utils.file_parser",
+    "plugins.v2/cloudsubscribex/utils/file_parser.py",
 ).MediaFileParser
 mock_utils.MediaFileParser = MediaFileParser
 mock_utils.parse_magnet_metadata = MagicMock()
 
 # 加载 resources.py 中的 SyncResourceManager
 ResourceTransferService = load_module(
-    "cloudsubscribe.handlers.sync.resources",
-    "plugins.v2/cloudsubscribe/handlers/sync/resources.py",
+    "cloudsubscribex.handlers.sync.resources",
+    "plugins.v2/cloudsubscribex/handlers/sync/resources.py",
 ).ResourceTransferService
 
 
@@ -182,14 +182,14 @@ install_app_mocks(
     "app.db", "app.db.subscribe_oper", "app.modules",
     "app.modules.filemanager", "app.modules.filemanager.transhandler",
     "app.utils", "app.utils.http", "app.helper", "app.application", "app.adapters",
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.core.media",
-    "cloudsubscribe.drive", "cloudsubscribe.drive.scanner",
-    "cloudsubscribe.handlers", "cloudsubscribe.handlers.sync",
-    "cloudsubscribe.handlers.notification", "cloudsubscribe.handlers.search",
-    "cloudsubscribe.handlers.subscription", "cloudsubscribe.utils",
-    "cloudsubscribe.utils.cache", "cloudsubscribe.search.types",
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.core.media",
+    "cloudsubscribex.drive", "cloudsubscribex.drive.scanner",
+    "cloudsubscribex.handlers", "cloudsubscribex.handlers.sync",
+    "cloudsubscribex.handlers.notification", "cloudsubscribex.handlers.search",
+    "cloudsubscribex.handlers.subscription", "cloudsubscribex.utils",
+    "cloudsubscribex.utils.cache", "cloudsubscribex.search.types",
     *[
-        f"cloudsubscribe.handlers.sync.{sibling}"
+        f"cloudsubscribex.handlers.sync.{sibling}"
         for sibling in (
             "baseline", "cleanup", "history", "matching", "metadata", "movie",
             "naming", "notify", "platform_history", "postprocess", "pt_upgrade",
@@ -199,26 +199,26 @@ install_app_mocks(
 )
 
 # service.py 顶部会 `from ...search.magnet import extract_magnet_hash`（service.py:60）。
-# cloudsubscribe.search 在此前只是 AutoMockModule（__path__ 为空），子模块解析不到会抛
+# cloudsubscribex.search 在此前只是 AutoMockModule（__path__ 为空），子模块解析不到会抛
 # ImportError: cannot import name 'extract_magnet_hash' ... (unknown location)。
 # 这里按真实实现加载 magnet 及其依赖，保证导入链可用。
 load_module(
-    "cloudsubscribe.search.matching",
-    "plugins.v2/cloudsubscribe/search/matching.py",
+    "cloudsubscribex.search.matching",
+    "plugins.v2/cloudsubscribex/search/matching.py",
 )
 load_module(
-    "cloudsubscribe.utils.magnet",
-    "plugins.v2/cloudsubscribe/utils/magnet.py",
+    "cloudsubscribex.utils.magnet",
+    "plugins.v2/cloudsubscribex/utils/magnet.py",
 )
 load_module(
-    "cloudsubscribe.search.magnet",
-    "plugins.v2/cloudsubscribe/search/magnet.py",
+    "cloudsubscribex.search.magnet",
+    "plugins.v2/cloudsubscribex/search/magnet.py",
 )
 
 # 加载 service.py 中的真实 SyncHandler
 SyncHandler = load_module(
-    "cloudsubscribe.handlers.sync.service",
-    "plugins.v2/cloudsubscribe/handlers/sync/service.py",
+    "cloudsubscribex.handlers.sync.service",
+    "plugins.v2/cloudsubscribex/handlers/sync/service.py",
 ).SyncHandler
 
 

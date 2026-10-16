@@ -25,16 +25,16 @@ register_mock("app.schemas.types")
 register_module("app.utils", package=True)
 register_mock("app.utils.http")
 
-# 构造 mock 的 cloudsubscribe 包结构
-register_module("cloudsubscribe", package=True)
-cloudsubscribe_core = register_module(
-    "cloudsubscribe.core",
+# 构造 mock 的 cloudsubscribex 包结构
+register_module("cloudsubscribex", package=True)
+cloudsubscribex_core = register_module(
+    "cloudsubscribex.core",
     package=True,
     OwnerDelegator=OwnerDelegator,
     CloudDriveCapability=MagicMock(),
 )
 register_module(
-    "cloudsubscribe.core.media",
+    "cloudsubscribex.core.media",
     apply_media_identity=MagicMock(),
     legacy_media_ids=MagicMock(),
     media_identity=MagicMock(),
@@ -44,21 +44,21 @@ register_module(
     tmdb_identity_update=MagicMock(),
 )
 
-register_module("cloudsubscribe.utils", package=True)
+register_module("cloudsubscribex.utils", package=True)
 register_mock(
-    "cloudsubscribe.utils.cache", normalize_platform_cache_key=MagicMock()
+    "cloudsubscribex.utils.cache", normalize_platform_cache_key=MagicMock()
 )
 
 # 动态加载 metadata.py
 SyncMetadataService = load_module(
-    "cloudsubscribe.handlers.sync.metadata",
-    "plugins.v2/cloudsubscribe/handlers/sync/metadata.py",
+    "cloudsubscribex.handlers.sync.metadata",
+    "plugins.v2/cloudsubscribex/handlers/sync/metadata.py",
 ).SyncMetadataService
 
 # 动态加载 runtime.py
 SyncRuntimeService = load_module(
-    "cloudsubscribe.core.services.runtime",
-    "plugins.v2/cloudsubscribe/core/services/runtime.py",
+    "cloudsubscribex.core.services.runtime",
+    "plugins.v2/cloudsubscribex/core/services/runtime.py",
 ).SyncRuntimeService
 
 
@@ -157,11 +157,11 @@ class TestSearchStateLifecycle(unittest.TestCase):
     def test_create_search_registry_simplifies_skipped_logs(self):
         """验证搜索渠道注册时，未配置的多个渠道日志聚合为单条输出，避免刷屏。"""
         from app.log import logger as mock_logger
-        load_module("cloudsubscribe.core.search", "plugins.v2/cloudsubscribe/core/search.py")
-        load_module("cloudsubscribe.core.definitions", "plugins.v2/cloudsubscribe/core/definitions.py")
-        load_module("cloudsubscribe.search.types", "plugins.v2/cloudsubscribe/search/types.py")
-        scanner_mod = load_module("cloudsubscribe.search.scanner", "plugins.v2/cloudsubscribe/search/scanner.py")
-        registry_mod = load_module("cloudsubscribe.search.registry", "plugins.v2/cloudsubscribe/search/registry.py")
+        load_module("cloudsubscribex.core.search", "plugins.v2/cloudsubscribex/core/search.py")
+        load_module("cloudsubscribex.core.definitions", "plugins.v2/cloudsubscribex/core/definitions.py")
+        load_module("cloudsubscribex.search.types", "plugins.v2/cloudsubscribex/search/types.py")
+        scanner_mod = load_module("cloudsubscribex.search.scanner", "plugins.v2/cloudsubscribex/search/scanner.py")
+        registry_mod = load_module("cloudsubscribex.search.registry", "plugins.v2/cloudsubscribex/search/registry.py")
 
         class _DummySource1:
             id = "dummy1"

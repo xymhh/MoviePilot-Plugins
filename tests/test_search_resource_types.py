@@ -3,8 +3,8 @@ import os
 import unittest
 
 # 加载 search/types.py
-types_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribe/search/types.py"))
-spec = importlib.util.spec_from_file_location("cloudsubscribe.search.types", types_file)
+types_file = os.path.abspath(os.path.join(os.path.dirname(__file__), "../plugins.v2/cloudsubscribex/search/types.py"))
+spec = importlib.util.spec_from_file_location("cloudsubscribex.search.types", types_file)
 types_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(types_mod)
 

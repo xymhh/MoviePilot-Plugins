@@ -26,17 +26,17 @@ from plugin_env import (
 install_app_mocks(
     "app.core", "app.core.context", "app.core.metainfo", "app.db",
     "app.db.subscribe_oper", "app.utils", "app.utils.string",
-    "cloudsubscribe", "cloudsubscribe.core", "cloudsubscribe.core.media",
-    "cloudsubscribe.handlers", "cloudsubscribe.handlers.sync",
+    "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.core.media",
+    "cloudsubscribex.handlers", "cloudsubscribex.handlers.sync",
 )
 set_media_type(movie="电影", tv="电视剧")
-sys.modules["cloudsubscribe.core"].OwnerDelegator = OwnerDelegator
-sys.modules["cloudsubscribe.core"].CloudFile = MagicMock()
-sys.modules["cloudsubscribe.core"].CloudDriveCapability = MagicMock()
+sys.modules["cloudsubscribex.core"].OwnerDelegator = OwnerDelegator
+sys.modules["cloudsubscribex.core"].CloudFile = MagicMock()
+sys.modules["cloudsubscribex.core"].CloudDriveCapability = MagicMock()
 
 HistoryRetryService = load_module(
-    "cloudsubscribe.handlers.sync.retry",
-    "plugins.v2/cloudsubscribe/handlers/sync/retry.py",
+    "cloudsubscribex.handlers.sync.retry",
+    "plugins.v2/cloudsubscribex/handlers/sync/retry.py",
 ).HistoryRetryService
 
 RECORD_TIME = "2026-10-09 21:26:34"

@@ -48,7 +48,7 @@ if plugins_v2_path not in sys.path:
 
 
 def _plugin_dir(*parts):
-    return os.path.join(plugins_v2_path, "cloudsubscribe", *parts)
+    return os.path.join(plugins_v2_path, "cloudsubscribex", *parts)
 
 
 def _register_real_package(name, path):
@@ -65,28 +65,28 @@ register_module("app.utils", package=True)
 register_mock("app.utils.string", StringUtils=MagicMock())
 register_module("app.log", logger=MagicMock())
 
-# ---- cloudsubscribe 包层级（core/drive 用真实路径，子模块按文件加载）----
-_register_real_package("cloudsubscribe", _plugin_dir())
-_register_real_package("cloudsubscribe.core", _plugin_dir("core"))
-_register_real_package("cloudsubscribe.drive", _plugin_dir("drive"))
-_register_real_package("cloudsubscribe.utils", _plugin_dir("utils"))
+# ---- cloudsubscribex 包层级（core/drive 用真实路径，子模块按文件加载）----
+_register_real_package("cloudsubscribex", _plugin_dir())
+_register_real_package("cloudsubscribex.core", _plugin_dir("core"))
+_register_real_package("cloudsubscribex.drive", _plugin_dir("drive"))
+_register_real_package("cloudsubscribex.utils", _plugin_dir("utils"))
 register_mock(
-    "cloudsubscribe.utils.cache",
+    "cloudsubscribex.utils.cache",
     create_platform_ttl_cache=MagicMock(return_value=MagicMock()),
 )
 
 cloud_module = load_module(
-    "cloudsubscribe.core.cloud", "plugins.v2/cloudsubscribe/core/cloud.py"
+    "cloudsubscribex.core.cloud", "plugins.v2/cloudsubscribex/core/cloud.py"
 )
 transfer_module = load_module(
-    "cloudsubscribe.core.transfer", "plugins.v2/cloudsubscribe/core/transfer.py"
+    "cloudsubscribex.core.transfer", "plugins.v2/cloudsubscribex/core/transfer.py"
 )
 gopeed_module = load_module(
-    "cloudsubscribe.core.gopeed", "plugins.v2/cloudsubscribe/core/gopeed.py"
+    "cloudsubscribex.core.gopeed", "plugins.v2/cloudsubscribex/core/gopeed.py"
 )
-load_module("cloudsubscribe.drive.common", "plugins.v2/cloudsubscribe/drive/common.py")
+load_module("cloudsubscribex.drive.common", "plugins.v2/cloudsubscribex/drive/common.py")
 files_module = load_module(
-    "cloudsubscribe.drive.quark.files", "plugins.v2/cloudsubscribe/drive/quark/files.py"
+    "cloudsubscribex.drive.quark.files", "plugins.v2/cloudsubscribex/drive/quark/files.py"
 )
 
 CloudFile = cloud_module.CloudFile

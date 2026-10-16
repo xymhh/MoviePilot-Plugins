@@ -72,43 +72,43 @@ class FakePlatformTTLCache:
 
 
 def fake_create_platform_ttl_cache(namespace: str, identity: Any = "", *, maxsize: int, ttl: int):
-    """对齐 ``cloudsubscribe.utils.cache.create_platform_ttl_cache`` 的签名。"""
-    return FakePlatformTTLCache(f"cloudsubscribe:{namespace}:{identity}", maxsize=maxsize, ttl=ttl)
+    """对齐 ``cloudsubscribex.utils.cache.create_platform_ttl_cache`` 的签名。"""
+    return FakePlatformTTLCache(f"cloudsubscribex:{namespace}:{identity}", maxsize=maxsize, ttl=ttl)
 
 
 register_mock(
-    "cloudsubscribe.utils.cache",
+    "cloudsubscribex.utils.cache",
     create_platform_ttl_cache=fake_create_platform_ttl_cache,
 )
 
 # ---- 搜索渠道依赖占位（本用例只关心缓存清理，不关心候选构造） ----
-register_mock("cloudsubscribe.search.magnet", media_titles=MagicMock(), normalize_magnets=MagicMock())
-register_mock("cloudsubscribe.search.matching", unique_texts=MagicMock())
+register_mock("cloudsubscribex.search.magnet", media_titles=MagicMock(), normalize_magnets=MagicMock())
+register_mock("cloudsubscribex.search.matching", unique_texts=MagicMock())
 register_mock(
-    "cloudsubscribe.search.subs_filter",
+    "cloudsubscribex.search.subs_filter",
     build_anime_candidate=MagicMock(),
     extract_fansub_from_title=MagicMock(),
     filter_fansubs=MagicMock(),
     release_matches=MagicMock(),
 )
 register_mock(
-    "cloudsubscribe.search.animegarden.client",
+    "cloudsubscribex.search.animegarden.client",
     AnimeGardenClient=MagicMock(),
     AnimeGardenClientError=type("AnimeGardenClientError", (Exception,), {}),
 )
 
 # ---- 真实模块：core/search.py、animegarden/service.py、animegarden/provider.py ----
 SearchCapability = load_module(
-    "cloudsubscribe.core.search",
-    "plugins.v2/cloudsubscribe/core/search.py",
+    "cloudsubscribex.core.search",
+    "plugins.v2/cloudsubscribex/core/search.py",
 ).SearchCapability
 AnimeGardenSearchService = load_module(
-    "cloudsubscribe.search.animegarden.service",
-    "plugins.v2/cloudsubscribe/search/animegarden/service.py",
+    "cloudsubscribex.search.animegarden.service",
+    "plugins.v2/cloudsubscribex/search/animegarden/service.py",
 ).AnimeGardenSearchService
 create_animegarden_provider = load_module(
-    "cloudsubscribe.search.animegarden.provider",
-    "plugins.v2/cloudsubscribe/search/animegarden/provider.py",
+    "cloudsubscribex.search.animegarden.provider",
+    "plugins.v2/cloudsubscribex/search/animegarden/provider.py",
 ).create_animegarden_provider
 
 

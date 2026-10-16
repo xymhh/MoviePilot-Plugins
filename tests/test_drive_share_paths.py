@@ -19,7 +19,7 @@ if plugins_v2_path not in sys.path:
 
 
 def _plugin_dir(*parts):
-    return os.path.join(plugins_v2_path, "cloudsubscribe", *parts)
+    return os.path.join(plugins_v2_path, "cloudsubscribex", *parts)
 
 
 # 构造 mock 的 app 基础依赖
@@ -47,8 +47,8 @@ for mod_name in [
 ]:
     ensure_package(mod_name)
 
-register_package("cloudsubscribe.drive")
-drive_common = ensure_package("cloudsubscribe.drive.common")
+register_package("cloudsubscribex.drive")
+drive_common = ensure_package("cloudsubscribex.drive.common")
 
 
 def iter_transfer_batches(values, batch_size, batch_interval, provider_limit):
@@ -82,17 +82,17 @@ drive_common.extract_list = extract_list
 drive_common.CloudDriveFileServiceBase = object
 
 # 加载真实 cloud.py / definitions.py
-load_module("cloudsubscribe.core.cloud", "plugins.v2/cloudsubscribe/core/cloud.py")
-load_module("cloudsubscribe.core.definitions", "plugins.v2/cloudsubscribe/core/definitions.py")
+load_module("cloudsubscribex.core.cloud", "plugins.v2/cloudsubscribex/core/cloud.py")
+load_module("cloudsubscribex.core.definitions", "plugins.v2/cloudsubscribex/core/definitions.py")
 
-register_package("cloudsubscribe.core")
-register_mock("cloudsubscribe.core.transfer")
+register_package("cloudsubscribex.core")
+register_mock("cloudsubscribex.core.transfer")
 
-register_package("cloudsubscribe.utils")
-register_mock("cloudsubscribe.utils.cache", create_platform_ttl_cache=MagicMock())
+register_package("cloudsubscribex.utils")
+register_mock("cloudsubscribex.utils.cache", create_platform_ttl_cache=MagicMock())
 
-register_package("cloudsubscribe.search")
-register_module("cloudsubscribe.search.types", RESOURCE_TYPE_DISPLAY={
+register_package("cloudsubscribex.search")
+register_module("cloudsubscribex.search.types", RESOURCE_TYPE_DISPLAY={
     "115": {"name": "115网盘"},
     "123": {"name": "123云盘"},
     "quark": {"name": "夸克网盘"},
@@ -108,39 +108,39 @@ register_module("cloudsubscribe.search.types", RESOURCE_TYPE_DISPLAY={
 })
 
 # 注册各驱动子包以支持相对导入，并加载真实 share service
-register_package("cloudsubscribe.drive.tianyi", paths=[_plugin_dir("drive", "tianyi")])
-register_package("cloudsubscribe.drive.yun139", paths=[_plugin_dir("drive", "yun139")])
-register_mock("cloudsubscribe.drive.yun139.client")
+register_package("cloudsubscribex.drive.tianyi", paths=[_plugin_dir("drive", "tianyi")])
+register_package("cloudsubscribex.drive.yun139", paths=[_plugin_dir("drive", "yun139")])
+register_mock("cloudsubscribex.drive.yun139.client")
 
-register_package("cloudsubscribe.drive.guangya", paths=[_plugin_dir("drive", "guangya")])
-register_mock("cloudsubscribe.drive.guangya.client")
+register_package("cloudsubscribex.drive.guangya", paths=[_plugin_dir("drive", "guangya")])
+register_mock("cloudsubscribex.drive.guangya.client")
 
-register_package("cloudsubscribe.search.online_docs", paths=[_plugin_dir("search", "online_docs")])
-register_mock("cloudsubscribe.search.online_docs.client")
-register_mock("cloudsubscribe.search.online_docs.provider")
+register_package("cloudsubscribex.search.online_docs", paths=[_plugin_dir("search", "online_docs")])
+register_mock("cloudsubscribex.search.online_docs.client")
+register_mock("cloudsubscribex.search.online_docs.provider")
 
 TianyiShareService = load_module(
-    "cloudsubscribe.drive.tianyi.share",
-    "plugins.v2/cloudsubscribe/drive/tianyi/share.py",
+    "cloudsubscribex.drive.tianyi.share",
+    "plugins.v2/cloudsubscribex/drive/tianyi/share.py",
 ).TianyiShareService
 Yun139ShareService = load_module(
-    "cloudsubscribe.drive.yun139.share",
-    "plugins.v2/cloudsubscribe/drive/yun139/share.py",
+    "cloudsubscribex.drive.yun139.share",
+    "plugins.v2/cloudsubscribex/drive/yun139/share.py",
 ).Yun139ShareService
 GuangyaShareService = load_module(
-    "cloudsubscribe.drive.guangya.share",
-    "plugins.v2/cloudsubscribe/drive/guangya/share.py",
+    "cloudsubscribex.drive.guangya.share",
+    "plugins.v2/cloudsubscribex/drive/guangya/share.py",
 ).GuangyaShareService
 
-register_package("cloudsubscribe.drive.alipan", paths=[_plugin_dir("drive", "alipan")])
+register_package("cloudsubscribex.drive.alipan", paths=[_plugin_dir("drive", "alipan")])
 AliPanShareService = load_module(
-    "cloudsubscribe.drive.alipan.share",
-    "plugins.v2/cloudsubscribe/drive/alipan/share.py",
+    "cloudsubscribex.drive.alipan.share",
+    "plugins.v2/cloudsubscribex/drive/alipan/share.py",
 ).AliPanShareService
 
 OnlineDocsSourceDefinition = load_module(
-    "cloudsubscribe.search.online_docs.definition",
-    "plugins.v2/cloudsubscribe/search/online_docs/definition.py",
+    "cloudsubscribex.search.online_docs.definition",
+    "plugins.v2/cloudsubscribex/search/online_docs/definition.py",
 ).OnlineDocsSourceDefinition
 
 
