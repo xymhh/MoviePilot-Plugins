@@ -1588,19 +1588,99 @@ class HistoryService(OwnerDelegator):
         """返回媒体库同步表使用的服务器类型标识。"""
         return str(getattr(service, "type", "") or name or "").strip().casefold()
 
+    @staticmethod
+    def _normalize_media_path(value: Any) -> str:
+        """归一化媒体路径：统一分隔符并去掉尾部斜杠。"""
+        return str(value or "").strip().replace("\\", "/").rstrip("/")
+
+    def _parsed_media_server_path_mappings(self) -> List[Tuple[str, str]]:
+        """解析「媒体服务器路径=本地路径」映射（长前缀优先）。"""
+        raw = str(getattr(self, "_media_server_path_mappings", "") or "")
+        if not raw:
+            notifier = getattr(self, "_media_server_notifier", None)
+            raw = str(getattr(notifier, "path_mappings", "") or "")
+        mappings: List[Tuple[str, str]] = []
+        for line in raw.splitlines():
+            text = line.strip()
+            if not text or text.startswith("#"):
+                continue
+            separator = "=" if "=" in text else ("#" if "#" in text else "")
+            if not separator:
+                continue
+            left, _, right = text.partition(separator)
+            server_root = self._normalize_media_path(left)
+            local_root = self._normalize_media_path(right)
+            if not server_root or not local_root:
+                continue
+            mappings.append((server_root, local_root))
+        mappings.sort(key=lambda item: len(item[0]), reverse=True)
+        return mappings
+
+    def _align_media_path_by_suffix(self, raw_value: str, root: Path) -> Optional[Path]:
+        """尾部对齐兜底：逐级丢弃原路径前缀段，命中 root 下的真实路径。"""
+        parts = [part for part in raw_value.replace("\\", "/").split("/") if part]
+        for index in range(1, len(parts)):
+            candidate = Path(
+                "/" + "/".join(parts[index:])
+            ).expanduser().resolve(strict=False)
+            if candidate != root and root not in candidate.parents:
+                continue
+            if not candidate.exists():
+                continue
+            logger.info(
+                f"媒体服务器路径前缀自动对齐：{raw_value} → {candidate}"
+                "（Emby 挂载点与本地不一致，可在插件设置→媒体服务器路径映射中写 "
+                "/media/strm=/strm 消除推断）"
+            )
+            return candidate
+        return None
+
     def _configured_media_path(self, value: Any) -> Tuple[Path, str]:
-        """校验媒体服务器实际路径属于插件配置的 STRM 媒体根目录。"""
+        """校验媒体服务器实际路径属于插件配置的 STRM 媒体根目录。
+
+        解析顺序：原样命中 → 显式映射（media_server_path_mappings）→ 尾部对齐兜底。
+        只做前缀翻译，不放松「必须在 root 之下」与「结果必须存在」两道检查。
+        """
         if not self._local_resource_path:
             raise RuntimeError("未配置本地或挂载媒体根路径")
         root = Path(self._local_resource_path).expanduser().resolve(strict=False)
         if not root.is_dir():
             raise RuntimeError("插件配置的媒体根路径不存在或不可访问")
-        path = Path(str(value or "").strip()).expanduser().resolve(strict=False)
-        if not str(value or "").strip() or (path != root and root not in path.parents):
-            raise ValueError("媒体服务器条目路径不在插件配置的媒体根路径中")
-        if not path.exists():
-            raise LookupError(f"媒体服务器条目路径不存在或不可访问：{path}")
-        return path, path.relative_to(root).as_posix()
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            raise ValueError(
+                "媒体服务器条目路径为空；"
+                f"当前媒体根路径={root}，"
+                "若 Emby 挂载点与本地不一致，可配置 media_server_path_mappings"
+            )
+        # 1. 原样命中：字面量已落在 root 之下（保持既有行为，最高优先级）
+        path = Path(raw_value).expanduser().resolve(strict=False)
+        if path == root or root in path.parents:
+            if not path.exists():
+                raise LookupError(f"媒体服务器条目路径不存在或不可访问：{path}")
+            return path, path.relative_to(root).as_posix()
+        # 2. 显式映射：替换媒体服务器前缀为本地前缀后再校验
+        for server_root, local_root in self._parsed_media_server_path_mappings():
+            if raw_value != server_root and not raw_value.startswith(f"{server_root}/"):
+                continue
+            relative = raw_value[len(server_root):].lstrip("/")
+            translated = f"{local_root}/{relative}" if relative else local_root
+            translated_path = Path(translated).expanduser().resolve(strict=False)
+            if translated_path != root and root not in translated_path.parents:
+                continue
+            if not translated_path.exists():
+                continue
+            return translated_path, translated_path.relative_to(root).as_posix()
+        # 3. 尾部对齐兜底：从右往左逐级丢弃原路径前缀段
+        aligned = self._align_media_path_by_suffix(raw_value, root)
+        if aligned is not None:
+            return aligned, aligned.relative_to(root).as_posix()
+        raise ValueError(
+            f"媒体服务器条目路径不在插件配置的媒体根路径中：{raw_value}，"
+            f"当前媒体根路径={root}；"
+            "若 Emby 挂载点与本地不一致，可配置 media_server_path_mappings"
+            "（每行 媒体服务器路径=本地路径，例如 /media/strm=/strm）"
+        )
 
     @staticmethod
     def _media_server_item_type(value: Any) -> Optional[MediaType]:
@@ -1660,11 +1740,22 @@ class HistoryService(OwnerDelegator):
                 MediaServerItem.title, MediaServerItem.year
             ).limit(100).all()
 
+            diagnostics = {
+                "matched": 0,
+                "dropped_no_identity": 0,
+                "dropped_path": 0,
+                "dropped_path_example": "",
+                "dropped_path_reason": "",
+                "root": str(self._local_resource_path or ""),
+                "mappings": str(getattr(self, "_media_server_path_mappings", "") or ""),
+            }
             items = []
             for row in rows:
+                diagnostics["matched"] += 1
                 media_type = self._media_server_item_type(row.item_type)
                 row_tmdb_id = tmdb_id_of(row)
                 if not media_type or not row_tmdb_id or not row.path:
+                    diagnostics["dropped_no_identity"] += 1
                     continue
                 if target_media_type in {"movie", "tv"} and (
                         (target_media_type == "movie") != (media_type == MediaType.MOVIE)
@@ -1672,7 +1763,11 @@ class HistoryService(OwnerDelegator):
                     continue
                 try:
                     _, relative = self._configured_media_path(row.path)
-                except (ValueError, LookupError, RuntimeError):
+                except (ValueError, LookupError, RuntimeError) as error:
+                    diagnostics["dropped_path"] += 1
+                    if not diagnostics["dropped_path_example"]:
+                        diagnostics["dropped_path_example"] = str(row.path)
+                        diagnostics["dropped_path_reason"] = str(error)
                     continue
                 base = {
                     "server": selected_server,
@@ -1720,7 +1815,19 @@ class HistoryService(OwnerDelegator):
                         break
                 if len(items) >= row_limit:
                     break
-        return {"servers": server_options, "items": items[:row_limit]}
+        result: Dict[str, Any] = {
+            "servers": server_options,
+            "items": items[:row_limit],
+            "diagnostics": diagnostics,
+        }
+        if not items and diagnostics["dropped_path"] > 0:
+            result["message"] = (
+                f"已读取 0 个媒体库内容：命中标题 {diagnostics['matched']} 条，"
+                "均因路径前缀与媒体根不一致被丢弃"
+                f"（示例 {diagnostics['dropped_path_example']}）。"
+                "请在插件设置→媒体服务器路径映射中填 /media/strm=/strm。"
+            )
+        return result
 
     def _media_server_episode_files(
             self, server: str, item_id: str, season: int

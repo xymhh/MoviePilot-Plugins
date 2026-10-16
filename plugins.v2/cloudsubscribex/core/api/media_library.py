@@ -477,7 +477,8 @@ class MediaLibraryApi(OwnerDelegator):
             )
             return {
                 "success": True,
-                "message": f"已读取 {len(data.get('items') or [])} 个媒体库内容",
+                "message": data.get("message")
+                or f"已读取 {len(data.get('items') or [])} 个媒体库内容",
                 "data": data,
             }
         except Exception as error:

@@ -871,8 +871,12 @@ async function searchMediaContents(tmdb = null) {
     if (mediaServer.value !== selectedServer) return
     if (result.success === false) throw new Error(result.message || "搜索媒体库失败")
     mediaServers.value = result.data?.servers || mediaServers.value
-    mediaContents.value = result.data?.items || []
+    const items = result.data?.items || []
+    mediaContents.value = items
     selectedMediaItems.value = []
+    if (!items.length && result.data?.message) {
+      error.value = result.data.message
+    }
   } catch (e) {
     error.value = e.message || "搜索媒体库失败"
   } finally {

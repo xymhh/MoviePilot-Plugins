@@ -489,6 +489,7 @@ class SyncHandler:
         media_server_refresh_delay = _get_val("media_server_refresh_delay", 0)
         emby_mediainfo_enabled = bool(_get_val("emby_mediainfo_enabled", False))
 
+        self._media_server_path_mappings = str(media_server_path_mappings or "")
         self._media_server_notifier = MediaServerNotifier(
             enabled=media_server_refresh_enabled,
             mediaservers=media_servers,
