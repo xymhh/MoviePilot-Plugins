@@ -157,6 +157,9 @@ class UpgradeBaselineService(OwnerDelegator):
                 continue
             if str(record.get("status") or "") in {"失败", "转存失败", "已删除", "跳过"}:
                 continue
+            if record.get("landed") is False:
+                # 1.6.52 显式落盘自检已明确「没有实物」→ 直接丢弃，不再当已有版本
+                continue
             episode = self._int_or_zero(record.get("episode"))
             file_name = str(
                 record.get("source_file_name") or record.get("file_name") or ""

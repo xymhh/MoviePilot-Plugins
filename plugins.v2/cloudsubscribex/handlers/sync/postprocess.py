@@ -2123,6 +2123,12 @@ class PostprocessService(OwnerDelegator):
                 detail.update({"season": int(season or 1), "episodes": [int(episode)]})
             details.append(detail)
 
+        if history_records:
+            apply_landed = getattr(
+                self, "apply_landed_verification_to_records", None
+            )
+            if callable(apply_landed):
+                apply_landed(subscribe, mediainfo, season, history_records)
         details = self._persist_magnet_finalized_outputs(
             item=item,
             pending_key=pending_key,
@@ -2340,6 +2346,12 @@ class PostprocessService(OwnerDelegator):
                 detail.update({"season": int(season or 1), "episodes": [int(ep)]})
             details.append(detail)
 
+        if history_records:
+            apply_landed = getattr(
+                self, "apply_landed_verification_to_records", None
+            )
+            if callable(apply_landed):
+                apply_landed(subscribe, mediainfo, season, history_records)
         return self._persist_magnet_finalized_outputs(
             item=item,
             pending_key=pending_key,

@@ -298,7 +298,16 @@
             <span class="text-error">失败 {{ item.failed_count }}</span>
             <template v-if="item.skipped_count">
               <span class="summary-separator">/</span>
-              <span class="text-medium-emphasis">跳过 {{ item.skipped_count }}</span>
+              <span class="text-medium-emphasis">
+                跳过 {{ item.skipped_count }}
+                <v-tooltip v-if="skipReasonText(item)" activator="parent" location="top">
+                  {{ skipReasonText(item) }}
+                </v-tooltip>
+              </span>
+            </template>
+            <template v-if="item.unverified_count">
+              <span class="summary-separator">/</span>
+              <span class="text-warning">待确认 {{ item.unverified_count }}</span>
             </template>
           </div>
         </template>
@@ -588,7 +597,13 @@
                         待完成 {{ item.pending_count }}
                       </span>
                       <span v-if="item.failed_count" class="text-caption text-error">失败 {{ item.failed_count }}</span>
-                      <span v-if="item.skipped_count" class="text-caption text-medium-emphasis">跳过 {{ item.skipped_count }}</span>
+                      <span v-if="item.skipped_count" class="text-caption text-medium-emphasis">
+                        跳过 {{ item.skipped_count }}
+                        <v-tooltip v-if="skipReasonText(item)" activator="parent" location="top">
+                          {{ skipReasonText(item) }}
+                        </v-tooltip>
+                      </span>
+                      <span v-if="item.unverified_count" class="text-caption text-warning">待确认 {{ item.unverified_count }}</span>
                     </div>
                     <span class="history-mobile-summary-time text-caption text-medium-emphasis">
                       {{ item.latest_time || "-" }}
@@ -980,6 +995,15 @@ function resourceTypeLabel(value) {
   return getResourceTypeName(resourceType(value));
 }
 
+function skipReasonText(item) {
+  const reasons = item?.skip_reasons;
+  if (!reasons || typeof reasons !== "object") return "";
+  return Object.entries(reasons)
+    .filter(([, count]) => Number(count) > 0)
+    .map(([label, count]) => `${label} ${count}`)
+    .join("、");
+}
+
 function resourceTypeColor(value) {
   return getTypeColor(resourceType(value));
 }
@@ -1006,6 +1030,7 @@ function playItemId(item) {
 function statusColor(status) {
   if (status === "成功") return "success";
   if (status === "跳过") return "warning";
+  if (status === "待确认") return "warning";
   return ["处理中", "下载中"].includes(status) ? "info" : "error";
 }
 

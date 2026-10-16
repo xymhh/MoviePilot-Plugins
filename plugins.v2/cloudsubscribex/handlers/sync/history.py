@@ -385,6 +385,7 @@ class HistoryService(OwnerDelegator):
                     for keep_key in (
                         "file_name", "target_file_name", "cloud_dir",
                         "cloud_file_id", "cloud_drive_name", "file_size",
+                        "landed", "landed_reason", "verified_at",
                     ):
                         if keep_key in current:
                             merged[keep_key] = current[keep_key]
@@ -590,9 +591,14 @@ class HistoryService(OwnerDelegator):
     def _cross_success_needs_repair(cls, record: Dict[str, Any]) -> bool:
         """跨盘「成功」但查无落盘痕迹 → 留一条人工重新转存入口（1.6.51）。
 
-        判重不再采信查无实据的历史版本后，这类记录已挡不住缺失集自动补齐；但历史页
-        仍要能手动重转，用户不必靠「删记录 + 重跑订阅」绕过。
+        1.6.52 起优先读显式 ``landed`` 字段；老记录没有该字段时回退原启发式
+        （``cloud_dir`` 为空 或 只剩源文件名）。
         """
+        landed = record.get("landed")
+        if landed is False:
+            return True
+        if landed is True:
+            return False
         if not str(record.get("cloud_dir") or "").strip():
             return True
         file_name = str(record.get("file_name") or "").strip()
@@ -698,6 +704,37 @@ class HistoryService(OwnerDelegator):
         return prepared
 
     @staticmethod
+    def _aggregate_skip_reasons(records: List[Dict[str, Any]]) -> Dict[str, int]:
+        """把跳过原因的明细归一化成「冒号前的原因头 → 条数」分布。
+
+        归一化只取冒号前的原因头（如 ``同集已有更优版本：同评分且候选文件未更大`` →
+        ``同集已有更优版本``），保留原文里的关键信息便于定位；无原因记「未标注」。
+        """
+        reasons: Dict[str, int] = {}
+        for record in records or []:
+            if str(record.get("status") or "") != "跳过":
+                continue
+            raw = str(record.get("skip_reason") or "").strip()
+            if not raw:
+                label = "未标注"
+            else:
+                head = re.split(r"[:：]", raw, maxsplit=1)[0].strip()
+                label = head or raw
+            reasons[label] = reasons.get(label, 0) + 1
+        return reasons
+
+    @staticmethod
+    def _landed_result_fields(info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """把落盘自检结果转成历史字段；拿不到实测数据时不加字段（维持旧行为）。"""
+        if not isinstance(info, dict) or info.get("landed") is None:
+            return {}
+        return {
+            "landed": bool(info.get("landed")),
+            "landed_reason": str(info.get("reason") or ""),
+            "verified_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @staticmethod
     def prepare_history_group(group: Dict[str, Any]) -> Dict[str, Any]:
         """补充单个数据库媒体组的展示字段，不在应用层重新分组。"""
         prepared = copy.deepcopy(group)
@@ -722,9 +759,26 @@ class HistoryService(OwnerDelegator):
         prepared["failed_count"] = sum(
             1 for r in records
             if r.get("status") == "失败"
-            or (r.get("status") not in {"成功", "处理中", "下载中", "跳过"})
+            or (
+                r.get("status") not in {"成功", "处理中", "下载中", "跳过"}
+                and r.get("status") != "待确认"
+            )
         )
         prepared["skipped_count"] = sum(1 for r in records if r.get("status") == "跳过")
+        prepared["unverified_count"] = sum(
+            1 for r in records if r.get("status") == "待确认"
+        )
+        prepared["skip_reasons"] = HistoryService._aggregate_skip_reasons(records)
+        prepared["unverified_records"] = [
+            {
+                "season": int(r.get("season") or 0),
+                "episode": int(r.get("episode") or 0),
+                "file_name": str(r.get("file_name") or ""),
+                "reason": str(r.get("landed_reason") or ""),
+            }
+            for r in records
+            if r.get("status") == "待确认"
+        ][:20]
         prepared["total_size"] = sum(int(r.get("file_size") or 0) for r in records)
         prepared.update({
             "tmdb_id": first.get("tmdb_id"),
@@ -1132,6 +1186,7 @@ class HistoryService(OwnerDelegator):
             return 0
         uppercase_keys = {value.upper() for value in normalized_keys}
         platform_records = []
+        success_records = []
         matched_records = 0
         with self._offline_pending_lock:
             pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
@@ -1182,8 +1237,32 @@ class HistoryService(OwnerDelegator):
                         if up_val is not None:
                             item[up_key] = copy.deepcopy(up_val)
                 if status == "成功":
-                    platform_records.append(copy.deepcopy(item))
+                    success_records.append(item)
                 changed = True
+            # 1.6.52 落盘自检：成功终态先核对目标目录里真有实物，查无实据记「待确认」。
+            if success_records:
+                verify_records = getattr(self, "verify_landed_records", None)
+                landed_infos = (
+                    verify_records(success_records)
+                    if callable(verify_records) else {}
+                )
+                for item in success_records:
+                    info = landed_infos.get(id(item)) or {}
+                    if info.get("landed") is False:
+                        item["status"] = "待确认"
+                        item.update(HistoryService._landed_result_fields(info))
+                        logger.warning(
+                            f"落盘自检未通过：{item.get('title') or '未知媒体'} "
+                            f"S{int(item.get('season') or 0):02d}"
+                            f"E{int(item.get('episode') or 0):02d} "
+                            f"{item.get('file_name') or '未记录'} 不在目标季目录"
+                            f"（{info.get('reason') or 'missing_in_dir'}），记「待确认」"
+                        )
+                        continue
+                    fields = HistoryService._landed_result_fields(info)
+                    if fields:
+                        item.update(fields)
+                    platform_records.append(copy.deepcopy(item))
             if changed:
                 self._save_data("history", history)
         self._record_platform_transfer_histories(platform_records)
@@ -1207,6 +1286,7 @@ class HistoryService(OwnerDelegator):
             history = self._get_data("history") or []
             pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
             repaired = 0
+            repaired_records = []
             for item in history:
                 if str(item.get("status") or "") not in {"处理中", "下载中"}:
                     continue
@@ -1216,7 +1296,24 @@ class HistoryService(OwnerDelegator):
                 item["status"] = "成功"
                 item.pop("finalize_key", None)
                 item.pop("failure_reason", None)
+                repaired_records.append(item)
                 repaired += 1
+            # 1.6.52 落盘自检：兜底修复同样过闸，查无实据记「待确认」而非「成功」。
+            if repaired_records:
+                verify_records = getattr(self, "verify_landed_records", None)
+                landed_infos = (
+                    verify_records(repaired_records)
+                    if callable(verify_records) else {}
+                )
+                for item in repaired_records:
+                    info = landed_infos.get(id(item)) or {}
+                    if info.get("landed") is False:
+                        item["status"] = "待确认"
+                        item.update(HistoryService._landed_result_fields(info))
+                    else:
+                        fields = HistoryService._landed_result_fields(info)
+                        if fields:
+                            item.update(fields)
             if repaired:
                 self._save_data("history", history)
         if repaired:

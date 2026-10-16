@@ -198,6 +198,7 @@ class UIConfig:
             "enable_pt_upgrade": False,
             "upgrade_mode": "largest",
             "episode_dedup_enabled": True,
+            "verify_landed_enabled": True,
             "prefer_template_named_version": True,
             "upgrade_subscribe_ids": [],
             "local_resource_path": "",

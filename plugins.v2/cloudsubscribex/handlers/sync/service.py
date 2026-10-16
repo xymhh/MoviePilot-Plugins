@@ -43,6 +43,7 @@ from .baseline import UpgradeBaselineService
 from .cleanup import HistoryCleanupService
 from .episode_dedup import EpisodeDedupService
 from .history import HistoryService
+from .landed import LandedVerifyService
 from .matching import FileMatchingService
 from .metadata import SyncMetadataService
 from .movie import MovieSyncProcessor
@@ -90,6 +91,7 @@ _COMPONENT_TYPES = (
     UpgradeBaselineService,
     UpgradeRuleScoringService,
     EpisodeDedupService,
+    LandedVerifyService,
     ResourceTransferService,
     SubtitleService,
     UpgradeService,
@@ -375,6 +377,7 @@ class SyncHandler:
             raw_mode if raw_mode in {"coexist", "replace", "largest", "smallest"} else "largest"
         )
         self._episode_dedup_enabled = bool(_get_val("episode_dedup_enabled", True))
+        self._verify_landed_enabled = bool(_get_val("verify_landed_enabled", True))
         self._prefer_template_named_version = bool(
             _get_val("prefer_template_named_version", True)
         )

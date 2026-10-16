@@ -83,6 +83,7 @@ class PlatformHistoryService(OwnerDelegator):
         is_upgrade_history = getattr(self, "_is_upgrade_history", None)
         if (
                 str(record.get("status") or "") != "成功"
+                or record.get("landed") is False
                 or (is_upgrade_history and is_upgrade_history(record))
         ):
             return []
@@ -365,6 +366,6 @@ class PlatformHistoryService(OwnerDelegator):
         records = [
             copy.deepcopy(record)
             for record in history
-            if isinstance(record, dict)
+            if isinstance(record, dict) and record.get("landed") is not False
         ]
         return self._record_platform_transfer_histories(records, reconcile=True)

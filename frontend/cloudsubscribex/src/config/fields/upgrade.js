@@ -44,6 +44,13 @@ export function createUpgradeSection(options) {
             cols: 4,
           },
           {
+            key: "verify_landed_enabled",
+            label: "转存后校验落盘（推荐开）",
+            type: "switch",
+            hint: "转存/后处理判定「成功」前，核对目标文件真的在目标季目录：查无实物则记「待确认」（不计成功、不写整理历史、不发成功通知），避免假成功变成下一轮的幻影版本。关闭后逐字节回退旧行为。",
+            cols: 4,
+          },
+          {
             key: "prefer_template_named_version",
             label: "保留符合重命名格式的版本",
             type: "switch",

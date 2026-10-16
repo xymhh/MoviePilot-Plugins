@@ -714,8 +714,31 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         batch_detail_episodes = {}
                         completed_missing_episodes = set()
 
+                        # 1.6.52 落盘自检：批内非 pending 的成功条目共用一次季目录列目录
+                        # （复用判重缓存，不额外打网盘），拿到结果后再决定状态。
+                        verify_map = self.verify_landed_items(
+                            subscribe,
+                            mediainfo,
+                            season,
+                            [
+                                {
+                                    "key": str(index),
+                                    "file_id": str(
+                                        transfer_result.get("file_id") or ""
+                                    ),
+                                    "target_name": str(
+                                        transfer_result["item"].get("target_name")
+                                        or ""
+                                    ),
+                                }
+                                for index, transfer_result in enumerate(transfer_results)
+                                if transfer_result["success"]
+                                and not transfer_result["pending_key"]
+                            ],
+                        )
+
                         # 处理结果
-                        for transfer_result in transfer_results:
+                        for index, transfer_result in enumerate(transfer_results):
                             item = transfer_result["item"]
                             file_id = transfer_result["file_id"]
                             episode = item["episode"]
@@ -745,14 +768,38 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             )
                             history.append(history_item)
 
+                            landed_info = verify_map.get(str(index))
+                            landed_blocked = (
+                                    success
+                                    and not pending_key
+                                    and landed_info is not None
+                                    and not self._landed_confirms_success(landed_info)
+                            )
+                            if success and not pending_key and landed_info is not None:
+                                history_item.update(
+                                    self._landed_verification_fields(landed_info)
+                                )
+                                if landed_blocked:
+                                    history_item["status"] = "待确认"
+                                    logger.warning(
+                                        f"落盘自检未通过：{mediainfo.title} "
+                                        f"S{int(season):02d}E{int(episode):02d} "
+                                        f"{item['target_name']} 不在目标季目录"
+                                        f"（{landed_info.get('reason') or 'missing_in_dir'}），"
+                                        f"记「待确认」"
+                                    )
                             if success:
-                                transferred_count += 1
                                 if pending_key:
                                     history_item["finalize_key"] = pending_key
                                     history_item["status"] = (
                                         "下载中" if self._is_ed2k_url(item_share_url)
                                         else "处理中"
                                     )
+                                if landed_blocked:
+                                    # 「待确认」不是失败也不是成功：不补齐、不通知、
+                                    # 不写整理历史，也不删旧版本（新文件尚未确认存在）。
+                                    continue
+                                transferred_count += 1
                                 completed_missing_episodes.add(episode)
 
                                 if not is_upgrade and not pending_key:
