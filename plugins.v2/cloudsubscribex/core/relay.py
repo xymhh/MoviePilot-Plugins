@@ -62,3 +62,30 @@ class RelayClient:
             self._request("DELETE", f"/jobs/{job_id}")
         except RelayError:
             return
+
+
+def probe_health(base_url: str, timeout: float = 8.0) -> str:
+    """探测中继连通性，返回一行人类可读描述；任何失败都只描述不抛出。
+
+    /healthz 不需要令牌，因此只验证「网络 + 服务是否活着」，
+    令牌是否匹配仍由 /jobs 的 401 判定。
+    """
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        return "未配置地址"
+    try:
+        response = requests.get(f"{base}/healthz", timeout=max(3.0, float(timeout or 8.0)))
+    except requests.RequestException as error:
+        return f"连接失败：{error}"
+    if response.status_code != 200:
+        return f"HTTP {response.status_code}"
+    try:
+        payload = response.json() or {}
+    except ValueError:
+        return "HTTP 200 但返回非 JSON"
+    if not isinstance(payload, dict):
+        payload = {}
+    return (
+        f"ok version={payload.get('version', '?')} "
+        f"剩余磁盘={payload.get('disk_free_gb', '?')}GB"
+    )

@@ -1397,6 +1397,18 @@ class CrossTransferTaskManager:
                 and int(task["total"] or 0) <= self._relay_max_bytes
                 and target.supports(CloudDriveCapability.FILE_QUERY)
             )
+            if relay_active:
+                logger.debug(
+                    f"中继接管条件满足：{target_name}（{int(task['total'] or 0)} 字节）"
+                )
+            elif not source_path and str(task.get("source_provider") or "") == "quark":
+                logger.debug(
+                    "中继未接管："
+                    f"client={'有' if self._relay_client else '无'} "
+                    f"大小={int(task['total'] or 0)} 上限={self._relay_max_bytes} "
+                    f"目标可查={target.supports(CloudDriveCapability.FILE_QUERY)}"
+                )
+            relay_tried = False
             remote_rapid_attempted = False
             if (
                     not source_path and algorithm and checksum
@@ -1430,7 +1442,17 @@ class CrossTransferTaskManager:
                         )
                         return
                     if rapid_miss_abort:
-                        # abort 模式：下载前探测未命中即中止（不下载、不上传）
+                        # abort 模式：下载前探测未命中即中止（不下载、不上传）；
+                        # 但中止前先给中继一次机会——中止本来就意味着这条文件没救，
+                        # 中继接管只会更好（不下载、不走跨境上传）
+                        if relay_active and not relay_tried:
+                            relay_tried = True
+                            if self._relay_transfer(
+                                    task, task_id, target, target_path, target_name,
+                                    target_name_text, checksum,
+                                    int(task["total"] or 0), stop_event,
+                            ):
+                                return
                         raise RapidMissAborted()
             source_provider = None
             source_name = ""
@@ -1506,6 +1528,8 @@ class CrossTransferTaskManager:
                         )
                         return
                     if probe_result is not None and not probe_result.reused:
+                        if relay_active:
+                            relay_tried = True
                         if relay_active and self._relay_transfer(
                                 task, task_id, target, target_path, target_name,
                                 target_name_text, checksum, expected_size, stop_event,
@@ -1513,7 +1537,22 @@ class CrossTransferTaskManager:
                             return
                         if rapid_miss_abort:
                             raise RapidMissAborted()
-                    # probe_result is None：无法零流量探测 → 继续下载后再按 abort 处理
+                    if probe_result is None:
+                        # 无法零流量探测（缺校验和/取链失败/接口异常）：abort 模式下
+                        # 结局本来就是中止，先给中继一次机会，失败才走原逻辑
+                        if rapid_miss_abort and relay_active and not relay_tried:
+                            relay_tried = True
+                            self._update(
+                                task_id, phase="rapid_upload",
+                                message="秒传无法判定，改为深圳中继处理",
+                            )
+                            if self._relay_transfer(
+                                    task, task_id, target, target_path, target_name,
+                                    target_name_text, checksum,
+                                    int(task["total"] or 0), stop_event,
+                            ):
+                                return
+                        # 继续下载后再按 abort 处理（与 1.6.55 一致）
             if (
                     not source_path
                     and self._direct_stream
@@ -1782,6 +1821,14 @@ class CrossTransferTaskManager:
             )
             if not result:
                 if rapid_miss_abort:
+                    if relay_active and not relay_tried:
+                        relay_tried = True
+                        if self._relay_transfer(
+                                task, task_id, target, target_path, target_name,
+                                target_name_text, checksum,
+                                int(task["total"] or 0), stop_event,
+                        ):
+                            return
                     raise RapidMissAborted()
                 raise RuntimeError("秒传未命中且普通上传失败" if fallback else "秒传未命中")
             result_file = result.file

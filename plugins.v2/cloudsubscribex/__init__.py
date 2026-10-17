@@ -39,6 +39,7 @@ from .core.api import (
     SyncApi,
 )
 from .core.hook import MessageRoutingHook, PluginEventHandler, SubscriptionSearchHook
+from .core.relay import probe_health
 from .core.legacy_migration import LegacyIdMigrator
 from .core.services import (
     SubscriptionControlService,
@@ -107,7 +108,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.55"
+    plugin_version = "1.6.56"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -694,6 +695,7 @@ class CloudSubscribeX(_PluginBase):
             f"洗版模式={self._upgrade_mode}, "
             f"洗版范围={'指定订阅' if self._upgrade_subscribe_ids else '全部'}, "
             f"当前接管态={self._is_takeover_active()}")
+        self._log_relay_state()
 
         # 调度一次性任务。
         if self._auto_subscribe_onlyonce:
@@ -711,6 +713,27 @@ class CloudSubscribeX(_PluginBase):
             self._persist_config_values(auto_subscribe_onlyonce=False)
             if self._scheduler.get_jobs():
                 self._scheduler.start()
+
+    def _log_relay_state(self) -> None:
+        """配置应用时把中继实际生效状态与连通性写进日志。
+
+        中继是「秒传未命中」的唯一出路，配置错一项就会静默退回本机链路，
+        仅在配置应用时打一行，避免每次任务重复探测。
+        """
+        if not self._cross_transfer_relay_enabled:
+            if self._cross_transfer_relay_url:
+                logger.info("跨盘中继未启用（开关关闭），秒传未命中按本机链路处理")
+            else:
+                logger.info("跨盘中继未启用（开关关闭或中继地址为空），秒传未命中按本机链路处理")
+            return
+        logger.info(
+            f"跨盘中继已启用：地址={self._cross_transfer_relay_url}, "
+            f"令牌={'已配置' if self._cross_transfer_relay_token else '空'}, "
+            f"单文件上限={self._cross_transfer_relay_max_file_gb}GB, "
+            f"单任务超时={self._cross_transfer_relay_timeout_minutes}分钟, "
+            f"失败回落本机={'是' if self._cross_transfer_relay_fallback_local else '否'}")
+        logger.info(
+            f"跨盘中继连通性：{probe_health(self._cross_transfer_relay_url)}")
 
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:
         self._notify = bool(config.get("notify", False))
