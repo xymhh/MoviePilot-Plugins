@@ -298,6 +298,8 @@ class LandedVerifyService(OwnerDelegator):
         candidates = [
             record for record in (records or [])
             if str(record.get("status") or "") == "成功"
+            # 用户手动标记成功的记录不再参与自检，避免隔天又被翻回「待确认」。
+            and not record.get("manual_success")
         ]
         if not candidates:
             return

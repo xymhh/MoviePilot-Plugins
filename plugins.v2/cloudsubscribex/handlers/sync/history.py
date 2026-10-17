@@ -44,6 +44,9 @@ class HistoryService(OwnerDelegator):
     _METADATA_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
     _SEASON_DIRECTORY_PATTERN = re.compile(r"^season[ ._-]*\d+$", re.IGNORECASE)
     _PLATFORM_HISTORY_STORAGE = "cloudsubscribe"
+    # 允许「批量手动标记成功」的来源状态：落盘自检查无实据的「待确认」，
+    # 以及卡在队列里的「处理中」/「下载中」。终态（成功/失败/跳过）不在此列。
+    _MANUAL_SUCCESS_STATUSES = frozenset({"待确认", "处理中", "下载中"})
 
     def _build_transfer_history_item(
             self,
@@ -1224,6 +1227,10 @@ class HistoryService(OwnerDelegator):
                 if not matched_key:
                     continue
                 matched_records += 1
+                if item.get("manual_success"):
+                    # 用户已手动定案为成功：自动终态与落盘自检不得再覆盖，
+                    # 但仍计为已匹配，避免调用方误判「历史尚未落盘」而反复重排队。
+                    continue
                 if status == "失败" and item.get("status") == "成功":
                     continue
                 item["status"] = status
@@ -2116,6 +2123,72 @@ class HistoryService(OwnerDelegator):
             "cache_deleted": cache_deleted,
             "skipped": skipped,
             **linked_stats,
+        }
+
+    def mark_history_records_success(
+            self, identities: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """把所选历史记录手动置为「成功」，并阻止后续自动状态回写。
+
+        仅接受 ``待确认``（落盘自检查无实据）、``处理中``/``下载中``（队列卡住）
+        作为起点。置成功后写 ``manual_success`` 标记，后处理终态与落盘自检
+        都会跳过该记录，避免下一次同步又把它翻回「待确认」或「失败」。
+        """
+        if not self._get_data or not self._save_data:
+            raise RuntimeError("历史记录存储未初始化")
+        target_ids = {
+            str(identity.get("record_id") or "").strip()
+            for identity in identities
+            if str(identity.get("record_id") or "").strip()
+        }
+        target_identities = {
+            identity_key
+            for identity in identities
+            if (identity_key := self._history_record_identity(identity))
+        }
+        if not target_ids and not target_identities:
+            raise ValueError("未提供有效的历史记录标识")
+
+        updated = 0
+        skipped = 0
+        with self._offline_pending_lock:
+            history = self._get_data("history") or []
+            selected_indexes = [
+                index for index, record in enumerate(history)
+                if (
+                        self._ensure_history_record_id(record) in target_ids
+                        or self._history_record_identity(record) in target_identities
+                )
+            ]
+            if not selected_indexes:
+                raise LookupError("所选历史记录不存在或状态已发生变化，请刷新后重试")
+            marked_at = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            for index in selected_indexes:
+                record = history[index]
+                status = str(record.get("status") or "")
+                if status not in self._MANUAL_SUCCESS_STATUSES:
+                    skipped += 1
+                    continue
+                record["status"] = "成功"
+                record["manual_success"] = True
+                record["manual_success_at"] = marked_at
+                record["manual_success_from"] = status
+                record.pop("failure_reason", None)
+                record.pop("retrying", None)
+                updated += 1
+            if updated:
+                self._save_data("history", history)
+
+        if updated and callable(getattr(self, "_history_changed", None)):
+            self._history_changed()
+        logger.info(
+            f"历史记录手动标记成功：更新 {updated} 条，跳过 {skipped} 条，"
+            f"命中 {len(selected_indexes)} 条"
+        )
+        return {
+            "updated": updated,
+            "skipped": skipped,
+            "selected": len(selected_indexes),
         }
 
     def notify_history_record(self, identity: Dict[str, Any]) -> Dict[str, Any]:

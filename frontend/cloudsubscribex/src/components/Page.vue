@@ -124,6 +124,7 @@
                 @retry="confirmRetryHistory"
                 @retry-failed="confirmRetryFailedHistory"
                 @retry-selected="confirmRetrySelectedHistory"
+                @mark-success="confirmMarkHistorySuccess"
                 @delete="confirmDeleteHistory"
                 @delete-groups="confirmDeleteGroups"
                 @selection-change="updateHistorySelection"
@@ -180,6 +181,17 @@
       confirm-color="primary"
       :loading="retryingHistoryKey === 'batch'"
       @confirm="retryFailedBatch" />
+    <ConfirmDialog
+      v-if="markSuccessVisible"
+      v-model="markSuccessVisible"
+      title="批量标记为成功"
+      icon="mdi-check-decagram-outline"
+      icon-color="warning"
+      :body="`将把 ${markSuccessRecords.length} 条「待确认 / 待处理」记录直接标记为成功；之后落盘自检和后处理终态都不会再改写这些记录，是否继续？`"
+      confirm-text="确认标记"
+      confirm-color="warning"
+      :loading="markingHistoryKey === 'batch'"
+      @confirm="markHistorySuccess" />
     <ConfirmDialog
       v-model="upgradeVisible"
       title="确认历史洗版"
@@ -314,6 +326,9 @@ const message = ref(""),
   retryingRecord = ref(null),
   retryBatchVisible = ref(false),
   retryBatchRecords = ref([]),
+  markSuccessVisible = ref(false),
+  markSuccessRecords = ref([]),
+  markingHistoryKey = ref(""),
   deleteVisible = ref(false),
   deletingRecord = ref(null),
   deletingRecords = ref([]),
@@ -605,6 +620,45 @@ async function retryFailedBatch() {
     notify(error.message || "批量重试失败", "error")
   } finally {
     retryingHistoryKey.value = ""
+  }
+}
+
+// 后端单次上限 2000 条，前端按 200 条串行提交，避免整批被拒。
+const MARK_SUCCESS_CHUNK_SIZE = 200
+
+function confirmMarkHistorySuccess(payload) {
+  const records = (payload?.records || []).map(retryBatchIdentity)
+  if (!records.length) {
+    notify("所选记录没有可标记的待确认/待处理项", "warning")
+    return
+  }
+  markSuccessRecords.value = records
+  markSuccessVisible.value = true
+}
+
+async function markHistorySuccess() {
+  const records = markSuccessRecords.value
+  if (!records.length || markingHistoryKey.value) return
+  markingHistoryKey.value = "batch"
+  try {
+    let updated = 0
+    let skipped = 0
+    for (let index = 0; index < records.length; index += MARK_SUCCESS_CHUNK_SIZE) {
+      const chunk = records.slice(index, index + MARK_SUCCESS_CHUNK_SIZE)
+      const result = await api.post("plugin/CloudSubscribeX/history/mark_success", { records: chunk })
+      if (!result?.success) throw new Error(result?.message || "批量标记成功失败")
+      const data = result?.data || {}
+      updated += Number(data.updated ?? 0)
+      skipped += Number(data.skipped ?? 0)
+    }
+    notify(`已标记 ${updated} 条为成功${skipped ? `，跳过 ${skipped} 条` : ""}`)
+    markSuccessVisible.value = false
+    markSuccessRecords.value = []
+    await Promise.all([loadPage(false), loadSummary(false)])
+  } catch (error) {
+    notify(error.message || "批量标记成功失败", "error")
+  } finally {
+    markingHistoryKey.value = ""
   }
 }
 

@@ -150,6 +150,18 @@
           <span class="history-action-label">重试选中</span>
         </v-btn>
         <v-btn
+          v-if="selectedGroups.length"
+          class="mark-success-button"
+          color="warning"
+          variant="text"
+          size="small"
+          :disabled="!manualSuccessSelectedCount"
+          :title="manualSuccessSelectedCount ? `标记选中为成功（${manualSuccessSelectedCount} 条）` : '所选记录没有待确认或待处理项'"
+          @click.stop="markSelectedSuccess">
+          <v-icon icon="mdi-check-decagram-outline" class="history-action-icon" />
+          <span class="history-action-label">标记成功</span>
+        </v-btn>
+        <v-btn
           class="delete-selected-button"
           color="error"
           variant="text"
@@ -761,6 +773,7 @@ const emit = defineEmits([
   "retry",
   "retry-failed",
   "retry-selected",
+  "mark-success",
   "delete",
   "delete-groups",
   "selection-change",
@@ -848,6 +861,14 @@ const selectedRecords = computed(() =>
 )
 const retryableSelectedCount = computed(() =>
   selectedRecords.value.filter((record) => Boolean(record?.can_retry)).length,
+)
+// 可手动标记成功的来源状态：待确认（查无实据）、处理中/下载中（队列卡住）
+const MANUAL_SUCCESS_STATUSES = ["待确认", "处理中", "下载中"]
+const manualSuccessSelectedCount = computed(
+  () =>
+    selectedRecords.value.filter((record) =>
+      MANUAL_SUCCESS_STATUSES.includes(String(record?.status || "")),
+    ).length,
 )
 
 function historySeasonEpisodes(group) {
@@ -1140,6 +1161,14 @@ function retrySelectedRecords() {
     groupCount: selectedGroups.value.length,
     records,
   });
+}
+
+function markSelectedSuccess() {
+  const records = selectedRecords.value.filter((record) =>
+    MANUAL_SUCCESS_STATUSES.includes(String(record?.status || "")),
+  );
+  if (!records.length) return;
+  emit("mark-success", { records });
 }
 
 function clearFilters() {

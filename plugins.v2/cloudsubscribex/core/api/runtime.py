@@ -176,6 +176,12 @@ class RuntimeApi(OwnerDelegator):
             logger.error(f"提交批量历史重试异常：{error}")
             return {"success": False, "message": str(error)}
 
+    def api_vue_mark_history_success(self, payload: Dict[str, Any]) -> dict:
+        return self.api_mark_history_success(
+            settings.API_TOKEN,
+            identities=(payload or {}).get("records") or [],
+        )
+
     _CACHE_CATEGORIES = frozenset({
         "search", "cloud", "sync", "interface", "platform",
     })

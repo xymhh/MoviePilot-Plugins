@@ -150,6 +150,39 @@ class HistoryApi(OwnerDelegator):
             message += f"；清理 {result['cache_deleted']} 个跨盘缓存文件"
         return {"success": True, "message": message, "data": result}
 
+    def api_mark_history_success(
+            self,
+            apikey: str,
+            identities: List[Dict[str, Any]],
+    ) -> dict:
+        """批量把「待确认 / 处理中 / 下载中」的历史记录手动标记为成功。"""
+        if apikey != settings.API_TOKEN:
+            return {"success": False, "message": "API密钥错误"}
+        if not self._sync_handler:
+            return {"success": False, "message": "同步处理器未初始化"}
+        records = [item for item in identities if isinstance(item, dict)]
+        if not records:
+            return {"success": False, "message": "未选择可标记的历史记录"}
+        if len(records) > 2000:
+            return {"success": False, "message": "单次最多标记 2000 条历史记录"}
+        if not sync_lock.acquire(blocking=False):
+            return {
+                "success": False,
+                "message": "订阅任务正在合并转存记录，请稍后再操作",
+            }
+        try:
+            result = self._sync_handler.mark_history_records_success(records)
+        except Exception as error:
+            logger.warning(f"批量手动标记历史记录为成功失败：{error}")
+            return {"success": False, "message": str(error)}
+        finally:
+            sync_lock.release()
+
+        message = f"已把 {result['updated']} 条记录标记为成功"
+        if result["skipped"]:
+            message += f"，跳过 {result['skipped']} 条（状态已变化或不可标记）"
+        return {"success": True, "message": message, "data": result}
+
     def api_notify_history(self, apikey: str, identity: Dict[str, Any]) -> dict:
         if apikey != settings.API_TOKEN:
             return {"success": False, "message": "API密钥错误"}

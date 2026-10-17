@@ -354,6 +354,20 @@ class ApplyVerificationTests(unittest.TestCase):
         handler.apply_landed_verification_to_records(_SUB, _MEDIA, 1, [record])
         self.assertEqual(record, original)
 
+    def test_i_manual_success_record_skipped(self):
+        """i（补）. 用户手动标记成功的记录不参与自检，不会被翻回「待确认」。"""
+        handler = _make_verify_handler(dirs=_dirs([("f4", "Show - S01E04.mp4", 100)]))
+        record = self._record()
+        record.update({
+            "manual_success": True,
+            "manual_success_at": "2026-10-17 12:00:00",
+            "manual_success_from": "待确认",
+        })
+        original = dict(record)
+        handler.apply_landed_verification_to_records(_SUB, _MEDIA, 1, [record])
+        self.assertEqual(record, original)
+        self.assertEqual(handler._cloud_directories.list_calls, 0)
+
     def test_j_record_landed_in_other_dir_not_marked_unverified(self):
         """j. 记录自称落在媒体库目录且那儿真有实物 → 仍按成功（不误记「待确认」）。"""
         library_dir = "/媒体/媒体库/Show (2024)/Season 01"

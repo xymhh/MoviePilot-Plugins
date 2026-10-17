@@ -409,6 +409,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "批量重试失败转存记录",
             },
             {
+                "path": "/history/mark_success",
+                "endpoint": self.api_vue_mark_history_success,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量把待确认/待处理历史标记为成功",
+            },
+            {
                 "path": "/cache/clear",
                 "endpoint": self.api_vue_clear_cache,
                 "methods": ["POST"],
