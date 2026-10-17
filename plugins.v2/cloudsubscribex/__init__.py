@@ -191,6 +191,13 @@ class CloudSubscribeX(_PluginBase):
     # 外部下载器（夸克→本地一步可选用 Gopeed；默认 builtin 与旧版行为一致）
     _cross_transfer_downloader: str = "builtin"
     _cross_transfer_rapid_miss_action: str = "fallback"
+    # 国内中继上传（实验）：默认关闭，未配置地址时强制视为关闭。
+    _cross_transfer_relay_enabled: bool = False
+    _cross_transfer_relay_url: str = ""
+    _cross_transfer_relay_token: str = ""
+    _cross_transfer_relay_max_file_gb: int = 25
+    _cross_transfer_relay_timeout_minutes: int = 180
+    _cross_transfer_relay_fallback_local: bool = True
     _gopeed_url: str = "http://gopeed:9999"
     _gopeed_token: str = ""
     _gopeed_path_prefix: str = ""
@@ -889,6 +896,31 @@ class CloudSubscribeX(_PluginBase):
         self._cross_transfer_rapid_miss_action = (
             rapid_miss_action if rapid_miss_action in {"fallback", "abort"} else "fallback"
         )
+        # 国内中继上传：开关 + 地址缺一不可，否则保持关闭（避免每个文件白等一次超时）。
+        self._cross_transfer_relay_enabled = bool(
+            config.get("cross_transfer_relay_enabled", False)
+        )
+        self._cross_transfer_relay_url = str(
+            config.get("cross_transfer_relay_url", "") or ""
+        ).strip().rstrip("/")
+        self._cross_transfer_relay_token = str(
+            config.get("cross_transfer_relay_token", "") or ""
+        ).strip()
+        try:
+            relay_max_gb = int(config.get("cross_transfer_relay_max_file_gb", 25) or 0)
+        except (TypeError, ValueError):
+            relay_max_gb = 25
+        self._cross_transfer_relay_max_file_gb = max(0, min(relay_max_gb, 500))
+        try:
+            relay_timeout = int(config.get("cross_transfer_relay_timeout_minutes", 180) or 180)
+        except (TypeError, ValueError):
+            relay_timeout = 180
+        self._cross_transfer_relay_timeout_minutes = max(5, min(relay_timeout, 1440))
+        self._cross_transfer_relay_fallback_local = bool(
+            config.get("cross_transfer_relay_fallback_local", True)
+        )
+        if self._cross_transfer_relay_enabled and not self._cross_transfer_relay_url:
+            self._cross_transfer_relay_enabled = False
         self._gopeed_url = str(config.get("gopeed_url", "http://gopeed:9999") or "").strip()
         self._gopeed_token = str(config.get("gopeed_token", "") or "").strip()
         self._gopeed_path_prefix = str(config.get("gopeed_path_prefix", "") or "").strip()

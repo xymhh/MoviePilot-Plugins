@@ -184,6 +184,14 @@ class UIConfig:
             "cross_transfer_upload_concurrency": 4,
             "cross_transfer_downloader": "builtin",
             "cross_transfer_rapid_miss_action": "fallback",
+            # 国内中继上传（实验）：秒传未命中时把「下载源文件 + 上传 115」整段
+            # 交给国内阿里云中继执行，中继同地域走 115 内网 OSS。默认关闭。
+            "cross_transfer_relay_enabled": False,
+            "cross_transfer_relay_url": "",
+            "cross_transfer_relay_token": "",
+            "cross_transfer_relay_max_file_gb": 25,
+            "cross_transfer_relay_timeout_minutes": 180,
+            "cross_transfer_relay_fallback_local": True,
             "gopeed_url": "http://gopeed:9999",
             "gopeed_token": "",
             "gopeed_path_prefix": "",
