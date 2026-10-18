@@ -216,6 +216,8 @@ def normalize_channel_rules(
             rule_keywords: Any = []
             rule_exclude: Any = []
             rule_limit = scan_limit
+            rule_auto_transfer = False
+            rule_auto_subscribe_id = 0
         elif isinstance(row, dict):
             channel = (
                 row.get("channel") or row.get("url")
@@ -228,6 +230,11 @@ def normalize_channel_rules(
                 rule_limit = int(row.get("scan_limit", scan_limit) or scan_limit)
             except (TypeError, ValueError):
                 rule_limit = scan_limit
+            rule_auto_transfer = bool(row.get("auto_transfer", False))
+            try:
+                rule_auto_subscribe_id = int(row.get("auto_subscribe_id", 0) or 0)
+            except (TypeError, ValueError):
+                rule_auto_subscribe_id = 0
         else:
             continue
         normalized = normalize_channel(str(channel or ""))
@@ -242,6 +249,8 @@ def normalize_channel_rules(
                 word.lower() for word in _split_terms(rule_exclude)
             ],
             "scan_limit": max(1, min(rule_limit, 200)),
+            "auto_transfer": rule_auto_transfer,
+            "auto_subscribe_id": max(0, rule_auto_subscribe_id),
         })
     return rules
 
@@ -315,6 +324,7 @@ class TgChannelMonitor:
             exclude_keywords: Iterable[str] = (), scan_limit: int = 20,
             interval_minutes: int = 10, max_items: int = 500,
             channel_rules: Any = None,
+            auto_transfer_handler: Any = None,
     ) -> None:
         with self._lock:
             self._enabled = bool(enabled)
@@ -328,6 +338,7 @@ class TgChannelMonitor:
                 exclude_keywords=exclude_keywords,
                 scan_limit=scan_limit,
             )
+            self._auto_transfer_handler = auto_transfer_handler
             self._channels = [rule["channel"] for rule in self._channel_rules]
             # 旧字段保留，供 status/兼容读取；扫描只认每频道规则
             self._keywords = [str(item).lower() for item in keywords if str(item).strip()]
@@ -427,6 +438,7 @@ class TgChannelMonitor:
             link for item in items for link in (item.get("links") or [])
         }
         added: List[dict] = []
+        auto_candidates: List[Tuple[dict, dict]] = []
         errors: List[str] = []
         scanned = 0
         for rule in self._channel_rules:
@@ -518,11 +530,18 @@ class TgChannelMonitor:
                 added.append(item)
                 existing.add(item_id)
                 existing_links.update(item["links"])
+                if rule.get("auto_transfer"):
+                    if int(rule.get("auto_subscribe_id") or 0) > 0:
+                        auto_candidates.append((item, dict(rule)))
+                    else:
+                        item["auto_transfer_error"] = "未配置目标订阅"
             state[channel_key] = max_id
         if len(items) > self._max_items:
             items = items[: self._max_items]
         self._store.save(ITEMS_KEY, items)
         self._store.save(STATE_KEY, state)
+        auto_stats = self._run_auto_transfers(auto_candidates)
+        self._store.save(ITEMS_KEY, items)
         self._last_scan_at = time.time()
         self._last_error = "; ".join(errors[-3:])
         result = {
@@ -534,6 +553,8 @@ class TgChannelMonitor:
                 1 for rule in self._channel_rules if rule.get("enabled", True)
             ),
             "errors": errors,
+            "auto_transferred": auto_stats["auto_transferred"],
+            "auto_failed": auto_stats["auto_failed"],
         }
         self._store.save(STATUS_KEY, {
             "last_scan_at": self._last_scan_at,
@@ -547,6 +568,45 @@ class TgChannelMonitor:
         elif errors:
             logger.info(f"TG 频道监控（{trigger}）无新增；{self._last_error}")
         return result
+
+    def _run_auto_transfers(
+            self, candidates: List[Tuple[dict, dict]],
+    ) -> Dict[str, int]:
+        """扫描后按频道规则自动转存；失败只记在条目上，不重试、不阻塞下次扫描。"""
+        stats = {"auto_transferred": 0, "auto_failed": 0}
+        if not candidates:
+            return stats
+        handler = getattr(self, "_auto_transfer_handler", None)
+        if not callable(handler):
+            for item, _rule in candidates:
+                item["auto_transfer_error"] = "自动转存未启用：插件未提供转存处理器"
+            stats["auto_failed"] = len(candidates)
+            return stats
+        for item, rule in candidates:
+            subscribe_id = int(rule.get("auto_subscribe_id") or 0)
+            try:
+                result = handler(item, subscribe_id)
+            except Exception as error:  # noqa: BLE001 - 单条失败不影响扫描
+                result = {"success": False, "message": str(error)}
+            if isinstance(result, dict) and result.get("success"):
+                item["status"] = "transferred"
+                item["subscribe_id"] = subscribe_id
+                item["auto_transferred_at"] = int(time.time())
+                item.pop("auto_transfer_error", None)
+                stats["auto_transferred"] += 1
+            else:
+                message = (
+                    str(result.get("message") or "转存失败")
+                    if isinstance(result, dict) else "转存失败"
+                )
+                item["auto_transfer_error"] = message[:300]
+                item["auto_subscribe_id"] = subscribe_id
+                stats["auto_failed"] += 1
+                logger.warning(
+                    f"TG 频道自动转存失败（{rule.get('channel')} / "
+                    f"订阅 {subscribe_id}）：{message}"
+                )
+        return stats
 
     # ------------------------------------------------------------------ 查询
     def status(self) -> Dict[str, Any]:
@@ -570,6 +630,8 @@ class TgChannelMonitor:
                     "keywords": list(rule.get("keywords") or []),
                     "exclude_keywords": list(rule.get("exclude_keywords") or []),
                     "scan_limit": int(rule.get("scan_limit") or self._scan_limit),
+                    "auto_transfer": bool(rule.get("auto_transfer", False)),
+                    "auto_subscribe_id": int(rule.get("auto_subscribe_id") or 0),
                 }
                 for rule in self._channel_rules
             ],

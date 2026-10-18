@@ -112,7 +112,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.65"
+    plugin_version = "1.6.66"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -960,9 +960,19 @@ class CloudSubscribeX(_PluginBase):
                 scan_limit=self._tg_monitor_scan_limit,
                 interval_minutes=self._tg_monitor_interval_minutes,
                 max_items=self._tg_monitor_max_items,
+                auto_transfer_handler=self._auto_transfer_tg_item,
             )
         except Exception as error:  # noqa: BLE001 - 监控不可用不应拖垮插件
             logger.warning(f"TG 频道监控初始化失败：{error}")
+
+    def _auto_transfer_tg_item(self, item: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
+        """频道规则命中自动转存时，复用页面「转存」同一条手动转存链路。"""
+        from .core.api.sync import SyncApi
+
+        return SyncApi(self).api_vue_start_manual_sync({
+            "subscribe_id": int(subscribe_id or 0),
+            "resource_links": list((item or {}).get("links") or []),
+        })
 
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:
         self._notify = bool(config.get("notify", False))

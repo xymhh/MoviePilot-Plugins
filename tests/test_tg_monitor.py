@@ -90,6 +90,15 @@ class FakeOwner:
 
 
 class ChannelRulesTest(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.owner = FakeOwner(Path(self.tempdir.name))
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
     def test_rules_are_normalized_per_channel(self):
         rules = normalize_channel_rules([
             {
@@ -127,6 +136,46 @@ class ChannelRulesTest(unittest.TestCase):
         )
         self.assertEqual(rules[0]["keywords"], ["4k"])
         self.assertEqual(rules[0]["scan_limit"], 3)
+
+    def test_auto_transfer_fields_are_parsed(self):
+        rules = normalize_channel_rules([{
+            "channel": "@a",
+            "auto_transfer": True,
+            "auto_subscribe_id": "42",
+        }])
+        self.assertTrue(rules[0]["auto_transfer"])
+        self.assertEqual(rules[0]["auto_subscribe_id"], 42)
+        self.assertFalse(normalize_channel_rules(["@b"])[0]["auto_transfer"])
+
+    def test_auto_transfer_marks_item_and_reports_failure(self):
+        calls = []
+
+        def handler(item, subscribe_id):
+            calls.append((item["links"], subscribe_id))
+            if subscribe_id == 7:
+                return {"success": True}
+            return {"success": False, "message": "订阅不存在"}
+
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=False, api_id=1, api_hash="hash", session="session",
+            channel_rules=[{"channel": "@a", "auto_transfer": True,
+                            "auto_subscribe_id": 7}],
+            auto_transfer_handler=handler,
+        )
+        ok_item = {"links": ["https://pan.quark.cn/s/ok"], "status": "new"}
+        bad_item = {"links": ["https://pan.quark.cn/s/bad"], "status": "new"}
+        stats = monitor._run_auto_transfers([
+            (ok_item, {"channel": "@a", "auto_subscribe_id": 7}),
+            (bad_item, {"channel": "@b", "auto_subscribe_id": 9}),
+        ])
+        self.assertEqual(calls, [(["https://pan.quark.cn/s/ok"], 7),
+                                 (["https://pan.quark.cn/s/bad"], 9)])
+        self.assertEqual(ok_item["status"], "transferred")
+        self.assertEqual(ok_item["subscribe_id"], 7)
+        self.assertEqual(bad_item["status"], "new")
+        self.assertEqual(bad_item["auto_transfer_error"], "订阅不存在")
+        self.assertEqual(stats, {"auto_transferred": 1, "auto_failed": 1})
 
 
 class ScanTest(unittest.TestCase):

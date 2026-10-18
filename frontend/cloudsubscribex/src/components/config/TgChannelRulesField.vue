@@ -41,6 +41,11 @@
           · {{ rule.keywords.length }} 关键词
         </span>
         <span v-if="!rule.enabled" class="ml-1 text-caption">（停用）</span>
+        <v-icon
+          v-if="rule.auto_transfer"
+          icon="mdi-download"
+          size="13"
+          class="ml-1" />
       </v-chip>
     </div>
     <div v-else class="text-caption text-medium-emphasis">
@@ -82,6 +87,13 @@
                 <v-switch
                   v-model="rule.enabled"
                   label="启用"
+                  density="compact"
+                  color="primary"
+                  hide-details
+                  class="flex-grow-0" />
+                <v-switch
+                  v-model="rule.auto_transfer"
+                  label="自动转存"
                   density="compact"
                   color="primary"
                   hide-details
@@ -128,6 +140,32 @@
                   hide-details
                   style="max-width: 130px" />
               </div>
+              <div v-if="rule.auto_transfer" class="d-flex align-center ga-2 mt-2">
+                <v-select
+                  v-model.number="rule.auto_subscribe_id"
+                  :items="subscribeOptions"
+                  item-title="title"
+                  item-value="id"
+                  label="自动转存到订阅"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  :loading="loadingSubscribes"
+                  no-data-text="没有可用订阅，请先在「订阅任务」创建"
+                  class="flex-grow-1" />
+                <v-btn
+                  size="small"
+                  variant="text"
+                  icon="mdi-refresh"
+                  :loading="loadingSubscribes"
+                  title="刷新订阅列表"
+                  @click="loadSubscribes(true)" />
+              </div>
+              <div
+                v-if="rule.auto_transfer && !rule.auto_subscribe_id"
+                class="text-caption text-warning mt-1">
+                开启自动转存后必须选择一个目标订阅，否则扫描时只会记录不转存。
+              </div>
             </v-card-text>
           </v-card>
           <v-btn
@@ -150,18 +188,28 @@
 </template>
 
 <script setup>
-import {computed, ref} from "vue"
+import {computed, onMounted, ref} from "vue"
 
 const props = defineProps({
   modelValue: {type: [Array, String, Object], default: () => []},
   field: {type: Object, required: true},
   config: {type: Object, default: () => ({})},
+  api: {type: [Object, Function], default: null},
 })
 
 const emit = defineEmits(["update:modelValue"])
 const dialogVisible = ref(false)
 const draft = ref([])
+const subscribes = ref([])
+const loadingSubscribes = ref(false)
 let keySeed = 0
+
+const subscribeOptions = computed(() => subscribes.value.map((sub) => ({
+  id: Number(sub.id || sub.subscribe_id || 0),
+  title: `#${sub.id || sub.subscribe_id} ${sub.name || sub.title || "未命名"}`
+    + (sub.season ? ` · S${String(sub.season).padStart(2, "0")}` : "")
+    + (sub.type === "电影" ? " · 电影" : ""),
+})))
 
 function splitTerms(value) {
   if (Array.isArray(value)) {
@@ -208,6 +256,8 @@ function normalizeRule(row) {
     return {
       channel: row.trim(),
       enabled: true,
+      auto_transfer: false,
+      auto_subscribe_id: 0,
       keywordsText: "",
       excludeText: "",
       scan_limit: 20,
@@ -217,6 +267,8 @@ function normalizeRule(row) {
   return {
     channel: String(rule.channel || rule.url || rule.name || "").trim(),
     enabled: rule.enabled !== false,
+    auto_transfer: rule.auto_transfer === true,
+    auto_subscribe_id: Number(rule.auto_subscribe_id || 0) || 0,
     keywordsText: splitTerms(rule.keywords).join("\n"),
     excludeText: splitTerms(rule.exclude_keywords).join("\n"),
     scan_limit: Number(rule.scan_limit || 20) || 20,
@@ -236,6 +288,8 @@ const rules = computed(() => {
       return {
         channel: rule.channel,
         enabled: rule.enabled,
+        auto_transfer: rule.auto_transfer,
+        auto_subscribe_id: rule.auto_subscribe_id,
         keywords: splitTerms(rule.keywordsText),
         exclude_keywords: splitTerms(rule.excludeText),
         scan_limit: rule.scan_limit,
@@ -246,7 +300,26 @@ const rules = computed(() => {
 
 const enabledCount = computed(() => rules.value.filter((rule) => rule.enabled).length)
 
+async function loadSubscribes(force = false) {
+  if (!props.api || loadingSubscribes.value) return
+  if (!force && subscribes.value.length) return
+  loadingSubscribes.value = true
+  try {
+    const result = await props.api.get("plugin/CloudSubscribeX/tg/subscribes")
+    if (result?.success) {
+      subscribes.value = result.data?.subscribes || []
+    }
+  } catch (error) {
+    // 下拉为空时保留手动输入能力，不阻塞配置保存
+  } finally {
+    loadingSubscribes.value = false
+  }
+}
+
+onMounted(() => loadSubscribes())
+
 function openDialog() {
+  loadSubscribes()
   draft.value = rules.value.map(withKey)
   if (!draft.value.length) addRule()
   dialogVisible.value = true
@@ -273,6 +346,8 @@ function save() {
     rows.push({
       channel,
       enabled: rule.enabled !== false,
+      auto_transfer: rule.auto_transfer === true,
+      auto_subscribe_id: Number(rule.auto_subscribe_id || 0) || 0,
       keywords: splitTerms(rule.keywordsText),
       exclude_keywords: splitTerms(rule.excludeText),
       scan_limit: limit,

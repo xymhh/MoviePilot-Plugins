@@ -268,7 +268,8 @@
                   v-else-if="field.type === 'tg-channel-rules'"
                   v-model="config[field.key]"
                   :field="field"
-                  :config="config" />
+                  :config="config"
+                  :api="api" />
                 <VCronField
                   v-else-if="field.type === 'cron'"
                   v-model="config[field.key]"
