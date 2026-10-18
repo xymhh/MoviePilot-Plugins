@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -111,6 +112,27 @@ def normalize_channel(value: str) -> str:
     return "@" + text
 
 
+def _mask_phone(phone: str) -> str:
+    digits = str(phone or "").strip()
+    if len(digits) <= 5:
+        return digits
+    return f"{digits[:4]}****{digits[-3:]}"
+
+
+def _code_delivery(sent) -> str:
+    """把 Telethon 的 SentCodeType 映射成 app/sms/call/flashcall。"""
+    name = type(getattr(sent, "type", None)).__name__.lower()
+    if "flashcall" in name:
+        return "flashcall"
+    if "call" in name:
+        return "call"
+    if "sms" in name:
+        return "sms"
+    if "app" in name:
+        return "app"
+    return "unknown"
+
+
 def _item_id(channel: str, message_id: int) -> str:
     return hashlib.sha1(f"{channel}:{message_id}".encode("utf-8")).hexdigest()[:16]
 
@@ -172,6 +194,8 @@ class TgChannelMonitor:
         self._thread: Optional[threading.Thread] = None
         self._client = None
         self._login_client = None
+        self._login_session = ""
+        self._login_delivery = ""
         self._login_phone = ""
         self._login_hash = ""
         self._last_scan_at = 0.0
@@ -239,28 +263,21 @@ class TgChannelMonitor:
                 return
 
     # ------------------------------------------------------------------ 客户端
-    def _client_or_none(self):
-        if self._client is not None:
-            return self._client
+    def _new_client(self, session: str = ""):
+        """每次调用新建客户端：Telethon 是纯异步的，跨线程复用连接不安全。"""
         if not TELETHON_AVAILABLE:
             raise RuntimeError("未安装 telethon，请重装插件依赖")
-        if not (self._api_id and self._api_hash and self._session):
-            raise RuntimeError("TG 凭据不完整（api_id / api_hash / 会话）")
-        if self._client is None:
-            client = TelegramClient(StringSession(self._session), self._api_id, self._api_hash)
-            client.connect()
-            if not client.is_user_authorized():
-                raise RuntimeError("TG 会话已失效，请在设置页重新登录")
-            self._client = client
-        return self._client
+        return TelegramClient(
+            StringSession(str(session or "")), self._api_id, self._api_hash,
+            timeout=20, connection_retries=3,
+        )
+
+    def _require_credentials(self) -> None:
+        if not (self._api_id and self._api_hash):
+            raise RuntimeError("请先填写 api_id 和 api_hash 并保存")
 
     def reset_client(self) -> None:
         with self._lock:
-            if self._client is not None:
-                try:
-                    self._client.disconnect()
-                except Exception:  # noqa: BLE001
-                    pass
             self._client = None
 
     # ------------------------------------------------------------------ 扫描
@@ -269,7 +286,22 @@ class TgChannelMonitor:
             return {"ok": False, "message": "频道监控未启用"}
         if not self._channels:
             return {"ok": False, "message": "还没有配置要监控的频道"}
-        client = self._client_or_none()
+        return asyncio.run(self._scan_async(trigger))
+
+    async def _scan_async(self, trigger: str) -> Dict[str, Any]:
+        client = self._new_client(self._session)
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                raise RuntimeError("TG 会话已失效，请在设置页重新登录")
+            return await self._scan_with_client(client, trigger)
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _scan_with_client(self, client, trigger: str) -> Dict[str, Any]:
         state = dict(self._store.load(STATE_KEY, {}) or {})
         items = list(self._store.load(ITEMS_KEY, []) or [])
         existing = {str(item.get("id")) for item in items}
@@ -281,7 +313,7 @@ class TgChannelMonitor:
         scanned = 0
         for raw_channel in self._channels:
             try:
-                entity = client.get_entity(raw_channel)
+                entity = await client.get_entity(raw_channel)
             except Exception as error:  # noqa: BLE001
                 errors.append(f"{raw_channel}: 无法解析频道（{error}）")
                 continue
@@ -295,17 +327,18 @@ class TgChannelMonitor:
             try:
                 if last_id:
                     # 增量：只取比 last_id 新的消息，按时间升序处理
-                    messages = list(client.iter_messages(
+                    messages = await client.get_messages(
                         entity, limit=self._scan_limit, min_id=last_id, reverse=True,
-                    ))
+                    )
                 else:
                     # 首次：取最新 N 条（Telethon 默认倒序），再翻转成升序
-                    messages = list(reversed(list(client.iter_messages(
+                    messages = list(reversed(await client.get_messages(
                         entity, limit=self._scan_limit,
-                    ))))
+                    )))
             except Exception as error:  # noqa: BLE001
                 errors.append(f"{channel_title}: 读取消息失败（{error}）")
                 continue
+            messages = list(messages or [])
             scanned += len(messages)
             max_id = last_id
             for message in messages:
@@ -390,6 +423,7 @@ class TgChannelMonitor:
         return {
             "available": TELETHON_AVAILABLE,
             "enabled": self._enabled,
+            "has_api": bool(self._api_id and self._api_hash),
             "configured": bool(self._api_id and self._api_hash and self._session),
             "running": bool(self._thread and self._thread.is_alive()),
             "channels": list(self._channels),
@@ -436,56 +470,94 @@ class TgChannelMonitor:
     def login_send_code(self, phone: str) -> Dict[str, Any]:
         if not TELETHON_AVAILABLE:
             raise RuntimeError("未安装 telethon，请重装插件依赖")
-        if not (self._api_id and self._api_hash):
-            raise RuntimeError("请先填写 api_id 和 api_hash 并保存")
+        self._require_credentials()
         phone = str(phone or "").strip()
         if not phone:
             raise RuntimeError("请填写手机号（含国家码，如 +8613800000000）")
-        client = TelegramClient(StringSession(), self._api_id, self._api_hash)
-        client.connect()
-        sent = client.send_code_request(phone)
-        self._login_client = client
-        self._login_phone = phone
-        self._login_hash = str(getattr(sent, "phone_code_hash", "") or "")
-        return {"ok": True, "message": "验证码已发送，请填入收到的登录码"}
+        return asyncio.run(self._login_send_code_async(phone))
+
+    async def _login_send_code_async(self, phone: str) -> Dict[str, Any]:
+        client = self._new_client()
+        await client.connect()
+        try:
+            sent = await client.send_code_request(phone)
+            self._login_session = StringSession.save(client.session)
+            self._login_phone = phone
+            self._login_hash = str(getattr(sent, "phone_code_hash", "") or "")
+            delivery = _code_delivery(sent)
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
+        self._login_delivery = delivery
+        logger.info(f"TG 登录验证码请求已提交：号码={_mask_phone(phone)}，发送方式={delivery}")
+        hint = {
+            "app": "验证码已发到你的 Telegram 客户端（官方「Telegram」服务对话），不是短信",
+            "sms": "验证码已通过短信发送",
+            "call": "Telegram 会拨打你的手机，语音播报验证码",
+            "flashcall": "Telegram 会来电，来电号码即验证码",
+        }.get(delivery, "验证码已发送")
+        return {"ok": True, "message": hint, "delivery": delivery}
 
     def login_submit_code(self, code: str) -> Dict[str, Any]:
-        client = self._login_client
-        if client is None:
+        if not self._login_session or not self._login_hash:
             raise RuntimeError("请先发送验证码")
+        return asyncio.run(self._login_submit_code_async(str(code or "").strip()))
+
+    async def _login_submit_code_async(self, code: str) -> Dict[str, Any]:
+        client = self._new_client(self._login_session)
+        await client.connect()
         try:
-            client.sign_in(self._login_phone, str(code or "").strip(),
-                           phone_code_hash=self._login_hash)
+            await client.sign_in(
+                self._login_phone, code, phone_code_hash=self._login_hash,
+            )
         except SessionPasswordNeededError:
+            # 两步验证：保留这一步的会话，下一步直接输密码
+            self._login_session = StringSession.save(client.session)
             return {"ok": True, "need_password": True, "message": "该账号启用了两步验证，请填写密码"}
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
         return self._finish_login(client)
 
     def login_submit_password(self, password: str) -> Dict[str, Any]:
-        client = self._login_client
-        if client is None:
+        if not self._login_session:
             raise RuntimeError("请先发送验证码")
-        client.sign_in(password=str(password or ""))
+        return asyncio.run(self._login_submit_password_async(str(password or "")))
+
+    async def _login_submit_password_async(self, password: str) -> Dict[str, Any]:
+        client = self._new_client(self._login_session)
+        await client.connect()
+        try:
+            await client.sign_in(password=password)
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
         return self._finish_login(client)
 
     def _finish_login(self, client) -> Dict[str, Any]:
         session = StringSession.save(client.session)
         self._session = session
-        self._login_client = None
+        self._login_session = ""
         self._login_phone = ""
         self._login_hash = ""
         try:
             self._owner._persist_config_values(tg_session=session)
         except Exception as error:  # noqa: BLE001
             logger.warning(f"TG 会话持久化失败：{error}")
-        try:
-            client.disconnect()
-        except Exception:  # noqa: BLE001
-            pass
         return {"ok": True, "message": "登录成功，会话已保存", "session_saved": True}
 
     def logout(self) -> Dict[str, Any]:
         self.reset_client()
         self._session = ""
+        self._login_session = ""
+        self._login_phone = ""
+        self._login_hash = ""
         self._owner._persist_config_values(tg_session="")
         return {"ok": True, "message": "已清除 TG 会话"}
 

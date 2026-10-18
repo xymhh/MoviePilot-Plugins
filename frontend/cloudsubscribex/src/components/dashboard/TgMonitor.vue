@@ -184,7 +184,7 @@ const password = ref("")
 const loginLoading = ref(false)
 let timer = null
 
-const hasApi = computed(() => Boolean(status.value.configured))
+const hasApi = computed(() => Boolean(status.value.has_api))
 const subscribeOptions = computed(() =>
   subscribes.value.map((sub) => ({
     value: sub.id,
@@ -331,7 +331,7 @@ async function submitLogin() {
       const result = await props.api.post(`plugin/${PLUGIN}/tg/login/start`, { phone: phone.value })
       if (result?.success) {
         loginStep.value = "code"
-        props.notify("验证码已发送", "success")
+        props.notify(result.data?.message || "验证码已发送", "success")
       } else {
         props.notify(result?.message || "发送验证码失败", "error")
       }

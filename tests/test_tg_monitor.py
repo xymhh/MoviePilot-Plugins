@@ -121,10 +121,19 @@ class ScanTest(unittest.TestCase):
             username = "demo"
 
         class FakeClient:
-            def get_entity(self, raw):
+            async def connect(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+            async def is_user_authorized(self):
+                return True
+
+            async def get_entity(self, raw):
                 return FakeEntity()
 
-            def iter_messages(self, entity, limit, min_id=0, reverse=False):
+            async def get_messages(self, entity, limit, min_id=0, reverse=False):
                 # 模拟 Telethon：默认倒序（最新在前），reverse=True 时升序
                 rows = [
                     FakeMessage(1, "https://pan.quark.cn/s/aaa"),
@@ -133,7 +142,7 @@ class ScanTest(unittest.TestCase):
                 return rows if reverse else list(reversed(rows))
 
         monitor = self._monitor()
-        monitor._client = FakeClient()
+        monitor._new_client = lambda session="": FakeClient()
         first = monitor.scan(trigger="测试")
         self.assertTrue(first["ok"])
         self.assertEqual(first["added"], 2)
@@ -143,7 +152,7 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(items[0]["types"], ["quark"])
 
         # 同一批消息再扫一次：靠 last_id + 链接去重，不应重复入库
-        monitor._client = FakeClient()
+        monitor._new_client = lambda session="": FakeClient()
         second = monitor.scan(trigger="测试")
         self.assertEqual(second["added"], 0)
         self.assertEqual(len(monitor.list_items()), 2)
@@ -152,6 +161,23 @@ class ScanTest(unittest.TestCase):
         monitor = TgChannelMonitor(self.owner)
         result = monitor.scan()
         self.assertFalse(result["ok"])
+
+
+class CodeDeliveryTest(unittest.TestCase):
+    def test_mapping(self):
+        class T:
+            def __init__(self, name):
+                self.__class__.__name__ = name
+
+        for name, expected in [
+            ("SentCodeTypeApp", "app"),
+            ("SentCodeTypeSms", "sms"),
+            ("SentCodeTypeCall", "call"),
+            ("SentCodeTypeFlashCall", "flashcall"),
+            ("SomethingElse", "unknown"),
+        ]:
+            sent = type("Sent", (), {"type": T(name)})()
+            self.assertEqual(tg_module._code_delivery(sent), expected)
 
 
 class TgMonitorApiImportTest(unittest.TestCase):

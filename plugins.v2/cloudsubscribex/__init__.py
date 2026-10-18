@@ -110,7 +110,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.58"
+    plugin_version = "1.6.59"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
