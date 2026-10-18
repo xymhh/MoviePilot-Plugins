@@ -242,6 +242,18 @@
                     </v-btn>
                   </div>
                 </div>
+                <div v-else-if="field.type === 'cleanup-residue'" class="d-flex align-center flex-wrap ga-2">
+                  <v-btn
+                    color="warning"
+                    variant="tonal"
+                    prepend-icon="mdi-broom"
+                    :loading="residueCleaning"
+                    :disabled="residueCleaning"
+                    @click="cleanupResidue()">
+                    {{ field.label }}
+                  </v-btn>
+                  <span v-if="field.hint" class="text-caption text-medium-emphasis">{{ field.hint }}</span>
+                </div>
                 <CheckinTimeline
                   v-else-if="field.type === 'checkin-timeline'"
                   :api="api"
@@ -535,6 +547,25 @@ const props = defineProps({
   testingAutoSubscribeProxy: {type: Boolean, default: false},
   hdhiveOauthAction: { type: String, default: "" },
 })
+
+const residueCleaning = ref(false)
+async function cleanupResidue() {
+  if (residueCleaning.value) return
+  residueCleaning.value = true
+  try {
+    const result = await props.api.post("plugin/CloudSubscribeX/gopeed/cleanup_residue", {})
+    if (!result?.success) throw new Error(result?.message || "清理失败")
+    emit("notify", result.message || "残留已清理", "success")
+  } catch (error) {
+    emit(
+      "notify",
+      error?.response?.data?.message || error.message || String(error),
+      "error",
+    )
+  } finally {
+    residueCleaning.value = false
+  }
+}
 
 function getAccountInfo(field) {
   if (field.data && typeof field.data === "object" && Object.keys(field.data).length > 0) {

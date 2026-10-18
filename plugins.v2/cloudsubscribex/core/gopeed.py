@@ -105,6 +105,16 @@ class GopeedClient:
             raise GopeedError("Gopeed 创建任务未返回任务 ID")
         return task_id
 
+    def list_tasks(self) -> List[dict]:
+        """全量任务列表（``data.tasks``）。"""
+        payload = self._request("GET", "/api/v1/tasks")
+        data = payload.get("data")
+        if isinstance(data, dict):
+            tasks = data.get("tasks")
+        else:
+            tasks = data
+        return [item for item in (tasks or []) if isinstance(item, dict)]
+
     def get_task(self, task_id: str) -> dict:
         payload = self._request("GET", f"/api/v1/tasks/{task_id}")
         data = payload.get("data")

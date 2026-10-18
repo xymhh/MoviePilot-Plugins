@@ -354,6 +354,27 @@ export function createTransferSection(options) {
               config.cross_transfer_downloader === "gopeed",
           },
           {
+            key: "gopeed_residue_cleanup",
+            label: "自动清理中继残留",
+            type: "switch",
+            default: true,
+            hint: "插件启动时清理一次，之后每天 04:30 清理：只删超过 24 小时、且不在 Gopeed 任务列表里的 cloud-transfer-* 文件",
+            cols: 4,
+            show: (config) =>
+              Boolean(config.cross_transfer_enabled) &&
+              config.cross_transfer_downloader === "gopeed",
+          },
+          {
+            key: "gopeed_cleanup_residue",
+            label: "立即清理残留",
+            type: "cleanup-residue",
+            hint: "只删 cloud-transfer-* 及其伴随文件，不碰目录里其他内容",
+            cols: 8,
+            show: (config) =>
+              Boolean(config.cross_transfer_enabled) &&
+              config.cross_transfer_downloader === "gopeed",
+          },
+          {
             key: "gopeed_downloader_info",
             type: "info",
             label: "Gopeed 外部下载器说明",

@@ -493,6 +493,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "清空搜索和分享缓存",
             },
             {
+                "path": "/gopeed/cleanup_residue",
+                "endpoint": self.api_vue_cleanup_residue,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "清理跨盘中继残留文件",
+            },
+            {
                 "path": "/qrcode",
                 "endpoint": self.api_vue_get_qrcode,
                 "methods": ["GET"],

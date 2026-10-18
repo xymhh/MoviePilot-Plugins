@@ -197,6 +197,7 @@ class UIConfig:
             "gopeed_token": "",
             "gopeed_path_prefix": "",
             "gopeed_connections": 0,
+            "gopeed_residue_cleanup": True,
             "subscription_concurrency": 2,
             "batch_size": 20,
             "batch_interval": 3,

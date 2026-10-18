@@ -186,6 +186,30 @@ class RuntimeApi(OwnerDelegator):
         "search", "cloud", "sync", "interface", "platform",
     })
 
+    def api_vue_cleanup_residue(
+            self, payload: Optional[Dict[str, Any]] = None
+    ) -> dict:
+        """手动清理 cloud-transfer-* 残留（Gopeed 中继缓存）。"""
+        del payload
+        try:
+            result = self._owner.cleanup_gopeed_residue("手动")
+            freed = int(result.get("freed_bytes") or 0) / (1024 * 1024)
+            message = (
+                f"已清理 {result.get('deleted_files')} 个残留文件，"
+                f"释放 {freed:.1f} MB"
+                if result.get("deleted_files")
+                else "没有可清理的残留文件"
+            )
+            if result.get("skipped_recent") or result.get("skipped_active"):
+                message += (
+                    f"（跳过未过期 {result.get('skipped_recent')} 组、"
+                    f"任务中 {result.get('skipped_active')} 组）"
+                )
+            return {"success": True, "message": message, "data": result}
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"清理跨盘中继残留失败：{error}")
+            return {"success": False, "message": str(error)}
+
     def api_vue_clear_cache(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:

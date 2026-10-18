@@ -7,7 +7,7 @@ import copy
 import datetime
 import json
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event as ThreadEvent, Lock, RLock, local
+from threading import Event as ThreadEvent, Lock, RLock, local, Thread
 from typing import Optional, Any, List, Dict, Tuple, Callable
 
 import pytz
@@ -112,7 +112,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.60"
+    plugin_version = "1.6.61"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -218,6 +218,8 @@ class CloudSubscribeX(_PluginBase):
     _gopeed_url: str = "http://gopeed:9999"
     _gopeed_token: str = ""
     _gopeed_path_prefix: str = ""
+    _gopeed_residue_cleanup: bool = True
+    _residue_scheduler: Optional[BackgroundScheduler] = None
     _gopeed_connections: int = 0  # 0=沿用 Gopeed 全局连接数；夸克建议 256
     _subscription_concurrency: int = 2
     _batch_size: int = 20
@@ -712,6 +714,7 @@ class CloudSubscribeX(_PluginBase):
             f"洗版范围={'指定订阅' if self._upgrade_subscribe_ids else '全部'}, "
             f"当前接管态={self._is_takeover_active()}")
         self._log_relay_state()
+        self._start_residue_cleanup()
 
         # 调度一次性任务。
         if self._auto_subscribe_onlyonce:
@@ -751,6 +754,66 @@ class CloudSubscribeX(_PluginBase):
             f"失败回落本机={'是' if self._cross_transfer_relay_fallback_local else '否'}")
         logger.info(
             f"跨盘中继连通性：{probe_health(self._cross_transfer_relay_url)}")
+
+    def cleanup_gopeed_residue(self, reason: str = "手动") -> dict:
+        """删除跨盘中继残留（cloud-transfer-*），返回统计。
+
+        判定见 :mod:`core.residue`：仅删「超过 24 小时且不在 Gopeed 任务列表」
+        的文件；Gopeed 不可达时退化为纯时间判断（运行中的文件 mtime 会被刷新）。
+        """
+        from .core.gopeed import GopeedClient, GopeedError
+        from .core.residue import scan_residue
+
+        root = self._cross_transfer_download_path or "/tmp"
+        active_names: List[str] = []
+        if self._gopeed_url:
+            try:
+                tasks = GopeedClient(
+                    self._gopeed_url, self._gopeed_token
+                ).list_tasks()
+                active_names = [
+                    str((task.get("meta") or {}).get("opts", {}).get("name") or "")
+                    for task in tasks
+                ]
+            except GopeedError as error:
+                logger.warning(f"跨盘中继残留清理：读取 Gopeed 任务列表失败（{error}），仅按时间判断")
+        result = scan_residue(root, active_names=active_names)
+        freed_mb = int(result.get("freed_bytes") or 0) / (1024 * 1024)
+        logger.info(
+            f"跨盘中继残留清理（{reason}）：删除 {result.get('deleted_files')} 个文件、"
+            f"释放 {freed_mb:.1f} MB；跳过未过期 {result.get('skipped_recent')} 组、"
+            f"任务中 {result.get('skipped_active')} 组"
+        )
+        for error in result.get("errors") or []:
+            logger.warning(f"跨盘中继残留清理：{error}")
+        return result
+
+    def _start_residue_cleanup(self) -> None:
+        """启动时跑一次 + 每天 04:30 跑一次（同一进程只挂一次）。"""
+        if not self._gopeed_residue_cleanup:
+            return
+        if self.__dict__.get("_residue_scheduler") is not None:
+            return
+        try:
+            scheduler = BackgroundScheduler(timezone=settings.TZ)
+            scheduler.add_job(
+                func=lambda: self.cleanup_gopeed_residue("每日"),
+                trigger=CronTrigger(hour=4, minute=30),
+                id="cloudsubscribe_residue_cleanup",
+                replace_existing=True,
+            )
+            scheduler.start()
+            self._residue_scheduler = scheduler
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"跨盘中继残留定时清理启动失败：{error}")
+
+        def _run_once():
+            try:
+                self.cleanup_gopeed_residue("启动")
+            except Exception as error:  # noqa: BLE001
+                logger.warning(f"跨盘中继残留清理失败：{error}")
+
+        Thread(target=_run_once, daemon=True).start()
 
     @staticmethod
     def _split_multiline(value: Any) -> list:
@@ -1062,6 +1125,9 @@ class CloudSubscribeX(_PluginBase):
             gopeed_connections = 0
         # 0 = 沿用 Gopeed 全局连接数；>0 = 建任务时显式传给 Gopeed（夸克建议 256）
         self._gopeed_connections = max(0, gopeed_connections)
+        self._gopeed_residue_cleanup = bool(
+            config.get("gopeed_residue_cleanup", True)
+        )
 
         self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", 2) or 2), 5))
         self._batch_size = int(config.get("batch_size", 20) or 20)
@@ -1317,6 +1383,15 @@ class CloudSubscribeX(_PluginBase):
                 if self._offline_scheduler.running:
                     self._offline_scheduler.shutdown()
                 self._offline_scheduler = None
+        except Exception:
+            pass
+
+        try:
+            if self._residue_scheduler:
+                self._residue_scheduler.remove_all_jobs()
+                if self._residue_scheduler.running:
+                    self._residue_scheduler.shutdown()
+                self._residue_scheduler = None
         except Exception:
             pass
 
