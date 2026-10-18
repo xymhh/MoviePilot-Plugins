@@ -56,8 +56,8 @@
       {{ field.hint }}
     </div>
 
-    <v-dialog v-model="dialogVisible" max-width="760" scrollable>
-      <v-card>
+    <v-dialog v-model="dialogVisible" max-width="760" :fullscreen="isMobile" scrollable>
+      <v-card :rounded="isMobile ? 0 : undefined">
         <v-card-title class="d-flex align-center">
           <v-icon icon="mdi-telegram" class="mr-2" />
           频道规则
@@ -65,7 +65,7 @@
           <v-btn icon="mdi-close" variant="text" size="small" @click="dialogVisible = false" />
         </v-card-title>
         <v-divider />
-        <v-card-text>
+        <v-card-text :class="isMobile ? 'px-3' : ''">
           <div v-if="!draft.length" class="text-caption text-medium-emphasis mb-3">
             每个频道一条规则；关键词命中任意一个才收录，排除词命中就跳过。
           </div>
@@ -74,8 +74,8 @@
             :key="rule._key"
             variant="outlined"
             class="mb-3">
-            <v-card-text>
-              <div class="d-flex align-center ga-2 mb-2">
+            <v-card-text :class="isMobile ? 'pa-3' : ''">
+              <div class="rule-head mb-2">
                 <v-text-field
                   v-model="rule.channel"
                   label="频道"
@@ -83,30 +83,30 @@
                   density="compact"
                   variant="outlined"
                   hide-details
-                  class="flex-grow-1" />
-                <v-switch
-                  v-model="rule.enabled"
-                  label="启用"
-                  density="compact"
-                  color="primary"
-                  hide-details
-                  class="flex-grow-0" />
-                <v-switch
-                  v-model="rule.auto_transfer"
-                  label="自动转存"
-                  density="compact"
-                  color="primary"
-                  hide-details
-                  class="flex-grow-0" />
-                <v-btn
-                  icon="mdi-delete-outline"
-                  variant="text"
-                  size="small"
-                  color="error"
-                  title="删除此规则"
-                  @click="draft.splice(index, 1)" />
+                  class="rule-channel" />
+                <div class="rule-toggles">
+                  <v-switch
+                    v-model="rule.enabled"
+                    label="启用"
+                    density="compact"
+                    color="primary"
+                    hide-details />
+                  <v-switch
+                    v-model="rule.auto_transfer"
+                    label="自动转存"
+                    density="compact"
+                    color="primary"
+                    hide-details />
+                  <v-btn
+                    icon="mdi-delete-outline"
+                    variant="text"
+                    size="small"
+                    color="error"
+                    title="删除此规则"
+                    @click="draft.splice(index, 1)" />
+                </div>
               </div>
-              <div class="d-flex ga-2 flex-wrap">
+              <div class="rule-fields">
                 <v-textarea
                   v-model="rule.keywordsText"
                   label="包含关键词"
@@ -116,8 +116,7 @@
                   density="compact"
                   variant="outlined"
                   hide-details
-                  class="flex-grow-1"
-                  style="min-width: 220px" />
+                  class="rule-keywords" />
                 <v-textarea
                   v-model="rule.excludeText"
                   label="排除关键词"
@@ -127,8 +126,7 @@
                   density="compact"
                   variant="outlined"
                   hide-details
-                  class="flex-grow-1"
-                  style="min-width: 220px" />
+                  class="rule-keywords" />
                 <v-text-field
                   v-model.number="rule.scan_limit"
                   label="回溯条数"
@@ -138,9 +136,9 @@
                   density="compact"
                   variant="outlined"
                   hide-details
-                  style="max-width: 130px" />
+                  class="rule-limit" />
               </div>
-              <div v-if="rule.auto_transfer" class="d-flex align-center ga-2 mt-2">
+              <div v-if="rule.auto_transfer" class="auto-row mt-2">
                 <v-select
                   v-model.number="rule.auto_subscribe_id"
                   :items="subscribeOptions"
@@ -152,7 +150,7 @@
                   hide-details
                   :loading="loadingSubscribes"
                   no-data-text="没有可用订阅，请先在「订阅任务」创建"
-                  class="flex-grow-1" />
+                  class="auto-subscribe" />
                 <v-btn
                   size="small"
                   variant="text"
@@ -189,6 +187,10 @@
 
 <script setup>
 import {computed, onMounted, ref} from "vue"
+import {useDisplay} from "vuetify"
+
+const display = useDisplay()
+const isMobile = computed(() => display.smAndDown)
 
 const props = defineProps({
   modelValue: {type: [Array, String, Object], default: () => []},
@@ -365,5 +367,82 @@ function clearAll() {
 <style scoped>
 .tg-channel-rules :deep(.v-chip) {
   cursor: pointer;
+}
+
+.rule-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rule-channel {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rule-toggles {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.rule-fields {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rule-keywords {
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.rule-limit {
+  flex: 0 0 130px;
+}
+
+.auto-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.auto-subscribe {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+@media (max-width: 700px) {
+  .rule-head {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .rule-toggles {
+    justify-content: space-between;
+    width: 100%;
+  }
+
+  .rule-toggles :deep(.v-label) {
+    white-space: nowrap;
+  }
+
+  .rule-fields {
+    flex-direction: column;
+  }
+
+  .rule-keywords,
+  .rule-limit {
+    flex: 1 1 auto;
+    width: 100%;
+    max-width: none;
+  }
+
+  .auto-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
 }
 </style>
