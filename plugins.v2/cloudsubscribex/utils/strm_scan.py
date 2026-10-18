@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -20,6 +21,7 @@ def rebuild_strm_tree(
         reference_values: Callable[[Any], Dict[str, str]],
         overwrite: bool = False,
         progress: Optional[Callable[[Dict[str, int]], None]] = None,
+        interval_seconds: float = 0.0,
 ) -> Dict[str, int]:
     """从 ``cloud_root`` 起按 cid 递归，为每个视频补齐 STRM。
 
@@ -62,6 +64,10 @@ def rebuild_strm_tree(
         stats["directories"] += 1
         if progress and stats["directories"] % 200 == 0:
             progress(stats)
+        if interval_seconds > 0:
+            # 目录间主动节流：iterdir 的 cooldown 只在「翻页」之间生效，
+            # 小目录单页返回时不会经过账号级限流器，全量扫描必须自己减速。
+            time.sleep(interval_seconds)
 
         for item in listing.files:
             name = str(getattr(item, "name", "") or "").strip()

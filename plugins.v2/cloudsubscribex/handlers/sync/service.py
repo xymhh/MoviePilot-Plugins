@@ -1238,6 +1238,7 @@ class SyncHandler:
             video_extensions=self._video_extensions,
             reference_values=self._playback_reference.reference_values,
             overwrite=overwrite,
+            interval_seconds=1.0,
             progress=lambda stats: logger.info(
                 f"STRM 全量校准进度：目录 {stats['directories']}，"
                 f"文件 {stats['files']}，新增 {stats['created']}，"
