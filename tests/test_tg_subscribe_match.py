@@ -24,6 +24,23 @@ class TgMatchTest(unittest.TestCase):
         self.assertEqual(parsed["year"], 2026)
         self.assertEqual(parsed["media_type"], "tv")
 
+    def test_chinese_episode_range(self):
+        parsed = matcher.parse_message_title("🎬 嫁金钗 (2026) 第1-8集")
+        self.assertEqual(parsed["title"], "嫁金钗")
+        self.assertEqual(parsed["episode"], 1)
+
+    def test_bare_episode_range(self):
+        parsed = matcher.parse_message_title("🎬 嫁金钗 (2026) 1-8")
+        self.assertEqual(parsed["title"], "嫁金钗")
+
+    def test_ddp_audio_suffix_stripped(self):
+        parsed = matcher.parse_message_title(
+            "📺 美人余 (2026) S01E20 ✨4K WEB-DL DDP 5 1"
+        )
+        self.assertEqual(parsed["title"], "美人余")
+        self.assertEqual(parsed["season"], 1)
+        self.assertEqual(parsed["episode"], 20)
+
     def test_english_release_title(self):
         parsed = matcher.parse_message_title("Some.Show.S02E03.1080p.WEB-DL")
         self.assertEqual(parsed["normalized_title"], "someshow")

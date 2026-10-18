@@ -23,6 +23,13 @@ _SEASON_EN_RE = re.compile(
     r"(?<![A-Za-z0-9])S(?:eason)?\s*0*(\d{1,3})(?![0-9])", re.IGNORECASE
 )
 _EPISODE_CN_RE = re.compile(r"第\s*(\d{1,4})\s*[集话話期]")
+_EPISODE_RANGE_CN_RE = re.compile(
+    r"第\s*(\d{1,4})\s*[-~至]\s*(\d{1,4})\s*[集话話期]"
+)
+_EPISODE_RANGE_RE = re.compile(
+    r"(?<![0-9A-Za-z])(\d{1,4})\s*[-~至]\s*(\d{1,4})\s*[集话話期]"
+)
+_ALL_EPISODES_RE = re.compile(r"全\s*\d{1,4}\s*[集话話期]?|全集")
 _EPISODE_EN_RE = re.compile(
     r"(?<![A-Za-z0-9])E(?:P)?\s*0*(\d{1,4})(?![0-9])", re.IGNORECASE
 )
@@ -36,8 +43,9 @@ _UPDATE_RE = re.compile(
 _QUALITY_RE = re.compile(
     r"(?:4K|8K|2160P|1080P|720P|WEB[- ]?DL|WEBRip|BluRay|BDRip|"
     r"HDR10\+?|HDR|杜比视界|杜比全景声|Dolby\s*Vision|Dolby\s*Atmos|"
-    r"H\.?264|H\.?265|HEVC|AVC|AAC|DTS(?:-HD)?|TrueHD|ATMOS|REMUX|"
-    r"简繁|简体|繁体|中字|国语|粤语|英语|字幕|内嵌|外挂)",
+    r"H\.?264|H\.?265|HEVC|AVC|AAC|EAC3|AC3|FLAC|OPUS|"
+    r"DDP(?:\s*5[ .]?1)?|DTS(?:-HD)?|TrueHD|ATMOS|REMUX|"
+    r"10bit|SDR|简繁|简体|繁体|中字|国语|粤语|英语|字幕|内嵌|外挂)",
     re.IGNORECASE,
 )
 _TRAILING_RE = re.compile(r"[\s\-_.·|/:：,，;；]+$")
@@ -109,7 +117,12 @@ def parse_message_title(value: Any) -> Dict[str, Any]:
         if match:
             season = _cn_number(match.group(1))
     if episode is None:
-        match = _EPISODE_CN_RE.search(text) or _EPISODE_EN_RE.search(text)
+        match = (
+            _EPISODE_RANGE_CN_RE.search(text)
+            or _EPISODE_RANGE_RE.search(text)
+            or _EPISODE_CN_RE.search(text)
+            or _EPISODE_EN_RE.search(text)
+        )
         if match:
             episode = int(match.group(1))
 
@@ -130,13 +143,23 @@ def parse_message_title(value: Any) -> Dict[str, Any]:
     cleaned = _YEAR_RE.sub(" ", cleaned)
     cleaned = _QUALITY_RE.sub(" ", cleaned)
     cleaned = _SEASON_EPISODE_RE.sub(" ", cleaned)
+    cleaned = _EPISODE_RANGE_CN_RE.sub(" ", cleaned)
+    cleaned = _EPISODE_RANGE_RE.sub(" ", cleaned)
+    cleaned = _ALL_EPISODES_RE.sub(" ", cleaned)
     cleaned = _SEASON_CN_RE.sub(" ", cleaned)
     cleaned = _SEASON_EN_RE.sub(" ", cleaned)
     cleaned = _EPISODE_CN_RE.sub(" ", cleaned)
     cleaned = _EPISODE_EN_RE.sub(" ", cleaned)
     cleaned = re.sub(r"[\[\]【】()（）<>《》]", " ", cleaned)
+    # “嫁金钗 1-8”“嫁金钗1-8”这类不带“集”的集数范围
+    cleaned = re.sub(r"\s+\d{1,4}\s*[-~至]\s*\d{1,4}\s*$", " ", cleaned)
+    cleaned = re.sub(
+        r"(?<=[\u4e00-\u9fff])\d{1,4}\s*[-~至]\s*\d{1,4}\s*$", " ", cleaned,
+    )
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_·|/:：,，;；")
     cleaned = _TRAILING_RE.sub("", cleaned).strip()
+    # 去掉标题两端的频道图标/装饰符号，保留中间标点（Doctor X：…）
+    cleaned = re.sub(r"^[\W_]+|[\W_]+$", "", cleaned).strip()
 
     return {
         "title": cleaned,
