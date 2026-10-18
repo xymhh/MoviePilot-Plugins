@@ -1,0 +1,118 @@
+import { enabled } from "./helpers.js"
+
+/** TG 频道监控：用用户自己的 TG 会话读频道消息，抽取网盘分享链接。 */
+export function createTgMonitorSection() {
+  return {
+    value: "tg",
+    title: "频道监控",
+    icon: "mdi-telegram",
+    groups: [
+      {
+        title: "TG 账号",
+        icon: "mdi-account-key-outline",
+        fields: [
+          {
+            key: "tg_monitor_enabled",
+            label: "启用频道监控",
+            type: "switch",
+            hint: "用你的 TG 账号读取指定频道的新消息，抽取网盘分享链接后进入「频道监控」页",
+            cols: 4,
+          },
+          {
+            key: "tg_api_id",
+            label: "api_id",
+            type: "number",
+            min: 0,
+            placeholder: "1234567",
+            hint: "在 my.telegram.org → API development tools 申请",
+            cols: 4,
+          },
+          {
+            key: "tg_api_hash",
+            label: "api_hash",
+            type: "password",
+            placeholder: "32 位十六进制",
+            hint: "与 api_id 配套，仅用于登录和读取频道消息",
+            cols: 4,
+          },
+          {
+            key: "tg_session",
+            label: "登录会话",
+            type: "password",
+            hint: "留空表示未登录：保存 api_id/api_hash 后，在插件页面「频道监控」里点「登录 TG」输入手机号+验证码，登录成功后会自动写回这里",
+            cols: 12,
+          },
+        ],
+      },
+      {
+        title: "监控频道",
+        icon: "mdi-broadcast",
+        fields: [
+          {
+            key: "tg_channels",
+            label: "频道列表",
+            type: "textarea",
+            rows: 4,
+            placeholder: "@channel_name\nhttps://t.me/some_channel\n-1001234567890",
+            hint: "每行一个：公开频道填 @用户名 或 t.me 链接；私有频道填已加入频道的 -100 开头的 id（或邀请链接）",
+            cols: 6,
+            show: enabled("tg_monitor_enabled"),
+          },
+          {
+            key: "tg_monitor_keywords",
+            label: "包含关键词",
+            type: "textarea",
+            rows: 4,
+            placeholder: "4K\n合集",
+            hint: "每行一个，命中任意一个才收录；留空表示收录所有带网盘链接的消息",
+            cols: 6,
+            show: enabled("tg_monitor_enabled"),
+          },
+          {
+            key: "tg_monitor_exclude_keywords",
+            label: "排除关键词",
+            type: "textarea",
+            rows: 3,
+            placeholder: "广告\n拉群",
+            hint: "每行一个，命中任意一个就跳过",
+            cols: 6,
+            show: enabled("tg_monitor_enabled"),
+          },
+          {
+            key: "tg_monitor_scan_limit",
+            label: "每次回溯条数",
+            type: "number",
+            default: 20,
+            min: 1,
+            max: 200,
+            hint: "每个频道每轮最多读取的消息数；首次启用时按该值回溯历史",
+            cols: 4,
+            show: enabled("tg_monitor_enabled"),
+          },
+          {
+            key: "tg_monitor_interval_minutes",
+            label: "扫描间隔（分钟）",
+            type: "number",
+            default: 10,
+            min: 1,
+            max: 1440,
+            hint: "后台定时扫描新消息的间隔",
+            cols: 4,
+            show: enabled("tg_monitor_enabled"),
+          },
+          {
+            key: "tg_monitor_max_items",
+            label: "最多保留条数",
+            type: "number",
+            default: 500,
+            min: 50,
+            max: 5000,
+            hint: "超过后丢弃最旧的记录（已转存的记录也会被清理）",
+            cols: 4,
+            show: enabled("tg_monitor_enabled"),
+          },
+        ],
+      },
+    ],
+  }
+}

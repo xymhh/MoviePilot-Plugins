@@ -37,6 +37,7 @@ from .core.api import (
     RuntimeApi,
     SearchApi,
     SyncApi,
+    TgMonitorApi,
 )
 from .core.hook import MessageRoutingHook, PluginEventHandler, SubscriptionSearchHook
 from .core.relay import probe_health
@@ -79,6 +80,7 @@ _COMPONENT_TYPES = (
     MediaLibraryApi,
     QRCodeService,
     HistoryApi,
+    TgMonitorApi,
     MessageRoutingHook,
     PluginEventHandler,
     MoviePilotRegistration,
@@ -108,7 +110,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.56"
+    plugin_version = "1.6.57"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -199,6 +201,17 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_relay_max_file_gb: int = 25
     _cross_transfer_relay_timeout_minutes: int = 180
     _cross_transfer_relay_fallback_local: bool = True
+    # TG 频道监控（用户自己的 TG API 会话）：默认关闭，未配置凭据时强制视为关闭。
+    _tg_monitor_enabled: bool = False
+    _tg_api_id: int = 0
+    _tg_api_hash: str = ""
+    _tg_session: str = ""
+    _tg_channels: list = []
+    _tg_monitor_keywords: list = []
+    _tg_monitor_exclude_keywords: list = []
+    _tg_monitor_scan_limit: int = 20
+    _tg_monitor_interval_minutes: int = 10
+    _tg_monitor_max_items: int = 500
     _gopeed_url: str = "http://gopeed:9999"
     _gopeed_token: str = ""
     _gopeed_path_prefix: str = ""
@@ -735,6 +748,72 @@ class CloudSubscribeX(_PluginBase):
         logger.info(
             f"跨盘中继连通性：{probe_health(self._cross_transfer_relay_url)}")
 
+    @staticmethod
+    def _split_multiline(value: Any) -> list:
+        """把设置页的多行/逗号文本拆成去重列表。"""
+        text = str(value or "")
+        parts = [
+            item.strip() for item in text.replace(",", "\n").replace("，", "\n").splitlines()
+        ]
+        return [item for item in dict.fromkeys(parts) if item]
+
+    def _apply_tg_monitor_config(self, config: Dict[str, Any]) -> None:
+        """应用 TG 频道监控配置并启动/停止扫描线程。"""
+        self._tg_monitor_enabled = bool(config.get("tg_monitor_enabled", False))
+        try:
+            self._tg_api_id = int(config.get("tg_api_id", 0) or 0)
+        except (TypeError, ValueError):
+            self._tg_api_id = 0
+        self._tg_api_hash = str(config.get("tg_api_hash", "") or "").strip()
+        self._tg_session = str(config.get("tg_session", "") or "").strip()
+        self._tg_channels = self._split_multiline(config.get("tg_channels", ""))
+        self._tg_monitor_keywords = self._split_multiline(
+            config.get("tg_monitor_keywords", "")
+        )
+        self._tg_monitor_exclude_keywords = self._split_multiline(
+            config.get("tg_monitor_exclude_keywords", "")
+        )
+        try:
+            scan_limit = int(config.get("tg_monitor_scan_limit", 20) or 20)
+        except (TypeError, ValueError):
+            scan_limit = 20
+        self._tg_monitor_scan_limit = max(1, min(scan_limit, 200))
+        try:
+            interval = int(config.get("tg_monitor_interval_minutes", 10) or 10)
+        except (TypeError, ValueError):
+            interval = 10
+        self._tg_monitor_interval_minutes = max(1, min(interval, 1440))
+        try:
+            max_items = int(config.get("tg_monitor_max_items", 500) or 500)
+        except (TypeError, ValueError):
+            max_items = 500
+        self._tg_monitor_max_items = max(50, min(max_items, 5000))
+        if self._tg_monitor_enabled and not (
+                self._tg_api_id and self._tg_api_hash and self._tg_session):
+            self._tg_monitor_enabled = False
+            if config.get("tg_monitor_enabled"):
+                logger.info(
+                    "TG 频道监控已关闭：缺少 api_id / api_hash / 会话，"
+                    "请在插件设置里先登录"
+                )
+        try:
+            from .core.tg_monitor import get_channel_monitor
+            monitor = get_channel_monitor(self)
+            monitor.configure(
+                enabled=self._tg_monitor_enabled,
+                api_id=self._tg_api_id,
+                api_hash=self._tg_api_hash,
+                session=self._tg_session,
+                channels=self._tg_channels,
+                keywords=self._tg_monitor_keywords,
+                exclude_keywords=self._tg_monitor_exclude_keywords,
+                scan_limit=self._tg_monitor_scan_limit,
+                interval_minutes=self._tg_monitor_interval_minutes,
+                max_items=self._tg_monitor_max_items,
+            )
+        except Exception as error:  # noqa: BLE001 - 监控不可用不应拖垮插件
+            logger.warning(f"TG 频道监控初始化失败：{error}")
+
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:
         self._notify = bool(config.get("notify", False))
         self._notification_type = self._resolve_notification_type(
@@ -944,6 +1023,7 @@ class CloudSubscribeX(_PluginBase):
         )
         if self._cross_transfer_relay_enabled and not self._cross_transfer_relay_url:
             self._cross_transfer_relay_enabled = False
+        self._apply_tg_monitor_config(config)
         self._gopeed_url = str(config.get("gopeed_url", "http://gopeed:9999") or "").strip()
         self._gopeed_token = str(config.get("gopeed_token", "") or "").strip()
         self._gopeed_path_prefix = str(config.get("gopeed_path_prefix", "") or "").strip()

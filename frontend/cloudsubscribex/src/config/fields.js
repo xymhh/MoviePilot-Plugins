@@ -7,6 +7,7 @@ import {createTransferSection} from "./fields/transfer.js";
 import {createUpgradeSection} from "./fields/upgrade.js";
 import {createSubscribeSection} from "./fields/subscribe.js";
 import {createCheckinSection} from "./fields/checkin.js";
+import {createTgMonitorSection} from "./fields/tg.js";
 
 export function createConfigSections(options, config = {}) {
   const cloudDriveItems = createCloudDriveItems(options);
@@ -16,6 +17,7 @@ export function createConfigSections(options, config = {}) {
     createTransferSection(options),
     createSubscribeSection(options),
     createCheckinSection(options),
+    createTgMonitorSection(),
     createDriveSection(options),
     createSearchSection(resourceTypeItems, options),
     createUpgradeSection(options),

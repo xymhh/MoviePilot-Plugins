@@ -96,11 +96,18 @@
             {{ historyStats.total }}
           </v-chip>
         </v-tab>
+        <v-tab value="tg">
+          <v-icon icon="mdi-telegram" size="small" class="mr-2" />
+          频道监控
+        </v-tab>
       </v-tabs>
       <v-card-text class="pa-0 page-body">
         <div class="page-window">
           <div v-show="mainTab === 'tasks'" class="page-pane task-pane">
             <RuntimeCard class="runtime-tab-panel" :runtime="runtime" :active="active" @stop-task="confirmStopTask" />
+          </div>
+          <div v-show="mainTab === 'tg'" class="page-pane tg-pane">
+            <TgMonitor :api="api" :notify="notify" :active="mainTab === 'tg'" />
           </div>
           <div v-show="mainTab === 'history'" class="page-pane history-pane">
             <div class="history-shell">
@@ -288,6 +295,7 @@
 import {computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch} from "vue";
 import RuntimeCard from "./dashboard/RuntimeCard.vue";
 import HistoryTable from "./dashboard/HistoryTable.vue";
+import TgMonitor from "./dashboard/TgMonitor.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";

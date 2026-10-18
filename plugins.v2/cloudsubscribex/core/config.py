@@ -216,6 +216,18 @@ class UIConfig:
             "self_heal_interval": 10,
             "anime_pack_preferred": True,
             "offline_timeout": 30,
+            # TG 频道监控：用用户自己的 TG API（api_id/api_hash + 登录会话）读频道消息，
+            # 抽取网盘分享链接后进入「频道监控」页，人工或自动转存。
+            "tg_monitor_enabled": False,
+            "tg_api_id": 0,
+            "tg_api_hash": "",
+            "tg_session": "",
+            "tg_channels": "",
+            "tg_monitor_keywords": "",
+            "tg_monitor_exclude_keywords": "",
+            "tg_monitor_scan_limit": 20,
+            "tg_monitor_interval_minutes": 10,
+            "tg_monitor_max_items": 500,
         }
         try:
             dynamic_defaults = cls.collect_definitions_defaults()
