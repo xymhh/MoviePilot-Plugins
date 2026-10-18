@@ -100,6 +100,39 @@ class ExtractLinksTest(unittest.TestCase):
         )])
 
 
+class FloodAndOutcomeTest(unittest.TestCase):
+    def test_flood_seconds_from_attribute_and_text(self):
+        class Flood(Exception):
+            seconds = 667
+        self.assertEqual(tg_module._flood_wait_seconds(Flood("wait")), 667)
+        self.assertEqual(
+            tg_module._flood_wait_seconds(
+                Exception("A wait of 42 seconds is required")
+            ),
+            42,
+        )
+        self.assertEqual(tg_module._flood_wait_seconds(Exception("other")), 0)
+
+    def test_auto_transfer_outcome(self):
+        self.assertEqual(
+            tg_module._auto_transfer_outcome(
+                {"success": True, "data": {"transferred": 2}}
+            ),
+            ("transferred", ""),
+        )
+        outcome, message = tg_module._auto_transfer_outcome(
+            {"success": True, "data": {"transferred": 0},
+             "message": "同步完成，共转存 0 个文件"}
+        )
+        self.assertEqual(outcome, "skipped")
+        self.assertIn("0 个文件", message)
+        outcome, message = tg_module._auto_transfer_outcome(
+            {"success": False, "message": "订阅不存在"}
+        )
+        self.assertEqual(outcome, "failed")
+        self.assertIn("订阅不存在", message)
+
+
 class ScanCursorTest(unittest.TestCase):
     def test_old_cursor_forces_backfill_once(self):
         self.assertEqual(tg_module._scan_start_id({"123": 900}, "123"), 0)
@@ -213,7 +246,7 @@ class ChannelRulesTest(unittest.TestCase):
         def handler(item, subscribe_id):
             calls.append((item["links"], subscribe_id))
             if subscribe_id == 7:
-                return {"success": True}
+                return {"success": True, "data": {"transferred": 1}}
             return {"success": False, "message": "订阅不存在"}
 
         monitor = TgChannelMonitor(self.owner)
@@ -237,7 +270,8 @@ class ChannelRulesTest(unittest.TestCase):
         self.assertEqual(bad_item["auto_transfer_error"], "订阅不存在")
         self.assertEqual(
             stats,
-            {"auto_transferred": 1, "auto_failed": 1, "auto_pending": 0},
+            {"auto_transferred": 1, "auto_skipped": 0,
+             "auto_failed": 1, "auto_pending": 0},
         )
 
     def test_provider_matches_title_and_leaves_ambiguity_pending(self):
@@ -245,7 +279,7 @@ class ChannelRulesTest(unittest.TestCase):
 
         def handler(item, subscribe_id):
             calls.append(subscribe_id)
-            return {"success": True}
+            return {"success": True, "data": {"transferred": 1}}
 
         monitor = TgChannelMonitor(self.owner)
         monitor.configure(

@@ -18,6 +18,7 @@ import json
 import re
 import threading
 import time
+import weakref
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from app.log import logger
@@ -43,6 +44,11 @@ STATE_KEY = "state"
 # 解析逻辑版本：升级后首次扫描忽略旧游标，回填最近 N 条
 # 1 -> 纯正文正则；2 -> 正文 + entities/webpage/按钮 URL
 SCAN_LOGIC_VERSION = 2
+
+# 同一进程里只允许一个监控线程：插件热重载会创建新实例，旧实例如果
+# 没被 stop，多个线程会同时扫描并触发 Telegram 限流。
+_ACTIVE_MONITORS: "weakref.WeakSet[TgChannelMonitor]" = weakref.WeakSet()
+_ACTIVE_MONITORS_LOCK = threading.Lock()
 STATUS_KEY = "status"
 
 _URL_RE = re.compile(r"https?://[^\s<>\"'）)】，。；、！？】]+")
@@ -142,6 +148,34 @@ def _scan_start_id(state: Dict[str, Any], channel_key: str) -> int:
     if version < SCAN_LOGIC_VERSION:
         return 0
     return int(state.get(channel_key) or 0)
+
+
+def _flood_wait_seconds(error: Any) -> int:
+    """从 Telethon FloodWaitError 或错误文本里取出等待秒数。"""
+    seconds = int(getattr(error, "seconds", 0) or 0)
+    if seconds > 0:
+        return seconds
+    match = re.search(r"(\d+)\s+seconds", str(error or ""), re.IGNORECASE)
+    return int(match.group(1)) if match else 0
+
+
+def _auto_transfer_outcome(result: Any) -> Tuple[str, str]:
+    """把同步结果归一为 transferred / skipped / failed。"""
+    if not isinstance(result, dict) or not result.get("success"):
+        message = (
+            str(result.get("message") or "转存失败")
+            if isinstance(result, dict) else "转存失败"
+        )
+        return "failed", message
+    data = result.get("data") or {}
+    try:
+        transferred = int(data.get("transferred") or 0)
+    except (TypeError, ValueError):
+        transferred = 0
+    if transferred > 0:
+        return "transferred", ""
+    message = str(result.get("message") or "").strip()
+    return "skipped", message or "同步完成，未转存新文件（库里已有或未匹配到可下载资源）"
 
 
 def _unwrap_channel_text(value: Any) -> str:
@@ -471,39 +505,72 @@ class TgChannelMonitor:
             self._scan_limit = max(1, int(scan_limit or 20))
             self._interval = max(1, int(interval_minutes or 10)) * 60
             self._max_items = max(50, int(max_items or 500))
+            signature = (
+                self._enabled, self._api_id, self._api_hash, self._session,
+                json.dumps(self._channel_rules, ensure_ascii=False, sort_keys=True),
+                self._interval, self._max_items,
+            )
+            unchanged = (
+                signature == getattr(self, "_config_signature", None)
+                and self._thread is not None and self._thread.is_alive()
+            )
+            self._config_signature = signature
+        if unchanged:
+            return
         self.stop()
         if self._enabled:
             self.start()
 
     # ------------------------------------------------------------------ 线程
     def start(self) -> None:
+        with _ACTIVE_MONITORS_LOCK:
+            for other in list(_ACTIVE_MONITORS):
+                if other is not self:
+                    try:
+                        other.stop()
+                    except Exception:  # noqa: BLE001 - 旧实例清理失败不阻塞
+                        pass
+            _ACTIVE_MONITORS.add(self)
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
-            self._stop.clear()
+            # 每次启动用独立的停止事件；旧线程即使还没退出，也只会看到
+            # 自己的已 set 事件，不会因为新线程 clear 共享事件而“复活”。
+            stop_event = threading.Event()
+            self._stop = stop_event
             self._thread = threading.Thread(
-                target=self._loop, name="cloudsubscribe-tg-monitor", daemon=True,
+                target=self._loop, args=(stop_event,),
+                name="cloudsubscribe-tg-monitor", daemon=True,
             )
             self._running = True
             self._thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
         with self._lock:
+            stop_event = self._stop
+            thread = self._thread
             self._thread = None
             self._running = False
+        stop_event.set()
+        if (
+            thread and thread.is_alive()
+            and thread is not threading.current_thread()
+        ):
+            # 不无限等待：当前扫描可能卡在 Telegram 请求里。事件已 set，
+            # 它结束当前一轮后会自行退出。
+            thread.join(timeout=2)
 
-    def _loop(self) -> None:
+    def _loop(self, stop_event: threading.Event) -> None:
         # 启动后先等 20 秒，避免和插件初始化抢资源
-        if self._stop.wait(20):
+        if stop_event.wait(20):
             return
-        while not self._stop.is_set():
+        while not stop_event.is_set():
             try:
                 self.scan(trigger="定时")
             except Exception as error:  # noqa: BLE001 - 后台线程不能死
                 self._last_error = str(error)
                 logger.warning(f"TG 频道监控扫描失败：{error}")
-            if self._stop.wait(self._interval):
+            if stop_event.wait(self._interval):
                 return
 
     # ------------------------------------------------------------------ 客户端
@@ -577,19 +644,62 @@ class TgChannelMonitor:
             rule_keywords = list(rule.get("keywords") or [])
             rule_exclude = list(rule.get("exclude_keywords") or [])
             rule_limit = int(rule.get("scan_limit") or self._scan_limit)
-            target = (
-                int(raw_channel) if re.fullmatch(r"-?\d+", str(raw_channel))
-                else raw_channel
+            cached_id = str(
+                state.get(f"resolved:{raw_channel}") or ""
+            ).strip()
+            if cached_id.isdigit():
+                target = int(cached_id)
+            elif re.fullmatch(r"-?\d+", str(raw_channel)):
+                target = int(raw_channel)
+            else:
+                target = raw_channel
+            now = int(time.time())
+            cooldown_until = int(
+                state.get(f"flood_until:{raw_channel}") or 0
             )
-            try:
-                entity = await client.get_entity(target)
-            except Exception as error:  # noqa: BLE001
-                detail = str(error)
+            if cooldown_until > now:
+                remaining = cooldown_until - now
+                rule_debug.append({
+                    "channel": raw_channel,
+                    "cooldown_remaining": remaining,
+                })
+                logger.info(
+                    f"TG 频道 {raw_channel} 限流冷却中，剩余 {remaining}s"
+                )
+                continue
+            entity = None
+            resolve_error: Optional[Exception] = None
+            candidates = [target]
+            if target != raw_channel:
+                # 缓存的数字 ID 没有 access_hash 时，回退一次邀请链接
+                candidates.append(raw_channel)
+            for candidate in candidates:
+                try:
+                    entity = await client.get_entity(candidate)
+                    break
+                except Exception as error:  # noqa: BLE001
+                    resolve_error = error
+            if entity is None:
+                seconds = _flood_wait_seconds(resolve_error)
+                if seconds > 0:
+                    state[f"flood_until:{raw_channel}"] = now + seconds
+                    logger.warning(
+                        f"TG 频道 {raw_channel} 触发限流，"
+                        f"{seconds}s 后自动重试"
+                    )
+                    rule_debug.append({
+                        "channel": raw_channel,
+                        "cooldown_remaining": seconds,
+                    })
+                    continue
+                detail = str(resolve_error)
                 if "not part of" in detail:
                     detail = f"{detail}（请先用该账号加入此频道）"
                 errors.append(f"{raw_channel}: 无法解析频道（{detail}）")
                 continue
             channel_key = str(getattr(entity, "id", raw_channel))
+            state[f"resolved:{raw_channel}"] = channel_key
+            state.pop(f"flood_until:{raw_channel}", None)
             channel_title = (
                 getattr(entity, "title", "")
                 or getattr(entity, "username", "")
@@ -694,6 +804,7 @@ class TgChannelMonitor:
             "errors": errors,
             "debug": rule_debug,
             "auto_transferred": auto_stats["auto_transferred"],
+            "auto_skipped": auto_stats["auto_skipped"],
             "auto_failed": auto_stats["auto_failed"],
             "auto_pending": auto_stats["auto_pending"],
         }
@@ -714,7 +825,10 @@ class TgChannelMonitor:
             self, candidates: List[Tuple[dict, dict]],
     ) -> Dict[str, int]:
         """扫描后按频道规则自动转存；失败只记在条目上，不重试、不阻塞下次扫描。"""
-        stats = {"auto_transferred": 0, "auto_failed": 0, "auto_pending": 0}
+        stats = {
+            "auto_transferred": 0, "auto_skipped": 0,
+            "auto_failed": 0, "auto_pending": 0,
+        }
         if not candidates:
             return stats
         handler = getattr(self, "_auto_transfer_handler", None)
@@ -778,18 +892,27 @@ class TgChannelMonitor:
                 result = handler(item, subscribe_id)
             except Exception as error:  # noqa: BLE001 - 单条失败不影响扫描
                 result = {"success": False, "message": str(error)}
-            if isinstance(result, dict) and result.get("success"):
+            outcome, message = _auto_transfer_outcome(result)
+            item["subscribe_id"] = subscribe_id
+            if outcome == "transferred":
                 item["status"] = "transferred"
-                item["subscribe_id"] = subscribe_id
                 item["match_status"] = "transferred"
                 item["auto_transferred_at"] = int(time.time())
                 item.pop("auto_transfer_error", None)
                 stats["auto_transferred"] += 1
-            else:
-                message = (
-                    str(result.get("message") or "转存失败")
-                    if isinstance(result, dict) else "转存失败"
+            elif outcome == "skipped":
+                # 同步成功但没转出文件：通常库里已有该集，或资源没有可下载文件。
+                # 不能标成“已转存”，否则用户会以为历史记录漏了。
+                item["status"] = "skipped"
+                item["match_status"] = "skipped"
+                item["auto_skipped_at"] = int(time.time())
+                item["auto_transfer_error"] = message[:300]
+                stats["auto_skipped"] += 1
+                logger.info(
+                    f"TG 频道自动转存无新文件（{rule.get('channel')} / "
+                    f"订阅 {subscribe_id}）：{message}"
                 )
+            else:
                 item["auto_transfer_error"] = message[:300]
                 item["auto_subscribe_id"] = subscribe_id
                 item["match_status"] = "failed"

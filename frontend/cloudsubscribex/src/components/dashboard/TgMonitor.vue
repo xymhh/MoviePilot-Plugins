@@ -67,8 +67,11 @@
               :class="item.match_status === 'pending' ? 'text-warning' : 'text-medium-emphasis'">
               自动匹配：{{ item.match_reason }}
             </div>
-            <div v-if="item.auto_transfer_error" class="text-caption text-error mt-1">
-              {{ item.auto_transfer_error }}
+            <div
+              v-if="item.auto_transfer_error"
+              class="text-caption mt-1"
+              :class="item.status === 'skipped' ? 'text-medium-emphasis' : 'text-error'">
+              {{ item.status === "skipped" ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}
             </div>
           </td>
           <td class="text-caption">{{ typeText(item.types) }}</td>
@@ -236,8 +239,18 @@ function typeText(types) {
   return (types || []).map((type) => TYPE_TEXT[type] || type).join(" / ") || "-"
 }
 
-const STATUS_TEXT = { new: "待处理", transferred: "已转存", ignored: "已忽略" }
-const STATUS_COLOR = { new: "primary", transferred: "success", ignored: "grey" }
+const STATUS_TEXT = {
+  new: "待处理",
+  transferred: "已转存",
+  skipped: "未转存",
+  ignored: "已忽略",
+}
+const STATUS_COLOR = {
+  new: "primary",
+  transferred: "success",
+  skipped: "warning",
+  ignored: "grey",
+}
 function statusText(value) {
   return STATUS_TEXT[value] || value || "-"
 }

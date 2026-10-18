@@ -112,7 +112,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.73"
+    plugin_version = "1.6.74"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -996,7 +996,8 @@ class CloudSubscribeX(_PluginBase):
         if title and links:
             # 把频道消息标题带进手动同步，电影单文件兜底不必只靠订阅名
             payload["resource_titles"] = {link: title for link in links}
-        return SyncApi(self).api_vue_start_manual_sync(payload)
+        # wait=True 才能拿到实际转存文件数；否则「任务已提交」会被误标成已转存
+        return SyncApi(self).api_vue_start_manual_sync(payload, wait=True)
 
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:
         self._notify = bool(config.get("notify", False))
