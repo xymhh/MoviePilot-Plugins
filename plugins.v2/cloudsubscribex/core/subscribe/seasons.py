@@ -10,6 +10,12 @@ from app.chain.media import MediaChain
 from app.core.metainfo import MetaInfo
 from app.schemas.types import MediaType
 
+try:
+    from ..media_scope import season_episodes_in_scope
+except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过滤模块
+    def season_episodes_in_scope(mediainfo: Any, season: int):
+        return None
+
 
 @dataclass
 class _SeasonProgress:
@@ -52,6 +58,14 @@ def probe_season_progress(
     )
     if not getattr(mediainfo, "media_source", None) or not getattr(mediainfo, "media_id", None):
         return unknown
+    scoped_episodes = season_episodes_in_scope(mediainfo, season)
+    if scoped_episodes is not None:
+        missing = sorted(set(episodes) - scoped_episodes)
+        return _SeasonProgress(
+            complete=not missing,
+            missing_episodes=missing,
+            total_episode=max(episodes),
+        )
     try:
         media = copy.deepcopy(mediainfo)
         meta = MetaInfo(getattr(media, "title", ""))

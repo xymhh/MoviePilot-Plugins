@@ -35,6 +35,11 @@ from ...core.media import (
     media_server_tmdb_filters,
     tmdb_id_of,
 )
+try:
+    from ...core.media_scope import is_ignored_media_path
+except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过滤模块
+    def is_ignored_media_path(path):
+        return False
 from ...search.types import normalize_resource_type, resource_type_from_url
 
 
@@ -1759,6 +1764,8 @@ class HistoryService(OwnerDelegator):
             }
             items = []
             for row in rows:
+                if is_ignored_media_path(row.path):
+                    continue
                 diagnostics["matched"] += 1
                 media_type = self._media_server_item_type(row.item_type)
                 row_tmdb_id = tmdb_id_of(row)

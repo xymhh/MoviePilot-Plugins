@@ -16,6 +16,11 @@ from sqlalchemy import func
 
 from .. import OwnerDelegator
 from ..media import media_server_tmdb_filters, tmdb_id_of
+try:
+    from ..media_scope import filter_media_rows
+except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过滤模块
+    def filter_media_rows(rows):
+        return list(rows)
 
 
 class MediaLibraryApi(OwnerDelegator):
@@ -257,7 +262,7 @@ class MediaLibraryApi(OwnerDelegator):
                 *media_server_tmdb_filters(MediaServerItem, tmdb_ids),
             ).all()
         result = {}
-        for row in rows:
+        for row in filter_media_rows(rows):
             identity = (tmdb_id_of(row) or 0, str(row.item_type or ""))
             if identity not in eligible or not row.item_id:
                 continue
@@ -339,7 +344,7 @@ class MediaLibraryApi(OwnerDelegator):
                 func.lower(MediaServerItem.server).in_(storage_servers),
                 *media_server_tmdb_filters(MediaServerItem, normalized_ids),
             ).all()
-        for row in rows:
+        for row in filter_media_rows(rows):
             tmdb_id = tmdb_id_of(row)
             if not tmdb_id:
                 continue
@@ -393,7 +398,7 @@ class MediaLibraryApi(OwnerDelegator):
                 func.lower(MediaServerItem.media_source) == "douban",
                 MediaServerItem.media_id.in_(normalized),
             ).all()
-        for row in rows:
+        for row in filter_media_rows(rows):
             key = str(row.media_id or "").strip()
             if key not in result:
                 continue
@@ -442,7 +447,7 @@ class MediaLibraryApi(OwnerDelegator):
                 func.lower(MediaServerItem.media_source).in_(["bangumi", "bgm"]),
                 MediaServerItem.media_id.in_(normalized),
             ).all()
-        for row in rows:
+        for row in filter_media_rows(rows):
             key = str(row.media_id or "").strip()
             if key not in result:
                 continue

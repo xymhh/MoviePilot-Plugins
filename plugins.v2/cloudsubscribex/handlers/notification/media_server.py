@@ -18,6 +18,12 @@ from app.schemas import MediaInfo, RefreshMediaItem
 from app.schemas.types import MediaType
 from app.utils.http import RequestUtils
 
+try:
+    from ...core.media_scope import is_ignored_media_path
+except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过滤模块
+    def is_ignored_media_path(path):
+        return False
+
 
 class MediaServerResolver:
     """通过 MoviePilot 平台接口读取各媒体服务器的实际入库内容。"""
@@ -80,7 +86,7 @@ class MediaServerResolver:
             return default
 
         path = str(value("path", "Path", default="") or "").strip() if item else ""
-        if not path:
+        if not path or is_ignored_media_path(path):
             return {}
         try:
             size = max(0, int(value("size", "Size", default=0) or 0))
@@ -274,6 +280,17 @@ class MediaServerResolver:
                 )
                 checked = True
                 if not exists_media or not exists_media.itemid:
+                    continue
+                series_path = str(getattr(exists_media, "path", "") or "").strip()
+                if not series_path:
+                    series_item = mediaserver_chain.iteminfo(
+                        server=server_name, item_id=str(exists_media.itemid)
+                    )
+                    if isinstance(series_item, dict):
+                        series_path = str(series_item.get("path") or series_item.get("Path") or "").strip()
+                    else:
+                        series_path = str(getattr(series_item, "path", "") or "").strip()
+                if is_ignored_media_path(series_path):
                     continue
                 episode_ids = MediaServerResolver._episode_ids(
                     mediaserver_chain, server_name,

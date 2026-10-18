@@ -142,6 +142,7 @@ class UIConfig:
             "strm_url_template": "{base_url}/d/{pickcode}?/{file_name}",
             "media_server_refresh_enabled": False,
             "media_servers": [],
+            "media_server_ignore_paths": "",
             "media_server_path_mappings": "",
             "media_server_refresh_delay": 0,
             "emby_mediainfo_enabled": False,

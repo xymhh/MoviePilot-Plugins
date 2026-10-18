@@ -36,6 +36,11 @@ from ..media import (
     recognize_media,
     tmdb_id_of,
 )
+try:
+    from ..media_scope import movie_in_scope
+except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过滤模块
+    def movie_in_scope(mediainfo):
+        return None
 from ...search.matching import is_anime_media
 from ...utils.http_client import (
     build_proxy_url,
@@ -1169,6 +1174,9 @@ class AutoSubscribeService:
                 total_episode=max(target_episodes),
                 start_episode=min(target_episodes),
             )
+        scoped_exists = movie_in_scope(media)
+        if scoped_exists is not None:
+            return _LibraryProgress(complete=bool(scoped_exists))
         exists, _ = self.download_chain.get_no_exists_info(meta=meta, mediainfo=media)
         return _LibraryProgress(complete=bool(exists))
 

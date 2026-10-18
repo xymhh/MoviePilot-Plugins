@@ -44,6 +44,7 @@ from .core.api import (
 from .core.hook import MessageRoutingHook, PluginEventHandler, SubscriptionSearchHook
 from .core.relay import probe_health
 from .core.legacy_migration import LegacyIdMigrator
+from .core.media_scope import configure_media_path_ignores
 from .core.services import (
     SubscriptionControlService,
     CheckinService,
@@ -112,7 +113,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.74"
+    plugin_version = "1.6.75"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -258,6 +259,7 @@ class CloudSubscribeX(_PluginBase):
     _strm_full_scan_scheduler: Optional[BackgroundScheduler] = None
     _media_server_refresh_enabled: bool = False
     _media_servers: List[str] = []
+    _media_server_ignore_paths: str = ""
     _media_server_path_mappings: str = ""
     _media_server_refresh_delay: int = 0
     _emby_mediainfo_enabled: bool = False
@@ -517,6 +519,7 @@ class CloudSubscribeX(_PluginBase):
         """应用配置并重建相关服务；普通保存不重置同步任务状态。"""
         config = dict(config or {})
         original_config = dict(config)
+        configure_media_path_ignores(config.get("media_server_ignore_paths", ""))
         # 丢弃已移除搜索渠道的历史配置，避免旧字段继续进入运行态或保存结果。
         removed_config_prefixes = ("but" + "ailing_",)
         config = {
@@ -570,6 +573,7 @@ class CloudSubscribeX(_PluginBase):
             "webhook_timeout",
             "media_server_refresh_enabled",
             "media_servers",
+            "media_server_ignore_paths",
             "media_server_path_mappings",
             "media_server_refresh_delay",
             "emby_mediainfo_enabled",
@@ -1016,6 +1020,10 @@ class CloudSubscribeX(_PluginBase):
             config.get("media_server_refresh_enabled", False)
         )
         self._media_servers = list(config.get("media_servers", []) or [])
+        self._media_server_ignore_paths = str(
+            config.get("media_server_ignore_paths", "") or ""
+        ).strip()
+        configure_media_path_ignores(self._media_server_ignore_paths)
         self._media_server_path_mappings = str(
             config.get("media_server_path_mappings", "") or ""
         ).strip()
