@@ -147,6 +147,19 @@ class TestMarkHistoryRecordsSuccess(unittest.TestCase):
         self.assertEqual(second["skipped"], 1)
         self.assertEqual(service.save_count, saves)
 
+    def test_reduced_identity_matches_record_with_tmdb_fields(self):
+        """前端只传 time/share_url/file_name 时，带 tmdb/季集字段的记录也要命中。"""
+        service = _ManualSuccessService([
+            _record("t1", "待确认", tmdb_id=279923, season=1, episode=8),
+        ])
+        result = service.mark_history_records_success([{
+            "time": "t1",
+            "share_url": "https://pan.example.com/s/T1",
+            "file_name": "f1.mkv",
+        }])
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(service._store["history"][0]["status"], "成功")
+
     def test_unknown_record_raises(self):
         service = _ManualSuccessService([_record("t1", "待确认")])
         with self.assertRaises(LookupError):

@@ -2047,6 +2047,12 @@ class HistoryService(OwnerDelegator):
             for identity in identities
             if (identity_key := self._history_record_identity(identity))
         }
+        target_pairs = {
+            (str(identity.get("share_url") or ""), str(identity.get("file_name") or ""))
+            for identity in identities
+            if str(identity.get("share_url") or "").strip()
+            and str(identity.get("file_name") or "").strip()
+        }
         if not target_ids and not target_identities:
             raise ValueError("未提供有效的历史记录标识")
 
@@ -2146,6 +2152,12 @@ class HistoryService(OwnerDelegator):
             for identity in identities
             if (identity_key := self._history_record_identity(identity))
         }
+        target_pairs = {
+            (str(identity.get("share_url") or ""), str(identity.get("file_name") or ""))
+            for identity in identities
+            if str(identity.get("share_url") or "").strip()
+            and str(identity.get("file_name") or "").strip()
+        }
         if not target_ids and not target_identities:
             raise ValueError("未提供有效的历史记录标识")
 
@@ -2158,6 +2170,10 @@ class HistoryService(OwnerDelegator):
                 if (
                         self._ensure_history_record_id(record) in target_ids
                         or self._history_record_identity(record) in target_identities
+                        or (
+                            str(record.get("share_url") or ""),
+                            str(record.get("file_name") or ""),
+                        ) in target_pairs
                 )
             ]
             if not selected_indexes:

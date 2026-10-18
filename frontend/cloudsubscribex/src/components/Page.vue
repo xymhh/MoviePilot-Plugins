@@ -634,8 +634,20 @@ async function retryFailedBatch() {
 // 后端单次上限 2000 条，前端按 200 条串行提交，避免整批被拒。
 const MARK_SUCCESS_CHUNK_SIZE = 200
 
+function markSuccessIdentity(record) {
+  return {
+    record_id: record?.record_id,
+    time: record?.time,
+    share_url: record?.share_url,
+    file_name: record?.file_name,
+    tmdb_id: record?.tmdb_id,
+    season: record?.season,
+    episode: record?.episode,
+  }
+}
+
 function confirmMarkHistorySuccess(payload) {
-  const records = (payload?.records || []).map(retryBatchIdentity)
+  const records = (payload?.records || []).map(markSuccessIdentity)
   if (!records.length) {
     notify("所选记录没有可标记的待确认/待处理项", "warning")
     return
