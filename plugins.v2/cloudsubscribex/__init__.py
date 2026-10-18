@@ -110,7 +110,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.57"
+    plugin_version = "1.6.58"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -201,6 +201,7 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_relay_max_file_gb: int = 25
     _cross_transfer_relay_timeout_minutes: int = 180
     _cross_transfer_relay_fallback_local: bool = True
+    _cross_transfer_relay_threads: int = 0
     # TG 频道监控（用户自己的 TG API 会话）：默认关闭，未配置凭据时强制视为关闭。
     _tg_monitor_enabled: bool = False
     _tg_api_id: int = 0
@@ -744,6 +745,7 @@ class CloudSubscribeX(_PluginBase):
             f"令牌={'已配置' if self._cross_transfer_relay_token else '空'}, "
             f"单文件上限={self._cross_transfer_relay_max_file_gb}GB, "
             f"单任务超时={self._cross_transfer_relay_timeout_minutes}分钟, "
+            f"下载线程={'中继默认' if not self._cross_transfer_relay_threads else self._cross_transfer_relay_threads}, "
             f"失败回落本机={'是' if self._cross_transfer_relay_fallback_local else '否'}")
         logger.info(
             f"跨盘中继连通性：{probe_health(self._cross_transfer_relay_url)}")
@@ -1021,6 +1023,11 @@ class CloudSubscribeX(_PluginBase):
         self._cross_transfer_relay_fallback_local = bool(
             config.get("cross_transfer_relay_fallback_local", True)
         )
+        try:
+            relay_threads = int(config.get("cross_transfer_relay_threads", 0) or 0)
+        except (TypeError, ValueError):
+            relay_threads = 0
+        self._cross_transfer_relay_threads = max(0, min(relay_threads, 128))
         if self._cross_transfer_relay_enabled and not self._cross_transfer_relay_url:
             self._cross_transfer_relay_enabled = False
         self._apply_tg_monitor_config(config)

@@ -106,12 +106,13 @@ class FakeRelay:
         self.cancelled.append(job_id)
 
 
-def make_manager(relay, fallback=True):
+def make_manager(relay, fallback=True, relay_connections=0):
     manager = CrossTransferTaskManager(
         lambda key: None, relay_client=relay,
         relay_max_bytes=10 * 1024 ** 3,
         relay_timeout_seconds=60,
         relay_fallback_local=fallback,
+        relay_connections=relay_connections,
     )
     manager._update = lambda *args, **kwargs: None
     return manager
@@ -146,7 +147,22 @@ def test_relay_success_returns_true_and_marks_success():
     assert ok is True
     assert relay.submitted[0]["file_id"] == "f1"
     assert relay.submitted[0]["target"]["name"] == "a.mkv"
+    assert relay.submitted[0]["connections"] == 0
     assert any(item.get("method") == "relay" for item in updates)
+
+
+def test_relay_payload_carries_configured_connections():
+    relay = FakeRelay([
+        {"status": "success", "phase": "done", "progress": 100,
+         "result": {"file_name": "a.mkv", "size": 1024, "sha1": "AB"}},
+    ])
+    manager = make_manager(relay, relay_connections=12)
+    ok = manager._relay_transfer(
+        make_task(), "task1", FakeTarget(), "/整理/待整理", "a.mkv",
+        "115", "AB", 1024, Event(),
+    )
+    assert ok is True
+    assert relay.submitted[0]["connections"] == 12
 
 
 def test_relay_failure_falls_back():

@@ -235,6 +235,19 @@ export function createTransferSection(options) {
               Boolean(config.cross_transfer_relay_enabled),
           },
           {
+            key: "cross_transfer_relay_threads",
+            label: "中继下载线程数",
+            type: "number",
+            default: 0,
+            min: 0,
+            max: 128,
+            hint: "随任务下发给中继的 Gopeed 下载连接数；0 = 用中继自己的配置（GOPEED_CONNECTIONS，默认 64）。中继需 0.6.2 及以上版本",
+            cols: 4,
+            show: (config) =>
+              Boolean(config.cross_transfer_enabled) &&
+              Boolean(config.cross_transfer_relay_enabled),
+          },
+          {
             key: "cross_transfer_relay_fallback_local",
             label: "中继失败回落本机上传",
             type: "switch",

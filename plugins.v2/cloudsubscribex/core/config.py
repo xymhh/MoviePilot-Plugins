@@ -192,6 +192,7 @@ class UIConfig:
             "cross_transfer_relay_max_file_gb": 25,
             "cross_transfer_relay_timeout_minutes": 180,
             "cross_transfer_relay_fallback_local": True,
+            "cross_transfer_relay_threads": 0,
             "gopeed_url": "http://gopeed:9999",
             "gopeed_token": "",
             "gopeed_path_prefix": "",

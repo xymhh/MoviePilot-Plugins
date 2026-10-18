@@ -649,6 +649,7 @@ class CrossTransferTaskManager:
                  relay_max_bytes: int = 0,
                  relay_timeout_seconds: int = 0,
                  relay_fallback_local: bool = True,
+                 relay_connections: int = 0,
                  on_change: Optional[Callable[[], None]] = None):
         self._provider_resolver = provider_resolver
         self._download_path = str(download_path or "").strip()
@@ -665,6 +666,8 @@ class CrossTransferTaskManager:
         self._relay_max_bytes = max(0, int(relay_max_bytes or 0))
         self._relay_timeout_seconds = max(60, int(relay_timeout_seconds or 0))
         self._relay_fallback_local = bool(relay_fallback_local)
+        # 中继下载腿线程数：0=用中继自己的配置（GOPEED_CONNECTIONS，默认 64）
+        self._relay_connections = max(0, min(int(relay_connections or 0), 128))
         self._transfer_slots = Semaphore(max(1, min(int(max_concurrent or 2), 10)))
         self._tasks: dict[str, dict] = {}
         self._lock = Lock()
@@ -1238,6 +1241,7 @@ class CrossTransferTaskManager:
             "size": int(total or 0),
             "sha1": str(checksum or getattr(source, "sha1", "") or "").upper(),
             "target": {"path": str(target_path), "name": str(target_name)},
+            "connections": int(self._relay_connections or 0),
         }
         try:
             job = client.submit(payload)
