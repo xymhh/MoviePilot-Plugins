@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 
-from . import OwnerDelegator
+from .. import OwnerDelegator
 from .sync import SyncApi
 
 

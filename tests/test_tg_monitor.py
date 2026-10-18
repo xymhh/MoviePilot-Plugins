@@ -154,5 +154,40 @@ class ScanTest(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class TgMonitorApiImportTest(unittest.TestCase):
+    """回归（1.6.57 真机加载失败）：api.tg 必须从 core 取 OwnerDelegator。
+
+    1.6.57 里写成 ``from . import OwnerDelegator``，MP 加载插件时
+    ``core.api`` 尚未初始化完成 → ImportError: cannot import name
+    'OwnerDelegator' from partially initialized module ...core.api，
+    整个插件加载失败、无法更新。
+    """
+
+    def test_tg_api_imports_owner_delegator_from_core(self):
+        import types
+
+        ensure_package("app.db")
+        ensure_package("app.db.subscribe_oper")
+        core.OwnerDelegator = type("OwnerDelegator", (), {
+            "__init__": lambda self, owner=None: None,
+        })
+        api_pkg = types.ModuleType("cloudsubscribex.core.api")
+        api_pkg.__path__ = [
+            os.path.join(plugins_v2_path, "cloudsubscribex", "core", "api")
+        ]
+        sys.modules["cloudsubscribex.core.api"] = api_pkg
+        setattr(core, "api", api_pkg)
+        sync_stub = types.ModuleType("cloudsubscribex.core.api.sync")
+        sync_stub.SyncApi = type("SyncApi", (), {})
+        sys.modules["cloudsubscribex.core.api.sync"] = sync_stub
+        setattr(api_pkg, "sync", sync_stub)
+
+        module = load_module(
+            "cloudsubscribex.core.api.tg",
+            "plugins.v2/cloudsubscribex/core/api/tg.py",
+        )
+        self.assertTrue(hasattr(module, "TgMonitorApi"))
+
+
 if __name__ == "__main__":
     unittest.main()
