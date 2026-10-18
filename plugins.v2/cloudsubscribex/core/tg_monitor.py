@@ -5,8 +5,8 @@
   因此私有频道（账号已加入）和公开频道都能读，Bot API 做不到这一点。
 - 扫描是增量的：每个频道记住最后处理的消息 id，只读新消息；首次按
   ``scan_limit`` 回溯。
-- 抓到资源只入库，不自动转存：页面点「转存」时复用插件既有的手动转存流程，
-  避免监控线程直接触发大批量的网盘操作。
+- 抓到资源先入库；频道规则开启自动转存且配置了白名单时，按标题/季号匹配
+  唯一订阅后复用插件既有的手动转存流程，其余条目保留为 pending 供人工选择。
 """
 
 from __future__ import annotations
@@ -69,13 +69,50 @@ def resource_type_of_url(url: str) -> str:
     return ""
 
 
-def extract_share_links(text: str) -> List[Tuple[str, str]]:
-    """从消息文本里抽取网盘分享链接，返回 [(url, type)]（按出现顺序去重）。"""
+def _message_entity_urls(message: Any) -> List[str]:
+    """抽取 Telegram 消息里不显示在正文中的 URL。
+
+    频道常把分享链接做成「点击跳转」的文字链接（``MessageEntityTextUrl``）、
+    网页预览（``web_page.url``）或底部按钮；这些 URL 不在 ``message.message``
+    里，只靠正则扫正文会漏掉整条资源。
+    """
+    text = str(getattr(message, "message", "") or "")
+    urls: List[str] = []
+    for entity in getattr(message, "entities", None) or []:
+        url = getattr(entity, "url", None)
+        if url:
+            urls.append(str(url))
+            continue
+        offset = getattr(entity, "offset", None)
+        length = getattr(entity, "length", None)
+        if isinstance(offset, int) and isinstance(length, int) and length > 0:
+            fragment = text[offset:offset + length].strip()
+            if "://" in fragment:
+                urls.append(fragment)
+    media = getattr(message, "media", None)
+    webpage = getattr(media, "webpage", None)
+    webpage_url = getattr(webpage, "url", None)
+    if webpage_url:
+        urls.append(str(webpage_url))
+    markup = getattr(message, "reply_markup", None)
+    for row in getattr(markup, "rows", None) or []:
+        for button in getattr(row, "buttons", None) or []:
+            button_url = getattr(button, "url", None)
+            if button_url:
+                urls.append(str(button_url))
+    return urls
+
+
+def extract_share_links(
+        text: str, extra_urls: Iterable[str] = (),
+) -> List[Tuple[str, str]]:
+    """从消息文本及实体/按钮 URL 中抽取分享链接，按出现顺序去重。"""
     body = str(text or "")
-    if not body:
-        return []
+    candidates = list(_URL_RE.findall(body)) + [
+        str(url or "").strip() for url in (extra_urls or [])
+    ]
     seen: Dict[str, str] = {}
-    for url in _URL_RE.findall(body):
+    for url in candidates:
         cleaned = url.rstrip(".,;，。；、!！?？]>")
         rtype = resource_type_of_url(cleaned)
         if rtype:
@@ -85,6 +122,14 @@ def extract_share_links(text: str) -> List[Tuple[str, str]]:
     for url in _ED2K_RE.findall(body):
         seen.setdefault(url, "ed2k")
     return list(seen.items())
+
+
+def extract_message_links(message: Any) -> List[Tuple[str, str]]:
+    """解析一条 Telegram 消息的全部分享链接（正文 + 实体 + 按钮）。"""
+    return extract_share_links(
+        str(getattr(message, "message", "") or ""),
+        extra_urls=_message_entity_urls(message),
+    )
 
 
 def normalize_channel(value: str) -> str:
@@ -534,7 +579,7 @@ class TgChannelMonitor:
                     continue
                 if rule_exclude and any(word in lowered for word in rule_exclude):
                     continue
-                links = extract_share_links(text)
+                links = extract_message_links(message)
                 if not links:
                     continue
                 item_id = _item_id(channel_key, message_id)

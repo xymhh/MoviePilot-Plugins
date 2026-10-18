@@ -28,6 +28,7 @@ tg_module = load_module(
 )
 
 extract_share_links = tg_module.extract_share_links
+extract_message_links = tg_module.extract_message_links
 normalize_channel = tg_module.normalize_channel
 normalize_channel_rules = tg_module.normalize_channel_rules
 TgChannelMonitor = tg_module.TgChannelMonitor
@@ -62,6 +63,41 @@ class ExtractLinksTest(unittest.TestCase):
     def test_trailing_punctuation_trimmed(self):
         links = extract_share_links("链接：https://pan.quark.cn/s/abcd，速存。")
         self.assertEqual(links[0][0], "https://pan.quark.cn/s/abcd")
+
+    def test_text_url_entity_used_when_body_hides_link(self):
+        class Entity:
+            url = "https://115cdn.com/s/sws1fkl3zrk?password=t58d"
+
+        class Message:
+            message = "链接： 点击跳转"
+            entities = [Entity()]
+            media = None
+            reply_markup = None
+
+        links = extract_message_links(Message())
+        self.assertEqual(links, [(
+            "https://115cdn.com/s/sws1fkl3zrk?password=t58d", "115",
+        )])
+
+    def test_inline_button_url_used(self):
+        class Button:
+            url = "https://pan.quark.cn/s/button123"
+
+        class Row:
+            buttons = [Button()]
+
+        class Markup:
+            rows = [Row()]
+
+        class Message:
+            message = "资源见按钮"
+            entities = []
+            media = None
+            reply_markup = Markup()
+
+        self.assertEqual(extract_message_links(Message()), [(
+            "https://pan.quark.cn/s/button123", "quark",
+        )])
 
 
 class NormalizeChannelTest(unittest.TestCase):
