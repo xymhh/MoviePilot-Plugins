@@ -2,8 +2,10 @@
 网盘订阅助手插件
 结合订阅功能，自动搜索网盘资源并同步缺失内容
 """
+import ast
 import copy
 import datetime
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as ThreadEvent, Lock, RLock, local
 from typing import Optional, Any, List, Dict, Tuple, Callable
@@ -110,7 +112,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.59"
+    plugin_version = "1.6.60"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -752,11 +754,31 @@ class CloudSubscribeX(_PluginBase):
 
     @staticmethod
     def _split_multiline(value: Any) -> list:
-        """把设置页的多行/逗号文本拆成去重列表。"""
-        text = str(value or "")
-        parts = [
-            item.strip() for item in text.replace(",", "\n").replace("，", "\n").splitlines()
-        ]
+        """把设置页的多行/逗号文本拆成去重列表。
+
+        兼容 MP 把多行字段存成列表、或存成 ``['a', 'b']`` / ``["a"]``
+        字符串的情况（前端编辑后原样提交）。
+        """
+        if isinstance(value, (list, tuple, set)):
+            parts = [str(item).strip() for item in value]
+        else:
+            text = str(value or "").strip()
+            if text.startswith("[") and text.endswith("]"):
+                parsed = None
+                for loader in (json.loads, ast.literal_eval):
+                    try:
+                        parsed = loader(text)
+                        break
+                    except (ValueError, SyntaxError, TypeError):
+                        continue
+                if isinstance(parsed, (list, tuple, set)):
+                    text = "\n".join(str(item) for item in parsed)
+                else:
+                    text = text.strip("[]")
+            parts = [
+                item.strip().strip("'\"").strip()
+                for item in text.replace(",", "\n").replace("，", "\n").splitlines()
+            ]
         return [item for item in dict.fromkeys(parts) if item]
 
     def _apply_tg_monitor_config(self, config: Dict[str, Any]) -> None:

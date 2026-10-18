@@ -92,19 +92,24 @@ def normalize_channel(value: str) -> str:
     支持 ``@name`` / ``name`` / ``https://t.me/name`` /
     ``https://t.me/c/123`` / ``-100123456`` / ``https://t.me/+invite``。
     """
-    text = str(value or "").strip()
+    text = str(value or "").strip().strip("[]").strip("'\"").strip()
     if not text:
         return ""
     if text.startswith("@"):
         return text
     if text.startswith("-") or text.isdigit():
         return text
-    match = re.match(r"https?://(?:t|telegram)\.me/(.+)$", text, re.IGNORECASE)
+    match = re.match(
+        r"(?:https?://)?(?:t|telegram)\.me/(.+)$", text, re.IGNORECASE,
+    )
     if match:
         path = match.group(1).strip("/")
         if path.startswith("+") or path.startswith("joinchat"):
             return f"https://t.me/{path}"
         if path.startswith("c/"):
+            parts = path.split("/")
+            if len(parts) > 1 and parts[1].isdigit():
+                return f"-100{parts[1]}"
             return path
         return "@" + path.split("/")[0]
     if "/" in text:
@@ -294,6 +299,12 @@ class TgChannelMonitor:
         try:
             if not await client.is_user_authorized():
                 raise RuntimeError("TG 会话已失效，请在设置页重新登录")
+            # StringSession 不保存实体缓存；先拉一遍对话列表，
+            # 这样私有频道的 -100 数字 ID 也能解析（邀请链接不依赖它）
+            try:
+                await client.get_dialogs(limit=None)
+            except Exception as error:  # noqa: BLE001
+                logger.warning(f"TG 拉取对话列表失败（不影响邀请链接扫描）：{error}")
             return await self._scan_with_client(client, trigger)
         finally:
             try:
@@ -312,10 +323,17 @@ class TgChannelMonitor:
         errors: List[str] = []
         scanned = 0
         for raw_channel in self._channels:
+            target = (
+                int(raw_channel) if re.fullmatch(r"-?\d+", str(raw_channel))
+                else raw_channel
+            )
             try:
-                entity = await client.get_entity(raw_channel)
+                entity = await client.get_entity(target)
             except Exception as error:  # noqa: BLE001
-                errors.append(f"{raw_channel}: 无法解析频道（{error}）")
+                detail = str(error)
+                if "not part of" in detail:
+                    detail = f"{detail}（请先用该账号加入此频道）"
+                errors.append(f"{raw_channel}: 无法解析频道（{detail}）")
                 continue
             channel_key = str(getattr(entity, "id", raw_channel))
             channel_title = (

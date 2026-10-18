@@ -163,6 +163,21 @@ class ScanTest(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
+class NormalizeChannelTest(unittest.TestCase):
+    def test_invite_link_and_list_repr(self):
+        self.assertEqual(
+            tg_module.normalize_channel("https://t.me/+Jc37JCr1diEzNDMx"),
+            "https://t.me/+Jc37JCr1diEzNDMx",
+        )
+        # MP 把多行字段存成列表字符串时，不能把括号引号带进去
+        self.assertEqual(
+            tg_module.normalize_channel("['https://t.me/+Jc37JCr1diEzNDMx']"),
+            "https://t.me/+Jc37JCr1diEzNDMx",
+        )
+        self.assertEqual(tg_module.normalize_channel("@some"), "@some")
+        self.assertEqual(tg_module.normalize_channel("t.me/some"), "@some")
+
+
 class CodeDeliveryTest(unittest.TestCase):
     def test_mapping(self):
         class T:
