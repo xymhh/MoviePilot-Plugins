@@ -227,6 +227,7 @@ class UIConfig:
             "tg_api_hash": "",
             "tg_session": "",
             "tg_channels": "",
+            "tg_channel_rules": [],
             "tg_monitor_keywords": "",
             "tg_monitor_exclude_keywords": "",
             "tg_monitor_scan_limit": 20,

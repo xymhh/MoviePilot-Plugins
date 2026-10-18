@@ -112,7 +112,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.64"
+    plugin_version = "1.6.65"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -210,6 +210,7 @@ class CloudSubscribeX(_PluginBase):
     _tg_api_hash: str = ""
     _tg_session: str = ""
     _tg_channels: list = []
+    _tg_channel_rules: list = []
     _tg_monitor_keywords: list = []
     _tg_monitor_exclude_keywords: list = []
     _tg_monitor_scan_limit: int = 20
@@ -908,6 +909,13 @@ class CloudSubscribeX(_PluginBase):
         self._tg_api_hash = str(config.get("tg_api_hash", "") or "").strip()
         self._tg_session = str(config.get("tg_session", "") or "").strip()
         self._tg_channels = self._split_multiline(config.get("tg_channels", ""))
+        raw_channel_rules = config.get("tg_channel_rules", [])
+        if isinstance(raw_channel_rules, str):
+            self._tg_channel_rules = [raw_channel_rules] if raw_channel_rules.strip() else []
+        elif isinstance(raw_channel_rules, (list, tuple)):
+            self._tg_channel_rules = list(raw_channel_rules)
+        else:
+            self._tg_channel_rules = []
         self._tg_monitor_keywords = self._split_multiline(
             config.get("tg_monitor_keywords", "")
         )
@@ -946,6 +954,7 @@ class CloudSubscribeX(_PluginBase):
                 api_hash=self._tg_api_hash,
                 session=self._tg_session,
                 channels=self._tg_channels,
+                channel_rules=self._tg_channel_rules,
                 keywords=self._tg_monitor_keywords,
                 exclude_keywords=self._tg_monitor_exclude_keywords,
                 scan_limit=self._tg_monitor_scan_limit,

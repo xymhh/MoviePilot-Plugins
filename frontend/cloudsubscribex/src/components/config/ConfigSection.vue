@@ -264,6 +264,11 @@
                   v-else-if="field.type === 'region-media-map' || field.type === 'priority-order'"
                   v-model="config[field.key]"
                   :field="field" />
+                <TgChannelRulesField
+                  v-else-if="field.type === 'tg-channel-rules'"
+                  v-model="config[field.key]"
+                  :field="field"
+                  :config="config" />
                 <VCronField
                   v-else-if="field.type === 'cron'"
                   v-model="config[field.key]"
@@ -532,6 +537,7 @@ import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from "vue";
 import AccountInfo from "./AccountInfo.vue";
 import CheckinTimeline from "./CheckinTimeline.vue";
 import RegionMediaMapField from "./RegionMediaMapField.vue";
+import TgChannelRulesField from "./TgChannelRulesField.vue";
 import MultiSelectDialogField from "./MultiSelectDialogField.vue";
 import ConfirmDialog from "../dialogs/ConfirmDialog.vue";
 

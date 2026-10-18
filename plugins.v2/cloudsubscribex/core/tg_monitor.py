@@ -150,6 +150,102 @@ def _message_title(text: str) -> str:
     return ""
 
 
+def _split_terms(value: Any) -> List[str]:
+    """把关键词字段归一成列表，兼容列表、逗号、顿号与换行分隔。"""
+    if isinstance(value, (list, tuple, set)):
+        items = [str(item) for item in value]
+    else:
+        text = str(value or "")
+        for separator in ("，", "、", ";", "；", ","):
+            text = text.replace(separator, "\n")
+        items = text.splitlines()
+    return [item.strip() for item in items if item.strip()]
+
+
+def _parse_rules_payload(value: Any) -> Any:
+    """``tg_channel_rules`` 可能是列表、JSON 字符串或多行文本。"""
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") or text.startswith("{"):
+            try:
+                return json.loads(text)
+            except (TypeError, ValueError):
+                return text
+        return text
+    return value
+
+
+def normalize_channel_rules(
+        raw_rules: Any, *, channels: Iterable[str] = (),
+        keywords: Iterable[str] = (), exclude_keywords: Iterable[str] = (),
+        scan_limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """归一化每频道规则；旧版的全局频道/关键词会自动展开成每频道一份。"""
+    payload = _parse_rules_payload(raw_rules)
+    rows: List[Any] = []
+    if isinstance(payload, dict):
+        rows = [payload]
+    elif isinstance(payload, (list, tuple)):
+        rows = list(payload)
+    elif isinstance(payload, str) and payload.strip():
+        rows = [payload]
+
+    if not rows:
+        # 兼容 1.6.64 及更早的配置：频道列表 + 全局关键词/回溯条数
+        default_keywords = list(keywords)
+        default_exclude = list(exclude_keywords)
+        rows = [
+            {
+                "channel": channel,
+                "keywords": default_keywords,
+                "exclude_keywords": default_exclude,
+                "scan_limit": scan_limit,
+            }
+            for channel in channels
+            if str(channel).strip()
+        ]
+
+    rules: List[Dict[str, Any]] = []
+    seen: set = set()
+    for row in rows:
+        if isinstance(row, str):
+            channel = row
+            rule_enabled = True
+            rule_keywords: Any = []
+            rule_exclude: Any = []
+            rule_limit = scan_limit
+        elif isinstance(row, dict):
+            channel = (
+                row.get("channel") or row.get("url")
+                or row.get("name") or row.get("id") or ""
+            )
+            rule_enabled = bool(row.get("enabled", True))
+            rule_keywords = row.get("keywords", [])
+            rule_exclude = row.get("exclude_keywords", [])
+            try:
+                rule_limit = int(row.get("scan_limit", scan_limit) or scan_limit)
+            except (TypeError, ValueError):
+                rule_limit = scan_limit
+        else:
+            continue
+        normalized = normalize_channel(str(channel or ""))
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        rules.append({
+            "channel": normalized,
+            "enabled": rule_enabled,
+            "keywords": [word.lower() for word in _split_terms(rule_keywords)],
+            "exclude_keywords": [
+                word.lower() for word in _split_terms(rule_exclude)
+            ],
+            "scan_limit": max(1, min(rule_limit, 200)),
+        })
+    return rules
+
+
 class _JsonStore:
     """频道监控自己的小型 JSON 存储。
 
@@ -215,16 +311,25 @@ class TgChannelMonitor:
     # ------------------------------------------------------------------ 配置
     def configure(
             self, *, enabled: bool, api_id: int, api_hash: str, session: str,
-            channels: Iterable[str], keywords: Iterable[str],
-            exclude_keywords: Iterable[str], scan_limit: int,
-            interval_minutes: int, max_items: int,
+            channels: Iterable[str] = (), keywords: Iterable[str] = (),
+            exclude_keywords: Iterable[str] = (), scan_limit: int = 20,
+            interval_minutes: int = 10, max_items: int = 500,
+            channel_rules: Any = None,
     ) -> None:
         with self._lock:
             self._enabled = bool(enabled)
             self._api_id = int(api_id or 0)
             self._api_hash = str(api_hash or "").strip()
             self._session = str(session or "").strip()
-            self._channels = [normalize_channel(item) for item in channels if str(item).strip()]
+            self._channel_rules = normalize_channel_rules(
+                channel_rules,
+                channels=channels,
+                keywords=keywords,
+                exclude_keywords=exclude_keywords,
+                scan_limit=scan_limit,
+            )
+            self._channels = [rule["channel"] for rule in self._channel_rules]
+            # 旧字段保留，供 status/兼容读取；扫描只认每频道规则
             self._keywords = [str(item).lower() for item in keywords if str(item).strip()]
             self._exclude_keywords = [
                 str(item).lower() for item in exclude_keywords if str(item).strip()
@@ -289,8 +394,10 @@ class TgChannelMonitor:
     def scan(self, trigger: str = "手动") -> Dict[str, Any]:
         if not self._enabled:
             return {"ok": False, "message": "频道监控未启用"}
-        if not self._channels:
+        if not self._channel_rules:
             return {"ok": False, "message": "还没有配置要监控的频道"}
+        if not any(rule.get("enabled", True) for rule in self._channel_rules):
+            return {"ok": False, "message": "所有频道规则都已停用"}
         return asyncio.run(self._scan_async(trigger))
 
     async def _scan_async(self, trigger: str) -> Dict[str, Any]:
@@ -322,7 +429,13 @@ class TgChannelMonitor:
         added: List[dict] = []
         errors: List[str] = []
         scanned = 0
-        for raw_channel in self._channels:
+        for rule in self._channel_rules:
+            if not rule.get("enabled", True):
+                continue
+            raw_channel = rule["channel"]
+            rule_keywords = list(rule.get("keywords") or [])
+            rule_exclude = list(rule.get("exclude_keywords") or [])
+            rule_limit = int(rule.get("scan_limit") or self._scan_limit)
             target = (
                 int(raw_channel) if re.fullmatch(r"-?\d+", str(raw_channel))
                 else raw_channel
@@ -346,12 +459,12 @@ class TgChannelMonitor:
                 if last_id:
                     # 增量：只取比 last_id 新的消息，按时间升序处理
                     messages = await client.get_messages(
-                        entity, limit=self._scan_limit, min_id=last_id, reverse=True,
+                        entity, limit=rule_limit, min_id=last_id, reverse=True,
                     )
                 else:
                     # 首次：取最新 N 条（Telethon 默认倒序），再翻转成升序
                     messages = list(reversed(await client.get_messages(
-                        entity, limit=self._scan_limit,
+                        entity, limit=rule_limit,
                     )))
             except Exception as error:  # noqa: BLE001
                 errors.append(f"{channel_title}: 读取消息失败（{error}）")
@@ -366,10 +479,9 @@ class TgChannelMonitor:
                 if not text:
                     continue
                 lowered = text.lower()
-                if self._keywords and not any(word in lowered for word in self._keywords):
+                if rule_keywords and not any(word in lowered for word in rule_keywords):
                     continue
-                if self._exclude_keywords and any(
-                        word in lowered for word in self._exclude_keywords):
+                if rule_exclude and any(word in lowered for word in rule_exclude):
                     continue
                 links = extract_share_links(text)
                 if not links:
@@ -418,7 +530,9 @@ class TgChannelMonitor:
             "trigger": trigger,
             "scanned": scanned,
             "added": len(added),
-            "channels": len(self._channels),
+            "channels": sum(
+                1 for rule in self._channel_rules if rule.get("enabled", True)
+            ),
             "errors": errors,
         }
         self._store.save(STATUS_KEY, {
@@ -446,6 +560,19 @@ class TgChannelMonitor:
             "running": bool(self._thread and self._thread.is_alive()),
             "channels": list(self._channels),
             "channel_count": len(self._channels),
+            "enabled_channel_count": sum(
+                1 for rule in self._channel_rules if rule.get("enabled", True)
+            ),
+            "channel_rules": [
+                {
+                    "channel": rule["channel"],
+                    "enabled": bool(rule.get("enabled", True)),
+                    "keywords": list(rule.get("keywords") or []),
+                    "exclude_keywords": list(rule.get("exclude_keywords") or []),
+                    "scan_limit": int(rule.get("scan_limit") or self._scan_limit),
+                }
+                for rule in self._channel_rules
+            ],
             "item_count": len(items),
             "new_count": sum(1 for item in items if item.get("status") == "new"),
             "last_scan_at": self._last_scan_at or int(stored.get("last_scan_at") or 0),
