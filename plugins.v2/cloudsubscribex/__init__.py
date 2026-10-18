@@ -112,7 +112,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.67"
+    plugin_version = "1.6.68"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -961,18 +961,42 @@ class CloudSubscribeX(_PluginBase):
                 interval_minutes=self._tg_monitor_interval_minutes,
                 max_items=self._tg_monitor_max_items,
                 auto_transfer_handler=self._auto_transfer_tg_item,
+                subscribe_provider=self._tg_subscribe_rows,
             )
         except Exception as error:  # noqa: BLE001 - 监控不可用不应拖垮插件
             logger.warning(f"TG 频道监控初始化失败：{error}")
+
+    def _tg_subscribe_rows(self) -> List[Dict[str, Any]]:
+        """给频道监控提供订阅匹配所需的精简字段。"""
+        from app.db.subscribe_oper import SubscribeOper
+
+        rows: List[Dict[str, Any]] = []
+        for sub in SubscribeOper().list() or []:
+            media_type = getattr(sub, "type", "")
+            media_type = getattr(media_type, "value", media_type)
+            rows.append({
+                "id": int(getattr(sub, "id", 0) or 0),
+                "name": str(getattr(sub, "name", "") or ""),
+                "season": int(getattr(sub, "season", 0) or 0),
+                "type": str(media_type or ""),
+                "year": str(getattr(sub, "year", "") or ""),
+            })
+        return rows
 
     def _auto_transfer_tg_item(self, item: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
         """频道规则命中自动转存时，复用页面「转存」同一条手动转存链路。"""
         from .core.api.sync import SyncApi
 
-        return SyncApi(self).api_vue_start_manual_sync({
+        links = list((item or {}).get("links") or [])
+        title = str((item or {}).get("title") or "").strip()
+        payload = {
             "subscribe_id": int(subscribe_id or 0),
-            "resource_links": list((item or {}).get("links") or []),
-        })
+            "resource_links": links,
+        }
+        if title and links:
+            # 把频道消息标题带进手动同步，电影单文件兜底不必只靠订阅名
+            payload["resource_titles"] = {link: title for link in links}
+        return SyncApi(self).api_vue_start_manual_sync(payload)
 
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:
         self._notify = bool(config.get("notify", False))

@@ -22,6 +22,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from app.log import logger
 
 from ..search.types import TYPE_HOSTS
+from .tg_match import match_item
 
 try:  # Telethon 是可选的：未安装时插件其余功能照常工作
     from telethon import TelegramClient
@@ -162,6 +163,34 @@ def _split_terms(value: Any) -> List[str]:
     return [item.strip() for item in items if item.strip()]
 
 
+def _rule_whitelist(rule: Dict[str, Any]) -> List[int]:
+    """频道规则的订阅白名单；兼容 1.6.68 之前的单值 auto_subscribe_id。"""
+    raw_ids = rule.get("auto_subscribe_ids") or []
+    if isinstance(raw_ids, str):
+        text = raw_ids.strip()
+        if text.startswith("["):
+            try:
+                raw_ids = json.loads(text)
+            except (TypeError, ValueError):
+                raw_ids = _split_terms(text)
+        else:
+            raw_ids = _split_terms(text)
+    if not isinstance(raw_ids, (list, tuple, set)):
+        raw_ids = [raw_ids]
+    values: List[Any] = list(raw_ids)
+    if rule.get("auto_subscribe_id"):
+        values.append(rule.get("auto_subscribe_id"))
+    result: List[int] = []
+    for value in values:
+        try:
+            subscribe_id = int(value or 0)
+        except (TypeError, ValueError):
+            continue
+        if subscribe_id > 0 and subscribe_id not in result:
+            result.append(subscribe_id)
+    return result
+
+
 def _parse_rules_payload(value: Any) -> Any:
     """``tg_channel_rules`` 可能是列表、JSON 字符串或多行文本。"""
     if isinstance(value, str):
@@ -218,6 +247,7 @@ def normalize_channel_rules(
             rule_limit = scan_limit
             rule_auto_transfer = False
             rule_auto_subscribe_id = 0
+            rule_auto_subscribe_ids: Any = []
         elif isinstance(row, dict):
             channel = (
                 row.get("channel") or row.get("url")
@@ -235,6 +265,7 @@ def normalize_channel_rules(
                 rule_auto_subscribe_id = int(row.get("auto_subscribe_id", 0) or 0)
             except (TypeError, ValueError):
                 rule_auto_subscribe_id = 0
+            rule_auto_subscribe_ids = row.get("auto_subscribe_ids", [])
         else:
             continue
         normalized = normalize_channel(str(channel or ""))
@@ -251,6 +282,10 @@ def normalize_channel_rules(
             "scan_limit": max(1, min(rule_limit, 200)),
             "auto_transfer": rule_auto_transfer,
             "auto_subscribe_id": max(0, rule_auto_subscribe_id),
+            "auto_subscribe_ids": _rule_whitelist({
+                "auto_subscribe_ids": rule_auto_subscribe_ids,
+                "auto_subscribe_id": rule_auto_subscribe_id,
+            }),
         })
     return rules
 
@@ -311,6 +346,8 @@ class TgChannelMonitor:
         self._last_scan_at = 0.0
         self._last_error = ""
         self._running = False
+        self._auto_transfer_handler = None
+        self._subscribe_provider = None
         self.configure(
             enabled=False, api_id=0, api_hash="", session="", channels=[],
             keywords=[], exclude_keywords=[], scan_limit=20,
@@ -325,6 +362,7 @@ class TgChannelMonitor:
             interval_minutes: int = 10, max_items: int = 500,
             channel_rules: Any = None,
             auto_transfer_handler: Any = None,
+            subscribe_provider: Any = None,
     ) -> None:
         with self._lock:
             self._enabled = bool(enabled)
@@ -339,6 +377,7 @@ class TgChannelMonitor:
                 scan_limit=scan_limit,
             )
             self._auto_transfer_handler = auto_transfer_handler
+            self._subscribe_provider = subscribe_provider
             self._channels = [rule["channel"] for rule in self._channel_rules]
             # 旧字段保留，供 status/兼容读取；扫描只认每频道规则
             self._keywords = [str(item).lower() for item in keywords if str(item).strip()]
@@ -531,10 +570,10 @@ class TgChannelMonitor:
                 existing.add(item_id)
                 existing_links.update(item["links"])
                 if rule.get("auto_transfer"):
-                    if int(rule.get("auto_subscribe_id") or 0) > 0:
+                    if _rule_whitelist(rule):
                         auto_candidates.append((item, dict(rule)))
                     else:
-                        item["auto_transfer_error"] = "未配置目标订阅"
+                        item["auto_transfer_error"] = "未配置目标订阅白名单"
             state[channel_key] = max_id
         if len(items) > self._max_items:
             items = items[: self._max_items]
@@ -555,6 +594,7 @@ class TgChannelMonitor:
             "errors": errors,
             "auto_transferred": auto_stats["auto_transferred"],
             "auto_failed": auto_stats["auto_failed"],
+            "auto_pending": auto_stats["auto_pending"],
         }
         self._store.save(STATUS_KEY, {
             "last_scan_at": self._last_scan_at,
@@ -573,7 +613,7 @@ class TgChannelMonitor:
             self, candidates: List[Tuple[dict, dict]],
     ) -> Dict[str, int]:
         """扫描后按频道规则自动转存；失败只记在条目上，不重试、不阻塞下次扫描。"""
-        stats = {"auto_transferred": 0, "auto_failed": 0}
+        stats = {"auto_transferred": 0, "auto_failed": 0, "auto_pending": 0}
         if not candidates:
             return stats
         handler = getattr(self, "_auto_transfer_handler", None)
@@ -582,8 +622,57 @@ class TgChannelMonitor:
                 item["auto_transfer_error"] = "自动转存未启用：插件未提供转存处理器"
             stats["auto_failed"] = len(candidates)
             return stats
+
+        provider = getattr(self, "_subscribe_provider", None)
+        subscriptions = None
+        provider_error = ""
+        if callable(provider):
+            try:
+                subscriptions = list(provider() or [])
+            except Exception as error:  # noqa: BLE001 - 读订阅失败不应误转
+                provider_error = str(error)
+                logger.warning(f"TG 频道自动匹配读取订阅失败：{error}")
+
         for item, rule in candidates:
-            subscribe_id = int(rule.get("auto_subscribe_id") or 0)
+            whitelist = _rule_whitelist(rule)
+            subscribe_id = 0
+            if callable(provider):
+                if provider_error:
+                    item["match_status"] = "pending"
+                    item["match_reason"] = f"读取订阅列表失败：{provider_error}"[:300]
+                    stats["auto_pending"] += 1
+                    continue
+                matched = match_item(item, subscriptions or [], allowed_ids=whitelist)
+                item["match_candidates"] = [
+                    {
+                        "id": row["id"], "name": row["name"],
+                        "season": row["season"], "type": row["type"],
+                        "score": row["score"], "reason": row["reason"],
+                    }
+                    for row in (matched.get("candidates") or [])
+                ]
+                item["match_reason"] = matched.get("reason") or ""
+                item["match_status"] = (
+                    "matched" if matched.get("matched") else "pending"
+                )
+                if not matched.get("matched"):
+                    stats["auto_pending"] += 1
+                    logger.info(
+                        f"TG 频道自动匹配留待手动（{rule.get('channel')}）："
+                        f"{item.get('title')} / {item['match_reason']}"
+                    )
+                    continue
+                subscribe_id = int(matched["matched"]["id"])
+                item["matched_subscribe_id"] = subscribe_id
+            else:
+                # 兼容旧调用方：没有订阅表时退回单值目标
+                subscribe_id = whitelist[0] if whitelist else 0
+            if subscribe_id <= 0:
+                item["match_status"] = "pending"
+                item["match_reason"] = "白名单为空"
+                stats["auto_pending"] += 1
+                continue
+
             try:
                 result = handler(item, subscribe_id)
             except Exception as error:  # noqa: BLE001 - 单条失败不影响扫描
@@ -591,6 +680,7 @@ class TgChannelMonitor:
             if isinstance(result, dict) and result.get("success"):
                 item["status"] = "transferred"
                 item["subscribe_id"] = subscribe_id
+                item["match_status"] = "transferred"
                 item["auto_transferred_at"] = int(time.time())
                 item.pop("auto_transfer_error", None)
                 stats["auto_transferred"] += 1
@@ -601,6 +691,7 @@ class TgChannelMonitor:
                 )
                 item["auto_transfer_error"] = message[:300]
                 item["auto_subscribe_id"] = subscribe_id
+                item["match_status"] = "failed"
                 stats["auto_failed"] += 1
                 logger.warning(
                     f"TG 频道自动转存失败（{rule.get('channel')} / "
@@ -632,6 +723,7 @@ class TgChannelMonitor:
                     "scan_limit": int(rule.get("scan_limit") or self._scan_limit),
                     "auto_transfer": bool(rule.get("auto_transfer", False)),
                     "auto_subscribe_id": int(rule.get("auto_subscribe_id") or 0),
+                    "auto_subscribe_ids": list(rule.get("auto_subscribe_ids") or []),
                 }
                 for rule in self._channel_rules
             ],

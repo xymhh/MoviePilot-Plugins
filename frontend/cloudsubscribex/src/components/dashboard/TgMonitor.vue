@@ -61,6 +61,15 @@
                 原消息
               </a>
             </div>
+            <div
+              v-if="item.match_reason"
+              class="text-caption mt-1"
+              :class="item.match_status === 'pending' ? 'text-warning' : 'text-medium-emphasis'">
+              自动匹配：{{ item.match_reason }}
+            </div>
+            <div v-if="item.auto_transfer_error" class="text-caption text-error mt-1">
+              {{ item.auto_transfer_error }}
+            </div>
           </td>
           <td class="text-caption">{{ typeText(item.types) }}</td>
           <td>

@@ -142,9 +142,11 @@ class ChannelRulesTest(unittest.TestCase):
             "channel": "@a",
             "auto_transfer": True,
             "auto_subscribe_id": "42",
+            "auto_subscribe_ids": [43, "44", 43, 0],
         }])
         self.assertTrue(rules[0]["auto_transfer"])
         self.assertEqual(rules[0]["auto_subscribe_id"], 42)
+        self.assertEqual(rules[0]["auto_subscribe_ids"], [43, 44, 42])
         self.assertFalse(normalize_channel_rules(["@b"])[0]["auto_transfer"])
 
     def test_auto_transfer_marks_item_and_reports_failure(self):
@@ -175,7 +177,53 @@ class ChannelRulesTest(unittest.TestCase):
         self.assertEqual(ok_item["subscribe_id"], 7)
         self.assertEqual(bad_item["status"], "new")
         self.assertEqual(bad_item["auto_transfer_error"], "订阅不存在")
-        self.assertEqual(stats, {"auto_transferred": 1, "auto_failed": 1})
+        self.assertEqual(
+            stats,
+            {"auto_transferred": 1, "auto_failed": 1, "auto_pending": 0},
+        )
+
+    def test_provider_matches_title_and_leaves_ambiguity_pending(self):
+        calls = []
+
+        def handler(item, subscribe_id):
+            calls.append(subscribe_id)
+            return {"success": True}
+
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=False, api_id=1, api_hash="hash", session="session",
+            channel_rules=[{"channel": "@a", "auto_transfer": True,
+                            "auto_subscribe_ids": [113, 114]}],
+            auto_transfer_handler=handler,
+            subscribe_provider=lambda: [
+                {"id": 113, "name": "现在就出发", "season": 4, "type": "电视剧"},
+                {"id": 114, "name": "现在就出发", "season": 4, "type": "电视剧"},
+            ],
+        )
+        item = {
+            "links": ["https://pan.quark.cn/s/a"],
+            "title": "现在就出发 第四季(2026) 第4集 [旅行/综艺]",
+            "status": "new",
+        }
+        stats = monitor._run_auto_transfers([(item, {
+            "channel": "@a", "auto_subscribe_ids": [113, 114],
+        })])
+        self.assertEqual(calls, [])
+        self.assertEqual(item["match_status"], "pending")
+        self.assertIn("多个相近订阅", item["match_reason"])
+        self.assertEqual(stats["auto_pending"], 1)
+
+        unique = {
+            "links": ["https://pan.quark.cn/s/b"],
+            "title": "现在就出发 第四季(2026) 第5集 [旅行/综艺]",
+            "status": "new",
+        }
+        stats = monitor._run_auto_transfers([(unique, {
+            "channel": "@a", "auto_subscribe_ids": [113],
+        })])
+        self.assertEqual(calls, [113])
+        self.assertEqual(unique["status"], "transferred")
+        self.assertEqual(stats["auto_transferred"], 1)
 
 
 class ScanTest(unittest.TestCase):

@@ -52,7 +52,7 @@ export function createTgMonitorSection() {
             key: "tg_channel_rules",
             label: "频道规则",
             type: "tg-channel-rules",
-            hint: "每个频道独立设置包含关键词、排除关键词和回溯条数；关键词留空表示该频道收录所有带网盘链接的消息",
+            hint: "每个频道独立设置包含关键词、排除关键词、回溯条数与自动转存白名单；白名单内按消息标题/季号/类型匹配，只有唯一高置信结果才自动转存",
             cols: 12,
             show: enabled("tg_monitor_enabled"),
           },

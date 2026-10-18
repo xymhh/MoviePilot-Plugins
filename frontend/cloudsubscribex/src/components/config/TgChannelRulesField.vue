@@ -41,6 +41,9 @@
           · {{ rule.keywords.length }} 关键词
         </span>
         <span v-if="!rule.enabled" class="ml-1 text-caption">（停用）</span>
+        <span v-if="rule.auto_transfer" class="ml-1 text-caption">
+          · 自动转存 {{ rule.auto_subscribe_ids.length }} 个订阅
+        </span>
         <v-icon
           v-if="rule.auto_transfer"
           icon="mdi-download"
@@ -140,11 +143,14 @@
               </div>
               <div v-if="rule.auto_transfer" class="auto-row mt-2">
                 <v-select
-                  v-model.number="rule.auto_subscribe_id"
+                  v-model="rule.auto_subscribe_ids"
                   :items="subscribeOptions"
                   item-title="title"
                   item-value="id"
-                  label="自动转存到订阅"
+                  label="自动转存订阅白名单（可多选）"
+                  multiple
+                  chips
+                  closable-chips
                   density="compact"
                   variant="outlined"
                   hide-details
@@ -160,9 +166,14 @@
                   @click="loadSubscribes(true)" />
               </div>
               <div
-                v-if="rule.auto_transfer && !rule.auto_subscribe_id"
+                v-if="rule.auto_transfer && !rule.auto_subscribe_ids.length"
                 class="text-caption text-warning mt-1">
-                开启自动转存后必须选择一个目标订阅，否则扫描时只会记录不转存。
+                开启自动转存后必须选择至少一个订阅，否则扫描时只会记录不转存。
+              </div>
+              <div
+                v-else-if="rule.auto_transfer"
+                class="text-caption text-medium-emphasis mt-1">
+                扫描时按消息标题、季号和类型在白名单内匹配；只有唯一高置信结果才自动转存，多个相近候选会留在列表里手动选择。
               </div>
             </v-card-text>
           </v-card>
@@ -259,18 +270,23 @@ function normalizeRule(row) {
       channel: row.trim(),
       enabled: true,
       auto_transfer: false,
-      auto_subscribe_id: 0,
+      auto_subscribe_ids: [],
       keywordsText: "",
       excludeText: "",
       scan_limit: 20,
     }
   }
   const rule = row || {}
+  const whitelist = Array.isArray(rule.auto_subscribe_ids)
+    ? rule.auto_subscribe_ids
+    : (rule.auto_subscribe_id ? [rule.auto_subscribe_id] : [])
   return {
     channel: String(rule.channel || rule.url || rule.name || "").trim(),
     enabled: rule.enabled !== false,
     auto_transfer: rule.auto_transfer === true,
-    auto_subscribe_id: Number(rule.auto_subscribe_id || 0) || 0,
+    auto_subscribe_ids: whitelist
+      .map((value) => Number(value || 0) || 0)
+      .filter((value, index, rows) => value > 0 && rows.indexOf(value) === index),
     keywordsText: splitTerms(rule.keywords).join("\n"),
     excludeText: splitTerms(rule.exclude_keywords).join("\n"),
     scan_limit: Number(rule.scan_limit || 20) || 20,
@@ -291,7 +307,7 @@ const rules = computed(() => {
         channel: rule.channel,
         enabled: rule.enabled,
         auto_transfer: rule.auto_transfer,
-        auto_subscribe_id: rule.auto_subscribe_id,
+        auto_subscribe_ids: rule.auto_subscribe_ids,
         keywords: splitTerms(rule.keywordsText),
         exclude_keywords: splitTerms(rule.excludeText),
         scan_limit: rule.scan_limit,
@@ -331,6 +347,8 @@ function addRule() {
   draft.value.push(withKey({
     channel: "",
     enabled: true,
+    auto_transfer: false,
+    auto_subscribe_ids: [],
     keywordsText: "",
     excludeText: "",
     scan_limit: 20,
@@ -345,11 +363,15 @@ function save() {
     if (!channel || seen.has(channel)) continue
     seen.add(channel)
     const limit = Math.max(1, Math.min(200, Number(rule.scan_limit || 20) || 20))
+    const autoIds = (rule.auto_subscribe_ids || [])
+      .map((value) => Number(value || 0) || 0)
+      .filter((value, index, values) => value > 0 && values.indexOf(value) === index)
     rows.push({
       channel,
       enabled: rule.enabled !== false,
       auto_transfer: rule.auto_transfer === true,
-      auto_subscribe_id: Number(rule.auto_subscribe_id || 0) || 0,
+      auto_subscribe_ids: autoIds,
+      auto_subscribe_id: autoIds[0] || 0,
       keywords: splitTerms(rule.keywordsText),
       exclude_keywords: splitTerms(rule.excludeText),
       scan_limit: limit,

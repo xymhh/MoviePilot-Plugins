@@ -93,10 +93,14 @@ class TgMonitorApi(OwnerDelegator):
         links = list(item.get("links") or [])
         if not links:
             return {"success": False, "message": "该消息没有可转存的网盘链接"}
-        result = SyncApi(self._owner).api_vue_start_manual_sync({
+        payload = {
             "subscribe_id": subscribe_id,
             "resource_links": links,
-        })
+        }
+        title = str(item.get("title") or "").strip()
+        if title:
+            payload["resource_titles"] = {link: title for link in links}
+        result = SyncApi(self._owner).api_vue_start_manual_sync(payload)
         if result.get("success"):
             monitor.update_items([item_id], status="transferred", subscribe_id=subscribe_id)
         return result
