@@ -100,6 +100,18 @@ class ExtractLinksTest(unittest.TestCase):
         )])
 
 
+class ScanCursorTest(unittest.TestCase):
+    def test_old_cursor_forces_backfill_once(self):
+        self.assertEqual(tg_module._scan_start_id({"123": 900}, "123"), 0)
+        self.assertEqual(
+            tg_module._scan_start_id(
+                {"123": 900, "123:logic_version": tg_module.SCAN_LOGIC_VERSION},
+                "123",
+            ),
+            900,
+        )
+
+
 class NormalizeChannelTest(unittest.TestCase):
     def test_variants(self):
         self.assertEqual(normalize_channel("@abc"), "@abc")

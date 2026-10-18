@@ -40,6 +40,9 @@ except Exception:  # pragma: no cover - 环境缺依赖
 
 ITEMS_KEY = "items"
 STATE_KEY = "state"
+# 解析逻辑版本：升级后首次扫描忽略旧游标，回填最近 N 条
+# 1 -> 纯正文正则；2 -> 正文 + entities/webpage/按钮 URL
+SCAN_LOGIC_VERSION = 2
 STATUS_KEY = "status"
 
 _URL_RE = re.compile(r"https?://[^\s<>\"'）)】，。；、！？】]+")
@@ -131,6 +134,14 @@ def extract_message_links(message: Any) -> List[Tuple[str, str]]:
         str(getattr(message, "message", "") or ""),
         extra_urls=_message_entity_urls(message),
     )
+
+
+def _scan_start_id(state: Dict[str, Any], channel_key: str) -> int:
+    """返回本轮扫描起点；解析逻辑升级后首次强制回填。"""
+    version = int(state.get(f"{channel_key}:logic_version") or 0)
+    if version < SCAN_LOGIC_VERSION:
+        return 0
+    return int(state.get(channel_key) or 0)
 
 
 def _unwrap_channel_text(value: Any) -> str:
@@ -578,7 +589,7 @@ class TgChannelMonitor:
                 or getattr(entity, "username", "")
                 or raw_channel
             )
-            last_id = int(state.get(channel_key) or 0)
+            last_id = _scan_start_id(state, channel_key)
             try:
                 if last_id:
                     # 增量：只取比 last_id 新的消息，按时间升序处理
@@ -648,6 +659,7 @@ class TgChannelMonitor:
                     else:
                         item["auto_transfer_error"] = "未配置目标订阅白名单"
             state[channel_key] = max_id
+            state[f"{channel_key}:logic_version"] = SCAN_LOGIC_VERSION
         if len(items) > self._max_items:
             items = items[: self._max_items]
         self._store.save(ITEMS_KEY, items)
