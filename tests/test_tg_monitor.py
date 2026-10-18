@@ -166,6 +166,16 @@ class ChannelRulesTest(unittest.TestCase):
             self.assertEqual(rule["exclude_keywords"], ["广告"])
             self.assertEqual(rule["scan_limit"], 15)
 
+    def test_channel_wrapped_in_list_or_double_quotes(self):
+        rules = normalize_channel_rules([
+            {"channel": ["https://t.me/+AbCdEf"]},
+            {"channel": r'''"['https://t.me/+GhIjKl']"'''},
+        ])
+        self.assertEqual(
+            [rule["channel"] for rule in rules],
+            ["https://t.me/+AbCdEf", "https://t.me/+GhIjKl"],
+        )
+
     def test_json_string_payload(self):
         rules = normalize_channel_rules(
             '[{"channel":"@a","keywords":"4K","scan_limit":3}]'
@@ -409,6 +419,19 @@ class NormalizeChannelTest(unittest.TestCase):
         # MP 把多行字段存成列表字符串时，不能把括号引号带进去
         self.assertEqual(
             tg_module.normalize_channel("['https://t.me/+Jc37JCr1diEzNDMx']"),
+            "https://t.me/+Jc37JCr1diEzNDMx",
+        )
+        # 旧配置可能被 str() 两次，外层再包一对引号
+        self.assertEqual(
+            tg_module.normalize_channel(
+                r'''"['https://t.me/+Jc37JCr1diEzNDMx']"''',
+            ),
+            "https://t.me/+Jc37JCr1diEzNDMx",
+        )
+        self.assertEqual(
+            tg_module.normalize_channel(
+                " [ 'https://t.me/+Jc37JCr1diEzNDMx' ] "
+            ),
             "https://t.me/+Jc37JCr1diEzNDMx",
         )
         self.assertEqual(tg_module.normalize_channel("@some"), "@some")

@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import hashlib
 import json
@@ -132,13 +133,40 @@ def extract_message_links(message: Any) -> List[Tuple[str, str]]:
     )
 
 
+def _unwrap_channel_text(value: Any) -> str:
+    """拆掉频道字段外面多包的 JSON/Python 列表和引号。
+
+    设置页或旧配置可能把 ``["https://t.me/+xxx"]`` 存成字符串，甚至再
+    ``str()`` 一次变成 ``"['https://t.me/+xxx']"``；直接拿去 get_entity 会报
+    ``Cannot find any entity corresponding to "['https://...']"``。
+    """
+    text = str(value or "").strip()
+    for _ in range(4):
+        before = text
+        text = text.strip()
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
+            if isinstance(parsed, (list, tuple)) and parsed:
+                text = str(parsed[0])
+                continue
+            text = text[1:-1].strip()
+        text = text.strip("'\"").strip()
+        if text == before:
+            break
+    return text
+
+
 def normalize_channel(value: str) -> str:
     """把设置页里填的频道写法归一成 Telethon 能识别的形式。
 
     支持 ``@name`` / ``name`` / ``https://t.me/name`` /
     ``https://t.me/c/123`` / ``-100123456`` / ``https://t.me/+invite``。
+    也兼容被列表/多层引号包住的旧配置。
     """
-    text = str(value or "").strip().strip("[]").strip("'\"").strip()
+    text = _unwrap_channel_text(value)
     if not text:
         return ""
     if text.startswith("@"):
