@@ -525,16 +525,18 @@ class TgChannelMonitor:
             self._client = None
 
     # ------------------------------------------------------------------ 扫描
-    def scan(self, trigger: str = "手动") -> Dict[str, Any]:
+    def scan(self, trigger: str = "手动", full: bool = False) -> Dict[str, Any]:
         if not self._enabled:
             return {"ok": False, "message": "频道监控未启用"}
         if not self._channel_rules:
             return {"ok": False, "message": "还没有配置要监控的频道"}
         if not any(rule.get("enabled", True) for rule in self._channel_rules):
             return {"ok": False, "message": "所有频道规则都已停用"}
-        return asyncio.run(self._scan_async(trigger))
+        return asyncio.run(self._scan_async(trigger, full=full))
 
-    async def _scan_async(self, trigger: str) -> Dict[str, Any]:
+    async def _scan_async(
+            self, trigger: str, full: bool = False,
+    ) -> Dict[str, Any]:
         client = self._new_client(self._session)
         await client.connect()
         try:
@@ -546,14 +548,16 @@ class TgChannelMonitor:
                 await client.get_dialogs(limit=None)
             except Exception as error:  # noqa: BLE001
                 logger.warning(f"TG 拉取对话列表失败（不影响邀请链接扫描）：{error}")
-            return await self._scan_with_client(client, trigger)
+            return await self._scan_with_client(client, trigger, full=full)
         finally:
             try:
                 await client.disconnect()
             except Exception:  # noqa: BLE001
                 pass
 
-    async def _scan_with_client(self, client, trigger: str) -> Dict[str, Any]:
+    async def _scan_with_client(
+            self, client, trigger: str, full: bool = False,
+    ) -> Dict[str, Any]:
         state = dict(self._store.load(STATE_KEY, {}) or {})
         items = list(self._store.load(ITEMS_KEY, []) or [])
         existing = {str(item.get("id")) for item in items}
@@ -564,10 +568,12 @@ class TgChannelMonitor:
         auto_candidates: List[Tuple[dict, dict]] = []
         errors: List[str] = []
         scanned = 0
+        rule_debug: List[dict] = []
         for rule in self._channel_rules:
-            if not rule.get("enabled", True):
-                continue
             raw_channel = rule["channel"]
+            if not rule.get("enabled", True):
+                rule_debug.append({"channel": raw_channel, "enabled": False})
+                continue
             rule_keywords = list(rule.get("keywords") or [])
             rule_exclude = list(rule.get("exclude_keywords") or [])
             rule_limit = int(rule.get("scan_limit") or self._scan_limit)
@@ -589,7 +595,7 @@ class TgChannelMonitor:
                 or getattr(entity, "username", "")
                 or raw_channel
             )
-            last_id = _scan_start_id(state, channel_key)
+            last_id = 0 if full else _scan_start_id(state, channel_key)
             try:
                 if last_id:
                     # 增量：只取比 last_id 新的消息，按时间升序处理
@@ -606,6 +612,15 @@ class TgChannelMonitor:
                 continue
             messages = list(messages or [])
             scanned += len(messages)
+            rule_debug.append({
+                "channel": raw_channel,
+                "channel_key": channel_key,
+                "start_id": last_id,
+                "messages": len(messages),
+                "logic_version": int(
+                    state.get(f"{channel_key}:logic_version") or 0
+                ),
+            })
             max_id = last_id
             for message in messages:
                 message_id = int(getattr(message, "id", 0) or 0)
@@ -677,6 +692,7 @@ class TgChannelMonitor:
                 1 for rule in self._channel_rules if rule.get("enabled", True)
             ),
             "errors": errors,
+            "debug": rule_debug,
             "auto_transferred": auto_stats["auto_transferred"],
             "auto_failed": auto_stats["auto_failed"],
             "auto_pending": auto_stats["auto_pending"],

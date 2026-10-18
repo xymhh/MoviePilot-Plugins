@@ -38,8 +38,11 @@ class TgMonitorApi(OwnerDelegator):
         }
 
     def api_vue_tg_scan(self, payload: Dict[str, Any] = None) -> dict:
+        payload = payload or {}
         try:
-            result = self._monitor().scan(trigger="手动")
+            result = self._monitor().scan(
+                trigger="手动", full=bool(payload.get("full")),
+            )
         except Exception as error:  # noqa: BLE001
             logger.warning(f"TG 频道手动扫描失败：{error}")
             return {"success": False, "message": f"扫描失败：{error}"}
