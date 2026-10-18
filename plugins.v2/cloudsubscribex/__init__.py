@@ -112,7 +112,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.61"
+    plugin_version = "1.6.62"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -252,6 +252,9 @@ class CloudSubscribeX(_PluginBase):
     _image_scrape_enabled: bool = False
     _strm_base_url: str = "http://172.17.0.1:9527"
     _strm_url_template: str = "{base_url}/d/{pickcode}?/{file_name}"
+    _strm_full_scan_enabled: bool = True
+    _strm_full_scan_overwrite: bool = False
+    _strm_full_scan_scheduler: Optional[BackgroundScheduler] = None
     _media_server_refresh_enabled: bool = False
     _media_servers: List[str] = []
     _media_server_path_mappings: str = ""
@@ -715,6 +718,7 @@ class CloudSubscribeX(_PluginBase):
             f"当前接管态={self._is_takeover_active()}")
         self._log_relay_state()
         self._start_residue_cleanup()
+        self._start_strm_full_scan()
 
         # 调度一次性任务。
         if self._auto_subscribe_onlyonce:
@@ -754,6 +758,56 @@ class CloudSubscribeX(_PluginBase):
             f"失败回落本机={'是' if self._cross_transfer_relay_fallback_local else '否'}")
         logger.info(
             f"跨盘中继连通性：{probe_health(self._cross_transfer_relay_url)}")
+
+    def run_strm_full_scan(self, reason: str = "手动") -> dict:
+        """后台按目录 CID 全量遍历媒体库，补齐/校准 STRM。"""
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler or not hasattr(sync_handler, "rebuild_strm_files"):
+            return {"success": False, "message": "同步服务未就绪"}
+        lock = self.__dict__.get("_strm_scan_lock")
+        if lock is None:
+            lock = Lock()
+            self._strm_scan_lock = lock
+        if not lock.acquire(blocking=False):
+            return {"success": False, "message": "已有 STRM 全量校准在运行"}
+
+        overwrite = bool(self._strm_full_scan_overwrite)
+
+        def _run():
+            try:
+                stats = sync_handler.rebuild_strm_files(overwrite=overwrite)
+                logger.info(
+                    f"STRM 全量校准完成（{reason}）：目录 {stats.get('directories')}，"
+                    f"视频 {stats.get('files')}，新增 {stats.get('created')}，"
+                    f"更新 {stats.get('updated')}，跳过 {stats.get('skipped')}，"
+                    f"失败 {stats.get('errors')}"
+                )
+            except Exception as error:  # noqa: BLE001
+                logger.error(f"STRM 全量校准失败（{reason}）：{error}")
+            finally:
+                lock.release()
+
+        Thread(target=_run, daemon=True).start()
+        return {"success": True, "message": "已开始后台全量校准，完成后写入日志"}
+
+    def _start_strm_full_scan(self) -> None:
+        """每天 05:10 全量校准一次（可在设置页关闭）。"""
+        if not (self._strm_full_scan_enabled and self._strm_generate_enabled):
+            return
+        if self.__dict__.get("_strm_full_scan_scheduler") is not None:
+            return
+        try:
+            scheduler = BackgroundScheduler(timezone=settings.TZ)
+            scheduler.add_job(
+                func=lambda: self.run_strm_full_scan("定时"),
+                trigger=CronTrigger(hour=5, minute=10),
+                id="cloudsubscribe_strm_full_scan",
+                replace_existing=True,
+            )
+            scheduler.start()
+            self._strm_full_scan_scheduler = scheduler
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"STRM 全量校准定时任务启动失败：{error}")
 
     def cleanup_gopeed_residue(self, reason: str = "手动") -> dict:
         """删除跨盘中继残留（cloud-transfer-*），返回统计。
@@ -1171,6 +1225,8 @@ class CloudSubscribeX(_PluginBase):
         self._anime_pack_preferred = bool(config.get("anime_pack_preferred", True))
         self._offline_timeout = max(10, min(int(config.get("offline_timeout", 30) or 30), 1440))
         self._strm_generate_enabled = bool(config.get("strm_generate_enabled", True))
+        self._strm_full_scan_enabled = bool(config.get("strm_full_scan_enabled", True))
+        self._strm_full_scan_overwrite = bool(config.get("strm_full_scan_overwrite", False))
         self._nfo_scrape_enabled = bool(config.get("nfo_scrape_enabled", False))
         self._image_scrape_enabled = bool(config.get("image_scrape_enabled", False))
         self._strm_base_url = str(config.get("strm_base_url", "http://172.17.0.1:9527")).strip().rstrip("/")
@@ -1392,6 +1448,15 @@ class CloudSubscribeX(_PluginBase):
                 if self._residue_scheduler.running:
                     self._residue_scheduler.shutdown()
                 self._residue_scheduler = None
+        except Exception:
+            pass
+
+        try:
+            if self._strm_full_scan_scheduler:
+                self._strm_full_scan_scheduler.remove_all_jobs()
+                if self._strm_full_scan_scheduler.running:
+                    self._strm_full_scan_scheduler.shutdown()
+                self._strm_full_scan_scheduler = None
         except Exception:
             pass
 

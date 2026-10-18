@@ -186,6 +186,17 @@ class RuntimeApi(OwnerDelegator):
         "search", "cloud", "sync", "interface", "platform",
     })
 
+    def api_vue_strm_full_scan(
+            self, payload: Optional[Dict[str, Any]] = None
+    ) -> dict:
+        """手动触发 STRM 全量校准（后台线程执行）。"""
+        del payload
+        result = self._owner.run_strm_full_scan("手动")
+        return {
+            "success": bool(result.get("success")),
+            "message": str(result.get("message") or ""),
+        }
+
     def api_vue_cleanup_residue(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:

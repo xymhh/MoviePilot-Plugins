@@ -77,7 +77,7 @@ from ...core.media import (
     tmdb_id_of,
 )
 from ...drive.scanner import get_driver_definitions
-from ...utils import StrmGenerator, StrmTemplateError
+from ...utils import StrmGenerator, StrmTemplateError, rebuild_strm_tree
 from ...utils.cache import create_platform_ttl_cache
 
 _COMPONENT_TYPES = (
@@ -431,6 +431,7 @@ class SyncHandler:
             )
 
         self._strm_generate_enabled = bool(_get_val("strm_generate_enabled", True))
+        self._video_extensions = list(_get_val("video_extensions", [".mkv", ".mp4", ".avi", ".iso"]))
         self._nfo_scrape_enabled = bool(_get_val("nfo_scrape_enabled", False))
         self._image_scrape_enabled = bool(_get_val("image_scrape_enabled", False))
         self._platform_transfer_history_enabled = bool(
@@ -1220,6 +1221,29 @@ class SyncHandler:
                 "pending_key": pending_key,
             })
         return results
+
+    def rebuild_strm_files(self, overwrite: bool = False) -> Dict[str, int]:
+        """按目录 CID 全量遍历媒体库，补齐（可选校准）STRM 文件。"""
+        if not (self._strm_generate_enabled and self._strm_generator
+                and self._local_resource_path and self._cloud_drive):
+            return {
+                "directories": 0, "files": 0, "created": 0,
+                "updated": 0, "skipped": 0, "errors": 0,
+            }
+        return rebuild_strm_tree(
+            provider=self._cloud_drive,
+            generator=self._strm_generator,
+            local_root=self._local_resource_path,
+            cloud_root=self._CLOUD_MEDIA_ROOT,
+            video_extensions=self._video_extensions,
+            reference_values=self._playback_reference.reference_values,
+            overwrite=overwrite,
+            progress=lambda stats: logger.info(
+                f"STRM 全量校准进度：目录 {stats['directories']}，"
+                f"文件 {stats['files']}，新增 {stats['created']}，"
+                f"更新 {stats['updated']}"
+            ),
+        )
 
     def _generate_strm(
             self,

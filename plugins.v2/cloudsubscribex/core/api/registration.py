@@ -493,6 +493,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "清空搜索和分享缓存",
             },
             {
+                "path": "/strm/full_scan",
+                "endpoint": self.api_vue_strm_full_scan,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "按目录 CID 全量校准 STRM",
+            },
+            {
                 "path": "/gopeed/cleanup_residue",
                 "endpoint": self.api_vue_cleanup_residue,
                 "methods": ["POST"],

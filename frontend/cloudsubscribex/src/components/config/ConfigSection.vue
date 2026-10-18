@@ -249,7 +249,7 @@
                     prepend-icon="mdi-broom"
                     :loading="residueCleaning"
                     :disabled="residueCleaning"
-                    @click="cleanupResidue()">
+                    @click="cleanupResidue(field)">
                     {{ field.label }}
                   </v-btn>
                   <span v-if="field.hint" class="text-caption text-medium-emphasis">{{ field.hint }}</span>
@@ -549,13 +549,15 @@ const props = defineProps({
 })
 
 const residueCleaning = ref(false)
-async function cleanupResidue() {
+async function cleanupResidue(field) {
   if (residueCleaning.value) return
   residueCleaning.value = true
   try {
-    const result = await props.api.post("plugin/CloudSubscribeX/gopeed/cleanup_residue", {})
-    if (!result?.success) throw new Error(result?.message || "清理失败")
-    emit("notify", result.message || "残留已清理", "success")
+    const endpoint =
+      field?.endpoint || "plugin/CloudSubscribeX/gopeed/cleanup_residue"
+    const result = await props.api.post(endpoint, {})
+    if (!result?.success) throw new Error(result?.message || "执行失败")
+    emit("notify", result.message || "已开始执行", "success")
   } catch (error) {
     emit(
       "notify",

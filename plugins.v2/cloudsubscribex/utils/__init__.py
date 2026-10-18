@@ -13,6 +13,7 @@ from .magnet import (
     parse_magnet_metadata,
 )
 from .strm import StrmGenerator, StrmTemplateError
+from .strm_scan import rebuild_strm_tree
 from ..core.media import media_identity
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "MediaFileParser",
     "StrmGenerator",
     "StrmTemplateError",
+    "rebuild_strm_tree",
     "parse_magnet_metadata",
     "DEFAULT_METADATA_URL_TEMPLATE",
     "configure_magnet_metadata_url",

@@ -134,6 +134,8 @@ class UIConfig:
             "anime_pack_preferred": True,
             "offline_timeout": 30,
             "strm_generate_enabled": True,
+            "strm_full_scan_enabled": True,
+            "strm_full_scan_overwrite": False,
             "nfo_scrape_enabled": False,
             "image_scrape_enabled": False,
             "strm_base_url": "http://172.17.0.1:9527",
