@@ -1001,8 +1001,20 @@ async function notifyHistory() {
   }
 
   .page-tabs :deep(.v-tab) {
-    padding-inline: 8px;
-    font-size: 0.875rem;
+    min-width: 0;
+    padding-inline: 4px;
+    font-size: 0.8rem;
+    letter-spacing: -0.2px;
+  }
+
+  .page-tabs :deep(.v-tab .v-icon) {
+    display: none;
+  }
+
+  .page-tabs :deep(.v-chip) {
+    margin-left: 4px !important;
+    height: 18px;
+    font-size: 10px;
   }
 
   .page-pane {

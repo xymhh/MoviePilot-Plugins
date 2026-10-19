@@ -2,7 +2,7 @@
   <div class="organize-panel">
     <v-card flat class="border rounded organize-shell">
       <v-card-text class="pa-3">
-        <div class="d-flex flex-wrap align-center ga-2">
+        <div class="organize-controls">
           <v-text-field
             v-model="sourcePath"
             class="organize-path"
@@ -14,6 +14,7 @@
             hide-details
             :disabled="busy" />
           <v-btn
+            class="organize-browse"
             variant="tonal"
             size="small"
             prepend-icon="mdi-folder-search-outline"
@@ -33,6 +34,7 @@
             hide-details
             :disabled="busy" />
           <v-btn
+            class="organize-scan"
             color="primary"
             variant="flat"
             size="small"
@@ -43,6 +45,7 @@
             扫描预览
           </v-btn>
           <v-btn
+            class="organize-cleanup"
             variant="tonal"
             size="small"
             prepend-icon="mdi-broom"
@@ -52,6 +55,7 @@
           </v-btn>
           <v-btn
             v-if="busy"
+            class="organize-stop"
             color="warning"
             variant="tonal"
             size="small"
@@ -153,6 +157,7 @@
             清空
           </v-btn>
           <v-btn
+            class="organize-execute"
             color="primary"
             variant="flat"
             size="small"
@@ -220,6 +225,57 @@
               </tr>
             </tbody>
           </v-table>
+        </div>
+
+        <div v-if="groups.length" class="organize-cards mt-2">
+          <article v-for="group in groups" :key="`card-${group.key}`" class="organize-card">
+            <div class="organize-card-head">
+              <v-checkbox
+                v-model="selected"
+                :value="group.key"
+                density="compact"
+                hide-details
+                class="organize-card-check"
+                :disabled="group.status !== 'ready' || busy" />
+              <div class="organize-card-heading">
+                <div class="organize-card-title">{{ group.title || group.key }}</div>
+                <div class="organize-card-tags">
+                  <v-chip size="x-small" variant="outlined">
+                    {{ group.media_type === "tv" ? "剧集" : "电影" }}
+                  </v-chip>
+                  <span v-if="group.year">{{ group.year }}</span>
+                  <span v-if="group.media_type === 'tv' && group.season">
+                    S{{ String(group.season).padStart(2, "0") }}
+                  </span>
+                </div>
+              </div>
+              <v-chip size="small" :color="statusColor(group.status)" variant="tonal">
+                {{ statusLabel(group.status) }}
+              </v-chip>
+            </div>
+
+            <div class="organize-card-source">{{ group.key }}</div>
+
+            <div class="organize-card-metrics">
+              <span><strong>{{ group.episode_count || 0 }}</strong> 集</span>
+              <span><strong>{{ group.subtitle_count || 0 }}</strong> 字幕</span>
+              <span v-if="group.duplicate_count" class="text-warning">
+                重复 {{ group.duplicate_count }}
+              </span>
+            </div>
+
+            <div class="organize-card-target">
+              <span class="organize-card-label">目标</span>
+              <span class="target-path">{{ group.target_dir || "—" }}</span>
+            </div>
+            <div v-if="group.reason" class="organize-card-note">{{ group.reason }}</div>
+            <div v-if="group.duplicate_count" class="organize-card-note text-warning">
+              重复集 {{ group.duplicate_count }} 个，已保留较大版本
+            </div>
+            <div v-if="group.result" class="organize-card-note">
+              成功 {{ group.result.done }} / 跳过 {{ group.result.skipped }} / 失败 {{ group.result.failed }}
+            </div>
+          </article>
         </div>
 
         <div v-if="latestHistory" class="text-caption text-medium-emphasis mt-3">
@@ -484,8 +540,18 @@ onBeforeUnmount(stopPolling)
 </script>
 
 <style scoped>
+.organize-panel {
+  height: 100%;
+  overflow: auto;
+}
 .organize-shell {
   background: rgb(var(--v-theme-surface));
+}
+.organize-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 .organize-path {
   flex: 1 1 320px;
@@ -538,5 +604,193 @@ onBeforeUnmount(stopPolling)
   white-space: nowrap;
   font-family: monospace;
   font-size: 12px;
+}
+.organize-cards {
+  display: none;
+}
+.organize-card {
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  border-radius: 10px;
+  padding: 10px;
+  background: rgb(var(--v-theme-surface));
+}
+.organize-card-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+.organize-card-check {
+  flex: 0 0 auto;
+  margin: -6px 0 -6px -6px;
+}
+.organize-card-heading {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.organize-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.organize-card-tags {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 3px;
+  color: rgb(var(--v-theme-on-surface-variant));
+  font-size: 11.5px;
+}
+.organize-card-source {
+  margin-top: 6px;
+  overflow: hidden;
+  color: rgb(var(--v-theme-on-surface-variant));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.organize-card-metrics {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  color: rgb(var(--v-theme-on-surface-variant));
+  font-size: 12px;
+}
+.organize-card-metrics strong {
+  color: rgb(var(--v-theme-on-surface));
+  font-size: 13px;
+}
+.organize-card-target {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: rgba(var(--v-theme-on-surface), 0.04);
+}
+.organize-card-label {
+  flex: 0 0 auto;
+  color: rgb(var(--v-theme-on-surface-variant));
+  font-size: 11px;
+  line-height: 1.5;
+}
+.organize-card-note {
+  margin-top: 6px;
+  color: rgb(var(--v-theme-on-surface-variant));
+  font-size: 11.5px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+@media (max-width: 600px) {
+  .organize-panel {
+    padding: 0;
+  }
+  .organize-shell :deep(.v-card-text) {
+    padding: 10px !important;
+  }
+  .organize-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+    align-items: stretch;
+  }
+  .organize-path {
+    grid-column: 1 / 2;
+    min-width: 0;
+  }
+  .organize-browse {
+    grid-column: 2 / 3;
+    height: 40px;
+    margin-top: 0;
+    padding-inline: 10px;
+  }
+  .organize-limit {
+    grid-column: 1 / 2;
+    min-width: 0;
+  }
+  .organize-scan {
+    grid-column: 2 / 3;
+    min-width: 108px;
+  }
+  .organize-cleanup,
+  .organize-stop {
+    grid-column: 1 / -1;
+  }
+  .organize-controls :deep(.v-btn) {
+    min-height: 36px;
+    font-size: 12px;
+  }
+  .organize-hint {
+    margin-top: 8px !important;
+    font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .organize-stats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    margin-top: 10px !important;
+  }
+  .organize-stats :deep(.v-chip) {
+    width: 100%;
+    min-width: 0;
+    justify-content: flex-start;
+    font-size: 11.5px;
+  }
+  .organize-message {
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .organize-toolbar {
+    position: sticky;
+    top: -1px;
+    z-index: 2;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    align-items: stretch;
+    margin-top: 10px !important;
+    padding: 6px 0;
+    background: rgb(var(--v-theme-surface));
+  }
+  .organize-toolbar > .text-caption {
+    grid-column: 1 / -1;
+  }
+  .organize-toolbar :deep(.v-spacer) {
+    display: none;
+  }
+  .organize-toolbar :deep(.v-btn) {
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    font-size: 12px;
+  }
+  .organize-toolbar .organize-execute {
+    grid-column: 1 / -1;
+    height: 36px;
+  }
+  .organize-table-wrap {
+    display: none;
+  }
+  .organize-cards {
+    display: grid;
+    gap: 10px;
+  }
+  .organize-card-check :deep(.v-selection-control) {
+    min-height: 24px;
+  }
+  .target-path {
+    max-width: none;
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+    word-break: break-all;
+    line-height: 1.45;
+  }
 }
 </style>

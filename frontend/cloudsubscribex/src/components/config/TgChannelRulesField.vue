@@ -383,6 +383,24 @@ function clearAll() {
 }
 
 @media (max-width: 700px) {
+  .tg-channel-rules :deep(.v-chip) {
+    max-width: 100%;
+    height: auto;
+    min-height: 30px;
+    padding-block: 5px;
+    white-space: normal;
+  }
+
+  .tg-channel-rules :deep(.v-chip__content) {
+    flex-wrap: wrap;
+    white-space: normal;
+    line-height: 1.4;
+  }
+
+  .tg-channel-rules :deep(.v-btn) {
+    max-width: 100%;
+  }
+
   .rule-head {
     flex-direction: column;
     align-items: stretch;

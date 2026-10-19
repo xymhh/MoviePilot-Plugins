@@ -2,20 +2,23 @@
   <div class="tg-monitor">
     <div class="tg-toolbar">
       <div class="tg-status">
-        <v-chip size="small" :color="status.enabled ? 'success' : 'grey'" variant="tonal">
-          {{ status.enabled ? "监控中" : "未启用" }}
-        </v-chip>
-        <v-chip v-if="!status.configured" size="small" color="warning" variant="tonal">未登录 TG</v-chip>
+        <div class="tg-status-chips">
+          <v-chip size="small" :color="status.enabled ? 'success' : 'grey'" variant="tonal">
+            {{ status.enabled ? "监控中" : "未启用" }}
+          </v-chip>
+          <v-chip v-if="!status.configured" size="small" color="warning" variant="tonal">未登录 TG</v-chip>
+        </div>
         <span class="tg-meta">
           频道 {{ status.channel_count || 0 }} · 资源 {{ status.item_count || 0 }} · 待处理 {{ status.new_count || 0 }}
           <template v-if="status.last_scan_at">· 上次扫描 {{ formatTime(status.last_scan_at) }}</template>
         </span>
       </div>
       <div class="tg-actions">
-        <v-btn size="small" variant="tonal" prepend-icon="mdi-account-key-outline" @click="openLogin">
+        <v-btn class="tg-login" size="small" variant="tonal" prepend-icon="mdi-account-key-outline" @click="openLogin">
           {{ status.configured ? "重新登录" : "登录 TG" }}
         </v-btn>
         <v-btn
+          class="tg-logout"
           size="small"
           variant="tonal"
           prepend-icon="mdi-delete-outline"
@@ -23,7 +26,7 @@
           @click="logout">
           退出登录
         </v-btn>
-        <v-btn size="small" color="primary" variant="flat" prepend-icon="mdi-radar" :loading="scanning" @click="scan">
+        <v-btn class="tg-scan" size="small" color="primary" variant="flat" prepend-icon="mdi-radar" :loading="scanning" @click="scan">
           立即扫描
         </v-btn>
       </div>
@@ -95,7 +98,55 @@
         </tr>
       </tbody>
     </v-table>
-    <div v-else class="tg-empty">还没有抓到资源。启用监控后点「立即扫描」，或等后台定时任务抓取。</div>
+    <div v-if="items.length" class="tg-cards mt-2">
+      <article v-for="item in items" :key="`card-${item.id}`" class="tg-card">
+        <div class="tg-card-head">
+          <div class="tg-card-channel">{{ item.channel_title || "未知频道" }}</div>
+          <v-chip size="x-small" :color="statusColor(item.status)" variant="tonal">
+            {{ statusText(item.status) }}
+          </v-chip>
+        </div>
+        <div class="tg-card-title">{{ item.title || "（无标题）" }}</div>
+        <div class="tg-card-meta">
+          <span>{{ formatTime(item.published_at || item.created_at) }}</span>
+          <span>·</span>
+          <span>{{ typeText(item.types) }}</span>
+        </div>
+        <div class="tg-links">
+          <a v-for="link in item.links" :key="`card-${link}`" :href="link" target="_blank" rel="noreferrer">
+            {{ shortLink(link) }}
+          </a>
+          <a v-if="item.message_url" :href="item.message_url" target="_blank" rel="noreferrer" class="tg-msg">
+            原消息
+          </a>
+        </div>
+        <div
+          v-if="item.match_reason"
+          class="tg-card-note"
+          :class="item.match_status === 'pending' ? 'text-warning' : 'text-medium-emphasis'">
+          自动匹配：{{ item.match_reason }}
+        </div>
+        <div
+          v-if="item.auto_transfer_error"
+          class="tg-card-note"
+          :class="item.status === 'skipped' ? 'text-medium-emphasis' : 'text-error'">
+          {{ item.status === "skipped" ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}
+        </div>
+        <div class="tg-card-actions">
+          <v-btn
+            size="small"
+            variant="tonal"
+            color="primary"
+            :disabled="item.status === 'transferred'"
+            @click="openTransfer(item)">
+            转存
+          </v-btn>
+          <v-btn size="small" variant="text" @click="ignore(item)">忽略</v-btn>
+          <v-btn size="small" variant="text" color="error" @click="remove(item)">删除</v-btn>
+        </div>
+      </article>
+    </div>
+    <div v-if="!items.length" class="tg-empty">还没有抓到资源。启用监控后点「立即扫描」，或等后台定时任务抓取。</div>
 
     <v-dialog v-model="transferVisible" max-width="560">
       <v-card>
@@ -416,6 +467,12 @@ onUnmounted(() => {
   gap: 8px;
   flex-wrap: wrap;
 }
+.tg-status-chips {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 .tg-meta {
   color: rgb(var(--v-theme-on-surface-variant));
   font-size: 12px;
@@ -440,6 +497,9 @@ onUnmounted(() => {
   font-size: 12px;
   margin-top: 2px;
 }
+.tg-links a {
+  word-break: break-all;
+}
 .tg-msg {
   opacity: 0.7;
 }
@@ -448,5 +508,116 @@ onUnmounted(() => {
   text-align: center;
   color: rgb(var(--v-theme-on-surface-variant));
   font-size: 13px;
+}
+.tg-cards {
+  display: none;
+}
+.tg-card {
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  border-radius: 10px;
+  padding: 10px;
+  background: rgb(var(--v-theme-surface));
+}
+.tg-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tg-card-channel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: rgb(var(--v-theme-primary));
+  font-size: 12px;
+  font-weight: 600;
+}
+.tg-card-title {
+  margin-top: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.tg-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  color: rgb(var(--v-theme-on-surface-variant));
+  font-size: 11.5px;
+}
+.tg-card-note {
+  margin-top: 6px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.tg-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity));
+}
+.tg-card-actions :deep(.v-btn) {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 32px;
+  padding-inline: 4px;
+  font-size: 12px;
+}
+.tg-card-actions :deep(.v-btn--variant-tonal) {
+  flex: 1.35 1 0;
+}
+
+@media (max-width: 600px) {
+  .tg-monitor {
+    padding: 10px;
+  }
+  .tg-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .tg-status {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .tg-meta {
+    font-size: 11.5px;
+    line-height: 1.45;
+  }
+  .tg-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    width: 100%;
+  }
+  .tg-actions :deep(.v-btn) {
+    width: 100%;
+    min-width: 0;
+    height: 34px;
+    padding-inline: 6px;
+    font-size: 12px;
+  }
+  .tg-scan {
+    grid-column: 1 / -1;
+  }
+  .tg-table {
+    display: none;
+  }
+  .tg-cards {
+    display: grid;
+    gap: 10px;
+    margin-top: 10px !important;
+  }
+  .tg-empty {
+    padding: 28px 8px;
+    line-height: 1.6;
+  }
 }
 </style>
