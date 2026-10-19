@@ -107,6 +107,26 @@ class ShareTitleGuardTests(unittest.TestCase):
             FileMatcher.share_title_mismatch(_share("更新至20集"), MEDIA, "伟大的长征")
         )
 
+    def test_titleless_files_allow_target_root_with_suffixes(self):
+        for root in (
+                "【玉簟秋】更新至第15集",
+                "玉簟秋(45)",
+                "玉簟秋 - 4K",
+        ):
+            self.assertFalse(
+                FileMatcher.share_title_mismatch(
+                    _share(root, "14.mp4"), MEDIA, "玉簟秋"
+                ),
+                root,
+            )
+
+    def test_titleless_files_still_reject_unrelated_root(self):
+        self.assertTrue(
+            FileMatcher.share_title_mismatch(
+                _share("私.行", "21.mp4"), MEDIA, "伟大的长征"
+            )
+        )
+
     def test_accepts_when_one_root_matches(self):
         files = _share("私.行") + _share("伟大的长征")
         self.assertFalse(FileMatcher.share_title_mismatch(files, MEDIA, "伟大的长征"))

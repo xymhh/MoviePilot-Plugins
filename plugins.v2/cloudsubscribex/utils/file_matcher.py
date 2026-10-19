@@ -211,6 +211,30 @@ class FileMatcher:
         return roots
 
     @classmethod
+    def _share_files_titleless(cls, files: Any) -> bool:
+        """分享内是否没有任何文件名携带作品标题（只有 14.mp4 / S01E14 这类）。"""
+        saw_video = False
+        for item in files or []:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name or not MediaFileParser.is_video(name):
+                continue
+            saw_video = True
+            stem = name.rsplit("/", 1)[-1]
+            stem = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", stem)
+            cleaned = cls._SHARE_ROOT_TAG_RE.sub("", stem)
+            cleaned = re.sub(
+                r"(?i)(?:s\d{1,3})?(?:e|ep)?\d{1,4}", " ", cleaned
+            )
+            cleaned = re.sub(r"第\s*\d+\s*[集话]?", " ", cleaned)
+            fingerprint = normalize_title(cleaned)
+            if any(ch.isalpha() or "\u4e00" <= ch <= "\u9fff"
+                   for ch in fingerprint):
+                return False
+        return saw_video
+
+    @classmethod
     def _is_generic_share_root(cls, name: str) -> bool:
         """判断分享根目录是否只是泛称/格式词，无法据此识别剧名。"""
         text = str(name or "").strip()
@@ -247,7 +271,22 @@ class FileMatcher:
         if not roots:
             return False
 
+        # 夸克等分享常用「【玉簟秋】更新至第15集」「玉簟秋(45)」这类
+        # 带后缀的目录名，而文件只有 14.mp4。文件名没有作品名时，
+        # 只按“根目录包含目标标题/标题包含根目录”放行；明确不相干的
+        # 根目录（如「私.行」「玉-癫-囚」）仍然拦下。
         expected_title = normalize_title(resource_title)
+        target_title = normalize_title(getattr(mediainfo, "title", "") or "")
+        if cls._share_files_titleless(files):
+            for root in roots:
+                normalized = normalize_title(root)
+                for expected in (target_title, expected_title):
+                    if expected and (
+                            expected in normalized or normalized in expected
+                    ):
+                        return False
+            return True
+
         for root in roots:
             cleaned = cls._SHARE_ROOT_TAG_RE.sub("", root)
             cleaned = cls._SHARE_ROOT_UPDATE_RE.sub("", cleaned)
