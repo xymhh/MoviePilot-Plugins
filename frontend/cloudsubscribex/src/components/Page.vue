@@ -100,6 +100,10 @@
           <v-icon icon="mdi-telegram" size="small" class="mr-2" />
           频道监控
         </v-tab>
+        <v-tab value="organize">
+          <v-icon icon="mdi-folder-move-outline" size="small" class="mr-2" />
+          网盘整理
+        </v-tab>
       </v-tabs>
       <v-card-text class="pa-0 page-body">
         <div class="page-window">
@@ -108,6 +112,9 @@
           </div>
           <div v-show="mainTab === 'tg'" class="page-pane tg-pane">
             <TgMonitor :api="api" :notify="notify" :active="mainTab === 'tg'" />
+          </div>
+          <div v-show="mainTab === 'organize'" class="page-pane organize-pane">
+            <OrganizePanel :api="api" />
           </div>
           <div v-show="mainTab === 'history'" class="page-pane history-pane">
             <div class="history-shell">
@@ -296,6 +303,7 @@ import {computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch} from
 import RuntimeCard from "./dashboard/RuntimeCard.vue";
 import HistoryTable from "./dashboard/HistoryTable.vue";
 import TgMonitor from "./dashboard/TgMonitor.vue";
+import OrganizePanel from "./dashboard/OrganizePanel.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";

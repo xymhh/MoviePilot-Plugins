@@ -88,12 +88,19 @@
               {{ historyStats.total }}
             </v-chip>
           </v-tab>
+          <v-tab value="organize">
+            <v-icon icon="mdi-folder-move-outline" size="small" class="mr-2" />
+            网盘整理
+          </v-tab>
         </v-tabs>
       </div>
 
       <div class="workspace-window">
         <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
           <RuntimeCard class="runtime-panel" :runtime="runtime" :active="active" @stop-task="confirmStopTask" />
+        </div>
+        <div v-show="mainTab === 'organize'" class="workspace-pane organize-pane">
+          <OrganizePanel :api="api" />
         </div>
         <div v-show="mainTab === 'history'" class="workspace-pane history-pane">
           <HistoryTable
@@ -291,6 +298,7 @@ import {useDisplay} from "vuetify";
 import RuntimeCard from "./dashboard/RuntimeCard.vue";
 import HistoryTable from "./dashboard/HistoryTable.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
+import OrganizePanel from "./dashboard/OrganizePanel.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";
 import {CACHE_CATEGORIES, useCacheActions} from "../composables/useCacheActions.js";

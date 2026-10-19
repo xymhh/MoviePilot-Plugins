@@ -35,6 +35,7 @@ from .core.api import (
     MoviePilotRegistration,
     HistoryApi,
     MediaLibraryApi,
+    OrganizeApi,
     PageApi,
     QRCodeService,
     RuntimeApi,
@@ -49,6 +50,7 @@ from .core.media_scope import configure_media_path_ignores
 from .core.services import (
     SubscriptionControlService,
     CheckinService,
+    OrganizeService,
     PlatformIntegrationService,
     SubscriptionScoringService,
     SyncExecutionService,
@@ -79,6 +81,7 @@ _COMPONENT_TYPES = (
     SearchApi,
     ConfigApi,
     CheckinApi,
+    OrganizeApi,
     SyncApi,
     RuntimeApi,
     MediaLibraryApi,
@@ -95,6 +98,7 @@ _COMPONENT_TYPES = (
     SubscriptionSearchHook,
     PlatformIntegrationService,
     CheckinService,
+    OrganizeService,
     AutoSubscribeService,
 )
 
@@ -161,7 +165,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.80"
+    plugin_version = "1.7.0"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -772,6 +776,7 @@ class CloudSubscribeX(_PluginBase):
         self._log_relay_state()
         self._start_residue_cleanup()
         self._start_strm_full_scan()
+        self._start_organize_schedule()
 
         # 调度一次性任务。
         if self._auto_subscribe_onlyonce:
@@ -861,6 +866,36 @@ class CloudSubscribeX(_PluginBase):
             self._strm_full_scan_scheduler = scheduler
         except Exception as error:  # noqa: BLE001
             logger.warning(f"STRM 全量校准定时任务启动失败：{error}")
+
+    def _start_organize_schedule(self) -> None:
+        """按 Cron 定时扫描 115 整理源目录；默认关闭。"""
+        if not self._organize_schedule_enabled:
+            return
+        if not self._organize_source_path:
+            logger.warning("整理台定时任务已开启，但未配置 organize_source_path")
+            return
+        if self.__dict__.get("_organize_scheduler") is not None:
+            return
+        try:
+            scheduler = BackgroundScheduler(timezone=settings.TZ)
+            scheduler.add_job(
+                func=lambda: self.start_scan(
+                    source_path=self._organize_source_path,
+                    auto_execute=self._organize_schedule_auto_execute,
+                    trigger="定时",
+                ),
+                trigger=CronTrigger.from_crontab(self._organize_schedule_cron),
+                id="cloudsubscribe_organize",
+                replace_existing=True,
+            )
+            scheduler.start()
+            self._organize_scheduler = scheduler
+            logger.info(
+                f"115 网盘整理定时任务启动：{self._organize_schedule_cron}，"
+                f"自动执行={'是' if self._organize_schedule_auto_execute else '否'}"
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"115 网盘整理定时任务启动失败：{error}")
 
     def cleanup_gopeed_residue(self, reason: str = "手动") -> dict:
         """删除跨盘中继残留（cloud-transfer-*），返回统计。
@@ -1327,6 +1362,23 @@ class CloudSubscribeX(_PluginBase):
         self._strm_generate_enabled = bool(config.get("strm_generate_enabled", True))
         self._strm_full_scan_enabled = bool(config.get("strm_full_scan_enabled", True))
         self._strm_full_scan_overwrite = bool(config.get("strm_full_scan_overwrite", False))
+        self._organize_source_path = str(config.get("organize_source_path", "") or "").strip()
+        try:
+            organize_max_files = int(config.get("organize_max_files", 500) or 500)
+        except (TypeError, ValueError):
+            organize_max_files = 500
+        try:
+            organize_max_depth = int(config.get("organize_max_depth", 8) or 8)
+        except (TypeError, ValueError):
+            organize_max_depth = 8
+        self._organize_max_files = max(1, min(organize_max_files, 5000))
+        self._organize_max_depth = max(1, min(organize_max_depth, 20))
+        self._organize_include_subtitles = bool(config.get("organize_include_subtitles", True))
+        self._organize_conflict_policy = str(config.get("organize_conflict_policy", "skip") or "skip")
+        self._organize_schedule_enabled = bool(config.get("organize_schedule_enabled", False))
+        self._organize_schedule_cron = str(config.get("organize_schedule_cron", "0 4 * * *") or "0 4 * * *")
+        self._organize_schedule_auto_execute = bool(config.get("organize_schedule_auto_execute", True))
+        self._organize_schedule_notify = bool(config.get("organize_schedule_notify", True))
         self._nfo_scrape_enabled = bool(config.get("nfo_scrape_enabled", False))
         self._image_scrape_enabled = bool(config.get("image_scrape_enabled", False))
         self._strm_base_url = str(config.get("strm_base_url", "http://172.17.0.1:9527")).strip().rstrip("/")

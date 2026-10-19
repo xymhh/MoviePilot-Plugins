@@ -2,6 +2,7 @@ import {createBasicSection} from "./fields/basic.js";
 import {createDriveSection} from "./fields/drive/index.js";
 import {createCloudDriveItems, createResourceTypeItems} from "./fields/helpers.js";
 import {createNotifySection} from "./fields/notify.js";
+import {createOrganizeSection} from "./fields/organize.js";
 import {createSearchSection} from "./fields/search/index.js";
 import {createTransferSection} from "./fields/transfer.js";
 import {createUpgradeSection} from "./fields/upgrade.js";
@@ -15,6 +16,7 @@ export function createConfigSections(options, config = {}) {
   return [
     createBasicSection(cloudDriveItems, options),
     createTransferSection(options),
+    createOrganizeSection(),
     createSubscribeSection(options),
     createCheckinSection(options),
     createTgMonitorSection(),

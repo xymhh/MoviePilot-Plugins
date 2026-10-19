@@ -540,7 +540,42 @@ class MoviePilotRegistration(OwnerDelegator):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "强制重评分：清空episode_priority缓存，重新扫描磁盘strm文件评分（覆盖旧评分）",
-            }
+            },
+            {
+                "path": "/organize/scan",
+                "endpoint": self.api_vue_organize_scan,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "115 网盘整理：扫描源目录并生成预览",
+            },
+            {
+                "path": "/organize/status",
+                "endpoint": self.api_vue_organize_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "115 网盘整理：扫描/执行状态",
+            },
+            {
+                "path": "/organize/execute",
+                "endpoint": self.api_vue_organize_execute,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "115 网盘整理：执行选中的分组",
+            },
+            {
+                "path": "/organize/stop",
+                "endpoint": self.api_vue_organize_stop,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "115 网盘整理：停止当前任务",
+            },
+            {
+                "path": "/organize/history",
+                "endpoint": self.api_vue_organize_history,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "115 网盘整理：最近执行摘要",
+            },
         ]
 
     def get_dashboard_meta(self) -> List[Dict[str, str]]:
