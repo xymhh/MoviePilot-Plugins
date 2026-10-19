@@ -176,3 +176,36 @@ def test_subtitle_skipped_when_video_skipped():
     assert result["skipped"] == 2
     assert result["done"] == 0
     assert any("字幕跳过" in item["reason"] for item in result["items"])
+
+
+def test_group_plan_uses_sync_handler_for_platform_target():
+    """整理台必须走同步服务的命名实现，不能假设插件自身有该方法。"""
+    service = make_service(FakeBatch())
+    object.__setattr__(service, "_recognize_package", lambda package: types.SimpleNamespace(
+        title="Show", year=2020, tmdb_id=1,
+    ))
+
+    class FakeNaming:
+        called = False
+
+        def _platform_target(self, root, subscribe, media, filename, season=None, episode=None):
+            self.called = True
+            return "/媒体库/剧集/Show (2020)/Season 01", "Show - S01E01.mkv"
+
+    naming = FakeNaming()
+    service._sync_handler = naming
+
+    entry = plan.OrganizeEntry(
+        file_id="1", name="Show.S01E01.mkv", size=100,
+        parent_path="/待整理/Show/Season 1", is_video=True,
+    )
+    package = plan.PackagePlan(
+        key="Show", pack_name="Show", source_dirs=["/待整理/Show"],
+        videos=[plan.VideoCandidate(entry=entry, season=1, episode=1, subtitles=[])],
+        duplicates=[], ignored=[], is_tv=True,
+    )
+    result = service._build_group_plan(package, 0)
+    assert naming.called is True
+    assert result.group["status"] == "ready"
+    assert result.targets[0].target_dir == "/媒体库/剧集/Show (2020)/Season 01"
+    assert result.targets[0].target_name == "Show - S01E01.mkv"

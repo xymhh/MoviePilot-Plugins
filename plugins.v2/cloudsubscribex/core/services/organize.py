@@ -336,7 +336,10 @@ class OrganizeService(OwnerDelegator):
         for candidate in package.videos:
             episode = int(candidate.episode or 0) if package.is_tv else 0
             try:
-                target_dir, target_name = self._platform_target(
+                naming = getattr(self, "_sync_handler", None)
+                if not naming:
+                    raise RuntimeError("同步服务尚未初始化")
+                target_dir, target_name = naming._platform_target(  # noqa: SLF001
                     "/",
                     None,
                     media,
