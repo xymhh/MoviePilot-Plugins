@@ -152,6 +152,76 @@ class TgMatchTest(unittest.TestCase):
             self.assertEqual(result["matched"]["id"], sub["id"])
             self.assertGreaterEqual(result["matched"]["score"], 90)
 
+    def test_update_count_and_credits_are_stripped(self):
+        """真实频道里的“更10集，演员/演员”不能残留成 88 分后缀。"""
+        cases = [
+            (
+                "名称：伟大的长征(2026)4K 10bit 60FPS FLAC无损HiFi声 更至EP20",
+                {"id": 10, "name": "伟大的长征", "season": 1, "type": "电视剧"},
+            ),
+            (
+                "名称：伟大的长征‎ (2026) 4K SDR HDR 60帧 高码率 "
+                "FLAC2.0+DDP2.0+HiFi 中字 更20集，于和伟/曹磊",
+                {"id": 10, "name": "伟大的长征", "season": 1, "type": "电视剧"},
+            ),
+            (
+                "名称：嫁金钗‎ (2026) 4K HDR SDR DV杜比视界 高码率 "
+                "AAC2.0 中字 更10集，田曦薇/闫桉",
+                {"id": 158, "name": "嫁金钗", "season": 1, "type": "电视剧"},
+            ),
+            (
+                "名称：美人余‎ (2026) 4K SDR HDR DV杜比视界 高码率 "
+                "DDP2.0+HiFi 中字 更23集，李一桐/王佳佳",
+                {"id": 83, "name": "美人余", "season": 1, "type": "电视剧"},
+            ),
+            (
+                "名称：把黑夜点燃‎ (2026) 4K HDR 高码率 DDP5.1+AAC5.1 "
+                "中字 更08集，蒋欣/陈哲远",
+                {"id": 184, "name": "把黑夜点燃", "season": 1, "type": "电视剧"},
+            ),
+        ]
+        for title, sub in cases:
+            parsed = matcher.parse_message_title(title)
+            self.assertEqual(
+                parsed["normalized_title"], matcher.normalize_title(sub["name"])
+            )
+            result = matcher.match_item({"title": title}, [sub], allowed_ids=[sub["id"]])
+            self.assertIsNotNone(result["matched"], title)
+            self.assertEqual(result["matched"]["id"], sub["id"])
+            self.assertGreaterEqual(result["matched"]["score"], 90)
+
+    def test_chinese_short_suffix_matches_actor_or_subtitle(self):
+        cases = [
+            ("美人余 剧情 李一桐 4KHDR60FPS 更新23集", 83, "美人余"),
+            ("把黑夜点燃 陈家往事 (2026) 更08集", 184, "把黑夜点燃"),
+            ("现在就出发 第四季 现在就出发4 (2026) 更新1018期", 113, "现在就出发"),
+        ]
+        for title, sub_id, name in cases:
+            result = matcher.match_item(
+                {"title": title},
+                [{"id": sub_id, "name": name, "season": 4 if sub_id == 113 else 1,
+                  "type": "电视剧"}],
+                allowed_ids=[sub_id],
+            )
+            self.assertIsNotNone(result["matched"], title)
+            self.assertEqual(result["matched"]["id"], sub_id)
+            self.assertGreaterEqual(result["matched"]["score"], 90)
+
+    def test_ambiguous_short_suffix_stays_pending(self):
+        cases = [
+            ("盗墓笔记 重启 (2026)", 1, "盗墓笔记"),
+            ("鬼吹灯 之精绝古城 (2026)", 2, "鬼吹灯"),
+            ("把黑夜点燃 番外 (2026)", 3, "把黑夜点燃"),
+        ]
+        for title, sub_id, name in cases:
+            result = matcher.match_item(
+                {"title": title},
+                [{"id": sub_id, "name": name, "season": 1, "type": "电视剧"}],
+                allowed_ids=[sub_id],
+            )
+            self.assertIsNone(result["matched"], title)
+            self.assertIn("匹配度过低", result["reason"])
+
     def test_season_conflict_reports_reason(self):
         result = matcher.match_item(
             {"title": "名称：诛仙 第四季(2026)【更11集】【4K.SDR】"},

@@ -1,5 +1,6 @@
 """TG 频道监控单测：链接抽取、频道归一化、条目去重与入库。"""
 
+import asyncio
 import os
 import sys
 import unittest
@@ -321,6 +322,46 @@ class ChannelRulesTest(unittest.TestCase):
              "auto_failed": 1, "auto_pending": 0},
         )
 
+    def test_rematch_caps_transfers_per_scan(self):
+        calls = []
+
+        def handler(item, subscribe_id):
+            calls.append(item["id"])
+            return {"success": True, "data": {"transferred": 1}}
+
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=False, api_id=1, api_hash="hash", session="session",
+            channel_rules=[{"channel": "@a", "monitor_mode": "subscriptions"}],
+            auto_transfer_handler=handler,
+            subscribe_provider=lambda: [
+                {"id": 113, "name": "现在就出发", "season": 4, "type": "电视剧"},
+            ],
+        )
+        rule = {"channel": "@a", "monitor_mode": "subscriptions"}
+        items = [
+            {
+                "id": f"item-{index}",
+                "links": [f"https://pan.quark.cn/s/{index}"],
+                "title": f"现在就出发 第四季(2026) 第{index}集",
+                "status": "new",
+                "match_status": "pending",
+            }
+            for index in range(1, 7)
+        ]
+        stats = monitor._run_auto_transfers(
+            [(item, rule) for item in items],
+            rematch_ids={item["id"] for item in items},
+        )
+        self.assertEqual(len(calls), tg_module.MAX_REMATCH_TRANSFERS)
+        self.assertEqual(stats["auto_transferred"], 5)
+        self.assertEqual(stats["auto_pending"], 1)
+        self.assertEqual(
+            sum(1 for item in items if item["status"] == "transferred"), 5,
+        )
+        self.assertEqual(items[-1]["status"], "new")
+        self.assertIn("待下轮补转", items[-1]["match_reason"])
+
     def test_provider_matches_title_and_leaves_ambiguity_pending(self):
         calls = []
 
@@ -438,6 +479,114 @@ class ScanTest(unittest.TestCase):
         second = monitor.scan(trigger="测试")
         self.assertEqual(second["added"], 0)
         self.assertEqual(len(monitor.list_items()), 2)
+
+    def test_scan_rematches_pending_item_after_parser_fix(self):
+        calls = []
+
+        class FakeEntity:
+            id = 999
+            access_hash = 123
+            title = "测试频道"
+            username = "demo"
+
+        class FakeClient:
+            async def get_entity(self, raw):
+                return FakeEntity()
+
+            async def get_messages(self, entity, limit, min_id=0, reverse=False):
+                return []
+
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=True, api_id=1, api_hash="hash", session="session",
+            channel_rules=[{"channel": "@demo", "monitor_mode": "subscriptions"}],
+            keywords=[], exclude_keywords=[],
+            scan_limit=10, interval_minutes=10, max_items=100,
+            auto_transfer_handler=lambda item, subscribe_id: (
+                calls.append((item["id"], subscribe_id))
+                or {"success": True, "data": {"transferred": 1}}
+            ),
+            subscribe_provider=lambda: [
+                {"id": 113, "name": "现在就出发", "season": 4, "type": "电视剧"},
+            ],
+        )
+        monitor.stop()
+        monitor._store.save("state", {
+            "resolved:@demo": "999",
+            "resolved_hash:@demo": "123",
+            "999": 2,
+            "999:logic_version": tg_module.SCAN_LOGIC_VERSION,
+        })
+        monitor._store.save("items", [{
+            "id": "999:1",
+            "channel": "@demo",
+            "channel_title": "测试频道",
+            "channel_id": "999",
+            "message_id": 1,
+            "title": "名称：现在就出发 第四季(2026) 第1集",
+            "links": ["https://pan.quark.cn/s/old"],
+            "types": ["quark"],
+            "status": "new",
+            "match_status": "pending",
+            "match_reason": "匹配度过低（88），留待手动选择",
+        }])
+        result = asyncio.run(monitor._scan_with_client(FakeClient(), "测试"))
+        self.assertEqual(calls, [("999:1", 113)])
+        self.assertEqual(result["auto_transferred"], 1)
+        item = monitor.list_items()[0]
+        self.assertEqual(item["status"], "transferred")
+        self.assertEqual(item["match_status"], "transferred")
+        self.assertIn("标题精确", item["match_reason"])
+
+    def test_incremental_scan_fetches_multiple_pages_to_catch_up(self):
+        class FakeEntity:
+            id = 999
+            access_hash = 123
+            title = "测试频道"
+            username = "demo"
+
+        class FakeMessage:
+            def __init__(self, message_id):
+                self.id = message_id
+                self.message = f"资源 https://pan.quark.cn/s/{message_id}"
+                self.date = None
+                self.entities = []
+                self.media = None
+                self.reply_markup = None
+
+        class FakeClient:
+            async def get_entity(self, raw):
+                return FakeEntity()
+
+            async def get_messages(self, entity, limit, min_id=0, reverse=False):
+                rows = [FakeMessage(index) for index in range(1, 8)]
+                if reverse:
+                    return [row for row in rows if row.id > min_id][:limit]
+                return list(reversed(rows))[:limit]
+
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=True, api_id=1, api_hash="hash", session="session",
+            channels=["@demo"], keywords=[], exclude_keywords=[],
+            scan_limit=2, interval_minutes=10, max_items=100,
+        )
+        monitor.stop()
+        monitor._store.save("state", {
+            "resolved:@demo": "999",
+            "resolved_hash:@demo": "123",
+            "999": 1,
+            "999:logic_version": tg_module.SCAN_LOGIC_VERSION,
+        })
+        result = asyncio.run(monitor._scan_with_client(FakeClient(), "测试"))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["scanned"], 6)
+        self.assertEqual(result["added"], 6)
+        self.assertEqual(
+            [item["message_id"] for item in monitor.list_items()],
+            [7, 6, 5, 4, 3, 2],
+        )
+        state = monitor._store.load("state", {})
+        self.assertEqual(state["999"], 7)
 
     def _monitor_for(self, channels):
         monitor = TgChannelMonitor(self.owner)

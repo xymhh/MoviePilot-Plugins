@@ -38,16 +38,49 @@ _SEASON_EPISODE_RE = re.compile(
     re.IGNORECASE,
 )
 _UPDATE_RE = re.compile(
-    r"更(?:新)?至\s*[0-9零〇一二两三四五六七八九十百./月日第集期话\s]+"
+    r"(?:更(?:新)?至|更新|更)\s*"
+    r"(?:EP?\s*\d{1,4}|第\s*\d{1,4}\s*[集话話期]|"
+    r"\d{1,4}\s*[集话話期]|"
+    r"[0-9零〇一二两三四五六七八九十百./月日第集期话\s]+)",
+    re.IGNORECASE,
+)
+# 音轨编码和声道数要整体吞掉，否则 AAC2.0 / DDP5.1 会残留 “2.0”“5.1”，
+# 把精确标题降成 88 分前缀。先于 _QUALITY_RE 执行。
+_AUDIO_RE = re.compile(
+    r"(?:AAC|EAC3|AC3|DDP|DTS(?:-HD)?|TrueHD|FLAC|OPUS|ATMOS|HIFI(?:声)?)"
+    r"(?:\s*\d(?:[ .]\d)?)?",
+    re.IGNORECASE,
 )
 _QUALITY_RE = re.compile(
     r"(?:4K|8K|2160P|1080P|720P|WEB[- ]?DL|WEBRip|BluRay|BDRip|"
-    r"HDR10\+?|HDR|杜比视界|杜比全景声|Dolby\s*Vision|Dolby\s*Atmos|"
-    r"H\.?264|H\.?265|HEVC|AVC|AAC|EAC3|AC3|FLAC|OPUS|"
-    r"DDP(?:\s*5[ .]?1)?|DTS(?:-HD)?|TrueHD|ATMOS|REMUX|"
-    r"DoVi|WEB(?:[- ]?DL|Rip)?|HDTV|ACC|CHS|CHT|简英|双语|"
-    r"10bit|SDR|简繁|简体|繁体|中字|国语|粤语|英语|字幕|内嵌|外挂|内封)",
+    r"HDR10\+?|HDR|杜比视界|杜比全景声|杜比环绕声|Dolby\s*Vision|Dolby\s*Atmos|"
+    r"H\.?264|H\.?265|HEVC|AVC|"
+    r"REMUX|DoVi|(?<![A-Za-z])DV(?![A-Za-z])|WEB(?:[- ]?DL|Rip)?|HDTV|ACC|CHS|CHT|简英|双语|"
+    r"10bit|SDR|简繁|简体|繁体|中字|国语|粤语|英语|字幕|内嵌|外挂|内封|简中|"
+    r"高码率|高码|臻彩(?:MAX)?|无损|\d+Audio|Audio|\d+\s*(?:FPS|帧)|"
+    r"(?<![A-Za-z])IQ(?![A-Za-z])|更新中|连载中|已完结|完结)",
     re.IGNORECASE,
+)
+# 标题与演员表之间常用逗号分隔；演员名通常是 2-4 个汉字，用 / 或 、 分隔。
+_CREDITS_RE = re.compile(
+    r"[，,]\s*[\u4e00-\u9fff·.]{2,20}"
+    r"(?:\s*[/、]\s*[\u4e00-\u9fff·.]{2,20})+\s*$"
+)
+# 频道常把“剧情/悬疑/犯罪”等分类词直接跟在标题后，用空白隔开。
+_GENRE_RE = re.compile(
+    r"(?<=\s)(?:剧情|悬疑|犯罪|爱情|古装|喜剧|动画|奇幻|科幻|动作|冒险|"
+    r"历史|战争|家庭|青春|都市|旅行|真人秀|综艺)(?=\s|$)"
+)
+# “现在就出发 第四季 现在就出发4”这类频道会重复剧名；折叠重复前缀。
+_DUPLICATE_TITLE_RE = re.compile(
+    r"^([\u4e00-\u9fffA-Za-z0-9·:：]{2,40}?)\s+\1\s*\d{0,3}\s*$"
+)
+# 短后缀自动匹配只接受“正片/演员/副标题”这类明确补充；
+# 这些词一旦出现在后缀开头，说明可能是不同作品/不同季，继续留待手动。
+_TITLE_SUFFIX_FORBIDDEN = (
+    "之", "第", "番", "特别", "剧场", "电影", "季", "部",
+    "重启", "新篇", "归来", "再起", "预告", "花絮", "特辑",
+    "先导", "加更", "纯享",
 )
 _TRAILING_RE = re.compile(r"[\s\-_.·|/:：,，;；]+$")
 # 频道标题里的补充信息（画质/演员/分类）多放在括号内；集号季号已在前面提取，
@@ -154,7 +187,11 @@ def parse_message_title(value: Any) -> Dict[str, Any]:
     cleaned = _UPDATE_RE.sub(" ", text)
     cleaned = _BRACKET_RE.sub(" ", cleaned)
     cleaned = _YEAR_RE.sub(" ", cleaned)
+    cleaned = _AUDIO_RE.sub(" ", cleaned)
     cleaned = _QUALITY_RE.sub(" ", cleaned)
+    cleaned = _GENRE_RE.sub(" ", cleaned)
+    cleaned = _CREDITS_RE.sub(" ", cleaned)
+    cleaned = _DUPLICATE_TITLE_RE.sub(r"\1", cleaned)
     cleaned = _SEASON_EPISODE_RE.sub(" ", cleaned)
     cleaned = _EPISODE_RANGE_CN_RE.sub(" ", cleaned)
     cleaned = _EPISODE_RANGE_RE.sub(" ", cleaned)
@@ -163,6 +200,8 @@ def parse_message_title(value: Any) -> Dict[str, Any]:
     cleaned = _SEASON_EN_RE.sub(" ", cleaned)
     cleaned = _EPISODE_CN_RE.sub(" ", cleaned)
     cleaned = _EPISODE_EN_RE.sub(" ", cleaned)
+    # 季/集号去掉后可能才露出重复的剧名（“现在就出发 第四季 现在就出发4”）
+    cleaned = _DUPLICATE_TITLE_RE.sub(r"\1", cleaned)
     cleaned = re.sub(r"[\[\]【】()（）<>《》]", " ", cleaned)
     # “嫁金钗 1-8”“嫁金钗1-8”这类不带“集”的集数范围
     cleaned = re.sub(r"\s+\d{1,4}\s*[-~至]\s*\d{1,4}\s*$", " ", cleaned)
@@ -211,6 +250,27 @@ def _subscription_titles(sub: Dict[str, Any]) -> List[str]:
     return [value for value in dict.fromkeys(values) if str(value).strip()]
 
 
+def _short_suffix_score(sub_title: str, item_title: str) -> int:
+    """主标题后只跟演员/副标题时给 94 分；歧义后缀保持 88。
+
+    ``Doctor`` 这类纯英文标题不适用，避免把 ``Doctor Who`` 自动吞掉。
+    """
+    if len(sub_title) < 3:
+        return 0
+    if not any("\u4e00" <= char <= "\u9fff" for char in sub_title):
+        return 0
+    suffix = item_title[len(sub_title):]
+    if not (2 <= len(suffix) <= 8):
+        return 0
+    if not suffix.isalnum():
+        return 0
+    if suffix.isdigit() and len(suffix) > 2:
+        return 0
+    if suffix.startswith(_TITLE_SUFFIX_FORBIDDEN):
+        return 0
+    return 94
+
+
 def score_subscription(
         parsed: Dict[str, Any], sub: Dict[str, Any],
         ignore_season: bool = False,
@@ -234,9 +294,14 @@ def score_subscription(
         if item_title == sub_title:
             score, reason = 100, "标题精确"
         elif item_title.startswith(sub_title) and len(sub_title) >= 2:
-            # 前缀只作为候选提示，不达到自动转存阈值：
+            # 中文主标题 + 2-8 字短后缀（演员/副标题）给 94 分；
+            # 其余前缀只作为候选提示，不达到自动转存阈值：
             # “Doctor” 不应该自动吞掉 “Doctor Who”。
-            score, reason = 88, "标题前缀"
+            short_score = _short_suffix_score(sub_title, item_title)
+            if short_score:
+                score, reason = short_score, "标题+短后缀"
+            else:
+                score, reason = 88, "标题前缀"
         elif sub_title.startswith(item_title) and len(item_title) >= 2:
             score, reason = 86, "订阅名更完整"
         elif len(sub_title) >= 4 and sub_title in item_title:

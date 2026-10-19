@@ -46,6 +46,12 @@ STATE_KEY = "state"
 # 解析逻辑版本：升级后首次扫描忽略旧游标，回填最近 N 条
 # 1 -> 纯正文正则；2 -> 正文 + entities/webpage/按钮 URL
 SCAN_LOGIC_VERSION = 2
+# 增量扫描单轮最多追 5 倍「回溯条数」，并封顶 500 条；避免频道发帖速度
+# 长期高于每轮 scan_limit 时游标一直落后。
+SCAN_CATCHUP_FACTOR = 5
+SCAN_CATCHUP_MAX = 500
+# 每次扫描最多补转 5 条旧的 pending 条目，避免一次把扫描线程卡太久。
+MAX_REMATCH_TRANSFERS = 5
 
 # 邀请链接解析失败后的冷却时间：CheckChatInvite 每轮都调会被 Telegram
 # 按 420 FLOOD_WAIT 重罚，失败后先退避，别连续试探。
@@ -772,12 +778,41 @@ class TgChannelMonitor:
                 or raw_channel
             )
             last_id = 0 if full else _scan_start_id(state, channel_key)
+            fetch_cap = min(
+                max(rule_limit, rule_limit * SCAN_CATCHUP_FACTOR),
+                SCAN_CATCHUP_MAX,
+            )
+            page_limit = min(rule_limit, fetch_cap)
             try:
                 if last_id:
-                    # 增量：只取比 last_id 新的消息，按时间升序处理
-                    messages = await client.get_messages(
-                        entity, limit=rule_limit, min_id=last_id, reverse=True,
-                    )
+                    # 增量：先取一页，再按 max_id 继续取，直到追平或到单轮上限。
+                    # 频道发帖速度高于 scan_limit 时，旧逻辑每轮只前进一页，
+                    # 游标会长期落后；这里一次多追几页，但仍保留上限。
+                    messages = list(await client.get_messages(
+                        entity, limit=page_limit, min_id=last_id, reverse=True,
+                    ) or [])
+                    while len(messages) < fetch_cap and len(messages) >= page_limit:
+                        current_max = max(
+                            int(getattr(message, "id", 0) or 0)
+                            for message in messages
+                        )
+                        batch = list(await client.get_messages(
+                            entity,
+                            limit=min(page_limit, fetch_cap - len(messages)),
+                            min_id=current_max,
+                            reverse=True,
+                        ) or [])
+                        if not batch:
+                            break
+                        batch_max = max(
+                            int(getattr(message, "id", 0) or 0)
+                            for message in batch
+                        )
+                        if batch_max <= current_max:
+                            # 防御：接口忽略 min_id 时避免原地打转。
+                            break
+                        messages.extend(batch)
+                    messages = messages[:fetch_cap]
                 else:
                     # 首次：取最新 N 条（Telethon 默认倒序），再翻转成升序
                     messages = list(reversed(await client.get_messages(
@@ -793,6 +828,7 @@ class TgChannelMonitor:
                 "channel_key": channel_key,
                 "start_id": last_id,
                 "messages": len(messages),
+                "fetch_cap": fetch_cap,
                 "logic_version": int(
                     state.get(f"{channel_key}:logic_version") or 0
                 ),
@@ -850,9 +886,32 @@ class TgChannelMonitor:
             state[f"{channel_key}:logic_version"] = SCAN_LOGIC_VERSION
         if len(items) > self._max_items:
             items = items[: self._max_items]
+        # 旧条目补匹配：解析规则升级或订阅新增后，pending 不能永远停在旧结果。
+        # 只补匹配，不重复转存；已转存/已跳过/已失败/已忽略的条目不碰。
+        candidate_ids = {str(item.get("id")) for item, _rule in auto_candidates}
+        rules_by_channel = {
+            str(rule.get("channel") or ""): rule
+            for rule in self._channel_rules
+            if rule.get("enabled", True)
+            and _rule_mode(rule) == "subscriptions"
+        }
+        rematch_ids = set()
+        for item in items:
+            item_id = str(item.get("id"))
+            if item.get("status") != "new" or item_id in candidate_ids:
+                continue
+            if item.get("match_status") not in (None, "pending"):
+                continue
+            rule = rules_by_channel.get(str(item.get("channel") or ""))
+            if not rule:
+                continue
+            rematch_ids.add(item_id)
+            auto_candidates.append((item, dict(rule)))
         self._store.save(ITEMS_KEY, items)
         self._store.save(STATE_KEY, state)
-        auto_stats = self._run_auto_transfers(auto_candidates)
+        auto_stats = self._run_auto_transfers(
+            auto_candidates, rematch_ids=rematch_ids,
+        )
         self._store.save(ITEMS_KEY, items)
         self._last_scan_at = time.time()
         self._last_error = "; ".join(errors[-3:])
@@ -886,6 +945,7 @@ class TgChannelMonitor:
 
     def _run_auto_transfers(
             self, candidates: List[Tuple[dict, dict]],
+            rematch_ids: Optional[Iterable[str]] = None,
     ) -> Dict[str, int]:
         """扫描后按频道规则自动转存；失败只记在条目上，不重试、不阻塞下次扫描。"""
         stats = {
@@ -894,6 +954,8 @@ class TgChannelMonitor:
         }
         if not candidates:
             return stats
+        rematch_ids = {str(item) for item in (rematch_ids or [])}
+        rematch_transfers = 0
         handler = getattr(self, "_auto_transfer_handler", None)
         if not callable(handler):
             for item, _rule in candidates:
@@ -913,6 +975,8 @@ class TgChannelMonitor:
 
         for item, rule in candidates:
             subscribe_id = 0
+            is_rematch = str(item.get("id")) in rematch_ids
+            old_reason = str(item.get("match_reason") or "")
             if callable(provider):
                 if provider_error:
                     item["match_status"] = "pending"
@@ -934,13 +998,26 @@ class TgChannelMonitor:
                 )
                 if not matched.get("matched"):
                     stats["auto_pending"] += 1
-                    logger.info(
-                        f"TG 频道自动匹配留待手动（{rule.get('channel')}）："
-                        f"{item.get('title')} / {item['match_reason']}"
-                    )
+                    if not old_reason or old_reason != item["match_reason"]:
+                        logger.info(
+                            f"TG 频道自动匹配留待手动（{rule.get('channel')}）："
+                            f"{item.get('title')} / {item['match_reason']}"
+                        )
                     continue
                 subscribe_id = int(matched["matched"]["id"])
                 item["matched_subscribe_id"] = subscribe_id
+                if is_rematch and rematch_transfers >= MAX_REMATCH_TRANSFERS:
+                    # 本轮补转名额用完；匹配结果先保存，下一轮继续补转。
+                    item["match_status"] = "pending"
+                    item["match_reason"] = (
+                        f"已匹配 #{subscribe_id} "
+                        f"{matched['matched'].get('name') or ''}，"
+                        f"待下轮补转（单轮上限 {MAX_REMATCH_TRANSFERS}）"
+                    )[:300]
+                    stats["auto_pending"] += 1
+                    continue
+                if is_rematch:
+                    rematch_transfers += 1
             else:
                 subscribe_id = 0
             if subscribe_id <= 0:
