@@ -30,8 +30,15 @@ _SEASON_PATTERNS = (
 )
 _GENERIC_DIRS = {
     "电影", "电影库", "剧集", "剧集库", "电视剧", "电视", "动画", "动漫",
-    "movies", "tv", "shows", "anime", "downloads", "download",
-    "待整理", "整理", "临时", "temp", "incoming", "uploads", "upload",
+    "纪录片", "综艺", "短剧", "微短剧", "番剧",
+    "国产剧", "国产电视剧", "国剧", "大陆剧", "华语剧",
+    "欧美剧", "美剧", "英剧", "日韩剧", "日剧", "韩剧",
+    "港剧", "台剧", "港台剧", "泰剧", "海外剧", "其他剧",
+    "国漫", "日漫",
+    "movies", "tv", "shows", "anime", "documentary", "variety",
+    "downloads", "download",
+    "待整理", "整理", "暂存", "临时", "未分类", "未整理", "其他", "其它",
+    "temp", "incoming", "uploads", "upload",
 }
 _TECH_TOKEN = re.compile(
     r"(?i)(?:\b(?:2160p|1080p|720p|480p|4k|uhd|hdr|hdr10|dv|dovi|"
@@ -186,13 +193,12 @@ def relative_parts(path: str, source_root: str) -> List[str]:
 def package_key(entry: OrganizeEntry, source_root: str) -> str:
     """返回作品包键：优先取源根下第一个非季号/非通用容器的目录。"""
     parts = relative_parts(entry.parent_path, source_root)
-    for part in parts:
-        text = str(part or "").strip()
-        if not text:
-            continue
-        if is_container_dir(text):
-            continue
-        return text
+    # 取离文件最近的、不是容器（季/日期/媒体库分类）的目录作为作品名。
+    # 这样 /剧集/国产剧/某剧/Season 1 会得到「某剧」，而不是「国产剧」。
+    while parts and is_container_dir(parts[-1]):
+        parts.pop()
+    if parts:
+        return str(parts[-1]).strip()
     # 文件直接散落在源根/日期目录/季目录里时，用文件名识别作品，
     # 不能把所有散文件都归到「待整理」这个容器名下。
     return clean_title(entry.stem) or entry.stem

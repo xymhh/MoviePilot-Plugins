@@ -173,3 +173,26 @@ def test_date_container_directory_is_skipped_for_grouping():
     ]
     packages = plan.build_packages(entries, "/待整理")
     assert {package.key for package in packages} == {"ShowA", "ShowB"}
+
+
+def test_category_directory_is_not_used_as_show_title():
+    """整个 /剧集 作为源时，不能用「国产剧」分类目录当作品名。"""
+    entries = [
+        entry("ShowA.S01E01.mkv", "/剧集/国产剧/ShowA/Season 1", 100),
+        entry("ShowA.S01E02.mkv", "/剧集/国产剧/ShowA/Season 1", 100),
+        entry("ShowB.S01E01.mkv", "/剧集/国产剧/ShowB/Season 1", 100),
+        entry("ShowC.S01E01.mkv", "/剧集/欧美剧/ShowC/Season 1", 100),
+    ]
+    packages = plan.build_packages(entries, "/剧集")
+    assert {package.key for package in packages} == {"ShowA", "ShowB", "ShowC"}
+    show_a = next(package for package in packages if package.key == "ShowA")
+    assert [item.episode for item in show_a.videos] == [1, 2]
+
+
+def test_chinese_category_dir_with_loose_videos_splits_by_filename():
+    entries = [
+        entry("ShowA.S01E01.mkv", "/剧集/国产剧", 100),
+        entry("ShowB.S01E01.mkv", "/剧集/国产剧", 100),
+    ]
+    packages = plan.build_packages(entries, "/剧集")
+    assert {package.key for package in packages} == {"ShowA", "ShowB"}
