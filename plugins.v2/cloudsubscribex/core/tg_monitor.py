@@ -315,15 +315,19 @@ def _rule_whitelist(rule: Dict[str, Any]) -> List[int]:
     return result
 
 
-def _rule_scope(rule: Dict[str, Any]) -> Optional[List[int]]:
-    """自动转存的订阅范围。
+def _rule_mode(rule: Dict[str, Any]) -> str:
+    """频道规则的监控模式。
 
-    ``None`` 表示全部订阅（新订阅自动纳入）；列表表示指定订阅。
-    关键词是另一层过滤，两者取交集（与）。
+    ``messages``：收录全部消息（关键词仍生效），不自动转存；
+    ``subscriptions``：收录后按标题在全部订阅内匹配，唯一高置信才自动转存。
+    旧配置没有该字段时按 ``auto_transfer`` 推断，保证升级不改语义。
     """
-    if str(rule.get("auto_transfer_mode") or "").strip().lower() == "all":
-        return None
-    return _rule_whitelist(rule)
+    mode = str(rule.get("monitor_mode") or "").strip().lower()
+    if mode in ("subscriptions", "all_subscriptions", "sub"):
+        return "subscriptions"
+    if mode in ("messages", "all", "all_messages"):
+        return "messages"
+    return "subscriptions" if rule.get("auto_transfer") else "messages"
 
 
 def _parse_rules_payload(value: Any) -> Any:
@@ -383,7 +387,7 @@ def normalize_channel_rules(
             rule_auto_transfer = False
             rule_auto_subscribe_id = 0
             rule_auto_subscribe_ids: Any = []
-            rule_auto_transfer_mode = "selected"
+            rule_monitor_mode = ""
         elif isinstance(row, dict):
             channel = (
                 row.get("channel") or row.get("url")
@@ -402,17 +406,17 @@ def normalize_channel_rules(
             except (TypeError, ValueError):
                 rule_auto_subscribe_id = 0
             rule_auto_subscribe_ids = row.get("auto_subscribe_ids", [])
-            rule_auto_transfer_mode = (
-                "all"
-                if str(row.get("auto_transfer_mode") or "").strip().lower() == "all"
-                else "selected"
-            )
+            rule_monitor_mode = str(row.get("monitor_mode") or "").strip().lower()
         else:
             continue
         normalized = normalize_channel(str(channel or ""))
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
+        rule_mode = _rule_mode({
+            "monitor_mode": rule_monitor_mode,
+            "auto_transfer": rule_auto_transfer,
+        })
         rules.append({
             "channel": normalized,
             "enabled": rule_enabled,
@@ -421,8 +425,8 @@ def normalize_channel_rules(
                 word.lower() for word in _split_terms(rule_exclude)
             ],
             "scan_limit": max(1, min(rule_limit, 200)),
-            "auto_transfer": rule_auto_transfer,
-            "auto_transfer_mode": rule_auto_transfer_mode,
+            "auto_transfer": rule_mode == "subscriptions",
+            "monitor_mode": rule_mode,
             "auto_subscribe_id": max(0, rule_auto_subscribe_id),
             "auto_subscribe_ids": _rule_whitelist({
                 "auto_subscribe_ids": rule_auto_subscribe_ids,
@@ -840,14 +844,8 @@ class TgChannelMonitor:
                 added.append(item)
                 existing.add(item_id)
                 existing_links.update(item["links"])
-                if rule.get("auto_transfer"):
-                    scope = _rule_scope(rule)
-                    if scope is None or scope:
-                        auto_candidates.append((item, dict(rule)))
-                    else:
-                        item["auto_transfer_error"] = (
-                            "未配置目标订阅：请选择「全部订阅」或指定订阅"
-                        )
+                if _rule_mode(rule) == "subscriptions":
+                    auto_candidates.append((item, dict(rule)))
             state[channel_key] = max_id
             state[f"{channel_key}:logic_version"] = SCAN_LOGIC_VERSION
         if len(items) > self._max_items:
@@ -914,7 +912,6 @@ class TgChannelMonitor:
                 logger.warning(f"TG 频道自动匹配读取订阅失败：{error}")
 
         for item, rule in candidates:
-            scope = _rule_scope(rule)
             subscribe_id = 0
             if callable(provider):
                 if provider_error:
@@ -922,9 +919,7 @@ class TgChannelMonitor:
                     item["match_reason"] = f"读取订阅列表失败：{provider_error}"[:300]
                     stats["auto_pending"] += 1
                     continue
-                matched = match_item(
-                    item, subscriptions or [], allowed_ids=scope
-                )
+                matched = match_item(item, subscriptions or [], allowed_ids=None)
                 item["match_candidates"] = [
                     {
                         "id": row["id"], "name": row["name"],
@@ -947,14 +942,10 @@ class TgChannelMonitor:
                 subscribe_id = int(matched["matched"]["id"])
                 item["matched_subscribe_id"] = subscribe_id
             else:
-                # 兼容旧调用方：没有订阅表时退回单值目标
-                subscribe_id = scope[0] if scope else 0
+                subscribe_id = 0
             if subscribe_id <= 0:
                 item["match_status"] = "pending"
-                item["match_reason"] = (
-                    "未配置目标订阅：请选择「全部订阅」或指定订阅"
-                    if scope is None else "白名单为空"
-                )
+                item["match_reason"] = "需要订阅列表才能匹配目标订阅"
                 stats["auto_pending"] += 1
                 continue
 
@@ -1015,10 +1006,8 @@ class TgChannelMonitor:
                     "keywords": list(rule.get("keywords") or []),
                     "exclude_keywords": list(rule.get("exclude_keywords") or []),
                     "scan_limit": int(rule.get("scan_limit") or self._scan_limit),
-                    "auto_transfer": bool(rule.get("auto_transfer", False)),
-                    "auto_transfer_mode": str(
-                        rule.get("auto_transfer_mode") or "selected"
-                    ),
+                    "auto_transfer": _rule_mode(rule) == "subscriptions",
+                    "monitor_mode": _rule_mode(rule),
                     "auto_subscribe_id": int(rule.get("auto_subscribe_id") or 0),
                     "auto_subscribe_ids": list(rule.get("auto_subscribe_ids") or []),
                 }

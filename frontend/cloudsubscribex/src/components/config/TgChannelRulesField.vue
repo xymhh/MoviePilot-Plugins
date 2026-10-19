@@ -41,12 +41,11 @@
           · {{ rule.keywords.length }} 关键词
         </span>
         <span v-if="!rule.enabled" class="ml-1 text-caption">（停用）</span>
-        <span v-if="rule.auto_transfer" class="ml-1 text-caption">
-          · 自动转存 {{ rule.auto_transfer_mode === 'all'
-            ? '全部订阅' : rule.auto_subscribe_ids.length + ' 个订阅' }}
+        <span class="ml-1 text-caption">
+          · {{ rule.monitor_mode === 'subscriptions' ? '全部订阅自动转存' : '全部消息' }}
         </span>
         <v-icon
-          v-if="rule.auto_transfer"
+          v-if="rule.monitor_mode === 'subscriptions'"
           icon="mdi-download"
           size="13"
           class="ml-1" />
@@ -95,12 +94,6 @@
                     density="compact"
                     color="primary"
                     hide-details />
-                  <v-switch
-                    v-model="rule.auto_transfer"
-                    label="自动转存"
-                    density="compact"
-                    color="primary"
-                    hide-details />
                   <v-btn
                     icon="mdi-delete-outline"
                     variant="text"
@@ -142,54 +135,22 @@
                   hide-details
                   class="rule-limit" />
               </div>
-              <div v-if="rule.auto_transfer" class="auto-row mt-2">
+              <div class="auto-row mt-2">
                 <v-btn-toggle
-                  v-model="rule.auto_transfer_mode"
+                  v-model="rule.monitor_mode"
                   mandatory
                   divided
                   density="compact"
                   variant="outlined"
                   class="auto-scope">
-                  <v-btn value="all" size="small">全部订阅</v-btn>
-                  <v-btn value="selected" size="small">指定订阅</v-btn>
+                  <v-btn value="messages" size="small">全部消息</v-btn>
+                  <v-btn value="subscriptions" size="small">全部订阅</v-btn>
                 </v-btn-toggle>
-                <v-select
-                  v-if="rule.auto_transfer_mode !== 'all'"
-                  v-model="rule.auto_subscribe_ids"
-                  :items="subscribeOptions"
-                  item-title="title"
-                  item-value="id"
-                  label="自动转存订阅白名单（可多选）"
-                  multiple
-                  chips
-                  closable-chips
-                  density="compact"
-                  variant="outlined"
-                  hide-details
-                  :loading="loadingSubscribes"
-                  no-data-text="没有可用订阅，请先在「订阅任务」创建"
-                  class="auto-subscribe" />
-                <v-btn
-                  size="small"
-                  variant="text"
-                  icon="mdi-refresh"
-                  :loading="loadingSubscribes"
-                  title="刷新订阅列表"
-                  @click="loadSubscribes(true)" />
               </div>
-              <div
-                v-if="rule.auto_transfer
-                  && rule.auto_transfer_mode !== 'all'
-                  && !rule.auto_subscribe_ids.length"
-                class="text-caption text-warning mt-1">
-                选择「指定订阅」后必须至少选一个，否则扫描时只会记录不转存。
-              </div>
-              <div
-                v-else-if="rule.auto_transfer"
-                class="text-caption text-medium-emphasis mt-1">
-                {{ rule.auto_transfer_mode === 'all'
-                  ? '扫描时在全部订阅内匹配，新增订阅自动生效；关键词与订阅范围取交集（与）。'
-                  : '扫描时按消息标题、季号和类型在白名单内匹配；只有唯一高置信结果才自动转存，多个相近候选会留在列表里手动选择。' }}
+              <div class="text-caption text-medium-emphasis mt-1">
+                {{ rule.monitor_mode === 'subscriptions'
+                  ? '收录后按标题在全部订阅内匹配（新增订阅自动生效），只有唯一高置信结果才自动转存；多个相近候选留在列表里手动选择。关键词与订阅范围是「与」的关系。'
+                  : '收录频道内所有带链接消息，不做订阅匹配、不自动转存；关键词和排除词照常生效。' }}
               </div>
             </v-card-text>
           </v-card>
@@ -213,7 +174,7 @@
 </template>
 
 <script setup>
-import {computed, onMounted, ref} from "vue"
+import {computed, ref} from "vue"
 import {useDisplay} from "vuetify"
 
 const display = useDisplay()
@@ -229,16 +190,14 @@ const props = defineProps({
 const emit = defineEmits(["update:modelValue"])
 const dialogVisible = ref(false)
 const draft = ref([])
-const subscribes = ref([])
-const loadingSubscribes = ref(false)
 let keySeed = 0
 
-const subscribeOptions = computed(() => subscribes.value.map((sub) => ({
-  id: Number(sub.id || sub.subscribe_id || 0),
-  title: `#${sub.id || sub.subscribe_id} ${sub.name || sub.title || "未命名"}`
-    + (sub.season ? ` · S${String(sub.season).padStart(2, "0")}` : "")
-    + (sub.type === "电影" ? " · 电影" : ""),
-})))
+function normalizeMode(rule) {
+  const mode = String(rule.monitor_mode || "").toLowerCase()
+  if (mode === "subscriptions" || mode === "all_subscriptions") return "subscriptions"
+  if (mode === "messages" || mode === "all") return "messages"
+  return rule.auto_transfer === true ? "subscriptions" : "messages"
+}
 
 function splitTerms(value) {
   if (Array.isArray(value)) {
@@ -285,26 +244,17 @@ function normalizeRule(row) {
     return {
       channel: row.trim(),
       enabled: true,
-      auto_transfer: false,
-      auto_transfer_mode: "selected",
-      auto_subscribe_ids: [],
+      monitor_mode: "messages",
       keywordsText: "",
       excludeText: "",
       scan_limit: 20,
     }
   }
   const rule = row || {}
-  const whitelist = Array.isArray(rule.auto_subscribe_ids)
-    ? rule.auto_subscribe_ids
-    : (rule.auto_subscribe_id ? [rule.auto_subscribe_id] : [])
   return {
     channel: String(rule.channel || rule.url || rule.name || "").trim(),
     enabled: rule.enabled !== false,
-    auto_transfer: rule.auto_transfer === true,
-    auto_transfer_mode: rule.auto_transfer_mode === "all" ? "all" : "selected",
-    auto_subscribe_ids: whitelist
-      .map((value) => Number(value || 0) || 0)
-      .filter((value, index, rows) => value > 0 && rows.indexOf(value) === index),
+    monitor_mode: normalizeMode(rule),
     keywordsText: splitTerms(rule.keywords).join("\n"),
     excludeText: splitTerms(rule.exclude_keywords).join("\n"),
     scan_limit: Number(rule.scan_limit || 20) || 20,
@@ -324,9 +274,7 @@ const rules = computed(() => {
       return {
         channel: rule.channel,
         enabled: rule.enabled,
-        auto_transfer: rule.auto_transfer,
-        auto_transfer_mode: rule.auto_transfer_mode,
-        auto_subscribe_ids: rule.auto_subscribe_ids,
+        monitor_mode: rule.monitor_mode,
         keywords: splitTerms(rule.keywordsText),
         exclude_keywords: splitTerms(rule.excludeText),
         scan_limit: rule.scan_limit,
@@ -337,26 +285,7 @@ const rules = computed(() => {
 
 const enabledCount = computed(() => rules.value.filter((rule) => rule.enabled).length)
 
-async function loadSubscribes(force = false) {
-  if (!props.api || loadingSubscribes.value) return
-  if (!force && subscribes.value.length) return
-  loadingSubscribes.value = true
-  try {
-    const result = await props.api.get("plugin/CloudSubscribeX/tg/subscribes")
-    if (result?.success) {
-      subscribes.value = result.data?.subscribes || []
-    }
-  } catch (error) {
-    // 下拉为空时保留手动输入能力，不阻塞配置保存
-  } finally {
-    loadingSubscribes.value = false
-  }
-}
-
-onMounted(() => loadSubscribes())
-
 function openDialog() {
-  loadSubscribes()
   draft.value = rules.value.map(withKey)
   if (!draft.value.length) addRule()
   dialogVisible.value = true
@@ -366,9 +295,7 @@ function addRule() {
   draft.value.push(withKey({
     channel: "",
     enabled: true,
-    auto_transfer: false,
-    auto_transfer_mode: "selected",
-    auto_subscribe_ids: [],
+    monitor_mode: "messages",
     keywordsText: "",
     excludeText: "",
     scan_limit: 20,
@@ -383,16 +310,14 @@ function save() {
     if (!channel || seen.has(channel)) continue
     seen.add(channel)
     const limit = Math.max(1, Math.min(200, Number(rule.scan_limit || 20) || 20))
-    const autoIds = (rule.auto_subscribe_ids || [])
-      .map((value) => Number(value || 0) || 0)
-      .filter((value, index, values) => value > 0 && values.indexOf(value) === index)
+    const mode = normalizeMode(rule)
     rows.push({
       channel,
       enabled: rule.enabled !== false,
-      auto_transfer: rule.auto_transfer === true,
-      auto_transfer_mode: rule.auto_transfer_mode === "all" ? "all" : "selected",
-      auto_subscribe_ids: autoIds,
-      auto_subscribe_id: autoIds[0] || 0,
+      monitor_mode: mode,
+      auto_transfer: mode === "subscriptions",
+      auto_subscribe_ids: [],
+      auto_subscribe_id: 0,
       keywords: splitTerms(rule.keywordsText),
       exclude_keywords: splitTerms(rule.excludeText),
       scan_limit: limit,
