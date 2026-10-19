@@ -179,10 +179,15 @@ class FileMatcher:
     _SHARE_ROOT_TAG_RE = re.compile(
         r"(?i)(?:[\[\(（【]?\s*)?"
         r"(?:4k|2160p|1080p|720p|web[- .]?dl|hdr10?|dv|hevc|h265|h264|avc|aac|dts|remux|bluray)"
-        r"\b.*$"
+        r"(?![A-Za-z0-9]).*$"
     )
     _SHARE_ROOT_UPDATE_RE = re.compile(
         r"(?:更新至|全|共)\s*\d+\s*集.*$"
+    )
+    # 只有季集/集数范围、没有作品名的根目录，不能拿来判断“这是另一部剧”。
+    _EPISODE_ONLY_ROOT_RE = re.compile(
+        r"(?i)^(?:第\s*)?(?:s\d{1,3})?(?:e|ep)?\d{1,4}"
+        r"(?:\s*[-~—至]\s*(?:s\d{1,3})?(?:e|ep)?\d{1,4})?\s*(?:集|话)?$"
     )
 
     @classmethod
@@ -217,7 +222,9 @@ class FileMatcher:
         if normalized in cls._GENERIC_SHARE_ROOTS:
             return True
         cleaned = cls._SHARE_ROOT_TAG_RE.sub("", text)
-        cleaned = cls._SHARE_ROOT_UPDATE_RE.sub("", cleaned)
+        cleaned = cls._SHARE_ROOT_UPDATE_RE.sub("", cleaned).strip()
+        if cls._EPISODE_ONLY_ROOT_RE.match(cleaned):
+            return True
         normalized_clean = normalize_title(cleaned)
         return not normalized_clean or normalized_clean in cls._GENERIC_SHARE_ROOTS
 

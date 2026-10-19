@@ -115,6 +115,18 @@ class ShareTitleGuardTests(unittest.TestCase):
         files = [{"name": "伟大的长征.S01E20.2160p.mkv"}]
         self.assertFalse(FileMatcher.share_title_mismatch(files, MEDIA, "伟大的长征"))
 
+    def test_titleless_episode_range_root_is_generic(self):
+        for root in (
+                "S01E01-E15 4K MIGU WEB-DL HDR",
+                "S01E01-E20 4K WEB-DL HDR",
+                "1-14集 4K_50fps 51.61GB 连载追更",
+                "第1-14集",
+        ):
+            self.assertFalse(
+                FileMatcher.share_title_mismatch(_share(root), MEDIA, "伟大的长征"),
+                root,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
