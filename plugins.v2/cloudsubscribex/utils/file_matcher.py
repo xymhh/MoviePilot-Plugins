@@ -167,6 +167,95 @@ class FileMatcher:
         meta = cls._platform_meta(normalized)
         return bool(meta and cls._matches_target_media(meta, mediainfo))
 
+    # 分享根目录常见泛称：这些名字不能用来判断资源属于哪部剧。
+    _GENERIC_SHARE_ROOTS = frozenset({
+        "国剧", "国产剧", "电视剧", "剧集", "合集", "全集", "更新", "最新",
+        "电影", "动漫", "纪录片", "综艺", "未分类", "新建文件夹", "下载",
+        "网盘", "资源", "国语", "中字", "双语", "无删减", "完整版",
+        "4k", "1080p", "2160p", "720p", "hdr", "hdr10", "dv", "webdl",
+        "web-dl", "bluray", "remux", "hevc", "h265", "h264", "avc",
+        "aac", "dts",
+    })
+    _SHARE_ROOT_TAG_RE = re.compile(
+        r"(?i)(?:[\[\(（【]?\s*)?"
+        r"(?:4k|2160p|1080p|720p|web[- .]?dl|hdr10?|dv|hevc|h265|h264|avc|aac|dts|remux|bluray)"
+        r"\b.*$"
+    )
+    _SHARE_ROOT_UPDATE_RE = re.compile(
+        r"(?:更新至|全|共)\s*\d+\s*集.*$"
+    )
+
+    @classmethod
+    def share_root_names(cls, files: Any) -> set[str]:
+        """提取分享文件所属的顶层目录名（无目录时取文件名）。"""
+        roots: set[str] = set()
+        for item in files or []:
+            if not isinstance(item, dict):
+                continue
+            relative = ""
+            for key in ("_relative_path", "relative_path"):
+                relative = str(item.get(key) or "").strip().strip("/")
+                if relative:
+                    break
+            if relative:
+                root = relative.split("/")[0].strip()
+            else:
+                root = str(item.get("name") or "").strip()
+            if root:
+                roots.add(root)
+        return roots
+
+    @classmethod
+    def _is_generic_share_root(cls, name: str) -> bool:
+        """判断分享根目录是否只是泛称/格式词，无法据此识别剧名。"""
+        text = str(name or "").strip()
+        if not text:
+            return True
+        normalized = normalize_title(text)
+        if not normalized:
+            return True
+        if normalized in cls._GENERIC_SHARE_ROOTS:
+            return True
+        cleaned = cls._SHARE_ROOT_TAG_RE.sub("", text)
+        cleaned = cls._SHARE_ROOT_UPDATE_RE.sub("", cleaned)
+        normalized_clean = normalize_title(cleaned)
+        return not normalized_clean or normalized_clean in cls._GENERIC_SHARE_ROOTS
+
+    @classmethod
+    def share_title_mismatch(
+            cls, files: Any, mediainfo: Any, resource_title: str = ""
+    ) -> bool:
+        """分享顶层目录明显是另一部剧时返回 True。
+
+        只拦“根目录能识别出明确剧名、但和目标标题完全不匹配”的资源；
+        ``国剧``、``4K``、``更新至20集`` 这类泛称不拦，避免误伤正常分享。
+        分享内同时包含多部剧时，只要有一个根目录匹配就放行，后续按文件匹配。
+        """
+        if mediainfo is None:
+            return False
+        roots = [
+            root for root in cls.share_root_names(files)
+            if not cls._is_generic_share_root(root)
+        ]
+        if not roots:
+            return False
+
+        expected_title = normalize_title(resource_title)
+        for root in roots:
+            cleaned = cls._SHARE_ROOT_TAG_RE.sub("", root)
+            cleaned = cls._SHARE_ROOT_UPDATE_RE.sub("", cleaned)
+            for candidate in (root, cleaned):
+                if cls.media_name_matches(candidate, mediainfo):
+                    return False
+                normalized = normalize_title(candidate)
+                if expected_title and (
+                        normalized == expected_title
+                        or expected_title in normalized
+                        or normalized in expected_title
+                ):
+                    return False
+        return True
+
     @classmethod
     def media_matches(cls, item: Any, mediainfo: Any) -> bool:
         """确认分享文件经识别后属于目标媒体。"""

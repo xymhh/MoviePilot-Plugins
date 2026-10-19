@@ -1,5 +1,6 @@
 """电视剧订阅搜索、匹配与转存流程。"""
 
+from datetime import date
 from typing import Any, Dict, List, Optional, Set
 
 from app.log import logger
@@ -15,6 +16,79 @@ from ...core.services.skip_stats import SkipStatsCollector
 
 class TelevisionSyncProcessor(OwnerDelegator):
     """处理电视剧订阅同步。"""
+
+    @staticmethod
+    def _share_title_mismatch(share_files: Any, mediainfo: Any, resource_title: str) -> bool:
+        """分享根目录标题守卫（延迟导入，避免测试环境缺少 utils 包）。"""
+        from ...utils import FileMatcher
+        return FileMatcher.share_title_mismatch(share_files, mediainfo, resource_title)
+
+    @staticmethod
+    def _season_episode_air_dates(mediainfo: Any, season: int) -> Dict[int, str]:
+        """获取目标季每集的播出日期，优先使用 TMDB 分集数据。"""
+        result: Dict[int, str] = {}
+        tmdb_id = getattr(mediainfo, "tmdb_id", None)
+        if tmdb_id is None and isinstance(mediainfo, dict):
+            tmdb_id = mediainfo.get("tmdb_id")
+        if tmdb_id:
+            try:
+                from app.chain.tmdb import TmdbChain
+                episodes = TmdbChain().tmdb_episodes(
+                    tmdbid=int(tmdb_id),
+                    season=int(season),
+                    episode_group=getattr(mediainfo, "episode_group", None),
+                ) or []
+            except Exception as error:  # noqa: BLE001
+                logger.debug(f"读取 TMDB 分集播出日期失败：{tmdb_id} S{season}：{error}")
+                episodes = []
+            for episode in episodes:
+                if isinstance(episode, dict):
+                    number = episode.get("episode_number")
+                    air_date = episode.get("air_date")
+                else:
+                    number = getattr(episode, "episode_number", None)
+                    air_date = getattr(episode, "air_date", None)
+                try:
+                    number = int(number)
+                except (TypeError, ValueError):
+                    continue
+                text = str(air_date or "").strip()[:10]
+                if number > 0 and text:
+                    result[number] = text
+            if result:
+                return result
+
+        # 兼容测试桩或宿主已把分集数据塞进 season_info 的情况。
+        season_info = getattr(mediainfo, "season_info", None)
+        if season_info is None and isinstance(mediainfo, dict):
+            season_info = mediainfo.get("season_info")
+        for info in season_info or []:
+            if isinstance(info, dict):
+                season_number = info.get("season_number")
+                episodes = info.get("episodes") or []
+            else:
+                season_number = getattr(info, "season_number", None)
+                episodes = getattr(info, "episodes", None) or []
+            try:
+                if int(season_number) != int(season):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            for episode in episodes:
+                if isinstance(episode, dict):
+                    number = episode.get("episode_number")
+                    air_date = episode.get("air_date")
+                else:
+                    number = getattr(episode, "episode_number", None)
+                    air_date = getattr(episode, "air_date", None)
+                try:
+                    number = int(number)
+                except (TypeError, ValueError):
+                    continue
+                text = str(air_date or "").strip()[:10]
+                if number > 0 and text:
+                    result[number] = text
+        return result
 
     def process_tv_subscribe(
             self,
@@ -116,7 +190,15 @@ class TelevisionSyncProcessor(OwnerDelegator):
             )
             missing_episodes: List[int] = []
             discovered_manual_episodes: Set[int] = set()
-            target_episode_air_dates: Dict[int, str] = {}
+            target_episode_air_dates: Dict[int, str] = self._season_episode_air_dates(
+                mediainfo, season
+            )
+            today = date.today().isoformat()
+            unaired_episodes = {
+                episode for episode in expected_episodes
+                if target_episode_air_dates.get(episode)
+                and target_episode_air_dates[episode] > today
+            }
             # 1. 先读取媒体服务器实际剧集，不混入订阅 note。
             self._set_task_phase(subscribe, "检查媒体库内容", 30)
             media_server_valid, media_server_episodes = self._timed_sync_call(
@@ -163,6 +245,9 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 )
                 return transferred_count
             cloud_matched = set(cloud_episodes & expected_episodes)
+            if unaired_episodes:
+                # 未播出集即使网盘里已有（泄露/错包），也不计入“已入库”。
+                cloud_matched -= unaired_episodes
             # 以当前目标网盘实际存在的剧集为准计算缺集，彻底解耦外部媒体库可能残留的旧源索引
             existing_episodes_in_resources = set(cloud_matched)
             existing_episodes_for_manual = set(cloud_episodes) if discover_manual_episodes else set()
@@ -217,6 +302,25 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     episode for episode in missing_episodes
                     if episode >= subscribe.start_episode
                 ]
+
+            # 未播出集数不参与转存：部分资源站会提前放出“全集/泄露版”，
+            # 或把别的剧打包冒充，必须按 TMDB 单集播出日期挡住。
+            if unaired_episodes:
+                skipped = set(missing_episodes) & unaired_episodes
+                if skipped:
+                    logger.info(
+                        f"{mediainfo.title_year} S{season:02d} 跳过未播出剧集："
+                        f"{self._format_episode_ranges(skipped)}"
+                    )
+                    missing_episodes = [
+                        episode for episode in missing_episodes
+                        if episode not in skipped
+                    ]
+                if not missing_episodes and not discover_manual_episodes:
+                    logger.info(
+                        f"{mediainfo.title_year} S{season:02d} 当前缺集均未播出，等待更新"
+                    )
+                    return transferred_count
 
             logger.debug(
                 f"{mediainfo.title_year} S{season:02d} 待转存剧集："
@@ -484,6 +588,22 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 target_file_names=selected_file_names,
                             ))
                         if not share_files:
+                            continue
+                        # 自动搜索源常见“标题写 A、分享里是 B”的挂羊头资源；
+                        # 手动资源保留人工判断，不在这里拦。
+                        if source != "manual" and self._share_title_mismatch(
+                                share_files, mediainfo, resource_title
+                        ):
+                            reason = "分享根目录与订阅标题不符"
+                            logger.warning(
+                                f"{reason}，已跳过：{resource_title} - "
+                                f"{self._resource_log_reference(share_url)}"
+                            )
+                            self._record_skip_candidate(
+                                SkipStatsCollector.KIND_MISMATCH,
+                                share_url,
+                                reason=reason,
+                            )
                             continue
 
                         video_count, share_episodes = self._summarize_share_episodes(
