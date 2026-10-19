@@ -187,9 +187,12 @@ def test_group_plan_uses_sync_handler_for_platform_target():
 
     class FakeNaming:
         called = False
+        root_seen = None
+        _CLOUD_MEDIA_ROOT = "/媒体库"
 
         def _platform_target(self, root, subscribe, media, filename, season=None, episode=None):
             self.called = True
+            self.root_seen = root
             return "/媒体库/剧集/Show (2020)/Season 01", "Show - S01E01.mkv"
 
     naming = FakeNaming()
@@ -206,6 +209,7 @@ def test_group_plan_uses_sync_handler_for_platform_target():
     )
     result = service._build_group_plan(package, 0)
     assert naming.called is True
+    assert naming.root_seen == "/媒体库"
     assert result.group["status"] == "ready"
     assert result.targets[0].target_dir == "/媒体库/剧集/Show (2020)/Season 01"
     assert result.targets[0].target_name == "Show - S01E01.mkv"

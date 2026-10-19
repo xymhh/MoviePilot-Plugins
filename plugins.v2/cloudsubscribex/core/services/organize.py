@@ -339,8 +339,9 @@ class OrganizeService(OwnerDelegator):
                 naming = getattr(self, "_sync_handler", None)
                 if not naming:
                     raise RuntimeError("同步服务尚未初始化")
+                media_root = getattr(naming, "_CLOUD_MEDIA_ROOT", "/") or "/"
                 target_dir, target_name = naming._platform_target(  # noqa: SLF001
-                    "/",
+                    media_root,
                     None,
                     media,
                     candidate.entry.name,
