@@ -149,7 +149,7 @@
           <div class="text-caption text-medium-emphasis">
             共 {{ groups.length }} 个分组，ready {{ readyCount }} 个
           </div>
-          <v-spacer />
+          <v-spacer class="organize-spacer" />
           <v-btn size="small" variant="text" :disabled="busy" @click="selectAllReady">
             全选可执行
           </v-btn>
@@ -761,7 +761,7 @@ onBeforeUnmount(stopPolling)
   .organize-toolbar > .text-caption {
     grid-column: 1 / -1;
   }
-  .organize-toolbar :deep(.v-spacer) {
+  .organize-toolbar .organize-spacer {
     display: none;
   }
   .organize-toolbar :deep(.v-btn) {
