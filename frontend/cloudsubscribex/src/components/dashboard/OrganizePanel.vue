@@ -43,6 +43,14 @@
             扫描预览
           </v-btn>
           <v-btn
+            variant="tonal"
+            size="small"
+            prepend-icon="mdi-broom"
+            :disabled="busy || !sourcePath.trim()"
+            @click="cleanupVisible = true">
+            清理空目录
+          </v-btn>
+          <v-btn
             v-if="busy"
             color="warning"
             variant="tonal"
@@ -54,8 +62,19 @@
         </div>
 
         <div class="organize-hint text-caption text-medium-emphasis mt-2">
-          扫描只读；执行只做重命名 + 移动，不删除网盘文件。目标路径复用当前媒体库分类与命名模板。
+          扫描只读；执行只做重命名 + 移动，不删除网盘文件；搬空后的源目录会一并清理（移入回收站）。目标路径复用当前媒体库分类与命名模板。
         </div>
+
+        <v-alert
+          v-if="cleanupMessage"
+          class="mt-3"
+          type="success"
+          variant="tonal"
+          density="compact"
+          closable
+          @click:close="cleanupMessage = ''">
+          {{ cleanupMessage }}
+        </v-alert>
 
         <v-alert
           v-if="errorMessage"
@@ -83,6 +102,9 @@
           </v-chip>
           <v-chip size="small" :color="stats.unmatched ? 'warning' : undefined" variant="tonal">
             待确认 {{ stats.unmatched || 0 }}
+          </v-chip>
+          <v-chip v-if="stats.removed_dirs" size="small" color="success" variant="tonal">
+            清理空目录 {{ stats.removed_dirs }}
           </v-chip>
           <v-chip v-if="stats.truncated" size="small" color="warning" variant="tonal">
             已达扫描上限
@@ -212,13 +234,30 @@
         <v-card-title class="text-subtitle-1">确认执行整理</v-card-title>
         <v-card-text class="text-body-2">
           将把选中的 <strong>{{ selected.length }}</strong> 个分组移动到媒体库目标目录，并按平台模板重命名。
-          目标端同名文件按「{{ conflictLabel }}」处理；不会删除任何文件。
+          目标端同名文件按「{{ conflictLabel }}」处理；不会删除任何文件，搬空后的源目录会自动清理。
         </v-card-text>
         <v-card-actions>
           <v-spacer />
           <v-btn variant="text" :disabled="executing" @click="confirmVisible = false">取消</v-btn>
           <v-btn color="primary" variant="flat" :loading="executing" @click="executeSelected">
             开始整理
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <v-dialog v-model="cleanupVisible" max-width="500">
+      <v-card>
+        <v-card-title class="text-subtitle-1">清理空目录</v-card-title>
+        <v-card-text class="text-body-2">
+          扫描 <strong>{{ sourcePath || "源目录" }}</strong> 下所有目录，只删除没有任何文件和子目录的空目录（移入回收站）。
+          非空目录不会改动。
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" :disabled="cleaning" @click="cleanupVisible = false">取消</v-btn>
+          <v-btn color="warning" variant="flat" :loading="cleaning" @click="cleanupEmptyDirs">
+            开始清理
           </v-btn>
         </v-card-actions>
       </v-card>
@@ -248,7 +287,10 @@ const maxFiles = ref(500)
 const selected = ref([])
 const directoryVisible = ref(false)
 const confirmVisible = ref(false)
+const cleanupVisible = ref(false)
 const executing = ref(false)
+const cleaning = ref(false)
+const cleanupMessage = ref("")
 const errorMessage = ref("")
 let pollTimer = null
 
@@ -270,10 +312,12 @@ const executionSummary = computed(() => {
   const done = exec.done || 0
   const failed = exec.failed || 0
   const skipped = exec.skipped || 0
+  const removedDirs = exec.removed_dirs || 0
   if (!done && !failed && !skipped) return null
   return {
     failed,
-    text: `执行完成：成功 ${done}，跳过 ${skipped}，失败 ${failed}`,
+    text: `执行完成：成功 ${done}，跳过 ${skipped}，失败 ${failed}`
+      + (removedDirs ? `，清理空目录 ${removedDirs} 个` : ""),
   }
 })
 
@@ -354,6 +398,31 @@ async function stopTask() {
     await loadStatus()
   } catch (error) {
     errorMessage.value = `停止失败：${error?.message || error}`
+  }
+}
+
+async function cleanupEmptyDirs() {
+  cleaning.value = true
+  cleanupMessage.value = ""
+  errorMessage.value = ""
+  try {
+    const result = await request("post", "organize/cleanup_empty_dirs", {
+      source_path: sourcePath.value.trim(),
+    })
+    cleanupVisible.value = false
+    if (result.success === false) {
+      errorMessage.value = result.message || "清理失败"
+      return
+    }
+    cleanupMessage.value = result.removed !== undefined
+      ? `已扫描 ${result.scanned || 0} 个目录，清理空目录 ${result.removed || 0} 个`
+        + (result.truncated ? "（目录过多，仅处理前 1000 个）" : "")
+      : (result.message || "空目录已清理")
+    await loadStatus()
+  } catch (error) {
+    errorMessage.value = `清理失败：${error?.message || error}`
+  } finally {
+    cleaning.value = false
   }
 }
 

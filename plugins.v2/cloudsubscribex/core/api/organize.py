@@ -16,6 +16,10 @@ class OrganizeApi(OwnerDelegator):
             trigger=str(request.get("trigger") or "手动"),
         )
 
+    def api_vue_organize_cleanup(self, payload: Optional[Dict[str, Any]] = None) -> dict:
+        request = payload or {}
+        return self.cleanup_empty_dirs(source_path=str(request.get("source_path") or ""))
+
     def api_vue_organize_status(self) -> dict:
         return self.status()
 

@@ -229,3 +229,154 @@ def test_missing_target_suffix_is_restored_before_rename():
     assert success is True
     assert actual == "Show - S01E01.mkv"
     assert batch.renamed[0][1]["1"]["target_name"] == "Show - S01E01.mkv"
+
+
+class FakeListing:
+    def __init__(self, files=()):
+        self.checked = True
+        self.files = list(files)
+
+
+class FakeLookup:
+    def __init__(self, directory_id=None):
+        self.checked = True
+        self.directory_id = directory_id
+
+
+class FakeNode:
+    def __init__(self, name, is_directory, directory_id=""):
+        self.name = name
+        self.is_directory = is_directory
+        self.id = directory_id
+
+
+class FakeDirectories:
+    """用 path -> 子项 的字典模拟 115 目录树。"""
+
+    def __init__(self, tree):
+        self.tree = {
+            path: {"id": f"cid{index}", "children": dict(children)}
+            for index, (path, children) in enumerate(tree.items())
+        }
+        self.deleted = []
+
+    def _path_by_id(self, directory_id):
+        for path, node in self.tree.items():
+            if node["id"] == directory_id:
+                return path
+        return ""
+
+    def resolve_directory(self, path):
+        node = self.tree.get(path)
+        return FakeLookup(node["id"] if node else None)
+
+    def list_directory(self, directory_id):
+        path = self._path_by_id(directory_id)
+        if not path:
+            return FakeListing()
+        return FakeListing(
+            FakeNode(
+                name, is_directory,
+                self.tree.get(f"{path.rstrip('/')}/{name}", {}).get("id", ""),
+            )
+            for name, is_directory in self.tree[path]["children"].items()
+        )
+
+    def delete_directory(self, directory_id):
+        path = self._path_by_id(directory_id)
+        if not path:
+            return False
+        parent = path.rsplit("/", 1)[0] or "/"
+        self.tree[parent]["children"].pop(path.rsplit("/", 1)[-1], None)
+        self.tree.pop(path, None)
+        self.deleted.append(path)
+        return True
+
+    def refresh_directories(self):
+        return None
+
+
+class FakePruneDrive:
+    def __init__(self, directories, batch=False):
+        self.directories = directories
+        self.batch = batch
+
+    def supports(self, capability):
+        if self.batch:
+            return capability in {"directory_read", "batch_file_mutation"}
+        return capability in {"directory_read", "file_mutation"}
+
+    def require(self, capability):
+        if capability == "directory_read":
+            return self.directories
+        if capability == "batch_file_mutation":
+            return types.SimpleNamespace(
+                delete_files=lambda ids: {
+                    item for item in ids if self.directories.delete_directory(item)
+                }
+            )
+        return types.SimpleNamespace(
+            delete_file=lambda item: self.directories.delete_directory(item)
+        )
+
+
+def test_prune_empty_dirs_removes_emptied_chain_but_not_source_root():
+    directories = FakeDirectories({
+        "/待整理": {"Show": True, "keep.mkv": False},
+        "/待整理/Show": {"Season 1": True},
+        "/待整理/Show/Season 1": {},
+    })
+    service = make_service(FakeBatch())
+    service._cloud_drive = FakePruneDrive(directories)
+    removed = service._prune_empty_dirs(["/待整理/Show/Season 1"], "/待整理")
+    assert removed == 2
+    assert "/待整理" in directories.tree
+    assert "/待整理/Show" not in directories.tree
+    assert "/待整理/Show/Season 1" not in directories.tree
+
+
+def test_prune_empty_dirs_stops_at_non_empty_parent():
+    directories = FakeDirectories({
+        "/待整理": {"Show": True},
+        "/待整理/Show": {"Season 1": True, "extra.mkv": False},
+        "/待整理/Show/Season 1": {},
+    })
+    service = make_service(FakeBatch())
+    service._cloud_drive = FakePruneDrive(directories, batch=True)
+    removed = service._prune_empty_dirs(["/待整理/Show/Season 1"], "/待整理")
+    assert removed == 1
+    assert "/待整理/Show/Season 1" not in directories.tree
+    assert "/待整理/Show" in directories.tree
+
+
+def test_prune_empty_dirs_never_removes_source_root():
+    directories = FakeDirectories({
+        "/待整理": {"Show": True},
+        "/待整理/Show": {"Season 1": True},
+        "/待整理/Show/Season 1": {},
+    })
+    service = make_service(FakeBatch())
+    service._cloud_drive = FakePruneDrive(directories)
+    removed = service._prune_empty_dirs(["/待整理/Show/Season 1"], "/待整理")
+    assert removed == 2
+    assert "/待整理" in directories.tree
+    assert directories.tree["/待整理"]["children"] == {}
+
+
+def test_cleanup_empty_dirs_scans_source_and_removes_all_empty_dirs():
+    directories = FakeDirectories({
+        "/待整理": {"A": True, "B": True, "keep.mkv": False},
+        "/待整理/A": {"Season 1": True},
+        "/待整理/A/Season 1": {},
+        "/待整理/B": {"Season 1": True, "note.txt": False},
+        "/待整理/B/Season 1": {},
+    })
+    service = make_service(FakeBatch())
+    service._cloud_drive = FakePruneDrive(directories)
+    result = service.cleanup_empty_dirs("/待整理")
+    assert result["success"] is True
+    assert result["data"]["removed"] == 3
+    assert "/待整理/A" not in directories.tree
+    assert "/待整理/B/Season 1" not in directories.tree
+    assert "/待整理/B" in directories.tree
+    assert "/待整理" in directories.tree

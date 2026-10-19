@@ -549,6 +549,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "115 网盘整理：扫描源目录并生成预览",
             },
             {
+                "path": "/organize/cleanup_empty_dirs",
+                "endpoint": self.api_vue_organize_cleanup,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "115 网盘整理：清理源目录下所有空目录（移入回收站）",
+            },
+            {
                 "path": "/organize/status",
                 "endpoint": self.api_vue_organize_status,
                 "methods": ["GET"],

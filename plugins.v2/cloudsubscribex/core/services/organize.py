@@ -109,6 +109,7 @@ class OrganizeService(OwnerDelegator):
                     "directories": 0, "files": 0, "videos": 0, "subtitles": 0,
                     "groups": 0, "ready": 0, "unmatched": 0, "conflict": 0,
                     "items": 0, "done": 0, "failed": 0, "skipped": 0,
+                    "removed_dirs": 0,
                 },
                 "groups": [],
                 "errors": [],
@@ -164,12 +165,14 @@ class OrganizeService(OwnerDelegator):
             "done": 0,
             "failed": 0,
             "skipped": 0,
+            "removed_dirs": 0,
             "items": [],
             "started_at": time.time(),
         }
         self._state["stats"]["done"] = 0
         self._state["stats"]["failed"] = 0
         self._state["stats"]["skipped"] = 0
+        self._state["stats"]["removed_dirs"] = 0
         self._thread = threading.Thread(
             target=self._execute_worker,
             args=(plans, trigger),
@@ -433,7 +436,7 @@ class OrganizeService(OwnerDelegator):
     # ------------------------------------------------------------------
     def _execute_worker(self, plans: Sequence[GroupPlan], trigger: str) -> None:
         started = time.time()
-        total_done = total_failed = total_skipped = 0
+        total_done = total_failed = total_skipped = total_removed_dirs = 0
         for plan in plans:
             if self._stop_event.is_set():
                 break
@@ -449,6 +452,7 @@ class OrganizeService(OwnerDelegator):
             total_done += result["done"]
             total_failed += result["failed"]
             total_skipped += result["skipped"]
+            total_removed_dirs += result.get("removed_dirs", 0)
             with self._lock:
                 plan.group["status"] = "done" if not result["failed"] else "partial"
                 plan.group["result"] = {
@@ -460,10 +464,12 @@ class OrganizeService(OwnerDelegator):
                 stats["done"] = total_done
                 stats["failed"] = total_failed
                 stats["skipped"] = total_skipped
+                stats["removed_dirs"] = total_removed_dirs
                 execution = self._state.setdefault("execution", {})
                 execution["done"] = total_done
                 execution["failed"] = total_failed
                 execution["skipped"] = total_skipped
+                execution["removed_dirs"] = total_removed_dirs
                 execution.setdefault("items", []).extend(result["items"][:50])
                 execution["items"] = execution["items"][:300]
         cancelled = self._stop_event.is_set()
@@ -472,10 +478,13 @@ class OrganizeService(OwnerDelegator):
             self._state["message"] = (
                 "整理已停止" if cancelled else
                 f"整理完成：成功 {total_done}，跳过 {total_skipped}，失败 {total_failed}"
+                + (f"，清理空目录 {total_removed_dirs} 个" if total_removed_dirs else "")
             )
             self._state["finished_at"] = time.time()
-        self._finish_history(trigger, started, done=total_done, failed=total_failed, skipped=total_skipped,
-                             cancelled=cancelled)
+        self._finish_history(
+            trigger, started, done=total_done, failed=total_failed,
+            skipped=total_skipped, removed_dirs=total_removed_dirs, cancelled=cancelled,
+        )
 
     def _execute_plan(self, plan: GroupPlan) -> Dict[str, Any]:
         done = failed = skipped = 0
@@ -548,7 +557,160 @@ class OrganizeService(OwnerDelegator):
                 "success": bool(success),
                 "reason": reason.removeprefix("skip:") if reason else "",
             })
-        return {"done": done, "failed": failed, "skipped": skipped, "items": items}
+        removed_dirs = 0
+        if done and not self._stop_event.is_set():
+            source_dirs = {
+                item.source_dir for item in [*plan.targets, *plan.subtitles]
+                if item.source_dir
+            }
+            removed_dirs = self._prune_empty_dirs(
+                source_dirs, str((self._state or {}).get("source_path") or "")
+            )
+        return {
+            "done": done, "failed": failed, "skipped": skipped,
+            "removed_dirs": removed_dirs, "items": items,
+        }
+
+    def cleanup_empty_dirs(self, source_path: str = "") -> Dict[str, Any]:
+        """手动清理源目录下所有空目录（仅空目录，移入回收站）。"""
+        source = str(source_path or self._organize_source_path or "").strip()
+        if not source:
+            return {"success": False, "message": "请先选择 115 待整理源目录"}
+        if not source.startswith("/"):
+            source = f"/{source}"
+        root = "/" + source.strip("/")
+        if root == "/":
+            return {"success": False, "message": "源目录不能是网盘根目录"}
+        with self._lock:
+            if self._thread and self._thread.is_alive():
+                return {"success": False, "message": "已有整理任务在运行，请先等待完成"}
+        try:
+            paths, scanned, truncated = self._collect_directories(root)
+            removed = self._prune_empty_dirs(paths, root)
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"整理台清理空目录失败：{root}：{error}", exc_info=True)
+            return {"success": False, "message": f"清理失败：{error}"}
+        message = f"已扫描 {scanned} 个目录，清理空目录 {removed} 个"
+        if truncated:
+            message += "（目录过多，仅处理前 1000 个）"
+        logger.info(f"整理台手动清理空目录：{root}，扫描={scanned}，清理={removed}")
+        return {
+            "success": True,
+            "message": message,
+            "data": {"scanned": scanned, "removed": removed, "truncated": truncated},
+        }
+
+    def _collect_directories(self, source_root: str, max_dirs: int = 1000) -> Tuple[List[str], int, bool]:
+        """列出源根下所有目录路径，供空目录清理使用。"""
+        drive = getattr(self, "_cloud_drive", None)
+        if not drive:
+            raise RuntimeError("网盘未登录或未就绪")
+        directories = drive.require(CloudDriveCapability.DIRECTORY_READ)
+        root = "/" + str(source_root or "").strip("/")
+        lookup = directories.resolve_directory(root)
+        if not getattr(lookup, "checked", False) or getattr(lookup, "directory_id", None) is None:
+            raise RuntimeError(f"无法解析源目录：{root}")
+        refresh = getattr(directories, "refresh_directories", None)
+        if callable(refresh):
+            refresh()
+        paths: List[str] = []
+        stack: List[Tuple[str, str, int]] = [(str(lookup.directory_id), root, 0)]
+        visited: set = set()
+        truncated = False
+        while stack:
+            if len(paths) >= max_dirs:
+                truncated = True
+                break
+            cid, path, depth = stack.pop()
+            if cid in visited:
+                continue
+            visited.add(cid)
+            listing = directories.list_directory(cid)
+            if not getattr(listing, "checked", False):
+                continue
+            for item in getattr(listing, "files", ()) or ():
+                if not getattr(item, "is_directory", False):
+                    continue
+                name = str(getattr(item, "name", "") or "").strip()
+                if not name:
+                    continue
+                child = f"{path.rstrip('/')}/{name}" if path != "/" else f"/{name}"
+                paths.append(child)
+                if len(paths) >= max_dirs:
+                    truncated = True
+                    break
+                if depth < 20:
+                    stack.append((str(getattr(item, "id", "") or ""), child, depth + 1))
+            if truncated:
+                break
+        return paths, len(paths), truncated
+
+    def _prune_empty_dirs(self, paths: Sequence[str], source_root: str) -> int:
+        """删除本次搬空后的源目录，最多清理到源根（不含源根）。"""
+        drive = getattr(self, "_cloud_drive", None)
+        root = "/" + str(source_root or "").strip("/")
+        if not drive or not root or root == "/":
+            return 0
+        supports = getattr(drive, "supports", None)
+        if callable(supports) and not supports(CloudDriveCapability.DIRECTORY_READ):
+            return 0
+        try:
+            directories = drive.require(CloudDriveCapability.DIRECTORY_READ)
+            batch = drive.require(CloudDriveCapability.BATCH_FILE_MUTATION) \
+                if (callable(supports) and supports(CloudDriveCapability.BATCH_FILE_MUTATION)) else None
+            mutations = None if batch else drive.require(CloudDriveCapability.FILE_MUTATION)
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"整理台清理空目录不可用：{error}")
+            return 0
+        try:
+            refresh = getattr(directories, "refresh_directories", None)
+            if callable(refresh):
+                refresh()
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"整理台刷新目录缓存失败：{error}")
+        protected = {
+            str(target.target_dir).rstrip("/")
+            for plan in (self._plans or {}).values()
+            for target in [*plan.targets, *plan.subtitles]
+            if target.target_dir
+        }
+        removed = 0
+        candidates = sorted(
+            {str(path).rstrip("/") for path in paths if str(path).strip()},
+            key=lambda path: path.count("/"), reverse=True,
+        )
+        for start in candidates:
+            current = start
+            while current != root and current.startswith(root + "/"):
+                if current in protected:
+                    break
+                try:
+                    lookup = directories.resolve_directory(current)
+                    if not getattr(lookup, "checked", False) or getattr(lookup, "directory_id", None) is None:
+                        break
+                    listing = directories.list_directory(str(lookup.directory_id))
+                    if not getattr(listing, "checked", False):
+                        break
+                    if getattr(listing, "files", ()):
+                        break
+                    directory_id = str(lookup.directory_id)
+                    if batch:
+                        deleted = batch.delete_files([directory_id])
+                        success = directory_id in (deleted or set())
+                    else:
+                        success = bool(mutations.delete_file(directory_id))
+                    if not success:
+                        break
+                    removed += 1
+                    logger.info(f"整理台清理空目录：{current}")
+                    refresh = getattr(directories, "refresh_directories", None)
+                    if callable(refresh):
+                        refresh()
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(f"整理台清理空目录失败：{current}：{error}")
+                    break
+                current = str(PurePosixPath(current).parent)
+        return removed
 
     def _move_target(self, target: TargetFile, policy: str) -> Tuple[bool, str, str]:
         drive = getattr(self, "_cloud_drive", None)
@@ -708,7 +870,7 @@ class OrganizeService(OwnerDelegator):
 
     def _finish_history(
             self, trigger: str, started: float, done: int = 0, failed: int = 0,
-            skipped: int = 0, cancelled: bool = False, note: str = "",
+            skipped: int = 0, removed_dirs: int = 0, cancelled: bool = False, note: str = "",
     ) -> None:
         with self._lock:
             if not self._state:
@@ -724,6 +886,7 @@ class OrganizeService(OwnerDelegator):
                 "done": done,
                 "failed": failed,
                 "skipped": skipped,
+                "removed_dirs": removed_dirs,
                 "cancelled": cancelled,
                 "note": note,
             }
@@ -739,6 +902,7 @@ class OrganizeService(OwnerDelegator):
                         f"源目录：{record['source_path']}\n"
                         f"分组：{record['groups']}，可执行：{record['ready']}\n"
                         f"成功 {done}，跳过 {skipped}，失败 {failed}"
+                        + (f"\n清理空目录：{removed_dirs} 个" if removed_dirs else "")
                     ),
                 )
             except Exception as error:  # noqa: BLE001
