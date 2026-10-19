@@ -493,13 +493,13 @@ class OrganizeService(OwnerDelegator):
         # 视频先处理；视频被跳过后其字幕也不再搬。
         moved_episodes = set()
         moved_movie_dirs = set()
+        video_results = self._move_targets_batch(plan.targets, policy)
         for target in plan.targets:
             if self._stop_event.is_set():
                 break
-            try:
-                success, actual_name, reason = self._move_target(target, policy)
-            except Exception as error:  # noqa: BLE001
-                success, actual_name, reason = False, target.target_name, str(error)
+            success, actual_name, reason = video_results.get(
+                target.file_id, (False, target.target_name, "未执行")
+            )
             moved = bool(success)
             if success:
                 done += 1
@@ -523,27 +523,35 @@ class OrganizeService(OwnerDelegator):
             if not moved:
                 continue
 
-        video_success_episodes = moved_episodes
+        subtitle_skips: Dict[str, str] = {}
+        subtitle_targets: List[TargetFile] = []
         for target in plan.subtitles:
             if self._stop_event.is_set():
                 break
             video_missing = (
-                target.episode not in video_success_episodes
+                target.episode not in moved_episodes
                 if target.episode else target.target_dir not in moved_movie_dirs
             )
             if video_missing:
+                subtitle_skips[target.file_id] = "对应视频未搬，字幕跳过"
+            else:
+                subtitle_targets.append(target)
+        subtitle_results = self._move_targets_batch(subtitle_targets, policy)
+        for target in plan.subtitles:
+            if self._stop_event.is_set():
+                break
+            if target.file_id in subtitle_skips:
                 skipped += 1
                 items.append({
                     "name": target.source_name,
                     "target": safe_join(target.target_dir, target.target_name),
                     "success": True,
-                    "reason": "对应视频未搬，字幕跳过",
+                    "reason": subtitle_skips[target.file_id],
                 })
                 continue
-            try:
-                success, actual_name, reason = self._move_target(target, policy)
-            except Exception as error:  # noqa: BLE001
-                success, actual_name, reason = False, target.target_name, str(error)
+            success, actual_name, reason = subtitle_results.get(
+                target.file_id, (False, target.target_name, "未执行")
+            )
             if success:
                 done += 1
             elif reason.startswith("skip:"):
@@ -712,6 +720,175 @@ class OrganizeService(OwnerDelegator):
                 current = str(PurePosixPath(current).parent)
         return removed
 
+    _BATCH_CHUNK_SIZE = 100
+
+    def _move_targets_batch(
+            self, targets: Sequence[TargetFile], policy: str
+    ) -> Dict[str, Tuple[bool, str, str]]:
+        """按源目录批量改名、按目标目录批量移动。
+
+        115 的 update_name / batch_move 都支持一次提交多个文件。把逐个文件的
+        两次写请求合并成每目录两次，能在保持 1.5 秒请求间隔的前提下显著提速。
+        """
+        results: Dict[str, Tuple[bool, str, str]] = {}
+        if not targets:
+            return results
+        drive = getattr(self, "_cloud_drive", None)
+        if not drive:
+            return {
+                target.file_id: (False, target.target_name, "网盘未就绪")
+                for target in targets
+            }
+        supports = getattr(drive, "supports", None)
+        batch = None
+        if callable(supports) and supports(CloudDriveCapability.BATCH_FILE_MUTATION):
+            batch = drive.require(CloudDriveCapability.BATCH_FILE_MUTATION)
+        if not batch:
+            return {
+                target.file_id: self._move_target(target, policy)
+                for target in targets
+            }
+
+        prepared: List[Tuple[TargetFile, Any, str, bool]] = []
+        for target in targets:
+            if self._stop_event.is_set():
+                break
+            entry = self._find_entry(target)
+            if not entry:
+                results[target.file_id] = (False, target.target_name, "源文件已不存在")
+                continue
+            final_name = self._target_final_name(target)
+            existing = self._directory_names(target.target_dir)
+            if existing is None:
+                results[target.file_id] = (
+                    False, final_name, "无法读取目标目录，已跳过（避免覆盖）"
+                )
+                continue
+            if target.source_dir == target.target_dir and target.source_name == final_name:
+                results[target.file_id] = (True, final_name, "")
+                continue
+            if final_name in existing:
+                if policy != "suffix":
+                    results[target.file_id] = (
+                        False, final_name, "skip:目标同名文件已存在"
+                    )
+                    continue
+                for index in range(2, 100):
+                    candidate = suffix_name(final_name, index)
+                    if candidate not in existing:
+                        final_name = candidate
+                        break
+                else:
+                    results[target.file_id] = (
+                        False, final_name, "目标同名文件过多，已跳过"
+                    )
+                    continue
+            existing.add(final_name)
+            prepared.append((
+                target, entry, final_name, target.source_name != final_name
+            ))
+
+        renamed_by_id: Dict[str, Any] = {}
+        final_names: Dict[str, str] = {}
+        rename_groups: Dict[str, List[Tuple[TargetFile, Any, str]]] = {}
+        for target, entry, final_name, needs_rename in prepared:
+            final_names[target.file_id] = final_name
+            if needs_rename:
+                rename_groups.setdefault(target.source_dir, []).append(
+                    (target, entry, final_name)
+                )
+            else:
+                renamed_by_id[target.file_id] = entry
+
+        for source_dir, group in rename_groups.items():
+            for start in range(0, len(group), self._BATCH_CHUNK_SIZE):
+                if self._stop_event.is_set():
+                    break
+                chunk = group[start:start + self._BATCH_CHUNK_SIZE]
+                payload = {
+                    target.file_id: {"item": entry, "target_name": final_name}
+                    for target, entry, final_name in chunk
+                }
+                try:
+                    renamed = batch.rename_files(source_dir, payload) or {}
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(f"整理台批量改名失败：{source_dir}，{error}")
+                    for target, _, final_name in chunk:
+                        results[target.file_id] = (
+                            False, final_name, f"重命名失败：{error}"
+                        )
+                    continue
+                for target, _, final_name in chunk:
+                    item = renamed.get(target.file_id)
+                    if not item:
+                        results[target.file_id] = (False, final_name, "重命名失败")
+                        continue
+                    renamed_by_id[target.file_id] = item
+                    final_names[target.file_id] = (
+                        str(getattr(item, "name", "") or final_name)
+                    )
+
+        move_groups: Dict[str, List[Tuple[TargetFile, Any]]] = {}
+        for target, _entry, final_name, _needs_rename in prepared:
+            if target.file_id in results:
+                continue
+            renamed = renamed_by_id.get(target.file_id)
+            if not renamed:
+                results[target.file_id] = (False, final_name, "重命名失败")
+                continue
+            if target.source_dir == target.target_dir:
+                actual_name = (
+                    str(getattr(renamed, "name", "") or final_names[target.file_id])
+                )
+                results[target.file_id] = (True, actual_name, "")
+                self._remember_target_name(target.target_dir, actual_name)
+                continue
+            move_groups.setdefault(target.target_dir, []).append((target, renamed))
+
+        for target_dir, group in move_groups.items():
+            for start in range(0, len(group), self._BATCH_CHUNK_SIZE):
+                if self._stop_event.is_set():
+                    break
+                chunk = group[start:start + self._BATCH_CHUNK_SIZE]
+                payload = {
+                    target.file_id: renamed
+                    for target, renamed in chunk
+                }
+                try:
+                    moved = batch.move_files(payload, target_dir) or {}
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(f"整理台批量移动失败：{target_dir}，{error}")
+                    for target, _ in chunk:
+                        results[target.file_id] = (
+                            False, final_names[target.file_id], f"移动失败：{error}"
+                        )
+                    continue
+                for target, _ in chunk:
+                    item = moved.get(target.file_id)
+                    if not item:
+                        results[target.file_id] = (
+                            False, final_names[target.file_id], "移动失败"
+                        )
+                        continue
+                    actual_name = (
+                        str(getattr(item, "name", "") or final_names[target.file_id])
+                    )
+                    results[target.file_id] = (True, actual_name, "")
+                    self._remember_target_name(target.target_dir, actual_name)
+        return results
+
+    def _target_final_name(self, target: TargetFile) -> str:
+        final_name = target.target_name
+        source_suffix = PurePosixPath(target.source_name).suffix
+        if source_suffix and not final_name.lower().endswith(source_suffix.lower()):
+            final_name = f"{final_name}{source_suffix}"
+        return final_name
+
+    def _remember_target_name(self, path: str, name: str) -> None:
+        names = self._target_name_cache.get(path)
+        if isinstance(names, set) and name:
+            names.add(name)
+
     def _move_target(self, target: TargetFile, policy: str) -> Tuple[bool, str, str]:
         drive = getattr(self, "_cloud_drive", None)
         if not drive:
@@ -723,10 +900,7 @@ class OrganizeService(OwnerDelegator):
         if not entry:
             return False, target.target_name, "源文件已不存在"
 
-        final_name = target.target_name
-        source_suffix = PurePosixPath(target.source_name).suffix
-        if source_suffix and not final_name.lower().endswith(source_suffix.lower()):
-            final_name = f"{final_name}{source_suffix}"
+        final_name = self._target_final_name(target)
         existing = self._directory_names(target.target_dir)
         if existing is None:
             return False, final_name, "无法读取目标目录，已跳过（避免覆盖）"

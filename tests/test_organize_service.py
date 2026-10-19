@@ -46,16 +46,18 @@ class FakeCloudFile:
 
 
 class FakeBatch:
-    def __init__(self, fail_move=False):
+    def __init__(self, fail_move=False, missing_rename_ids=()):
         self.renamed = []
         self.moved = []
         self.fail_move = fail_move
+        self.missing_rename_ids = set(missing_rename_ids)
 
     def rename_files(self, path, items):
         self.renamed.append((path, items))
         return {
             key: FakeCloudFile(value["target_name"])
             for key, value in items.items()
+            if key not in self.missing_rename_ids
         }
 
     def move_files(self, items, target_dir):
@@ -63,8 +65,8 @@ class FakeBatch:
         if self.fail_move:
             return {}
         return {
-            key: FakeCloudFile(next(iter(items.values())).name)
-            for key in items
+            key: FakeCloudFile(value.name)
+            for key, value in items.items()
         }
 
 
@@ -153,12 +155,15 @@ def test_subtitle_skipped_when_video_skipped():
     service._stop_event = __import__("threading").Event()
     object.__setattr__(service, "_generate_strm_for_target", lambda target, name: None)
 
-    def fake_move(target, policy):
-        if target.is_subtitle:
-            return True, target.target_name, ""
-        return False, target.target_name, "skip:目标同名文件已存在"
+    def fake_move_batch(targets, policy):
+        return {
+            target.file_id: (True, target.target_name, "")
+            if target.is_subtitle else
+            (False, target.target_name, "skip:目标同名文件已存在")
+            for target in targets
+        }
 
-    object.__setattr__(service, "_move_target", fake_move)
+    object.__setattr__(service, "_move_targets_batch", fake_move_batch)
     video = TargetFile(
         file_id="1", source_name="Show.S01E01.mkv", source_dir="/源",
         target_dir="/库", target_name="Show - S01E01.mkv", episode=1,
@@ -229,6 +234,127 @@ def test_missing_target_suffix_is_restored_before_rename():
     assert success is True
     assert actual == "Show - S01E01.mkv"
     assert batch.renamed[0][1]["1"]["target_name"] == "Show - S01E01.mkv"
+
+
+def _batch_targets(count=3, source_dir="/待整理/Show", target_dir="/剧集/Show/Season 01"):
+    return [
+        TargetFile(
+            file_id=str(index),
+            source_name=f"Show.S01E{index:02d}.mkv",
+            source_dir=source_dir,
+            target_dir=target_dir,
+            target_name=f"Show - S01E{index:02d}.mkv",
+            episode=index,
+        )
+        for index in range(1, count + 1)
+    ]
+
+
+def test_batch_groups_rename_and_move_per_directory():
+    """同一目录的多个文件只能各发一次批量改名/移动请求。"""
+    batch = FakeBatch()
+    service = make_service(batch)
+    object.__setattr__(service, "_find_entry", lambda target: FakeCloudFile(target.source_name))
+    names = {}
+    object.__setattr__(service, "_directory_names", lambda path: names.setdefault(path, set()))
+    results = service._move_targets_batch(_batch_targets(3), "skip")
+    assert all(result[0] for result in results.values())
+    assert len(batch.renamed) == 1
+    assert len(batch.renamed[0][1]) == 3
+    assert len(batch.moved) == 1
+    assert len(batch.moved[0][1]) == 3
+
+
+def test_batch_suffix_policy_reserves_distinct_names():
+    batch = FakeBatch()
+    service = make_service(batch)
+    object.__setattr__(service, "_find_entry", lambda target: FakeCloudFile(target.source_name))
+    names = {}
+    object.__setattr__(service, "_directory_names", lambda path: names.setdefault(path, set()))
+    targets = [
+        TargetFile(
+            file_id="1", source_name="Show.S01E01.mkv", source_dir="/源",
+            target_dir="/库", target_name="Show - S01E01.mkv", episode=1,
+        ),
+        TargetFile(
+            file_id="2", source_name="Show.S01E01.dup.mkv", source_dir="/源",
+            target_dir="/库", target_name="Show - S01E01.mkv", episode=1,
+        ),
+    ]
+    results = service._move_targets_batch(targets, "suffix")
+    assert all(result[0] for result in results.values())
+    renamed = batch.renamed[0][1]
+    assert renamed["1"]["target_name"] == "Show - S01E01.mkv"
+    assert renamed["2"]["target_name"] == "Show - S01E01 (2).mkv"
+
+
+def test_batch_same_directory_only_renames():
+    batch = FakeBatch()
+    service = make_service(batch)
+    object.__setattr__(service, "_find_entry", lambda target: FakeCloudFile(target.source_name))
+    object.__setattr__(service, "_directory_names", lambda path: set())
+    target = TargetFile(
+        file_id="1", source_name="old.mkv", source_dir="/库/Show",
+        target_dir="/库/Show", target_name="new.mkv",
+    )
+    results = service._move_targets_batch([target], "skip")
+    assert results["1"][0] is True
+    assert len(batch.renamed) == 1
+    assert batch.moved == []
+
+
+def test_batch_missing_rename_result_fails_only_that_file():
+    batch = FakeBatch(missing_rename_ids={"1"})
+    service = make_service(batch)
+    object.__setattr__(service, "_find_entry", lambda target: FakeCloudFile(target.source_name))
+    names = {}
+    object.__setattr__(service, "_directory_names", lambda path: names.setdefault(path, set()))
+    results = service._move_targets_batch(_batch_targets(2), "skip")
+    assert results["1"] == (False, "Show - S01E01.mkv", "重命名失败")
+    assert results["2"][0] is True
+    assert len(batch.moved[0][1]) == 1
+
+
+def test_batch_move_failure_marks_files_failed():
+    batch = FakeBatch(fail_move=True)
+    service = make_service(batch)
+    object.__setattr__(service, "_find_entry", lambda target: FakeCloudFile(target.source_name))
+    names = {}
+    object.__setattr__(service, "_directory_names", lambda path: names.setdefault(path, set()))
+    results = service._move_targets_batch(_batch_targets(2), "skip")
+    assert all(result[0] is False for result in results.values())
+    assert all("移动失败" in result[2] for result in results.values())
+
+
+def test_execute_plan_batches_videos_then_subtitles():
+    batch = FakeBatch()
+    service = make_service(batch)
+    object.__setattr__(service, "_find_entry", lambda target: FakeCloudFile(target.source_name))
+    names = {}
+    object.__setattr__(service, "_directory_names", lambda path: names.setdefault(path, set()))
+    object.__setattr__(service, "_generate_strm_for_target", lambda target, name: None)
+    object.__setattr__(service, "_prune_empty_dirs", lambda dirs, root: 0)
+    videos = _batch_targets(2)
+    subtitles = [
+        TargetFile(
+            file_id=f"s{index}", source_name=f"Show.S01E{index:02d}.chs.srt",
+            source_dir="/待整理/Show", target_dir="/剧集/Show/Season 01",
+            target_name=f"Show - S01E{index:02d}.chs.srt", episode=index,
+            is_subtitle=True,
+        )
+        for index in (1, 2)
+    ]
+    plan = GroupPlan(
+        key="Show", group={"title": "Show", "status": "ready"},
+        package=types.SimpleNamespace(videos=[], duplicates=[], ignored=[]),
+        media=None, targets=videos, subtitles=subtitles,
+    )
+    result = service._execute_plan(plan)
+    assert result["done"] == 4
+    assert result["failed"] == 0
+    assert result["skipped"] == 0
+    assert len(batch.renamed) == 2
+    assert len(batch.moved) == 2
 
 
 class FakeListing:
