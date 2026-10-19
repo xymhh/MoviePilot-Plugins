@@ -125,5 +125,43 @@ class TgMatchTest(unittest.TestCase):
         self.assertEqual(result["matched"]["id"], 1)
 
 
+    def test_real_channel_titles_auto_match(self):
+        """真实频道标题里的画质/演员残留不应把精确匹配降成前缀匹配。"""
+        cases = [
+            (
+                "名称：玉簟秋(2026)web-4k H265 ACC简体字幕 第15集",
+                {"id": 137, "name": "玉簟秋", "season": 1, "type": "电视剧"},
+            ),
+            (
+                "名称：《玉簟秋》2026 更新至 - 第 15 集 - [1080p] [AAC 2.0] "
+                "[丞磊 徐若晗 王丽坤] [民国 虐恋 家国]",
+                {"id": 137, "name": "玉簟秋", "season": 1, "type": "电视剧"},
+            ),
+            (
+                "名称：嫁金钗(2026)4k WEB-DL.DoVi 2160p 杜比视界 简体字幕 第10集",
+                {"id": 158, "name": "嫁金钗", "season": 1, "type": "电视剧"},
+            ),
+        ]
+        for title, sub in cases:
+            parsed = matcher.parse_message_title(title)
+            self.assertEqual(
+                parsed["normalized_title"], matcher.normalize_title(sub["name"])
+            )
+            result = matcher.match_item({"title": title}, [sub], allowed_ids=[sub["id"]])
+            self.assertIsNotNone(result["matched"], title)
+            self.assertEqual(result["matched"]["id"], sub["id"])
+            self.assertGreaterEqual(result["matched"]["score"], 90)
+
+    def test_season_conflict_reports_reason(self):
+        result = matcher.match_item(
+            {"title": "名称：诛仙 第四季(2026)【更11集】【4K.SDR】"},
+            [{"id": 200, "name": "诛仙", "season": 3, "type": "动漫"}],
+            allowed_ids=[200],
+        )
+        self.assertIsNone(result["matched"])
+        self.assertIn("季号不符", result["reason"])
+        self.assertIn("S04", result["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

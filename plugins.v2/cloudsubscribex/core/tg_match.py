@@ -45,10 +45,22 @@ _QUALITY_RE = re.compile(
     r"HDR10\+?|HDR|杜比视界|杜比全景声|Dolby\s*Vision|Dolby\s*Atmos|"
     r"H\.?264|H\.?265|HEVC|AVC|AAC|EAC3|AC3|FLAC|OPUS|"
     r"DDP(?:\s*5[ .]?1)?|DTS(?:-HD)?|TrueHD|ATMOS|REMUX|"
-    r"10bit|SDR|简繁|简体|繁体|中字|国语|粤语|英语|字幕|内嵌|外挂)",
+    r"DoVi|WEB(?:[- ]?DL|Rip)?|HDTV|ACC|CHS|CHT|简英|双语|"
+    r"10bit|SDR|简繁|简体|繁体|中字|国语|粤语|英语|字幕|内嵌|外挂|内封)",
     re.IGNORECASE,
 )
 _TRAILING_RE = re.compile(r"[\s\-_.·|/:：,，;；]+$")
+# 频道标题里的补充信息（画质/演员/分类）多放在括号内；集号季号已在前面提取，
+# 这里整段丢弃，避免“玉簟秋webacc”“嫁金钗dovi”这类残留把精确匹配降成前缀匹配。
+_BRACKET_RE = re.compile(r"[\[【(（][^\]】)）]*[\]】)）]")
+# 标题后残留的技术词（可被分隔符切开），只在中文/数字之后清理，避免误伤英文片名。
+_TECH_RESIDUE_RE = re.compile(
+    r"(?<=[\u4e00-\u9fff0-9])[\s\-_.·|/:：,，;；]*"
+    r"(?:web|webdl|webrip|hdtv|dovi|dv|hdr\d*|sdr|aac|acc|hevc|avc|"
+    r"h26[45]|2160p|1080p|720p|\d+\.\d+)"
+    r"(?=$|[\s\-_.·|/:：,，;；])",
+    re.IGNORECASE,
+)
 
 _TV_WORDS = ("电视剧", "剧集", "综艺", "动漫", "动画", "纪录片", "真人秀", "短剧", "连续剧")
 _MOVIE_WORDS = ("电影", "影片")
@@ -140,6 +152,7 @@ def parse_message_title(value: Any) -> Dict[str, Any]:
         media_type = "tv"
 
     cleaned = _UPDATE_RE.sub(" ", text)
+    cleaned = _BRACKET_RE.sub(" ", cleaned)
     cleaned = _YEAR_RE.sub(" ", cleaned)
     cleaned = _QUALITY_RE.sub(" ", cleaned)
     cleaned = _SEASON_EPISODE_RE.sub(" ", cleaned)
@@ -157,6 +170,13 @@ def parse_message_title(value: Any) -> Dict[str, Any]:
         r"(?<=[\u4e00-\u9fff])\d{1,4}\s*[-~至]\s*\d{1,4}\s*$", " ", cleaned,
     )
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -_·|/:：,，;；")
+    # 反复剥离尾部技术词与分隔符（"玉簟秋 web- ACC" → "玉簟秋"）
+    for _ in range(3):
+        polished = _TECH_RESIDUE_RE.sub(" ", cleaned)
+        polished = re.sub(r"[\s\-_.·|/:：,，;；]+$", "", polished).strip()
+        if polished == cleaned:
+            break
+        cleaned = polished
     cleaned = _TRAILING_RE.sub("", cleaned).strip()
     # 去掉标题两端的频道图标/装饰符号，保留中间标点（Doctor X：…）
     cleaned = re.sub(r"^[\W_]+|[\W_]+$", "", cleaned).strip()
@@ -193,8 +213,13 @@ def _subscription_titles(sub: Dict[str, Any]) -> List[str]:
 
 def score_subscription(
         parsed: Dict[str, Any], sub: Dict[str, Any],
+        ignore_season: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """给单个订阅打分；标题不匹配、季号冲突或类型冲突返回 None。"""
+    """给单个订阅打分；标题不匹配、季号冲突或类型冲突返回 None。
+
+    ``ignore_season`` 只用于诊断：标题命中但季号不符时，仍返回分数以便
+    日志说明真实原因，而不是笼统地写「没有标题匹配的订阅」。
+    """
     item_title = parsed["normalized_title"]
     if not item_title:
         return None
@@ -229,7 +254,7 @@ def score_subscription(
     except (TypeError, ValueError):
         sub_season = 0
     item_season = parsed.get("season")
-    if item_season is not None:
+    if item_season is not None and not ignore_season:
         if sub_season and int(item_season) != sub_season:
             return None
         if sub_season and best_score >= 90:
@@ -301,11 +326,36 @@ def match_item(
     candidates.sort(key=lambda row: (-row["score"], row["id"]))
 
     if not candidates:
+        conflicts: List[str] = []
+        if parsed.get("season") is not None:
+            for sub in subscriptions or []:
+                try:
+                    sub_id = int(sub.get("id") or sub.get("subscribe_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if has_whitelist and sub_id not in allowed:
+                    continue
+                scored = score_subscription(parsed, sub, ignore_season=True)
+                if not scored:
+                    continue
+                sub_season = int(scored.get("season") or 0)
+                if sub_season and sub_season != int(parsed["season"]):
+                    conflicts.append(
+                        f"#{scored['id']} {scored['name']} S{sub_season:02d}"
+                    )
+        if conflicts:
+            shown = "、".join(conflicts[:3])
+            reason = (
+                f"标题匹配但季号不符（消息 S{int(parsed['season']):02d} / "
+                f"订阅 {shown}），留待手动选择"
+            )
+        else:
+            reason = "白名单内没有标题匹配的订阅"
         return {
             "parsed": parsed,
             "matched": None,
             "candidates": [],
-            "reason": "白名单内没有标题匹配的订阅",
+            "reason": reason,
         }
     top = candidates[0]
     close = [row for row in candidates if top["score"] - row["score"] <= 5]
