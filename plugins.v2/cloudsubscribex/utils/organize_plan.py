@@ -30,7 +30,7 @@ _SEASON_PATTERNS = (
 )
 _GENERIC_DIRS = {
     "电影", "电影库", "剧集", "剧集库", "电视剧", "电视", "动画", "动漫",
-    "movies", "movie", "tv", "shows", "show", "anime", "downloads", "download",
+    "movies", "tv", "shows", "anime", "downloads", "download",
     "待整理", "整理", "临时", "temp", "incoming", "uploads", "upload",
 }
 _TECH_TOKEN = re.compile(
@@ -41,6 +41,10 @@ _TECH_TOKEN = re.compile(
     r"chs|cht|gb|big5|zh|eng|sub|subs|subbed|multi|proper|repack)\b)"
 )
 _YEAR = re.compile(r"(?<!\d)(19|20)\d{2}(?!\d)")
+_DATE_CONTAINER = re.compile(
+    r"(?:(?:19|20)\d{2}[-._年]?\d{1,2}[-._月]?\d{1,2}日?|"
+    r"\d{1,2}[-._月]\d{1,2}日?)"
+)
 
 
 @dataclass(frozen=True)
@@ -182,23 +186,32 @@ def relative_parts(path: str, source_root: str) -> List[str]:
 def package_key(entry: OrganizeEntry, source_root: str) -> str:
     """返回作品包键：优先取源根下第一个非季号/非通用容器的目录。"""
     parts = relative_parts(entry.parent_path, source_root)
-    fallback = ""
     for part in parts:
         text = str(part or "").strip()
         if not text:
             continue
-        if parse_season(text) is not None and len(text) <= 20:
-            continue
-        fallback = text
-        if text.lower() in _GENERIC_DIRS:
+        if is_container_dir(text):
             continue
         return text
-    if fallback:
-        return fallback
-    root_name = PurePosixPath(str(source_root or "/").rstrip("/")).name
-    if root_name and root_name.lower() not in _GENERIC_DIRS:
-        return root_name
+    # 文件直接散落在源根/日期目录/季目录里时，用文件名识别作品，
+    # 不能把所有散文件都归到「待整理」这个容器名下。
     return clean_title(entry.stem) or entry.stem
+
+
+def is_container_dir(text: str) -> bool:
+    """判断目录名是否只是容器（库、季、日期、集），不是作品名。"""
+    value = str(text or "").strip()
+    if not value:
+        return True
+    if value.lower() in _GENERIC_DIRS:
+        return True
+    if parse_season(value) is not None and len(value) <= 20:
+        return True
+    if _DATE_CONTAINER.fullmatch(value):
+        return True
+    if re.fullmatch(r"(?:第\s*)?\d{1,4}\s*[天日集期]", value):
+        return True
+    return False
 
 
 def package_name(entry: OrganizeEntry, source_root: str) -> str:

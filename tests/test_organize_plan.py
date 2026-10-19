@@ -150,3 +150,26 @@ def test_same_show_multiple_seasons_dedupe_to_one_package():
 def test_generic_library_directory_is_not_used_as_title():
     entry_item = entry("Movie.2024.mkv", "/待整理/电影/Movie", 100)
     assert plan.package_key(entry_item, "/待整理") == "Movie"
+
+
+def test_loose_files_directly_under_source_root_group_by_filename():
+    """整个待整理目录作为源时，根下散文件不能被归成同一个「待整理」包。"""
+    entries = [
+        entry("ShowA.S01E01.mkv", "/待整理", 100),
+        entry("ShowA.S01E02.mkv", "/待整理", 100),
+        entry("ShowB.S01E01.mkv", "/待整理", 100),
+    ]
+    packages = plan.build_packages(entries, "/待整理")
+    assert {package.key for package in packages} == {"ShowA", "ShowB"}
+    show_a = next(package for package in packages if package.key == "ShowA")
+    assert [item.episode for item in show_a.videos] == [1, 2]
+
+
+def test_date_container_directory_is_skipped_for_grouping():
+    entries = [
+        entry("ShowA.S01E01.mkv", "/待整理/2026-10-18", 100),
+        entry("ShowB.S01E01.mkv", "/待整理/2026-10-18", 100),
+        entry("ShowA.S01E02.mkv", "/待整理/2026-10-19", 100),
+    ]
+    packages = plan.build_packages(entries, "/待整理")
+    assert {package.key for package in packages} == {"ShowA", "ShowB"}
