@@ -209,3 +209,19 @@ def test_group_plan_uses_sync_handler_for_platform_target():
     assert result.group["status"] == "ready"
     assert result.targets[0].target_dir == "/媒体库/剧集/Show (2020)/Season 01"
     assert result.targets[0].target_name == "Show - S01E01.mkv"
+
+
+def test_missing_target_suffix_is_restored_before_rename():
+    """115 改名接口会截断缺失扩展名的目标名，执行前必须补回源后缀。"""
+    batch = FakeBatch()
+    service = make_service(batch)
+    object.__setattr__(service, "_find_entry", lambda target: FakeCloudFile(target.source_name))
+    object.__setattr__(service, "_directory_names", lambda path: set())
+    target = TargetFile(
+        file_id="1", source_name="Show.S01E01.mkv", source_dir="/待整理/Show",
+        target_dir="/剧集/Show/Season 01", target_name="Show - S01E01",
+    )
+    success, actual, reason = service._move_target(target, "skip")
+    assert success is True
+    assert actual == "Show - S01E01.mkv"
+    assert batch.renamed[0][1]["1"]["target_name"] == "Show - S01E01.mkv"

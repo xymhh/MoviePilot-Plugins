@@ -595,8 +595,8 @@ class P115FileService(OwnerDelegator):
         if current_name == target_name:
             return True
         curr_suffix = Path(current_name).suffix
-        if curr_suffix and not target_name.endswith(curr_suffix):
-            target_name = f"{Path(target_name).stem}{curr_suffix}"
+        if curr_suffix and not target_name.lower().endswith(curr_suffix.lower()):
+            target_name = f"{target_name}{curr_suffix}"
             if current_name == target_name:
                 return True
         try:
@@ -628,6 +628,23 @@ class P115FileService(OwnerDelegator):
             )
             return False
 
+    def _file_name_by_id(self, file_id: Any) -> str:
+        """按文件 ID 直查 115 详情，绕过目录列表的最终一致性延迟。"""
+        if not self.client or file_id in (None, ""):
+            return ""
+        try:
+            response = self._rate_limited_call(self.client.fs_file, str(file_id))
+            data = (response or {}).get("data") or []
+            if isinstance(data, dict):
+                data = [data]
+            item = data[0] if data else {}
+            return str(
+                item.get("file_name") or item.get("name") or item.get("n") or ""
+            ).strip()
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"115 按ID查询文件名失败：{file_id}，{error}")
+            return ""
+
     def rename_file_items_batch(
             self,
             save_path: str,
@@ -649,6 +666,11 @@ class P115FileService(OwnerDelegator):
             file_id = item.get("fid") or item.get("id")
             if not file_id or not current_name or not target_name:
                 continue
+            # 115 改名接口会把最后一个点之后的内容当扩展名；目标名缺后缀时必须补上，
+            # 否则接口返回成功但实际名字被截断，目录复核永远找不到目标名。
+            current_suffix = Path(current_name).suffix
+            if current_suffix and not target_name.lower().endswith(current_suffix.lower()):
+                target_name = f"{target_name}{current_suffix}"
             if current_name == target_name:
                 self._cache_target_file(save_path, target_name, item)
                 ready[str(key)] = item
@@ -699,13 +721,39 @@ class P115FileService(OwnerDelegator):
                 if verified_ids == expected_ids or attempt == 2:
                     break
                 time.sleep(1)
+            # 目录列表可能延迟；对仍未确认的文件按 ID 直查详情，避免把成功改名误判为失败。
+            unresolved = {
+                key: pending for key, pending in pending_items.items()
+                if pending[2] in expected_ids and pending[2] not in verified_ids
+            }
+            for key, (item, target_name, file_id) in list(unresolved.items()):
+                actual_name = self._file_name_by_id(file_id)
+                if actual_name != target_name:
+                    continue
+                verified_item = dict(item)
+                verified_item.update({"name": target_name, "n": target_name})
+                self._cache_target_file(save_path, target_name, verified_item)
+                ready[key] = verified_item
+                verified_ids.add(file_id)
+                unresolved.pop(key, None)
+
             unresolved_count = len(pending_items) - len(verified_ids)
             message = (
                 f"115 后处理文件重命名：提交 {len(rename_pairs)} 个，"
                 f"接口成功 {len(renamed_ids)} 个，目录确认 {len(verified_ids)} 个"
             )
             if unresolved_count:
-                logger.warning(f"{message}，待重试 {unresolved_count} 个")
+                details = "；".join(
+                    f"{item_name} -> {target_name}（实际：{self._file_name_by_id(file_id) or '未知'}）"
+                    for _, (item, target_name, file_id) in list(unresolved.items())[:3]
+                    for item_name in [str(
+                        item.get("name") or item.get("n") or item.get("file_name") or ""
+                    ).strip()]
+                )
+                logger.warning(
+                    f"{message}，待重试 {unresolved_count} 个"
+                    + (f"：{details}" if details else "")
+                )
             else:
                 logger.debug(message)
             return ready

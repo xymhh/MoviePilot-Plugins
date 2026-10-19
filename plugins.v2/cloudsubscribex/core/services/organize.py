@@ -561,6 +561,9 @@ class OrganizeService(OwnerDelegator):
             return False, target.target_name, "源文件已不存在"
 
         final_name = target.target_name
+        source_suffix = PurePosixPath(target.source_name).suffix
+        if source_suffix and not final_name.lower().endswith(source_suffix.lower()):
+            final_name = f"{final_name}{source_suffix}"
         existing = self._directory_names(target.target_dir)
         if existing is None:
             return False, final_name, "无法读取目标目录，已跳过（避免覆盖）"
