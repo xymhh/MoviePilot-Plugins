@@ -42,7 +42,8 @@
         </span>
         <span v-if="!rule.enabled" class="ml-1 text-caption">（停用）</span>
         <span v-if="rule.auto_transfer" class="ml-1 text-caption">
-          · 自动转存 {{ rule.auto_subscribe_ids.length }} 个订阅
+          · 自动转存 {{ rule.auto_transfer_mode === 'all'
+            ? '全部订阅' : rule.auto_subscribe_ids.length + ' 个订阅' }}
         </span>
         <v-icon
           v-if="rule.auto_transfer"
@@ -142,7 +143,18 @@
                   class="rule-limit" />
               </div>
               <div v-if="rule.auto_transfer" class="auto-row mt-2">
+                <v-btn-toggle
+                  v-model="rule.auto_transfer_mode"
+                  mandatory
+                  divided
+                  density="compact"
+                  variant="outlined"
+                  class="auto-scope">
+                  <v-btn value="all" size="small">全部订阅</v-btn>
+                  <v-btn value="selected" size="small">指定订阅</v-btn>
+                </v-btn-toggle>
                 <v-select
+                  v-if="rule.auto_transfer_mode !== 'all'"
                   v-model="rule.auto_subscribe_ids"
                   :items="subscribeOptions"
                   item-title="title"
@@ -166,14 +178,18 @@
                   @click="loadSubscribes(true)" />
               </div>
               <div
-                v-if="rule.auto_transfer && !rule.auto_subscribe_ids.length"
+                v-if="rule.auto_transfer
+                  && rule.auto_transfer_mode !== 'all'
+                  && !rule.auto_subscribe_ids.length"
                 class="text-caption text-warning mt-1">
-                开启自动转存后必须选择至少一个订阅，否则扫描时只会记录不转存。
+                选择「指定订阅」后必须至少选一个，否则扫描时只会记录不转存。
               </div>
               <div
                 v-else-if="rule.auto_transfer"
                 class="text-caption text-medium-emphasis mt-1">
-                扫描时按消息标题、季号和类型在白名单内匹配；只有唯一高置信结果才自动转存，多个相近候选会留在列表里手动选择。
+                {{ rule.auto_transfer_mode === 'all'
+                  ? '扫描时在全部订阅内匹配，新增订阅自动生效；关键词与订阅范围取交集（与）。'
+                  : '扫描时按消息标题、季号和类型在白名单内匹配；只有唯一高置信结果才自动转存，多个相近候选会留在列表里手动选择。' }}
               </div>
             </v-card-text>
           </v-card>
@@ -270,6 +286,7 @@ function normalizeRule(row) {
       channel: row.trim(),
       enabled: true,
       auto_transfer: false,
+      auto_transfer_mode: "selected",
       auto_subscribe_ids: [],
       keywordsText: "",
       excludeText: "",
@@ -284,6 +301,7 @@ function normalizeRule(row) {
     channel: String(rule.channel || rule.url || rule.name || "").trim(),
     enabled: rule.enabled !== false,
     auto_transfer: rule.auto_transfer === true,
+    auto_transfer_mode: rule.auto_transfer_mode === "all" ? "all" : "selected",
     auto_subscribe_ids: whitelist
       .map((value) => Number(value || 0) || 0)
       .filter((value, index, rows) => value > 0 && rows.indexOf(value) === index),
@@ -307,6 +325,7 @@ const rules = computed(() => {
         channel: rule.channel,
         enabled: rule.enabled,
         auto_transfer: rule.auto_transfer,
+        auto_transfer_mode: rule.auto_transfer_mode,
         auto_subscribe_ids: rule.auto_subscribe_ids,
         keywords: splitTerms(rule.keywordsText),
         exclude_keywords: splitTerms(rule.excludeText),
@@ -348,6 +367,7 @@ function addRule() {
     channel: "",
     enabled: true,
     auto_transfer: false,
+    auto_transfer_mode: "selected",
     auto_subscribe_ids: [],
     keywordsText: "",
     excludeText: "",
@@ -370,6 +390,7 @@ function save() {
       channel,
       enabled: rule.enabled !== false,
       auto_transfer: rule.auto_transfer === true,
+      auto_transfer_mode: rule.auto_transfer_mode === "all" ? "all" : "selected",
       auto_subscribe_ids: autoIds,
       auto_subscribe_id: autoIds[0] || 0,
       keywords: splitTerms(rule.keywordsText),

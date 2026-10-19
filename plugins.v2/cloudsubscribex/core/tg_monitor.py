@@ -315,6 +315,17 @@ def _rule_whitelist(rule: Dict[str, Any]) -> List[int]:
     return result
 
 
+def _rule_scope(rule: Dict[str, Any]) -> Optional[List[int]]:
+    """自动转存的订阅范围。
+
+    ``None`` 表示全部订阅（新订阅自动纳入）；列表表示指定订阅。
+    关键词是另一层过滤，两者取交集（与）。
+    """
+    if str(rule.get("auto_transfer_mode") or "").strip().lower() == "all":
+        return None
+    return _rule_whitelist(rule)
+
+
 def _parse_rules_payload(value: Any) -> Any:
     """``tg_channel_rules`` 可能是列表、JSON 字符串或多行文本。"""
     if isinstance(value, str):
@@ -372,6 +383,7 @@ def normalize_channel_rules(
             rule_auto_transfer = False
             rule_auto_subscribe_id = 0
             rule_auto_subscribe_ids: Any = []
+            rule_auto_transfer_mode = "selected"
         elif isinstance(row, dict):
             channel = (
                 row.get("channel") or row.get("url")
@@ -390,6 +402,11 @@ def normalize_channel_rules(
             except (TypeError, ValueError):
                 rule_auto_subscribe_id = 0
             rule_auto_subscribe_ids = row.get("auto_subscribe_ids", [])
+            rule_auto_transfer_mode = (
+                "all"
+                if str(row.get("auto_transfer_mode") or "").strip().lower() == "all"
+                else "selected"
+            )
         else:
             continue
         normalized = normalize_channel(str(channel or ""))
@@ -405,6 +422,7 @@ def normalize_channel_rules(
             ],
             "scan_limit": max(1, min(rule_limit, 200)),
             "auto_transfer": rule_auto_transfer,
+            "auto_transfer_mode": rule_auto_transfer_mode,
             "auto_subscribe_id": max(0, rule_auto_subscribe_id),
             "auto_subscribe_ids": _rule_whitelist({
                 "auto_subscribe_ids": rule_auto_subscribe_ids,
@@ -823,10 +841,13 @@ class TgChannelMonitor:
                 existing.add(item_id)
                 existing_links.update(item["links"])
                 if rule.get("auto_transfer"):
-                    if _rule_whitelist(rule):
+                    scope = _rule_scope(rule)
+                    if scope is None or scope:
                         auto_candidates.append((item, dict(rule)))
                     else:
-                        item["auto_transfer_error"] = "未配置目标订阅白名单"
+                        item["auto_transfer_error"] = (
+                            "未配置目标订阅：请选择「全部订阅」或指定订阅"
+                        )
             state[channel_key] = max_id
             state[f"{channel_key}:logic_version"] = SCAN_LOGIC_VERSION
         if len(items) > self._max_items:
@@ -893,7 +914,7 @@ class TgChannelMonitor:
                 logger.warning(f"TG 频道自动匹配读取订阅失败：{error}")
 
         for item, rule in candidates:
-            whitelist = _rule_whitelist(rule)
+            scope = _rule_scope(rule)
             subscribe_id = 0
             if callable(provider):
                 if provider_error:
@@ -901,7 +922,9 @@ class TgChannelMonitor:
                     item["match_reason"] = f"读取订阅列表失败：{provider_error}"[:300]
                     stats["auto_pending"] += 1
                     continue
-                matched = match_item(item, subscriptions or [], allowed_ids=whitelist)
+                matched = match_item(
+                    item, subscriptions or [], allowed_ids=scope
+                )
                 item["match_candidates"] = [
                     {
                         "id": row["id"], "name": row["name"],
@@ -925,10 +948,13 @@ class TgChannelMonitor:
                 item["matched_subscribe_id"] = subscribe_id
             else:
                 # 兼容旧调用方：没有订阅表时退回单值目标
-                subscribe_id = whitelist[0] if whitelist else 0
+                subscribe_id = scope[0] if scope else 0
             if subscribe_id <= 0:
                 item["match_status"] = "pending"
-                item["match_reason"] = "白名单为空"
+                item["match_reason"] = (
+                    "未配置目标订阅：请选择「全部订阅」或指定订阅"
+                    if scope is None else "白名单为空"
+                )
                 stats["auto_pending"] += 1
                 continue
 
@@ -990,6 +1016,9 @@ class TgChannelMonitor:
                     "exclude_keywords": list(rule.get("exclude_keywords") or []),
                     "scan_limit": int(rule.get("scan_limit") or self._scan_limit),
                     "auto_transfer": bool(rule.get("auto_transfer", False)),
+                    "auto_transfer_mode": str(
+                        rule.get("auto_transfer_mode") or "selected"
+                    ),
                     "auto_subscribe_id": int(rule.get("auto_subscribe_id") or 0),
                     "auto_subscribe_ids": list(rule.get("auto_subscribe_ids") or []),
                 }

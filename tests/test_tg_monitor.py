@@ -239,6 +239,41 @@ class ChannelRulesTest(unittest.TestCase):
         self.assertEqual(rules[0]["auto_subscribe_id"], 42)
         self.assertEqual(rules[0]["auto_subscribe_ids"], [43, 44, 42])
         self.assertFalse(normalize_channel_rules(["@b"])[0]["auto_transfer"])
+        self.assertEqual(rules[0]["auto_transfer_mode"], "selected")
+
+    def test_auto_transfer_mode_all_matches_any_subscription(self):
+        rules = normalize_channel_rules([{
+            "channel": "@a",
+            "auto_transfer": True,
+            "auto_transfer_mode": "all",
+        }])
+        self.assertEqual(rules[0]["auto_transfer_mode"], "all")
+        self.assertIsNone(tg_module._rule_scope(rules[0]))
+
+        calls = []
+
+        def handler(item, subscribe_id):
+            calls.append(subscribe_id)
+            return {"success": True, "data": {"transferred": 1}}
+
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=False, api_id=1, api_hash="hash", session="session",
+            channel_rules=rules,
+            auto_transfer_handler=handler,
+            subscribe_provider=lambda: [
+                {"id": 201, "name": "现在就出发", "season": 4, "type": "电视剧"},
+            ],
+        )
+        item = {
+            "links": ["https://pan.quark.cn/s/a"],
+            "title": "现在就出发 第四季(2026) 第4集 [旅行/综艺]",
+            "status": "new",
+        }
+        stats = monitor._run_auto_transfers([(item, rules[0])])
+        self.assertEqual(calls, [201])
+        self.assertEqual(item["status"], "transferred")
+        self.assertEqual(stats["auto_transferred"], 1)
 
     def test_auto_transfer_marks_item_and_reports_failure(self):
         calls = []
