@@ -10,12 +10,6 @@ from __future__ import annotations
 
 from typing import Any, Iterable, List, Optional, Set
 
-from .media import (
-    TMDB_SOURCE,
-    media_identity,
-    media_server_tmdb_filters,
-)
-
 _IGNORE_PREFIXES: tuple[str, ...] = ()
 
 
@@ -87,6 +81,8 @@ def _row_media_type(row: Any) -> str:
 
 def _identity_filters(mediainfo: Any) -> Optional[List[Any]]:
     from app.db.models.mediaserver import MediaServerItem
+
+    from .media import TMDB_SOURCE, media_identity, media_server_tmdb_filters
 
     source, media_id = media_identity(mediainfo)
     if not source or not media_id:

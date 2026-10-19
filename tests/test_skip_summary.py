@@ -274,7 +274,7 @@ class TestKindAndProviderCounts(unittest.TestCase):
         )
         self.assertEqual(
             SkipStatsCollector.format_notify(snapshot),
-            "被跳过的候选：分享链接失效 1 个（115网盘）、无可用文件 1 个（光鸭网盘）。",
+            "跳过 2 个候选 · 分享链接失效 1 个（115网盘）；无可用文件 1 个（光鸭网盘）",
         )
 
 
@@ -336,11 +336,23 @@ class TestEmptySummaryKeepsLegacyText(unittest.TestCase):
         )
 
         self.assertEqual(len(owner.messages), 1)
-        self.assertEqual(owner.messages[0]["title"], "【网盘订阅助手】执行完成")
+        self.assertEqual(owner.messages[0]["title"], "✅ 网盘订阅助手 · 同步完成")
         self.assertEqual(
             owner.messages[0]["text"],
-            "本次同步未发现需要转存的新资源。",
+            "本次无需转存。",
         )
+
+    def test_duplicate_empty_notify_suppressed_within_window(self):
+        owner = _StubOwner(notify=True, collector=SkipStatsCollector())
+        service = SyncExecutionService(owner)
+
+        service._notify_sync_completed("转存", 0, False, 0, {})
+        service._notify_sync_completed("转存", 0, False, 0, {})
+        service._notify_sync_completed("洗版", 0, False, 0, {})
+
+        self.assertEqual(len(owner.messages), 2)
+        self.assertEqual(owner.messages[0]["text"], "本次无需转存。")
+        self.assertEqual(owner.messages[1]["text"], "本次无需洗版。")
 
     def test_completion_notify_appends_skip_line(self):
         collector = SkipStatsCollector()
@@ -355,8 +367,8 @@ class TestEmptySummaryKeepsLegacyText(unittest.TestCase):
         self.assertEqual(len(owner.messages), 1)
         self.assertEqual(
             owner.messages[0]["text"],
-            "本次同步未发现需要转存的新资源。\n"
-            "被跳过的候选：分享链接失效 1 个（115网盘）。",
+            "本次无需转存。\n"
+            "跳过 1 个候选 · 分享链接失效（115网盘）",
         )
 
 
@@ -429,7 +441,7 @@ class TestMissingCollector(unittest.TestCase):
         self.assertEqual(len(owner.messages), 1)
         self.assertEqual(
             owner.messages[0]["text"],
-            "本次同步未发现需要转存的新资源。",
+            "本次无需转存。",
         )
 
 
@@ -643,8 +655,8 @@ class TestThreeKindsOrder(unittest.TestCase):
         )
         self.assertEqual(
             SkipStatsCollector.format_notify(snapshot),
-            "被跳过的候选：分享链接失效 1 个（115网盘）、无可用文件 1 个（光鸭网盘）、"
-            "内容不匹配 1 个（夸克网盘）。",
+            "跳过 3 个候选 · 分享链接失效 1 个（115网盘）；无可用文件 1 个（光鸭网盘）；"
+            "内容不匹配 1 个（夸克网盘）",
         )
 
 

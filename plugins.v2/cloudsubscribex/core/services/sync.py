@@ -2,7 +2,7 @@
 
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from threading import Event as ThreadEvent, Thread
+from threading import Event as ThreadEvent, RLock, Thread
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.db import SessionFactory
@@ -1184,13 +1184,27 @@ class SyncExecutionService(OwnerDelegator):
                 and not pending_finalize_count
         ):
             return
-        text = f"本次同步未发现需要{action_name}的新资源。"
         skip_line = SkipStatsCollector.format_notify(skip_snapshot)
+        signature = f"{action_name}|{skip_line}"
+        lock = getattr(self, "_empty_notify_lock", None)
+        if lock is None:
+            lock = RLock()
+            self._empty_notify_lock = lock
+        now = time.monotonic()
+        with lock:
+            last_notify = getattr(self, "_last_empty_notify", {}) or {}
+            previous = last_notify.get(action_name)
+            if previous and previous[0] == signature and now - previous[1] < 300:
+                logger.debug("5 分钟内相同的空同步通知已发送，跳过重复提醒")
+                return
+            last_notify[action_name] = (signature, now)
+            self._last_empty_notify = last_notify
+        text = f"本次无需{action_name}。"
         if skip_line:
             text = f"{text}\n{skip_line}"
         self.post_message(
             mtype=self._notification_type,
-            title="【网盘订阅助手】执行完成",
+            title="✅ 网盘订阅助手 · 同步完成",
             text=text,
         )
 

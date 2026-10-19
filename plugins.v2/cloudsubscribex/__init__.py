@@ -16,6 +16,7 @@ from app.core.config import settings
 from app.core.event import Event, eventmanager
 from app.log import logger
 from app.plugins import _PluginBase
+from app.schemas import Notification
 from app.schemas.types import ChainEventType, EventType, NotificationType
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -106,6 +107,53 @@ class CloudSubscribeX(_PluginBase):
     迁移配置、持久化数据与私有数据库（见 :meth:`_migrate_from_legacy_plugin`）。
     """
 
+    def post_message(
+            self,
+            channel=None,
+            mtype=None,
+            title=None,
+            text=None,
+            image=None,
+            link=None,
+            userid=None,
+            **kwargs,
+    ):
+        """发送通知，并关闭 Telegram 的网页预览卡片。
+
+        MoviePilot 默认把插件通知的 link 指向插件页；Telegram 会为这个链接
+        生成一张大预览卡，和通知正文叠在一起很占屏。这里保留「查看详情」链接，
+        但显式关闭预览。旧版基类不支持该参数时回退原逻辑。
+        """
+        if not link:
+            link = settings.MP_DOMAIN(
+                f"#/plugins?tab=installed&id={self.__class__.__name__}"
+            )
+        kwargs.setdefault("disable_web_page_preview", True)
+        try:
+            notification = Notification(
+                channel=channel,
+                mtype=mtype,
+                title=title,
+                text=text,
+                image=image,
+                link=link,
+                userid=userid,
+                **kwargs,
+            )
+        except TypeError:
+            kwargs.pop("disable_web_page_preview", None)
+            return super().post_message(
+                channel=channel,
+                mtype=mtype,
+                title=title,
+                text=text,
+                image=image,
+                link=link,
+                userid=userid,
+                **kwargs,
+            )
+        return self.chain.post_message(notification)
+
     # 插件名称
     plugin_name = "网盘订阅助手（跨盘优化版）"
     # 插件描述
@@ -113,7 +161,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.6.75"
+    plugin_version = "1.6.76"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页

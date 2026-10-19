@@ -153,10 +153,16 @@ class SkipStatsCollector:
         if total <= 0 or not by_kind:
             return ""
         parts = []
-        for kind in cls._ordered_kinds(by_kind):
-            segment = f"{cls.kind_label(kind)} {_as_count(by_kind.get(kind))} 个"
+        ordered_kinds = cls._ordered_kinds(by_kind)
+        for kind in ordered_kinds:
+            label = cls.kind_label(kind)
+            segment = (
+                label
+                if len(ordered_kinds) == 1
+                else f"{label} {_as_count(by_kind.get(kind))} 个"
+            )
             providers = list((by_kind_provider.get(kind) or {}).keys())
             if providers:
                 segment = f"{segment}（{'、'.join(providers)}）"
             parts.append(segment)
-        return f"被跳过的候选：{'、'.join(parts)}。"
+        return f"跳过 {total} 个候选 · {'；'.join(parts)}"
