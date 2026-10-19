@@ -387,6 +387,137 @@ class ScanTest(unittest.TestCase):
         self.assertEqual(second["added"], 0)
         self.assertEqual(len(monitor.list_items()), 2)
 
+    def _monitor_for(self, channels):
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=True, api_id=1, api_hash="hash", session="session",
+            channels=channels, keywords=[], exclude_keywords=[],
+            scan_limit=10, interval_minutes=10, max_items=100,
+        )
+        monitor.stop()
+        return monitor
+
+    def test_access_hash_cached_and_invite_link_never_rechecked(self):
+        calls = []
+
+        class FakeEntity:
+            id = 4242
+            access_hash = 777
+            title = "私有频道"
+            username = ""
+
+        class FakeClient:
+            async def connect(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+            async def is_user_authorized(self):
+                return True
+
+            async def get_dialogs(self, limit=None):
+                calls.append("dialogs")
+                return []
+
+            async def get_entity(self, raw):
+                calls.append(raw)
+                return FakeEntity()
+
+            async def get_messages(self, entity, limit, min_id=0, reverse=False):
+                return []
+
+        monitor = self._monitor_for(["https://t.me/+abc"])
+        monitor._new_client = lambda session="": FakeClient()
+        first = monitor.scan(trigger="测试")
+        self.assertTrue(first["ok"])
+        self.assertIn("https://t.me/+abc", calls)
+
+        # 第二轮回合：已有 access_hash，直接构造 peer，不再调用 CheckChatInvite
+        calls.clear()
+        monitor._new_client = lambda session="": FakeClient()
+        second = monitor.scan(trigger="测试")
+        self.assertTrue(second["ok"])
+        self.assertNotIn("https://t.me/+abc", calls)
+        self.assertNotIn("dialogs", calls)
+        self.assertTrue(any(
+            getattr(item, "channel_id", None) == 4242 for item in calls
+        ))
+
+    def test_resolve_failure_backs_off_instead_of_retrying_every_scan(self):
+        calls = []
+
+        class FakeClient:
+            async def connect(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+            async def is_user_authorized(self):
+                return True
+
+            async def get_dialogs(self, limit=None):
+                return []
+
+            async def get_entity(self, raw):
+                calls.append(raw)
+                raise ValueError("Cannot find any entity corresponding to +abc")
+
+            async def get_messages(self, entity, limit, min_id=0, reverse=False):
+                return []
+
+        monitor = self._monitor_for(["https://t.me/+abc"])
+        monitor._new_client = lambda session="": FakeClient()
+        first = monitor.scan(trigger="测试")
+        self.assertTrue(any("6h 内不再重试" in err for err in first["errors"]))
+        attempts = len(calls)
+
+        second = monitor.scan(trigger="测试")
+        self.assertEqual(len(calls), attempts, "冷却期内不应再请求 Telegram")
+        self.assertTrue(any(
+            "resolve_retry_remaining" in entry for entry in second["debug"]
+        ))
+
+    def test_flood_wait_sets_cooldown_and_skips_next_scan(self):
+        calls = []
+
+        class FloodWait(Exception):
+            seconds = 1725
+
+        class FakeClient:
+            async def connect(self):
+                return None
+
+            async def disconnect(self):
+                return None
+
+            async def is_user_authorized(self):
+                return True
+
+            async def get_dialogs(self, limit=None):
+                return []
+
+            async def get_entity(self, raw):
+                calls.append(raw)
+                raise FloodWait(
+                    "A wait of 1725 seconds is required "
+                    "(caused by CheckChatInviteRequest)"
+                )
+
+            async def get_messages(self, entity, limit, min_id=0, reverse=False):
+                return []
+
+        monitor = self._monitor_for(["https://t.me/+abc"])
+        monitor._new_client = lambda session="": FakeClient()
+        first = monitor.scan(trigger="测试")
+        self.assertEqual(first["errors"], [])
+        self.assertTrue(first["debug"][0].get("cooldown_remaining", 0) > 0)
+        attempts = len(calls)
+
+        monitor.scan(trigger="测试")
+        self.assertEqual(len(calls), attempts, "限流冷却期内不应再请求 Telegram")
+
     def test_per_channel_rules_are_independent(self):
         class FakeMessage:
             def __init__(self, mid, text):

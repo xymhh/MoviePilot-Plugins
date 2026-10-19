@@ -30,12 +30,14 @@ try:  # Telethon 是可选的：未安装时插件其余功能照常工作
     from telethon import TelegramClient
     from telethon.errors import SessionPasswordNeededError
     from telethon.sessions import StringSession
+    from telethon.tl.types import InputPeerChannel
 
     TELETHON_AVAILABLE = True
 except Exception:  # pragma: no cover - 环境缺依赖
     TelegramClient = None  # type: ignore[assignment]
     StringSession = None  # type: ignore[assignment]
     SessionPasswordNeededError = Exception  # type: ignore[assignment]
+    InputPeerChannel = None  # type: ignore[assignment]
     TELETHON_AVAILABLE = False
 
 
@@ -44,6 +46,10 @@ STATE_KEY = "state"
 # 解析逻辑版本：升级后首次扫描忽略旧游标，回填最近 N 条
 # 1 -> 纯正文正则；2 -> 正文 + entities/webpage/按钮 URL
 SCAN_LOGIC_VERSION = 2
+
+# 邀请链接解析失败后的冷却时间：CheckChatInvite 每轮都调会被 Telegram
+# 按 420 FLOOD_WAIT 重罚，失败后先退避，别连续试探。
+RESOLVE_RETRY_SECONDS = 6 * 3600
 
 # 同一进程里只允许一个监控线程：插件热重载会创建新实例，旧实例如果
 # 没被 stop，多个线程会同时扫描并触发 Telegram 限流。
@@ -609,12 +615,24 @@ class TgChannelMonitor:
         try:
             if not await client.is_user_authorized():
                 raise RuntimeError("TG 会话已失效，请在设置页重新登录")
-            # StringSession 不保存实体缓存；先拉一遍对话列表，
-            # 这样私有频道的 -100 数字 ID 也能解析（邀请链接不依赖它）
-            try:
-                await client.get_dialogs(limit=None)
-            except Exception as error:  # noqa: BLE001
-                logger.warning(f"TG 拉取对话列表失败（不影响邀请链接扫描）：{error}")
+            # StringSession 不保存实体缓存。已有 access_hash 的频道不需要
+            # 对话列表；只有首次解析或缓存失效时才全量拉一遍（全量拉取本身
+            # 也会占用 Telegram 的请求配额）
+            state = self._store.load(STATE_KEY, {}) or {}
+            need_warm = any(
+                rule.get("enabled", True)
+                and not str(
+                    state.get(f"resolved_hash:{rule['channel']}") or ""
+                ).isdigit()
+                for rule in self._channel_rules
+            )
+            if need_warm:
+                try:
+                    await client.get_dialogs(limit=None)
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(
+                        f"TG 拉取对话列表失败（不影响邀请链接扫描）：{error}"
+                    )
             return await self._scan_with_client(client, trigger, full=full)
         finally:
             try:
@@ -647,12 +665,9 @@ class TgChannelMonitor:
             cached_id = str(
                 state.get(f"resolved:{raw_channel}") or ""
             ).strip()
-            if cached_id.isdigit():
-                target = int(cached_id)
-            elif re.fullmatch(r"-?\d+", str(raw_channel)):
-                target = int(raw_channel)
-            else:
-                target = raw_channel
+            cached_hash = str(
+                state.get(f"resolved_hash:{raw_channel}") or ""
+            ).strip()
             now = int(time.time())
             cooldown_until = int(
                 state.get(f"flood_until:{raw_channel}") or 0
@@ -667,11 +682,30 @@ class TgChannelMonitor:
                     f"TG 频道 {raw_channel} 限流冷却中，剩余 {remaining}s"
                 )
                 continue
+            retry_until = int(
+                state.get(f"resolve_retry:{raw_channel}") or 0
+            )
+            if retry_until > now:
+                rule_debug.append({
+                    "channel": raw_channel,
+                    "resolve_retry_remaining": retry_until - now,
+                })
+                continue
             entity = None
             resolve_error: Optional[Exception] = None
-            candidates = [target]
-            if target != raw_channel:
-                # 缓存的数字 ID 没有 access_hash 时，回退一次邀请链接
+            candidates: List[Any] = []
+            if cached_id.isdigit():
+                # 有 access_hash 就直接构造 peer，完全绕开 CheckChatInvite
+                if cached_hash.isdigit() and InputPeerChannel is not None:
+                    candidates.append(
+                        InputPeerChannel(int(cached_id), int(cached_hash))
+                    )
+                candidates.append(int(cached_id))
+                # 缓存失效（换会话/被踢）时才回退一次邀请链接
+                candidates.append(raw_channel)
+            elif re.fullmatch(r"-?\d+", str(raw_channel)):
+                candidates.append(int(raw_channel))
+            else:
                 candidates.append(raw_channel)
             for candidate in candidates:
                 try:
@@ -695,11 +729,21 @@ class TgChannelMonitor:
                 detail = str(resolve_error)
                 if "not part of" in detail:
                     detail = f"{detail}（请先用该账号加入此频道）"
-                errors.append(f"{raw_channel}: 无法解析频道（{detail}）")
+                state[f"resolve_retry:{raw_channel}"] = (
+                    now + RESOLVE_RETRY_SECONDS
+                )
+                errors.append(
+                    f"{raw_channel}: 无法解析频道（{detail}），"
+                    f"{RESOLVE_RETRY_SECONDS // 3600}h 内不再重试"
+                )
                 continue
             channel_key = str(getattr(entity, "id", raw_channel))
+            access_hash = getattr(entity, "access_hash", None)
             state[f"resolved:{raw_channel}"] = channel_key
+            if access_hash:
+                state[f"resolved_hash:{raw_channel}"] = str(access_hash)
             state.pop(f"flood_until:{raw_channel}", None)
+            state.pop(f"resolve_retry:{raw_channel}", None)
             channel_title = (
                 getattr(entity, "title", "")
                 or getattr(entity, "username", "")
