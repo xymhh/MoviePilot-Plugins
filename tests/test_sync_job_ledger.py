@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
+import threading
 import types
 import unittest
 import uuid
@@ -511,6 +513,82 @@ class SyncJobLedgerTests(unittest.TestCase):
         second, reason = self._begin(self.ledger, target_name="第18集.mp4")
         self.assertIsNotNone(second, reason)
         self.assertNotEqual(first.job_key, second.job_key)
+
+
+class SyncJobLedgerConcurrencyTests(unittest.TestCase):
+    """真实多线程抢同一目标：只能有一个 worker 拿到租约。"""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        db_path = os.path.join(self.tmpdir.name, "sync_jobs.db")
+        self.engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False, "timeout": 30},
+        )
+        with self.engine.begin() as conn:
+            conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+        CloudSubscribeBase.metadata.create_all(self.engine)
+        self.session_factory = sessionmaker(
+            bind=self.engine, expire_on_commit=False,
+        )
+        self.repo = SyncJobRepository(
+            manager=_SessionManager(self.session_factory)
+        )
+        self.ledger = SyncJobLedger(self.repo)
+
+    def tearDown(self):
+        self.engine.dispose()
+        self.tmpdir.cleanup()
+
+    def _begin(self):
+        return self.ledger.begin(
+            target_provider="115",
+            target_path="/待整理",
+            target_name="第17集.mp4",
+            source={"sha1": "e" * 40, "file_id": "f1", "size": 1024},
+            source_provider="115",
+            source_name="第17集.mp4",
+        )
+
+    def test_two_threads_claim_same_job_once(self):
+        barrier = threading.Barrier(2)
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                barrier.wait(timeout=10)
+                results.append(self._begin())
+            except Exception as error:  # pragma: no cover - 失败时打印原始异常
+                errors.append(error)
+
+        threads = [threading.Thread(target=worker) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+
+        self.assertFalse(errors, errors)
+        self.assertEqual(len(results), 2)
+        claimed = [item for item in results if item[0] is not None]
+        waiting = [item for item in results if item[0] is None]
+        self.assertEqual(len(claimed), 1, results)
+        self.assertEqual(len(waiting), 1, results)
+        self.assertIn("持有", waiting[0][1])
+
+        with self.session_factory() as db:
+            row = self.repo.get(claimed[0][0].job_key, db=db)
+        self.assertEqual(row.state, JOB_TRANSFERRING)
+        self.assertEqual(row.attempt, 1)
+
+        self.assertTrue(
+            self.ledger.success(
+                claimed[0][0], result_name="第17集.mp4", result_size=1024,
+            )
+        )
+        reused, reason = self._begin()
+        self.assertIsNotNone(reused, reason)
+        self.assertTrue(reused.reused)
 
 
 if __name__ == "__main__":
