@@ -113,6 +113,7 @@ https://github.com/xymhh/MoviePilot-Plugins
 ## 文档
 
 - [`docs/README.md`](docs/README.md) — 文档索引（`plan/` 计划、`test/` 证据、`summary/` 结论）
+- [历史重试同集重复记录（1.7.22）](docs/summary/2026-10-20-历史重试同集重复记录.md) —— 重试改扩展名后按 `record_id` 更新原失败记录；历史页同集去重按状态优先级选代表记录，旧失败记录不再遮住已成功的 `.iso`
 - [历史重试同集识别（1.7.21）](docs/summary/2026-10-20-历史重试同集识别.md) —— 重试先精确查名，未命中按 SxxExx/第N集回退匹配季目录；库里已有 `.2160p.mkv`/`.iso` 时不再去校验失效分享，直接复用实际文件名并落成功
 - [同步作业状态机与目标幂等改造（ADR）](docs/plan/2026-10-20-同步作业状态机与幂等改造.md) —— 把「进程内目标锁」升级为持久化 `sync_jobs` 账本 + 统一 `TargetWriter`；P0 表/仓储/状态机、P1 转存入口接线、P2a done 目标回查已发布，P2b 统一 `TargetWriter` 随 1.7.20 发布｜[P1 总结](docs/summary/2026-10-20-同步作业账本P1.md)｜[P2a 线上缺失回查](docs/test/2026-10-20-1.7.19线上P2a缺失回查.md)｜[P2b 总结](docs/summary/2026-10-20-TargetWriterP2b.md)
 - [同步作业账本 P2a 线上缺失回查（1.7.19）](docs/test/2026-10-20-1.7.19线上P2a缺失回查.md) —— 把已 done 的目标文件移出季目录后重跑同步：识别缺失、重新转存 1 个文件、大小一致且无重复副本；恢复后再次同步 0 文件

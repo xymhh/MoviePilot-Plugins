@@ -309,6 +309,11 @@ class HistoryService(OwnerDelegator):
             history = self._get_data("history") or []
             for record in history:
                 self._ensure_history_record_id(record)
+            record_id_index = {
+                str(record.get("record_id") or ""): index
+                for index, record in enumerate(history)
+                if str(record.get("record_id") or "")
+            }
             record_index = {
                 identity: index
                 for index, record in enumerate(history)
@@ -335,13 +340,26 @@ class HistoryService(OwnerDelegator):
                 incoming = copy.deepcopy(record)
                 self._ensure_history_record_id(incoming)
                 identity = self._history_record_identity(incoming)
-                index = record_index.get(identity) if identity else None
+                incoming_id = str(incoming.get("record_id") or "")
                 scope = self._upgrade_scope_identity(incoming)
+                # 先用 record_id 锁定原记录：重试会把 file_name 从 .mkv 改成
+                # 实际存在的 .iso/.2160p.mkv，identity 随之变化；若此时按
+                # identity/scope 合并，会错写同一集的另一条记录，原失败记录
+                # 仍留在历史里，页面继续显示「失败」。
+                index = record_id_index.get(incoming_id) if incoming_id else None
+                if index is not None and scope:
+                    current_scope = self._upgrade_scope_identity(history[index])
+                    if current_scope and current_scope != scope:
+                        index = None
+                if index is None and identity:
+                    index = record_index.get(identity)
                 if index is None and scope:
                     index = upgrade_scope_index.get(scope)
                 if index is None:
                     history.append(incoming)
                     platform_records.append(copy.deepcopy(incoming))
+                    if incoming_id:
+                        record_id_index[incoming_id] = len(history) - 1
                     if identity:
                         record_index[identity] = len(history) - 1
                     if scope:
@@ -400,6 +418,10 @@ class HistoryService(OwnerDelegator):
                         else:
                             merged.pop(keep_key, None)
                 history[index] = merged
+                if incoming_id:
+                    record_id_index[incoming_id] = index
+                if identity:
+                    record_index[identity] = index
                 if not skip_onto_success:
                     # 也不要把这种「假成功」写进 MP 整理历史：写进去后，下一轮基线
                     # 会把它当成已有的更优版本，缺失集就再也补不上。
@@ -743,6 +765,18 @@ class HistoryService(OwnerDelegator):
         }
 
     @staticmethod
+    def _history_display_priority(record: Dict[str, Any]) -> int:
+        """同一集有多条历史时，优先展示已成功/正在处理的记录。"""
+        return {
+            "成功": 5,
+            "处理中": 4,
+            "下载中": 4,
+            "待确认": 3,
+            "失败": 2,
+            "跳过": 1,
+        }.get(str(record.get("status") or ""), 0)
+
+    @staticmethod
     def prepare_history_group(group: Dict[str, Any]) -> Dict[str, Any]:
         """补充单个数据库媒体组的展示字段，不在应用层重新分组。"""
         prepared = copy.deepcopy(group)
@@ -750,16 +784,27 @@ class HistoryService(OwnerDelegator):
         first = raw_records[0] if raw_records else {}
         is_tv = (prepared.get("type") or first.get("type")) != "电影"
         records = []
-        seen_episodes = set()
+        episode_positions: Dict[Tuple[int, int], int] = {}
         for record in raw_records:
             if is_tv:
                 season = int(record.get("season") or 0)
                 episode = int(record.get("episode") or 0)
                 ep_key = (season, episode)
                 if episode > 0:
-                    if ep_key in seen_episodes:
+                    position = episode_positions.get(ep_key)
+                    if position is not None:
+                        # 数据库里同集可能保留多条重试记录。旧失败记录若排在
+                        # 新成功记录前面，会把整集显示成失败；这里按状态优先级
+                        # 选代表记录，避免「实际已成功却一直红着」。
+                        if (
+                            HistoryService._history_display_priority(record)
+                            > HistoryService._history_display_priority(
+                                records[position]
+                            )
+                        ):
+                            records[position] = record
                         continue
-                    seen_episodes.add(ep_key)
+                    episode_positions[ep_key] = len(records)
             records.append(record)
         prepared["records"] = records
         prepared["success_count"] = sum(1 for r in records if r.get("status") == "成功")
