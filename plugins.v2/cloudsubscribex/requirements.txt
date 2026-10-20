@@ -4,3 +4,6 @@ curl_cffi>=0.15.0
 numpy>=2.0.0
 Pillow>=11.0.0
 telethon>=1.36.0
+# MoviePilot 运行时已提供；声明出来是为了让纯 CI/私有库环境也能跑账本单测
+sqlalchemy~=2.0.0
+alembic~=1.13

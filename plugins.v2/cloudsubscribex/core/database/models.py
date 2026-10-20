@@ -2,7 +2,17 @@
 
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import Boolean, Index, Integer, JSON, String, delete, inspect, select
+from sqlalchemy import (
+    Boolean,
+    Index,
+    Integer,
+    JSON,
+    String,
+    Text,
+    delete,
+    inspect,
+    select,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 
@@ -96,6 +106,113 @@ class OfflinePendingTask(CloudSubscribeBase):
     __table_args__ = (
         Index("ix_offline_task_id", "task_id"),
         Index("ix_offline_status", "status"),
+    )
+
+
+class SyncJob(CloudSubscribeBase):
+    """一次「内容 → 目标文件」的持久化作业。
+
+    ``job_key`` 是幂等键；``job_id`` 是贯穿日志/历史/前端的追踪号。
+    状态迁移与租约规则见 ``core/database/sync_job_state.py``。
+    """
+
+    __tablename__ = "sync_jobs"
+
+    job_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    job_id: Mapped[str] = mapped_column(
+        String(36), nullable=False, unique=True
+    )
+    content_key: Mapped[str] = mapped_column(
+        String(160), nullable=False, default=""
+    )
+    source_provider: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )
+    source_file_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, default=""
+    )
+    source_name: Mapped[str] = mapped_column(
+        String(1024), nullable=False, default=""
+    )
+    source_size: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    source_sha1: Mapped[str] = mapped_column(
+        String(40), nullable=False, default=""
+    )
+    source_md5: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=""
+    )
+    target_provider: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )
+    target_path: Mapped[str] = mapped_column(
+        String(2048), nullable=False, default="/"
+    )
+    target_name: Mapped[str] = mapped_column(
+        String(1024), nullable=False, default=""
+    )
+    subscribe_id: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    history_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="queued"
+    )
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=3
+    )
+    lease_owner: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True
+    )
+    lease_until: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    result_provider: Mapped[str] = mapped_column(
+        String(64), nullable=False, default=""
+    )
+    result_file_id: Mapped[str] = mapped_column(
+        String(255), nullable=False, default=""
+    )
+    result_name: Mapped[str] = mapped_column(
+        String(1024), nullable=False, default=""
+    )
+    result_size: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    result_method: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=""
+    )
+    last_error: Mapped[str] = mapped_column(
+        Text, nullable=False, default=""
+    )
+    last_error_at: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+    payload: Mapped[Dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    created_at: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    updated_at: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    finished_at: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True
+    )
+
+    __table_args__ = (
+        Index("ix_sync_job_state_lease", "state", "lease_until"),
+        Index(
+            "ix_sync_job_target",
+            "target_provider", "target_path", "target_name",
+        ),
+        Index("ix_sync_job_history", "history_id"),
+        Index("ix_sync_job_updated", "updated_at"),
     )
 
 

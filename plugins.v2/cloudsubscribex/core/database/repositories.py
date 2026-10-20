@@ -22,6 +22,7 @@ from .models import (
     OfflinePendingTask,
     PointBudgetRecord,
 )
+from .sync_jobs import SyncJobRepository
 from ..history import history_group_key
 from ...drive.common import positive_int
 from ...search.types import normalize_resource_type, resource_type_from_url
@@ -851,6 +852,7 @@ class CloudSubscribeRepositories:
     ):
         self.history = HistoryRepository(manager, db)
         self.offline = OfflinePendingRepository(manager, db)
+        self.sync_jobs = SyncJobRepository(manager, db)
         self.checkin = CheckinRepository(manager, db)
         self.schedule = CheckinScheduleRepository(manager, db)
         self.budget = PointBudgetRepository(manager, db)
