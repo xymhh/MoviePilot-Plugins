@@ -912,6 +912,10 @@ class TgChannelMonitor:
                 continue
             rematch_ids.add(item_id)
             auto_candidates.append((item, dict(rule)))
+        # 画质标签是 1.7.14 才写入的新字段；旧版扫描留下的
+        # skipped/transferred 条目不会进入重新匹配，因此永远缺字段。
+        # 在保存前统一补齐，前端无需重扫即可显示历史记录画质。
+        self._fill_missing_quality(items)
         self._store.save(ITEMS_KEY, items)
         self._store.save(STATE_KEY, state)
         auto_stats = self._run_auto_transfers(
@@ -1229,8 +1233,24 @@ class TgChannelMonitor:
             "interval_minutes": max(1, self._interval // 60),
         }
 
+    def _fill_missing_quality(self, items: Iterable[dict]) -> None:
+        """为旧条目补画质字段；已有有效标签的不覆盖。"""
+        prefs = getattr(self, "_quality_preferences", None)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            quality = item.get("quality")
+            if (
+                    isinstance(quality, dict)
+                    and quality.get("label") not in (None, "", "未知")
+            ):
+                continue
+            item["quality"] = parse_quality(item.get("title"), prefs)
+
     def list_items(self, status: str = "") -> List[dict]:
         items = list(self._store.load(ITEMS_KEY, []) or [])
+        # 读接口兜底：升级后即使还没触发扫描，历史卡片也能显示画质。
+        self._fill_missing_quality(items)
         if status:
             items = [item for item in items if item.get("status") == status]
         return items

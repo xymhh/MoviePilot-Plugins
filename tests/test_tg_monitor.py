@@ -431,6 +431,34 @@ class ScanTest(unittest.TestCase):
         monitor.stop()  # 不走后台线程，测试里手动调用 scan
         return monitor
 
+    def test_list_items_backfills_quality_for_legacy_items(self):
+        monitor = self._monitor()
+        monitor._store.save("items", [
+            {
+                "id": "legacy:1",
+                "title": "玉簟秋 (2026)【4K.高码率】【内嵌简中】",
+                "status": "skipped",
+            },
+            {
+                "id": "legacy:2",
+                "title": "PSYREN 决战游戏 (2026)【1080P】",
+                "status": "transferred",
+            },
+            {
+                "id": "legacy:3",
+                "title": "美人余 (2026)【4K.HDR】",
+                "status": "skipped",
+                "quality": {"label": "手工标签", "rankable": True},
+            },
+        ])
+
+        items = {item["id"]: item for item in monitor.list_items()}
+
+        self.assertEqual(items["legacy:1"]["quality"]["label"], "4K")
+        self.assertEqual(items["legacy:2"]["quality"]["label"], "1080P")
+        # 已有有效标签不覆盖，避免读接口改变人工/新逻辑结果
+        self.assertEqual(items["legacy:3"]["quality"]["label"], "手工标签")
+
     def test_scan_dedup_and_store(self):
         class FakeMessage:
             def __init__(self, mid, text):
