@@ -27,6 +27,55 @@ from .cloud import (
 )
 from .relay import RelayClient, RelayError
 
+# 同一目标文件的中继任务必须串行：115 目标目录已存在同名文件时会自动改名成
+# 「xxx (1).mp4」，并发中继同一集就会在最终目录留下两个文件。
+_RELAY_TARGET_LOCKS: dict[str, Lock] = {}
+_RELAY_TARGET_LOCKS_GUARD = Lock()
+_RELAY_TARGET_DONE: dict[str, float] = {}
+_RELAY_TARGET_DONE_TTL = 1800.0
+
+
+def _relay_target_lock_key(target_path: str, target_name: str) -> str:
+    path = str(target_path or "/").strip().rstrip("/") or "/"
+    return f"{path}/{str(target_name or '').strip()}"
+
+
+def _relay_target_key(target_path: str, target_name: str, checksum: str) -> str:
+    return f"{_relay_target_lock_key(target_path, target_name)}|{str(checksum or '').upper()}"
+
+
+def _relay_target_lock(key: str) -> Lock:
+    with _RELAY_TARGET_LOCKS_GUARD:
+        lock = _RELAY_TARGET_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            _RELAY_TARGET_LOCKS[key] = lock
+        return lock
+
+
+def _relay_target_recently_done(key: str) -> bool:
+    now = time.monotonic()
+    with _RELAY_TARGET_LOCKS_GUARD:
+        finished_at = _RELAY_TARGET_DONE.get(key)
+        if finished_at is None:
+            return False
+        if now - finished_at > _RELAY_TARGET_DONE_TTL:
+            _RELAY_TARGET_DONE.pop(key, None)
+            return False
+        return True
+
+
+def _mark_relay_target_done(key: str) -> None:
+    now = time.monotonic()
+    with _RELAY_TARGET_LOCKS_GUARD:
+        expired = [
+            item for item, finished_at in _RELAY_TARGET_DONE.items()
+            if now - finished_at > _RELAY_TARGET_DONE_TTL
+        ]
+        for item in expired:
+            _RELAY_TARGET_DONE.pop(item, None)
+        _RELAY_TARGET_DONE[key] = now
+
 
 def _fd_safe_workers(requested: int, ceiling: int = 256) -> int:
     """按进程文件句柄软上限收敛分片并发数。
@@ -1220,6 +1269,51 @@ class CrossTransferTaskManager:
         return CrossDriveTransferResult(item, "progressive") if item else None
 
     def _relay_transfer(
+            self, task: dict, task_id: str, target: CloudDriveProvider,
+            target_path: str, target_name: str, target_name_text: str,
+            checksum: str, total: int, stop_event: Event,
+    ) -> bool:
+        """串行化同一目标文件的中继，避免并发任务被 115 自动改名成 (1)。"""
+        lock_key = _relay_target_lock_key(target_path, target_name)
+        done_key = _relay_target_key(target_path, target_name, checksum)
+        with _relay_target_lock(lock_key):
+            if _relay_target_recently_done(done_key):
+                logger.info(
+                    f"中继目标已有相同文件，跳过重复上传：{target_name} -> {target_path}"
+                )
+                existing = None
+                try:
+                    existing = target.require(
+                        CloudDriveCapability.FILE_QUERY
+                    ).find_file(target_path, target_name)
+                except Exception as error:  # noqa: BLE001 - 查不到不影响跳过重复上传
+                    logger.debug(f"复用已存在文件时查询目标失败：{error}")
+                self._update(
+                    task_id, status="success", phase="done", progress=100,
+                    transferred=int(total or getattr(existing, "size", 0) or 0),
+                    message=f"目标已存在相同文件，跳过重复上传：{target_name}",
+                    method="relay-reuse",
+                    result_file_id=str(getattr(existing, "id", "") or ""),
+                    result_file_name=str(
+                        getattr(existing, "name", "") or target_name
+                    ),
+                    result_file_size=int(
+                        getattr(existing, "size", 0) or total or 0
+                    ),
+                    result_sha1=str(getattr(existing, "sha1", "") or checksum or ""),
+                    result_md5=str(getattr(existing, "md5", "") or ""),
+                    finished_at=time.time(),
+                )
+                return True
+            success = self._relay_transfer_locked(
+                task, task_id, target, target_path, target_name,
+                target_name_text, checksum, total, stop_event,
+            )
+            if success:
+                _mark_relay_target_done(done_key)
+            return success
+
+    def _relay_transfer_locked(
             self, task: dict, task_id: str, target: CloudDriveProvider,
             target_path: str, target_name: str, target_name_text: str,
             checksum: str, total: int, stop_event: Event,

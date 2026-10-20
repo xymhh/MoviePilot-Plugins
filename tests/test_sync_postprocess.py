@@ -201,6 +201,53 @@ class TestPostprocessServiceHelpers(unittest.TestCase):
         self.assertTrue(backup_name.endswith(".mkv"))
         self.assertIn("taskabc123", backup_name)
 
+    @staticmethod
+    def _dedupe_service(files):
+        class StaticSnapshotService(DummyPostprocessService):
+            def _cloud_directory_snapshot(self, path, cache=None):
+                return True, DirectoryFileIndex(files)
+        return StaticSnapshotService()
+
+    def test_dedupe_moved_duplicate_deletes_same_content_copy(self):
+        base = types.SimpleNamespace(
+            id="base", name="Show - S01E17 - 第17集.mp4",
+            size=4036123377, sha1="SAME",
+        )
+        moved = types.SimpleNamespace(
+            id="dup", name="Show - S01E17 - 第17集 (1).mp4",
+            size=4036123377, sha1="SAME",
+        )
+        service = self._dedupe_service([base])
+        service._cloud_mutations = MagicMock()
+        service._cloud_mutations.delete_file = MagicMock(return_value=True)
+
+        result = service._dedupe_moved_duplicate(
+            "/media/tv", "Show - S01E17 - 第17集.mp4", moved
+        )
+
+        self.assertIs(result, base)
+        service._cloud_mutations.delete_file.assert_called_once_with("dup")
+
+    def test_dedupe_moved_duplicate_keeps_different_content(self):
+        base = types.SimpleNamespace(
+            id="base", name="Show - S01E17 - 第17集.mp4",
+            size=1000, sha1="OLD",
+        )
+        moved = types.SimpleNamespace(
+            id="dup", name="Show - S01E17 - 第17集 (1).mp4",
+            size=2000, sha1="NEW",
+        )
+        service = self._dedupe_service([base])
+        service._cloud_mutations = MagicMock()
+        service._cloud_mutations.delete_file = MagicMock(return_value=True)
+
+        result = service._dedupe_moved_duplicate(
+            "/media/tv", "Show - S01E17 - 第17集.mp4", moved
+        )
+
+        self.assertIs(result, moved)
+        service._cloud_mutations.delete_file.assert_not_called()
+
     def test_due_pending_keys(self):
         now = 1000.0
         # skip_history：跳过「等待历史落盘」判断（该判断由 _history_ready_for_finalize 负责，

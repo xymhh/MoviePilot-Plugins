@@ -451,6 +451,60 @@ class PostprocessService(OwnerDelegator):
         except (OSError, ValueError) as error:
             logger.debug(f"洗版清理旧 STRM 失败：{old_dir}/{old_name}，{error}")
 
+    def _dedupe_moved_duplicate(
+            self,
+            final_dir: str,
+            file_name: str,
+            moved_file: Any,
+    ) -> Any:
+        """移动后兜底：115 同名自动改名为「xxx (1).ext」时，删掉同内容副本。
+
+        并发中继/两个整理任务同时移动同一集时，115 不会覆盖而是生成 (1)。
+        只要基础名文件仍在、大小与哈希一致，就保留基础名文件，删除刚生成的副本。
+        """
+        moved_name = str(getattr(moved_file, "name", "") or "")
+        if not moved_file or moved_name == file_name:
+            return moved_file
+        base_stem = Path(file_name).stem
+        suffix = Path(file_name).suffix
+        if (
+                not moved_name.startswith(f"{base_stem} (")
+                or Path(moved_name).suffix.lower() != suffix.lower()
+        ):
+            return moved_file
+        valid, index = self._cloud_directory_snapshot(final_dir)
+        base_file = index.get(file_name) if valid else None
+        if not base_file or str(getattr(base_file, "id", "")) == str(getattr(moved_file, "id", "")):
+            return moved_file
+        moved_size = int(getattr(moved_file, "size", 0) or 0)
+        base_size = int(getattr(base_file, "size", 0) or 0)
+        same_size = bool(moved_size and base_size and abs(moved_size - base_size) <= 1024)
+        same_hash = False
+        hash_compared = False
+        for algo in self._supported_hash_algorithms():
+            left = str(getattr(moved_file, algo, "") or "").strip().upper()
+            right = str(getattr(base_file, algo, "") or "").strip().upper()
+            if left and right:
+                hash_compared = True
+                if left == right:
+                    same_hash = True
+                    break
+        # 有哈希时以哈希为准；只有两边都拿不到哈希才退回大小比较。
+        same_content = same_hash if hash_compared else same_size
+        if not same_content:
+            logger.warning(
+                f"目标目录已有同名文件但内容不同，保留两份待人工确认："
+                f"{final_dir}/{file_name} 与 {moved_name}"
+            )
+            return moved_file
+        if self._cloud_mutations.delete_file(getattr(moved_file, "id", "")):
+            logger.info(
+                f"已清理并发移动产生的同内容副本：{final_dir}/{moved_name}"
+            )
+            return base_file
+        logger.warning(f"同内容副本清理失败，保留待重试：{final_dir}/{moved_name}")
+        return moved_file
+
     def _replace_upgrade_file(
             self,
             item: Dict[str, Any],
@@ -528,7 +582,9 @@ class PostprocessService(OwnerDelegator):
                 self._schedule_finalize_retry(item, now)
                 return None
             item["moved_at"] = now
-            target_file = moved_file
+            target_file = self._dedupe_moved_duplicate(
+                final_dir, file_name, moved_file
+            )
 
         return target_file
 
@@ -1600,7 +1656,9 @@ class PostprocessService(OwnerDelegator):
                         self._schedule_finalize_retry(item, ctx.now)
                     return
             ctx.sync_move(staging_dir, final_dir, moved_file)
-            target_file = moved_file
+            target_file = self._dedupe_moved_duplicate(
+                final_dir, file_name, moved_file
+            )
             item["moved_at"] = ctx.now
 
         context_key = self._media_context_key(item)

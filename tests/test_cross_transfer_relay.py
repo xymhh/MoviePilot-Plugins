@@ -11,6 +11,8 @@ import sys
 from threading import Event
 from unittest.mock import MagicMock
 
+import pytest
+
 from plugin_env import load_module, register_mock, register_module
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -59,6 +61,13 @@ transfer_module = load_module(
 CloudDriveCapability = cloud_module.CloudDriveCapability
 CrossTransferTaskManager = transfer_module.CrossTransferTaskManager
 RelayError = relay_module.RelayError
+
+
+@pytest.fixture(autouse=True)
+def _clear_relay_done_cache():
+    transfer_module._RELAY_TARGET_DONE.clear()
+    yield
+    transfer_module._RELAY_TARGET_DONE.clear()
 
 
 class FakeFile:
@@ -163,6 +172,46 @@ def test_relay_payload_carries_configured_connections():
     )
     assert ok is True
     assert relay.submitted[0]["connections"] == 12
+
+
+def test_relay_same_target_and_sha1_is_not_submitted_twice():
+    relay = FakeRelay([
+        {"status": "success", "phase": "done", "progress": 100,
+         "result": {"file_name": "dup.mkv", "size": 1024, "sha1": "DUP"}},
+        {"status": "success", "phase": "done", "progress": 100,
+         "result": {"file_name": "dup.mkv", "size": 1024, "sha1": "DUP"}},
+    ])
+    manager = make_manager(relay)
+    first = manager._relay_transfer(
+        make_task(), "task1", FakeTarget(), "/dedup", "dup.mkv",
+        "115", "DUP", 1024, Event(),
+    )
+    second = manager._relay_transfer(
+        make_task(), "task2", FakeTarget(), "/dedup", "dup.mkv",
+        "115", "DUP", 1024, Event(),
+    )
+    assert first is True
+    assert second is True
+    assert len(relay.submitted) == 1
+
+
+def test_relay_different_sha1_still_submits():
+    relay = FakeRelay([
+        {"status": "success", "phase": "done", "progress": 100,
+         "result": {"file_name": "upgrade.mkv", "size": 1024, "sha1": "OLD"}},
+        {"status": "success", "phase": "done", "progress": 100,
+         "result": {"file_name": "upgrade.mkv", "size": 2048, "sha1": "NEW"}},
+    ])
+    manager = make_manager(relay)
+    manager._relay_transfer(
+        make_task(), "task1", FakeTarget(), "/dedup-upgrade", "upgrade.mkv",
+        "115", "OLD", 1024, Event(),
+    )
+    manager._relay_transfer(
+        make_task(), "task2", FakeTarget(), "/dedup-upgrade", "upgrade.mkv",
+        "115", "NEW", 2048, Event(),
+    )
+    assert [item["sha1"] for item in relay.submitted] == ["OLD", "NEW"]
 
 
 def test_relay_failure_falls_back():
