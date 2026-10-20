@@ -647,3 +647,43 @@ def test_progressive_renamed_target_is_verified_by_writer(tmp_path):
     assert task["result_file_id"] == "renamed-progressive"
     assert len(target.upload.progressive_calls) == 1
     assert len(source.download_calls) == 1
+
+
+def test_local_upload_source_sha1_conflict_fails_without_transfer(tmp_path):
+    local_path = tmp_path / "source.bin"
+    local_path.write_bytes(b"s" * 1024)
+    target = RunTarget()
+    target.add_file("/local-sha-conflict", FakeFile(
+        file_id="existing", name="movie.mkv", size=1024, sha1="B" * 40
+    ))
+    manager = make_run_manager(target, None, str(tmp_path))
+    task = make_run_task(
+        target_path="/local-sha-conflict", name="movie.mkv", total=1024,
+        source_path=str(local_path),
+        source_file=FakeFile(name="movie.mkv", size=1024,
+                             sha1="A" * 40, md5=""),
+    )
+    run_task(manager, task, "")
+    assert task["status"] == "failed"
+    assert target.upload.upload_file_calls == []
+
+
+def test_local_upload_source_sha1_match_reuses_without_transfer(tmp_path):
+    local_path = tmp_path / "source.bin"
+    local_path.write_bytes(b"t" * 1024)
+    target = RunTarget()
+    target.add_file("/local-sha-reuse", FakeFile(
+        file_id="existing", name="movie.mkv", size=1024, sha1="A" * 40
+    ))
+    manager = make_run_manager(target, None, str(tmp_path))
+    task = make_run_task(
+        target_path="/local-sha-reuse", name="movie.mkv", total=1024,
+        source_path=str(local_path),
+        source_file=FakeFile(name="movie.mkv", size=1024,
+                             sha1="A" * 40, md5=""),
+    )
+    run_task(manager, task, "")
+    assert task["status"] == "success"
+    assert task["method"] == "reuse"
+    assert task["result_file_id"] == "existing"
+    assert target.upload.upload_file_calls == []

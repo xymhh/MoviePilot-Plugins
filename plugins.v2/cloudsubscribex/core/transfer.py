@@ -1232,13 +1232,16 @@ class CrossTransferTaskManager:
             algorithm: str, checksum: str,
     ) -> TargetPlan:
         algorithm = str(algorithm or "").strip().lower()
+        source = task.get("source_file")
+        source_sha1 = str(getattr(source, "sha1", "") or "")
+        source_md5 = str(getattr(source, "md5", "") or "")
         return TargetPlan(
             provider_key=str(task["target_provider"]),
             path=target_path,
             name=target_name,
             size=int(task.get("total") or 0),
-            sha1=str(checksum or "") if algorithm == "sha1" else "",
-            md5=str(checksum or "") if algorithm == "md5" else "",
+            sha1=str(checksum or "") if algorithm == "sha1" else source_sha1,
+            md5=str(checksum or "") if algorithm == "md5" else source_md5,
         )
 
     def _relay_transfer(
