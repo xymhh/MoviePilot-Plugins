@@ -564,6 +564,24 @@ class SyncJobLedgerTests(unittest.TestCase):
         self.assertEqual(row.state, JOB_DONE)
         self.assertEqual(row.last_error, "")
 
+    def test_done_missing_logs_reopen(self):
+        self._done()
+        with self.assertLogs(
+                "cloudsubscribex.core.database.sync_job_ledger",
+                level="INFO",
+        ) as captured:
+            lease, reason = self._begin(
+                self.ledger, verify_done=lambda _: DONE_CHECK_MISSING,
+            )
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(
+            any(
+                "目标文件不存在" in line and "重新入队" in line
+                for line in captured.output
+            ),
+            captured.output,
+        )
+
     def test_done_unknown_does_not_reuse_or_retransfer(self):
         key = self._done()
         lease, reason = self._begin(

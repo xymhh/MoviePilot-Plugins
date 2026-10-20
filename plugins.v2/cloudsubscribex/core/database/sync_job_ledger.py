@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
@@ -26,6 +27,8 @@ from .sync_job_state import (
     normalize_path,
 )
 from .sync_jobs import SyncJobRepository
+
+logger = logging.getLogger(__name__)
 
 # done 回查结果：必须区分「确认存在」「确认不存在」「同名不同内容」
 # 「查不清」，不能把查询失败当成文件丢失而重复上传。
@@ -159,6 +162,11 @@ class SyncJobLedger:
                 return None, "目标文件不存在，重新入队后未找到作业"
             if row.state == JOB_DONE:
                 return None, "目标文件不存在，但作业仍为已完成状态"
+            logger.info(
+                "同步作业 done 回查：目标文件不存在，已重新入队"
+                "（job=%s，target=%s/%s）",
+                row.job_key, row.target_path, row.target_name,
+            )
 
         owner = f"{row.job_id}:{uuid.uuid4().hex[:12]}"
         try:
