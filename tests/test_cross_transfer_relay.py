@@ -59,25 +59,39 @@ transfer_module = load_module(
 CloudDriveCapability = cloud_module.CloudDriveCapability
 CrossTransferTaskManager = transfer_module.CrossTransferTaskManager
 RelayError = relay_module.RelayError
+TargetConflictError = sys.modules[
+    "cloudsubscribex.core.target_writer"
+].TargetConflictError
 
 
 
 class FakeFile:
-    id = "f1"
-    name = "a.mkv"
-    size = 1024
-    sha1 = "AB"
-    md5 = ""
+    def __init__(self, file_id="f1", name="a.mkv", size=1024, sha1="AB", md5=""):
+        self.id = file_id
+        self.name = name
+        self.size = size
+        self.sha1 = sha1
+        self.md5 = md5
 
 
 class FakeQuery:
+    def __init__(self):
+        self.files = {}
+
     def find_file(self, path, name):
-        return FakeFile()
+        return self.files.get((path, name))
+
+    def list_files_recursive(self, path):
+        return [file for (file_path, _name), file in self.files.items()
+                if file_path == path]
 
 
 class FakeTarget:
     def __init__(self):
         self.query = FakeQuery()
+
+    def add_file(self, path, file):
+        self.query.files[(path, file.name)] = file
 
     def supports(self, capability):
         return capability == CloudDriveCapability.FILE_QUERY
@@ -91,25 +105,31 @@ class FakeTarget:
 class FakeRelay:
     enabled = True
 
-    def __init__(self, statuses):
+    def __init__(self, statuses, on_success=None):
         self.statuses = list(statuses)
         self.submitted = []
         self.cancelled = []
+        self.on_success = on_success
 
     def submit(self, payload):
         self.submitted.append(payload)
         return {"id": "job1"}
 
     def get(self, job_id):
-        return self.statuses.pop(0) if self.statuses else {"status": "running"}
+        current = self.statuses.pop(0) if self.statuses else {"status": "running"}
+        if current.get("status") == "success" and self.on_success:
+            callback, self.on_success = self.on_success, None
+            callback(current)
+        return current
 
     def cancel(self, job_id):
         self.cancelled.append(job_id)
 
 
-def make_manager(relay, fallback=True, relay_connections=0):
+def make_manager(relay, fallback=True, relay_connections=0, target=None):
+    provider = target if target is not None else FakeTarget()
     manager = CrossTransferTaskManager(
-        lambda key: None, relay_client=relay,
+        lambda key: provider, relay_client=relay,
         relay_max_bytes=10 * 1024 ** 3,
         relay_timeout_seconds=60,
         relay_fallback_local=fallback,
@@ -131,58 +151,107 @@ def make_task():
     }
 
 
+def _success_status(file_name="a.mkv", size=1024, sha1="AB"):
+    return {
+        "status": "success", "phase": "done", "progress": 100,
+        "result": {"file_name": file_name, "size": size, "sha1": sha1},
+    }
+
+
 def test_relay_success_returns_true_and_marks_success():
-    transfer_module._RELAY_TARGET_DONE.clear()
+    target = FakeTarget()
     relay = FakeRelay([
         {"status": "running", "phase": "download", "progress": 40,
          "transferred": 400, "message": "下载中"},
-        {"status": "success", "phase": "done", "progress": 100,
-         "result": {"file_name": "a.mkv", "size": 1024, "sha1": "AB"}},
-    ])
-    manager = make_manager(relay)
+        _success_status(),
+    ], on_success=lambda _status: target.add_file("/整理/待整理", FakeFile()))
+    manager = make_manager(relay, target=target)
     updates = []
     manager._update = lambda *args, **kwargs: updates.append(kwargs)
     ok = manager._relay_transfer(
-        make_task(), "task1", FakeTarget(), "/整理/待整理", "a.mkv",
+        make_task(), "task1", target, "/整理/待整理", "a.mkv",
         "115", "AB", 1024, Event(),
     )
     assert ok is True
     assert relay.submitted[0]["file_id"] == "f1"
     assert relay.submitted[0]["target"]["name"] == "a.mkv"
     assert relay.submitted[0]["connections"] == 0
-    assert any(item.get("method") == "relay" for item in updates)
+    success_updates = [item for item in updates if item.get("status") == "success"]
+    assert len(success_updates) == 1
+    assert success_updates[0]["method"] == "relay"
+    assert success_updates[0]["result_file_name"] == "a.mkv"
 
 
 def test_relay_payload_carries_configured_connections():
-    transfer_module._RELAY_TARGET_DONE.clear()
+    target = FakeTarget()
     relay = FakeRelay([
-        {"status": "success", "phase": "done", "progress": 100,
-         "result": {"file_name": "a.mkv", "size": 1024, "sha1": "AB"}},
-    ])
-    manager = make_manager(relay, relay_connections=12)
+        _success_status(),
+    ], on_success=lambda _status: target.add_file("/整理/待整理", FakeFile()))
+    manager = make_manager(relay, relay_connections=12, target=target)
     ok = manager._relay_transfer(
-        make_task(), "task1", FakeTarget(), "/整理/待整理", "a.mkv",
+        make_task(), "task1", target, "/整理/待整理", "a.mkv",
         "115", "AB", 1024, Event(),
     )
     assert ok is True
     assert relay.submitted[0]["connections"] == 12
 
 
-def test_relay_same_target_and_sha1_is_not_submitted_twice():
-    transfer_module._RELAY_TARGET_DONE.clear()
+def test_relay_target_exists_and_matches_reuses_without_submit():
+    target = FakeTarget()
+    target.add_file("/dedup", FakeFile(file_id="existing", name="dup.mkv",
+                                       size=1024, sha1="DUP"))
+    relay = FakeRelay([])
+    manager = make_manager(relay, target=target)
+    updates = []
+    manager._update = lambda *args, **kwargs: updates.append(kwargs)
+    ok = manager._relay_transfer(
+        make_task(), "task1", target, "/dedup", "dup.mkv",
+        "115", "DUP", 1024, Event(),
+    )
+    assert ok is True
+    assert relay.submitted == []
+    success_updates = [item for item in updates if item.get("status") == "success"]
+    assert len(success_updates) == 1
+    assert success_updates[0]["method"] == "relay-reuse"
+    assert success_updates[0]["result_file_id"] == "existing"
+    assert success_updates[0]["result_file_name"] == "dup.mkv"
+
+
+def test_relay_missing_target_submits_once_and_marks_success():
+    target = FakeTarget()
     relay = FakeRelay([
-        {"status": "success", "phase": "done", "progress": 100,
-         "result": {"file_name": "dup.mkv", "size": 1024, "sha1": "DUP"}},
-        {"status": "success", "phase": "done", "progress": 100,
-         "result": {"file_name": "dup.mkv", "size": 1024, "sha1": "DUP"}},
-    ])
-    manager = make_manager(relay)
+        _success_status(file_name="new.mkv", sha1="NEW"),
+    ], on_success=lambda _status: target.add_file(
+        "/new", FakeFile(file_id="written", name="new.mkv", size=1024, sha1="NEW")
+    ))
+    manager = make_manager(relay, target=target)
+    updates = []
+    manager._update = lambda *args, **kwargs: updates.append(kwargs)
+    ok = manager._relay_transfer(
+        make_task(), "task1", target, "/new", "new.mkv",
+        "115", "NEW", 1024, Event(),
+    )
+    assert ok is True
+    assert len(relay.submitted) == 1
+    success_updates = [item for item in updates if item.get("status") == "success"]
+    assert success_updates[0]["method"] == "relay"
+    assert success_updates[0]["result_file_id"] == "written"
+    assert success_updates[0]["result_file_name"] == "new.mkv"
+
+
+def test_relay_same_target_and_sha1_is_not_submitted_twice():
+    target = FakeTarget()
+    relay = FakeRelay([_success_status(file_name="dup.mkv", sha1="DUP")],
+                      on_success=lambda _status: target.add_file(
+                          "/dedup", FakeFile(name="dup.mkv", size=1024, sha1="DUP")
+                      ))
+    manager = make_manager(relay, target=target)
     first = manager._relay_transfer(
-        make_task(), "task1", FakeTarget(), "/dedup", "dup.mkv",
+        make_task(), "task1", target, "/dedup", "dup.mkv",
         "115", "DUP", 1024, Event(),
     )
     second = manager._relay_transfer(
-        make_task(), "task2", FakeTarget(), "/dedup", "dup.mkv",
+        make_task(), "task2", target, "/dedup", "dup.mkv",
         "115", "DUP", 1024, Event(),
     )
     assert first is True
@@ -190,31 +259,50 @@ def test_relay_same_target_and_sha1_is_not_submitted_twice():
     assert len(relay.submitted) == 1
 
 
-def test_relay_different_sha1_still_submits():
-    transfer_module._RELAY_TARGET_DONE.clear()
-    relay = FakeRelay([
-        {"status": "success", "phase": "done", "progress": 100,
-         "result": {"file_name": "upgrade.mkv", "size": 1024, "sha1": "OLD"}},
-        {"status": "success", "phase": "done", "progress": 100,
-         "result": {"file_name": "upgrade.mkv", "size": 2048, "sha1": "NEW"}},
-    ])
-    manager = make_manager(relay)
-    manager._relay_transfer(
-        make_task(), "task1", FakeTarget(), "/dedup-upgrade", "upgrade.mkv",
-        "115", "OLD", 1024, Event(),
-    )
-    manager._relay_transfer(
-        make_task(), "task2", FakeTarget(), "/dedup-upgrade", "upgrade.mkv",
-        "115", "NEW", 2048, Event(),
-    )
-    assert [item["sha1"] for item in relay.submitted] == ["OLD", "NEW"]
+def test_relay_same_name_different_content_conflicts_without_submit():
+    target = FakeTarget()
+    target.add_file("/dedup-upgrade", FakeFile(
+        name="upgrade.mkv", size=1024, sha1="OLD"
+    ))
+    relay = FakeRelay([])
+    manager = make_manager(relay, target=target)
+    try:
+        manager._relay_transfer(
+            make_task(), "task1", target, "/dedup-upgrade", "upgrade.mkv",
+            "115", "NEW", 2048, Event(),
+        )
+    except TargetConflictError:
+        pass
+    else:
+        raise AssertionError("expected TargetConflictError")
+    assert relay.submitted == []
+
+
+def test_relay_success_but_missing_target_fails_without_success(monkeypatch):
+    target = FakeTarget()
+    relay = FakeRelay([_success_status()])
+    manager = make_manager(relay, target=target)
+    updates = []
+    manager._update = lambda *args, **kwargs: updates.append(kwargs)
+    monkeypatch.setattr(transfer_module.time, "sleep", lambda _seconds: None)
+    try:
+        manager._relay_transfer(
+            make_task(), "task1", target, "/missing", "a.mkv",
+            "115", "AB", 1024, Event(),
+        )
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("expected RuntimeError")
+    assert not any(item.get("status") == "success" for item in updates)
 
 
 def test_relay_failure_falls_back():
+    target = FakeTarget()
     relay = FakeRelay([{"status": "failed", "error": "boom"}])
-    manager = make_manager(relay)
+    manager = make_manager(relay, target=target)
     ok = manager._relay_transfer(
-        make_task(), "task1", FakeTarget(), "/x", "a.mkv",
+        make_task(), "task1", target, "/x", "a.mkv",
         "115", "AB", 1024, Event(),
     )
     assert ok is False
@@ -225,9 +313,10 @@ def test_relay_submit_error_falls_back():
         def submit(self, payload):
             raise RelayError("down")
 
-    manager = make_manager(BrokenRelay([]))
+    target = FakeTarget()
+    manager = make_manager(BrokenRelay([]), target=target)
     ok = manager._relay_transfer(
-        make_task(), "task1", FakeTarget(), "/x", "a.mkv",
+        make_task(), "task1", target, "/x", "a.mkv",
         "115", "AB", 1024, Event(),
     )
     assert ok is False
@@ -238,10 +327,11 @@ def test_relay_submit_error_raises_without_fallback():
         def submit(self, payload):
             raise RelayError("down")
 
-    manager = make_manager(BrokenRelay([]), fallback=False)
+    target = FakeTarget()
+    manager = make_manager(BrokenRelay([]), fallback=False, target=target)
     try:
         manager._relay_transfer(
-            make_task(), "task1", FakeTarget(), "/x", "a.mkv",
+            make_task(), "task1", target, "/x", "a.mkv",
             "115", "AB", 1024, Event(),
         )
     except RuntimeError as error:

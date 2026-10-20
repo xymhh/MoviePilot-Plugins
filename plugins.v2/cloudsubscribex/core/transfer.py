@@ -26,55 +26,7 @@ from .cloud import (
     RapidUploadResult,
 )
 from .relay import RelayClient, RelayError
-
-# 同一目标文件的中继任务必须串行：115 目标目录已存在同名文件时会自动改名成
-# 「xxx (1).mp4」，并发中继同一集就会在最终目录留下两个文件。
-_RELAY_TARGET_LOCKS: dict[str, Lock] = {}
-_RELAY_TARGET_LOCKS_GUARD = Lock()
-_RELAY_TARGET_DONE: dict[str, float] = {}
-_RELAY_TARGET_DONE_TTL = 1800.0
-
-
-def _relay_target_lock_key(target_path: str, target_name: str) -> str:
-    path = str(target_path or "/").strip().rstrip("/") or "/"
-    return f"{path}/{str(target_name or '').strip()}"
-
-
-def _relay_target_key(target_path: str, target_name: str, checksum: str) -> str:
-    return f"{_relay_target_lock_key(target_path, target_name)}|{str(checksum or '').upper()}"
-
-
-def _relay_target_lock(key: str) -> Lock:
-    with _RELAY_TARGET_LOCKS_GUARD:
-        lock = _RELAY_TARGET_LOCKS.get(key)
-        if lock is None:
-            lock = Lock()
-            _RELAY_TARGET_LOCKS[key] = lock
-        return lock
-
-
-def _relay_target_recently_done(key: str) -> bool:
-    now = time.monotonic()
-    with _RELAY_TARGET_LOCKS_GUARD:
-        finished_at = _RELAY_TARGET_DONE.get(key)
-        if finished_at is None:
-            return False
-        if now - finished_at > _RELAY_TARGET_DONE_TTL:
-            _RELAY_TARGET_DONE.pop(key, None)
-            return False
-        return True
-
-
-def _mark_relay_target_done(key: str) -> None:
-    now = time.monotonic()
-    with _RELAY_TARGET_LOCKS_GUARD:
-        expired = [
-            item for item, finished_at in _RELAY_TARGET_DONE.items()
-            if now - finished_at > _RELAY_TARGET_DONE_TTL
-        ]
-        for item in expired:
-            _RELAY_TARGET_DONE.pop(item, None)
-        _RELAY_TARGET_DONE[key] = now
+from .target_writer import TargetPlan, TargetUnknownError, TargetWriter
 
 
 def _fd_safe_workers(requested: int, ceiling: int = 256) -> int:
@@ -701,6 +653,7 @@ class CrossTransferTaskManager:
                  relay_connections: int = 0,
                  on_change: Optional[Callable[[], None]] = None):
         self._provider_resolver = provider_resolver
+        self._target_writer = TargetWriter(provider_resolver)
         self._download_path = str(download_path or "").strip()
         self._download_threads = max(1, min(int(download_threads or 5), 256))
         self._direct_stream = bool(direct_stream)
@@ -1273,55 +1226,57 @@ class CrossTransferTaskManager:
             target_path: str, target_name: str, target_name_text: str,
             checksum: str, total: int, stop_event: Event,
     ) -> bool:
-        """串行化同一目标文件的中继，避免并发任务被 115 自动改名成 (1)。"""
-        lock_key = _relay_target_lock_key(target_path, target_name)
-        done_key = _relay_target_key(target_path, target_name, checksum)
-        with _relay_target_lock(lock_key):
-            if _relay_target_recently_done(done_key):
-                logger.info(
-                    f"中继目标已有相同文件，跳过重复上传：{target_name} -> {target_path}"
-                )
-                existing = None
-                try:
-                    existing = target.require(
-                        CloudDriveCapability.FILE_QUERY
-                    ).find_file(target_path, target_name)
-                except Exception as error:  # noqa: BLE001 - 查不到不影响跳过重复上传
-                    logger.debug(f"复用已存在文件时查询目标失败：{error}")
-                self._update(
-                    task_id, status="success", phase="done", progress=100,
-                    transferred=int(total or getattr(existing, "size", 0) or 0),
-                    message=f"目标已存在相同文件，跳过重复上传：{target_name}",
-                    method="relay-reuse",
-                    result_file_id=str(getattr(existing, "id", "") or ""),
-                    result_file_name=str(
-                        getattr(existing, "name", "") or target_name
-                    ),
-                    result_file_size=int(
-                        getattr(existing, "size", 0) or total or 0
-                    ),
-                    result_sha1=str(getattr(existing, "sha1", "") or checksum or ""),
-                    result_md5=str(getattr(existing, "md5", "") or ""),
-                    finished_at=time.time(),
-                )
-                return True
-            success = self._relay_transfer_locked(
+        """通过 TargetWriter 查目标、串行化、提交中继并回填真实文件。"""
+        plan = TargetPlan(
+            provider_key=str(task["target_provider"]),
+            path=target_path,
+            name=target_name,
+            size=int(total or 0),
+            sha1=str(checksum or ""),
+        )
+        result = self._target_writer.commit(
+            plan,
+            write=lambda: self._relay_transfer_locked(
                 task, task_id, target, target_path, target_name,
                 target_name_text, checksum, total, stop_event,
-            )
-            if success:
-                _mark_relay_target_done(done_key)
-            return success
+            ),
+        )
+        if result.status == "not_written":
+            return False
+        if result.status not in {"reused", "written"} or result.file is None:
+            raise TargetUnknownError(f"中继目标写入状态异常：{result.status}")
+        file = result.file
+        reused = result.status == "reused"
+        self._update(
+            task_id, status="success", phase="done", progress=100,
+            transferred=int(result.actual_size or getattr(file, "size", 0) or total or 0),
+            speed_bytes_per_second=0.0,
+            stage_transferred=0, stage_total=0,
+            message=(
+                f"目标已存在相同文件，跳过重复上传：{result.actual_name}"
+                if reused else f"已由深圳中继上传到{target_name_text}"
+            ),
+            method="relay-reuse" if reused else "relay",
+            result_file_id=str(getattr(file, "id", "") or ""),
+            result_file_name=str(
+                getattr(file, "name", "") or result.actual_name or target_name
+            ),
+            result_file_size=int(getattr(file, "size", 0) or result.actual_size or 0),
+            result_sha1=str(getattr(file, "sha1", "") or ""),
+            result_md5=str(getattr(file, "md5", "") or ""),
+            finished_at=time.time(),
+        )
+        return True
 
     def _relay_transfer_locked(
             self, task: dict, task_id: str, target: CloudDriveProvider,
             target_path: str, target_name: str, target_name_text: str,
             checksum: str, total: int, stop_event: Event,
-    ) -> bool:
-        """把「秒传确认未命中」的单个文件交给深圳中继；成功返回 True。
+    ) -> CloudFile | bool:
+        """把「秒传确认未命中」的单个文件交给深圳中继。
 
-        True  → 已由中继上传并在网盘里找到文件，调用方直接返回；
-        False → 中继未完成且允许回落，调用方继续本机原链路。
+        CloudFile → 已由中继上传并在网盘里找到真实文件，交给 TargetWriter 核验；
+        False     → 中继未完成且允许回落，调用方继续本机原链路。
         """
         client = self._relay_client
         if client is None:
@@ -1405,24 +1360,10 @@ class CrossTransferTaskManager:
                     time.sleep(3)
                 if not result_file:
                     raise RuntimeError("深圳中继已上传，但目标网盘未找到文件")
-                self._update(
-                    task_id, status="success", phase="done", progress=100,
-                    transferred=int(total or result.get("size") or 0),
-                    speed_bytes_per_second=0.0,
-                    stage_transferred=0, stage_total=0,
-                    message=f"已由深圳中继上传到{target_name_text}",
-                    method="relay",
-                    result_file_id=str(result_file.id or ""),
-                    result_file_name=str(result_file.name or file_name),
-                    result_file_size=int(result_file.size or result.get("size") or 0),
-                    result_sha1=str(result_file.sha1 or result.get("sha1") or ""),
-                    result_md5=str(result_file.md5 or ""),
-                    finished_at=time.time(),
-                )
                 logger.info(
                     f"深圳中继完成：{target_name} -> {target_path}/{file_name}"
                 )
-                return True
+                return result_file
             if status in {"failed", "cancelled"}:
                 error = str(current.get("error") or status)
                 if self._relay_fallback_local:
