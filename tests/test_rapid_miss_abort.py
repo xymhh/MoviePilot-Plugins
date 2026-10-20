@@ -109,7 +109,7 @@ class FakeRapidUploadService:
 
     rapid_requires_local_file = True
 
-    def __init__(self, probe_outcomes=None, rapid_outcomes=None):
+    def __init__(self, probe_outcomes=None, rapid_outcomes=None, on_success=None):
         # probe_outcomes / rapid_outcomes：按调用顺序出队的 True/False/None，
         # 耗尽后重复最后一个值。
         self._probe_outcomes = list(probe_outcomes or [])
@@ -117,6 +117,7 @@ class FakeRapidUploadService:
         self.probe_calls = []
         self.rapid_calls = []
         self.upload_file_calls = []
+        self.on_success = on_success
 
     def _next(self, outcomes, default):
         if outcomes:
@@ -132,7 +133,10 @@ class FakeRapidUploadService:
             "algorithm": algorithm, "checksum": checksum, "size": size,
             "read_range": read_range_bytes_or_hash,
         })
-        return self._next(self._probe_outcomes, False)
+        result = self._next(self._probe_outcomes, False)
+        if result and self.on_success:
+            self.on_success()
+        return result
 
     def try_rapid_upload(self, local_path, save_path, target_name,
                          algorithm, checksum, size):
@@ -141,7 +145,10 @@ class FakeRapidUploadService:
             "target_name": target_name, "algorithm": algorithm,
             "checksum": checksum, "size": size,
         })
-        return self._next(self._rapid_outcomes, False)
+        result = self._next(self._rapid_outcomes, False)
+        if result and self.on_success:
+            self.on_success()
+        return result
 
     def upload_file(self, local_path, save_path, target_name="",
                     file_sha1="", progress_callback=None):
@@ -151,6 +158,8 @@ class FakeRapidUploadService:
         })
         if progress_callback:
             progress_callback(len(PAYLOAD), len(PAYLOAD))
+        if self.on_success:
+            self.on_success()
         return True
 
 
@@ -196,10 +205,22 @@ class RapidMissAbortTests(unittest.TestCase):
     def make_manager(self, upload_service, rapid_miss_action="abort",
                      files_service=None):
         files_service = files_service or MagicMock()
-        files_service.find_file.return_value = CloudFile(
+        target_file = CloudFile(
             id="n1", name="movie.mkv", is_directory=False, size=len(PAYLOAD),
             sha1=SHA1, md5=MD5,
         )
+        present = {"value": False}
+
+        def _activate_target_file():
+            present["value"] = True
+
+        if hasattr(upload_service, "on_success"):
+            upload_service.on_success = _activate_target_file
+
+        def _find_file(*_args, **_kwargs):
+            return target_file if present["value"] else None
+
+        files_service.find_file.side_effect = _find_file
         adapter = LocalRapidUploadAdapter(
             upload_service, files_service, frozenset({"sha1"}),
         )
@@ -207,9 +228,7 @@ class RapidMissAbortTests(unittest.TestCase):
             upload_file=upload_service.upload_file,
             upload_from_link=None, upload_progressive=None,
         )
-        file_query = SimpleNamespace(
-            find_file=lambda *_args: files_service.find_file.return_value,
-        )
+        file_query = SimpleNamespace(find_file=files_service.find_file)
 
         def require(capability):
             cap = transfer_module.CloudDriveCapability
