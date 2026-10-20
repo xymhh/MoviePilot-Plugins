@@ -243,6 +243,13 @@ class UIConfig:
             "tg_monitor_scan_limit": 20,
             "tg_monitor_interval_minutes": 10,
             "tg_monitor_max_items": 500,
+            # 频道监控全局画质偏好（所有频道共用）：只做软偏好，同集先转
+            # 最优画质，低画质保留兜底；识别不到画质默认放行。
+            "tg_quality_preference_enabled": True,
+            "tg_quality_resolution_order": "4K,1080P,720P",
+            "tg_quality_hdr_order": "DOLBY VISION,HDR10+,HDR10,HDR,SDR",
+            "tg_quality_codec_order": "HEVC,AVC,AV1",
+            "tg_quality_preferred_groups": "",
         }
         try:
             dynamic_defaults = cls.collect_definitions_defaults()

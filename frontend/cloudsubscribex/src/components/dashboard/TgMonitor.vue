@@ -56,6 +56,14 @@
           <td class="text-caption">{{ item.channel_title }}</td>
           <td>
             <div class="tg-title">{{ item.title || "（无标题）" }}</div>
+            <v-chip
+              v-if="qualityLabel(item)"
+              size="x-small"
+              color="info"
+              variant="tonal"
+              class="mt-1">
+              {{ qualityLabel(item) }}
+            </v-chip>
             <div class="tg-links">
               <a v-for="link in item.links" :key="link" :href="link" target="_blank" rel="noreferrer">
                 {{ shortLink(link) }}
@@ -107,6 +115,14 @@
           </v-chip>
         </div>
         <div class="tg-card-title">{{ item.title || "（无标题）" }}</div>
+        <v-chip
+          v-if="qualityLabel(item)"
+          size="x-small"
+          color="info"
+          variant="tonal"
+          class="mt-1">
+          {{ qualityLabel(item) }}
+        </v-chip>
         <div class="tg-card-meta">
           <span>{{ formatTime(item.published_at || item.created_at) }}</span>
           <span>·</span>
@@ -288,6 +304,11 @@ const TYPE_TEXT = {
 }
 function typeText(types) {
   return (types || []).map((type) => TYPE_TEXT[type] || type).join(" / ") || "-"
+}
+
+function qualityLabel(item) {
+  const label = item?.quality?.label
+  return label && label !== "未知" ? label : ""
 }
 
 const STATUS_TEXT = {

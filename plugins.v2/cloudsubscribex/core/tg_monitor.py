@@ -25,6 +25,7 @@ from app.log import logger
 
 from ..search.types import TYPE_HOSTS
 from .tg_match import match_item
+from .tg_quality import normalize_quality_preferences, parse_quality
 
 try:  # Telethon 是可选的：未安装时插件其余功能照常工作
     from telethon import TelegramClient
@@ -513,6 +514,7 @@ class TgChannelMonitor:
             exclude_keywords: Iterable[str] = (), scan_limit: int = 20,
             interval_minutes: int = 10, max_items: int = 500,
             channel_rules: Any = None,
+            quality_preferences: Any = None,
             auto_transfer_handler: Any = None,
             subscribe_provider: Any = None,
     ) -> None:
@@ -527,6 +529,9 @@ class TgChannelMonitor:
                 keywords=keywords,
                 exclude_keywords=exclude_keywords,
                 scan_limit=scan_limit,
+            )
+            self._quality_preferences = normalize_quality_preferences(
+                quality_preferences
             )
             self._auto_transfer_handler = auto_transfer_handler
             self._subscribe_provider = subscribe_provider
@@ -943,6 +948,97 @@ class TgChannelMonitor:
             logger.info(f"TG 频道监控（{trigger}）无新增；{self._last_error}")
         return result
 
+    def _quality_candidate_key(
+            self, item: Dict[str, Any], matched: Dict[str, Any],
+    ) -> Optional[Tuple[int, str, int, int]]:
+        """同一订阅、同季同集的候选才互相比较画质。"""
+        parsed = matched.get("parsed") or {}
+        sub = matched.get("matched") or {}
+        try:
+            subscribe_id = int(sub.get("id") or 0)
+        except (TypeError, ValueError):
+            return None
+        if subscribe_id <= 0:
+            return None
+        episode = parsed.get("episode")
+        if episode is not None:
+            try:
+                season = int(
+                    parsed.get("season")
+                    or sub.get("season")
+                    or 1
+                )
+                return (subscribe_id, "episode", season, int(episode))
+            except (TypeError, ValueError):
+                return None
+        if str(parsed.get("media_type") or "") == "movie":
+            return (subscribe_id, "movie", 0, 0)
+        # 剧集整包没有集号时不参与同集比较，避免把整季包和单集混在一起。
+        return None
+
+    def _select_quality_candidates(
+            self, candidates: List[Tuple[dict, dict]],
+            subscriptions: Optional[List[Dict[str, Any]]],
+    ) -> Dict[str, Dict[str, Any]]:
+        """按全局画质偏好挑出同集最优候选，其余留作兜底。
+
+        Returns:
+            ``{item_id: {"matched": ..., "held_reason": ...}}``。
+            没有画质标签或不参与同集比较的条目不会出现在这里。
+        """
+        selections: Dict[str, Dict[str, Any]] = {}
+        prefs = getattr(self, "_quality_preferences", None) or {}
+        if not prefs.get("enabled", True):
+            return selections
+        groups: Dict[Tuple[int, str, int, int], List[Dict[str, Any]]] = {}
+        for item, _rule in candidates:
+            matched = match_item(item, subscriptions or [], allowed_ids=None)
+            if not matched.get("matched"):
+                continue
+            quality = parse_quality(item.get("title"), prefs)
+            item["quality"] = quality
+            if not quality.get("rankable"):
+                # 默认放行：识别不到分辨率就不参与排序，也不阻塞。
+                continue
+            key = self._quality_candidate_key(item, matched)
+            if not key:
+                continue
+            groups.setdefault(key, []).append({
+                "item": item,
+                "matched": matched,
+                "quality": quality,
+            })
+        for rows in groups.values():
+            if len(rows) < 2:
+                continue
+            rows.sort(key=lambda row: (
+                row["quality"].get("rank_key") or [],
+                -int(row["item"].get("published_at")
+                     or row["item"].get("created_at") or 0),
+                str(row["item"].get("id") or ""),
+            ))
+            best = rows[0]
+            best_label = str(best["quality"].get("label") or "未知")
+            best_title = str(best["item"].get("title") or "")[:48]
+            for row in rows:
+                item_id = str(row["item"].get("id") or "")
+                if not item_id:
+                    continue
+                if row is best:
+                    selections[item_id] = {
+                        "matched": row["matched"],
+                        "held_reason": "",
+                    }
+                else:
+                    selections[item_id] = {
+                        "matched": row["matched"],
+                        "held_reason": (
+                            f"同集有更优画质优先：{best_label}"
+                            f"（{best_title}）；本条保留兜底"
+                        ),
+                    }
+        return selections
+
     def _run_auto_transfers(
             self, candidates: List[Tuple[dict, dict]],
             rematch_ids: Optional[Iterable[str]] = None,
@@ -973,11 +1069,46 @@ class TgChannelMonitor:
                 provider_error = str(error)
                 logger.warning(f"TG 频道自动匹配读取订阅失败：{error}")
 
+        for item, _rule in candidates:
+            item["quality"] = parse_quality(
+                item.get("title"), getattr(self, "_quality_preferences", None)
+            )
+        quality_selections: Dict[str, Dict[str, Any]] = {}
+        if callable(provider) and not provider_error:
+            quality_selections = self._select_quality_candidates(
+                candidates, subscriptions
+            )
+
         for item, rule in candidates:
             subscribe_id = 0
             is_rematch = str(item.get("id")) in rematch_ids
             old_reason = str(item.get("match_reason") or "")
-            if callable(provider):
+            selection = quality_selections.get(str(item.get("id") or ""))
+            if selection:
+                matched = selection.get("matched") or {}
+                item["match_candidates"] = [
+                    {
+                        "id": row["id"], "name": row["name"],
+                        "season": row["season"], "type": row["type"],
+                        "score": row["score"], "reason": row["reason"],
+                    }
+                    for row in (matched.get("candidates") or [])
+                ]
+                item["match_reason"] = matched.get("reason") or ""
+                item["match_status"] = "matched"
+                subscribe_id = int(matched["matched"]["id"])
+                item["matched_subscribe_id"] = subscribe_id
+                held_reason = str(selection.get("held_reason") or "")
+                if held_reason:
+                    item["match_status"] = "pending"
+                    item["match_reason"] = held_reason[:300]
+                    stats["auto_pending"] += 1
+                    logger.info(
+                        f"TG 频道画质偏好保留兜底（{rule.get('channel')}）："
+                        f"{item.get('title')} / {held_reason}"
+                    )
+                    continue
+            elif callable(provider):
                 if provider_error:
                     item["match_status"] = "pending"
                     item["match_reason"] = f"读取订阅列表失败：{provider_error}"[:300]
@@ -1006,7 +1137,10 @@ class TgChannelMonitor:
                     continue
                 subscribe_id = int(matched["matched"]["id"])
                 item["matched_subscribe_id"] = subscribe_id
-                if is_rematch and rematch_transfers >= MAX_REMATCH_TRANSFERS:
+            else:
+                subscribe_id = 0
+            if is_rematch and subscribe_id > 0:
+                if rematch_transfers >= MAX_REMATCH_TRANSFERS:
                     # 本轮补转名额用完；匹配结果先保存，下一轮继续补转。
                     item["match_status"] = "pending"
                     item["match_reason"] = (
@@ -1016,10 +1150,7 @@ class TgChannelMonitor:
                     )[:300]
                     stats["auto_pending"] += 1
                     continue
-                if is_rematch:
-                    rematch_transfers += 1
-            else:
-                subscribe_id = 0
+                rematch_transfers += 1
             if subscribe_id <= 0:
                 item["match_status"] = "pending"
                 item["match_reason"] = "需要订阅列表才能匹配目标订阅"

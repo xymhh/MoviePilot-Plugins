@@ -165,7 +165,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.13"
+    plugin_version = "1.7.14"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -1024,6 +1024,19 @@ class CloudSubscribeX(_PluginBase):
         except (TypeError, ValueError):
             max_items = 500
         self._tg_monitor_max_items = max(50, min(max_items, 5000))
+        quality_preferences = {
+            "enabled": config.get("tg_quality_preference_enabled", True),
+            "resolution_order": config.get(
+                "tg_quality_resolution_order", "4K,1080P,720P"
+            ),
+            "hdr_order": config.get(
+                "tg_quality_hdr_order", "DOLBY VISION,HDR10+,HDR10,HDR,SDR"
+            ),
+            "codec_order": config.get(
+                "tg_quality_codec_order", "HEVC,AVC,AV1"
+            ),
+            "preferred_groups": config.get("tg_quality_preferred_groups", ""),
+        }
         if self._tg_monitor_enabled and not (
                 self._tg_api_id and self._tg_api_hash and self._tg_session):
             self._tg_monitor_enabled = False
@@ -1047,6 +1060,7 @@ class CloudSubscribeX(_PluginBase):
                 scan_limit=self._tg_monitor_scan_limit,
                 interval_minutes=self._tg_monitor_interval_minutes,
                 max_items=self._tg_monitor_max_items,
+                quality_preferences=quality_preferences,
                 auto_transfer_handler=self._auto_transfer_tg_item,
                 subscribe_provider=self._tg_subscribe_rows,
             )
