@@ -7,6 +7,7 @@ import sys
 import types
 import unittest
 import uuid
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -71,9 +72,14 @@ sync_jobs_module = load_module(
     "cloudsubscribex.core.database.sync_jobs",
     "plugins.v2/cloudsubscribex/core/database/sync_jobs.py",
 )
+sync_job_ledger_module = load_module(
+    "cloudsubscribex.core.database.sync_job_ledger",
+    "plugins.v2/cloudsubscribex/core/database/sync_job_ledger.py",
+)
 
 CloudSubscribeBase = models_module.CloudSubscribeBase
 SyncJobRepository = sync_jobs_module.SyncJobRepository
+SyncJobLedger = sync_job_ledger_module.SyncJobLedger
 JOB_QUEUED = state_module.JOB_QUEUED
 JOB_TRANSFERRING = state_module.JOB_TRANSFERRING
 JOB_VERIFYING = state_module.JOB_VERIFYING
@@ -376,6 +382,135 @@ class SyncJobRepositoryTests(unittest.TestCase):
             {"sha1": values["source_sha1"]}, provider="115"
         )
         self.assertEqual(values["content_key"], expected)
+
+
+class _SessionManager:
+    """给 SyncJobLedger 提供与生产一致的短会话。"""
+
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    @contextmanager
+    def session(self, write: bool = False):
+        db = self._session_factory()
+        try:
+            yield db
+            if write:
+                db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+
+class SyncJobLedgerTests(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine("sqlite://")
+        CloudSubscribeBase.metadata.create_all(self.engine)
+        self.session_factory = sessionmaker(
+            bind=self.engine, expire_on_commit=False,
+        )
+        self.repo = SyncJobRepository(
+            manager=_SessionManager(self.session_factory)
+        )
+        self.ledger = SyncJobLedger(self.repo)
+
+    def tearDown(self):
+        self.engine.dispose()
+
+    @staticmethod
+    def _begin(ledger, *, target_name="第17集.mp4", sha1="a" * 40):
+        return ledger.begin(
+            target_provider="115",
+            target_path="/待整理",
+            target_name=target_name,
+            source={"sha1": sha1, "file_id": "f1", "size": 1024},
+            source_provider="115",
+            source_name="第17集.mp4",
+        )
+
+    def _row(self, job_key):
+        with self.session_factory() as db:
+            return self.repo.get(job_key, db=db)
+
+    def test_begin_claims_once_and_success_is_reused(self):
+        first, reason = self._begin(self.ledger)
+        self.assertIsNotNone(first, reason)
+        self.assertFalse(first.reused)
+        self.assertEqual(self._row(first.job_key).state, JOB_TRANSFERRING)
+
+        second, reason = self._begin(self.ledger)
+        self.assertIsNone(second, reason)
+        self.assertIn("持有", reason)
+
+        self.assertTrue(
+            self.ledger.success(
+                first, result_name="第17集.mp4", result_size=1024,
+            )
+        )
+        row = self._row(first.job_key)
+        self.assertEqual(row.state, JOB_DONE)
+        self.assertEqual(row.result_name, "第17集.mp4")
+        self.assertEqual(row.result_size, 1024)
+
+        reused, reason = self._begin(self.ledger)
+        self.assertIsNotNone(reused, reason)
+        self.assertTrue(reused.reused)
+
+    def test_heartbeat_extends_lease(self):
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(self.ledger.heartbeat(lease, ttl_seconds=60))
+        self.assertEqual(
+            self._row(lease.job_key).lease_owner, lease.owner,
+        )
+
+    def test_retryable_failure_can_be_claimed_again(self):
+        first, reason = self._begin(self.ledger)
+        self.assertIsNotNone(first, reason)
+        self.assertTrue(
+            self.ledger.failure(first, error="网络抖动", retryable=True)
+        )
+        self.assertEqual(self._row(first.job_key).state, JOB_RETRY_WAIT)
+
+        second, reason = self._begin(self.ledger)
+        self.assertIsNotNone(second, reason)
+        self.assertFalse(second.reused)
+        self.assertEqual(self._row(second.job_key).attempt, 2)
+
+    def test_canceled_failure_is_terminal(self):
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(
+            self.ledger.failure(
+                lease, error="用户停止", retryable=False, canceled=True,
+            )
+        )
+        self.assertEqual(self._row(lease.job_key).state, JOB_CANCELED)
+
+    def test_invalid_source_is_rejected_without_enqueue(self):
+        lease, reason = self.ledger.begin(
+            target_provider="115",
+            target_path="/待整理",
+            target_name="第17集.mp4",
+            source={},
+            source_provider="115",
+        )
+        self.assertIsNone(lease)
+        self.assertIn("身份无效", reason)
+
+    def test_empty_target_name_is_rejected(self):
+        lease, reason = self._begin(self.ledger, target_name="")
+        self.assertIsNone(lease)
+        self.assertIn("目标文件名不能为空", reason)
+
+    def test_same_content_different_target_gets_different_key(self):
+        first, reason = self._begin(self.ledger)
+        self.assertIsNotNone(first, reason)
+        second, reason = self._begin(self.ledger, target_name="第18集.mp4")
+        self.assertIsNotNone(second, reason)
+        self.assertNotEqual(first.job_key, second.job_key)
 
 
 if __name__ == "__main__":

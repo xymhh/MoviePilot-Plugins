@@ -66,6 +66,13 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             cols: 4,
           },
           {
+            key: "sync_job_ledger_enabled",
+            label: "同步作业账本（实验）",
+            type: "switch",
+            hint: "同一内容写同一目标只执行一次；关闭时走旧路径",
+            cols: 4,
+          },
+          {
             key: "takeover_new_subscribes",
             label: "拦截新增订阅",
             type: "switch",
