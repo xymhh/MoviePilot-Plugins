@@ -148,3 +148,121 @@ class HistoryRetryRecoveryTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HistoryRetryExistingEpisodeTest(unittest.TestCase):
+    """目标季目录已有同集文件时，重试必须复用而不是再走失效分享。"""
+
+    RECORD_FILE = "玉簟秋 - S01E04 - 第4集.mkv"
+    TARGET_NAME = "玉簟秋 - S01E04 - 第4集.mkv"
+    CLOUD_DIR = "/Alist/影视/moviepilot/媒体库/剧集/国产剧/玉簟秋 (2026) {tmdb-304452}/Season 1"
+
+    def setUp(self):
+        from types import SimpleNamespace
+
+        self.SimpleNamespace = SimpleNamespace
+        self.owner = MagicMock()
+        self.mediainfo = MagicMock()
+        self.mediainfo.tmdb_id = 304452
+        self.mediainfo.type = "电视剧"
+        self.mediainfo.title = "玉簟秋"
+        self.mediainfo.year = "2026"
+        self.mediainfo.get_poster_image.return_value = ""
+        self.record = {
+            "time": "2026-10-19 23:15:44",
+            "share_url": "https://pan.quark.cn/s/8106df93bcf2",
+            "file_name": self.RECORD_FILE,
+            "source_file_name": "S01E04 - 第 4 集 - 2160p WEB-DL H265 AAC.mkv",
+            "source_sha1": "",
+            "file_size": 2588541913,
+            "status": "失败",
+            "failure_reason": "夸克网盘分享链接无效：好友已取消了分享",
+            "transfer_mode": "cross",
+            "source_drive_key": "quark",
+            "target_drive_key": "115",
+            "type": "电视剧",
+            "season": 1,
+            "episode": 4,
+            "title": "玉簟秋",
+            "year": "2026",
+        }
+        self.owner._get_data.return_value = [self.record]
+        self.owner._cloud_drive.key = "115"
+        self.owner._cloud_transfer_path = "/Alist/影视/moviepilot/转存"
+        self.owner._cloud_query.find_file.return_value = None
+        self.owner._cloud_query.list_files_recursive.return_value = []
+        self.owner._cross_transfer_manager.cache_info.return_value = {}
+        self.owner._generate_or_queue_strm.return_value = ("/tmp/玉簟秋.strm", "")
+        self.owner._is_ed2k_url.return_value = False
+        self.retry_context = {
+            "subscribe": None,
+            "mediainfo": self.mediainfo,
+            "season": 1,
+            "episode": 4,
+            "cloud_dir": self.CLOUD_DIR,
+            "target_name": self.TARGET_NAME,
+        }
+        self.service = HistoryRetryService(self.owner)
+
+    def _episode_file(self, name, size):
+        return self.SimpleNamespace(name=name, size=size, is_directory=False)
+
+    def _retry(self):
+        with patch.object(
+            HistoryRetryService,
+            "_resolve_history_retry_context",
+            return_value=self.retry_context,
+        ):
+            return self.service.retry_history_record(
+                self.record["time"],
+                self.record["share_url"],
+                self.record["file_name"],
+                force=True,
+            )
+
+    def test_same_episode_with_2160p_suffix_is_reused(self):
+        """实际文件多了 .2160p 后缀，精确名不中也要按季集命中。"""
+        self.owner._cloud_query.list_files_recursive.return_value = [
+            self._episode_file("玉簟秋 - S01E04 - 第4集.2160p.mkv", 1809965794),
+        ]
+
+        result = self._retry()
+
+        self.assertEqual("成功", result["status"])
+        self.assertEqual(
+            "玉簟秋 - S01E04 - 第4集.2160p.mkv", self.record["file_name"]
+        )
+        self.assertEqual("episode_match", self.record["landed_reason"])
+        self.assertTrue(self.record["retry_reused_existing"])
+        self.owner._transfer_file.assert_not_called()
+        self.owner._share_transfer.check_share_status.assert_not_called()
+
+    def test_same_episode_iso_is_reused(self):
+        """库内是 ISO 原盘、历史是 MKV 时同样按同集处理。"""
+        self.owner._cloud_query.list_files_recursive.return_value = [
+            self._episode_file("玉簟秋 - S01E04 - 第4集.iso", 3858965321),
+        ]
+
+        result = self._retry()
+
+        self.assertEqual("成功", result["status"])
+        self.assertEqual(
+            "玉簟秋 - S01E04 - 第4集.iso", self.record["file_name"]
+        )
+        self.owner._transfer_file.assert_not_called()
+        self.owner._share_transfer.check_share_status.assert_not_called()
+
+    def test_other_episode_does_not_count_as_existing(self):
+        """只有别的集数时必须继续走分享校验，不能误判为已存在。"""
+        self.record["transfer_mode"] = ""
+        self.owner._cloud_query.list_files_recursive.return_value = [
+            self._episode_file("玉簟秋 - S01E05 - 第5集.iso", 3965982456),
+        ]
+        self.owner._share_transfer.check_share_status.return_value.is_valid = False
+        self.owner._share_transfer.check_share_status.return_value.status_text = "好友已取消了分享"
+
+        with self.assertRaises(ValueError):
+            self._retry()
+
+        self.owner._share_transfer.check_share_status.assert_called_once()
+        self.owner._transfer_file.assert_not_called()

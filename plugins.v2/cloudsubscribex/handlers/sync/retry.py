@@ -228,6 +228,83 @@ class HistoryRetryService(OwnerDelegator):
             self._save_data("history", history)
 
     @staticmethod
+    def _retry_episode_number(file_name: str, season: int) -> Optional[int]:
+        """从目标文件名解析季集号，用于识别同集不同名/不同扩展名的文件。"""
+        stem = str(file_name or "").strip()
+        if not stem:
+            return None
+        stem = re.sub(r"\.[^.]+$", "", stem)
+        match = re.search(
+            r"(?i)(?:^|[^A-Z0-9])S(\d{1,2})[ ._-]*E(?:P)?(\d{1,4})(?:[^0-9]|$)",
+            stem,
+        )
+        if match:
+            file_season = int(match.group(1))
+            if season and file_season != season:
+                return None
+            return int(match.group(2))
+        match = re.search(
+            r"(?i)(?:^|[ ._-])E(?:P)?(\d{1,4})(?:[ ._-]|$)", stem
+        )
+        if match:
+            return int(match.group(1))
+        match = re.search(r"第\s*(\d{1,4})\s*[集话]", stem)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _find_existing_retry_target(
+            self,
+            cloud_dir: str,
+            target_name: str,
+            record: Dict[str, Any],
+    ) -> tuple[Optional[CloudFile], bool]:
+        """查找目标目录中已存在的目标文件。
+
+        先按当前规则生成的精确文件名查找；未命中时，对剧集按季集号回退匹配，
+        避免历史记录因命名模板变化（如 ``.mkv`` -> ``.2160p.mkv``/``.iso``）
+        被误判为缺失，从而反复去校验早已失效的分享链接。
+        """
+        exact = self._cloud_query.find_file(cloud_dir, target_name, attempts=1)
+        if exact:
+            return exact, False
+
+        record_type = str(record.get("type") or "")
+        if record_type and record_type.lower() not in ("电视剧", "tv", "episode"):
+            return None, False
+        episode = int(record.get("episode") or 0)
+        season = int(record.get("season") or 1)
+        if not episode:
+            return None, False
+
+        try:
+            files = self._cloud_query.list_files_recursive(
+                cloud_dir, max_depth=1
+            ) or []
+        except Exception as error:
+            logger.debug(f"历史重试扫描目标季目录失败：{cloud_dir}，{error}")
+            return None, False
+
+        expected_size = int(record.get("file_size") or 0)
+        min_size = max(50 * 1024 * 1024, int(expected_size * 0.2))
+        best_file = None
+        best_size = -1
+        for item in files:
+            if getattr(item, "is_directory", False):
+                continue
+            name = str(getattr(item, "name", "") or "")
+            if self._retry_episode_number(name, season) != episode:
+                continue
+            size = int(getattr(item, "size", 0) or 0)
+            # 过滤样片/预告等明显不是正片的同集文件。
+            if expected_size and size and size < min_size:
+                continue
+            if size > best_size:
+                best_file = item
+                best_size = size
+        return best_file, bool(best_file)
+
+    @staticmethod
     def _find_share_file_for_history(files: List[dict], source_sha1: str, source_name: str) -> Optional[dict]:
         source_hash = re.sub(r"[^0-9A-Fa-f]", "", str(source_sha1 or "")).upper()
         source_name = str(source_name or "").strip()
@@ -307,11 +384,25 @@ class HistoryRetryService(OwnerDelegator):
         cloud_dir = retry_context["cloud_dir"]
         target_name = retry_context["target_name"]
 
-        final_file_exists = bool(
-            self._cloud_query.find_file(cloud_dir, target_name, attempts=1)
+        existing_target, episode_match = self._find_existing_retry_target(
+            cloud_dir, target_name, record
         )
+        final_file_exists = bool(existing_target)
         success = final_file_exists
         retry_staging_name = source_name
+        if existing_target:
+            actual_name = str(getattr(existing_target, "name", "") or target_name)
+            if actual_name != target_name:
+                logger.info(
+                    f"历史重试目标目录已有同集文件，改用实际文件名："
+                    f"{cloud_dir.rstrip('/')}/{actual_name}"
+                )
+                target_name = actual_name
+            if episode_match:
+                record["landed"] = True
+                record["landed_reason"] = "episode_match"
+                record["verified_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                record["retry_reused_existing"] = True
         if not success:
             expected_size = int(record.get("file_size") or 0)
             expected_sha1 = source_sha1.upper()
