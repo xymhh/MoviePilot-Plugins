@@ -56,14 +56,16 @@
           <td class="text-caption">{{ item.channel_title }}</td>
           <td>
             <div class="tg-title">{{ item.title || "（无标题）" }}</div>
-            <v-chip
-              v-if="qualityLabel(item)"
-              size="x-small"
-              color="info"
-              variant="tonal"
-              class="mt-1">
-              {{ qualityLabel(item) }}
-            </v-chip>
+            <div v-if="qualityTags(item).length" class="tg-tags mt-1">
+              <v-chip
+                v-for="tag in qualityTags(item)"
+                :key="tag"
+                size="x-small"
+                :color="tagColor(tag)"
+                variant="tonal">
+                {{ tag }}
+              </v-chip>
+            </div>
             <div class="tg-links">
               <a v-for="link in item.links" :key="link" :href="link" target="_blank" rel="noreferrer">
                 {{ shortLink(link) }}
@@ -115,14 +117,16 @@
           </v-chip>
         </div>
         <div class="tg-card-title">{{ item.title || "（无标题）" }}</div>
-        <v-chip
-          v-if="qualityLabel(item)"
-          size="x-small"
-          color="info"
-          variant="tonal"
-          class="mt-1">
-          {{ qualityLabel(item) }}
-        </v-chip>
+        <div v-if="qualityTags(item).length" class="tg-tags mt-1">
+          <v-chip
+            v-for="tag in qualityTags(item)"
+            :key="tag"
+            size="x-small"
+            :color="tagColor(tag)"
+            variant="tonal">
+            {{ tag }}
+          </v-chip>
+        </div>
         <div class="tg-card-meta">
           <span>{{ formatTime(item.published_at || item.created_at) }}</span>
           <span>·</span>
@@ -309,6 +313,22 @@ function typeText(types) {
 function qualityLabel(item) {
   const label = item?.quality?.label
   return label && label !== "未知" ? label : ""
+}
+
+function qualityTags(item) {
+  const tags = item?.quality?.tags
+  if (Array.isArray(tags) && tags.length) return tags
+  const label = qualityLabel(item)
+  return label ? [label] : []
+}
+
+function tagColor(tag) {
+  if (tag === "免费") return "success"
+  if (/^(8K|4K|UHD|1080P|720P|480P)$/.test(tag)) return "deep-purple"
+  if (tag === "杜比视界" || tag === "杜比全景声") return "purple"
+  if (/^HDR|^SDR/.test(tag)) return "indigo"
+  if (tag === "中字" || tag === "内封简繁英" || tag === "内封简繁") return "info"
+  return "grey"
 }
 
 const STATUS_TEXT = {
@@ -510,6 +530,11 @@ onUnmounted(() => {
   font-size: 13px;
   line-height: 1.4;
   word-break: break-all;
+}
+.tg-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 .tg-links {
   display: flex;

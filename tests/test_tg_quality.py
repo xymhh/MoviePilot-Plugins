@@ -47,6 +47,28 @@ class QualityParseTest(unittest.TestCase):
         self.assertEqual(quality["audio"], "DDP")
         self.assertEqual(quality["label"], "4K.HDR10.HEVC")
 
+    def test_chinese_dv_subtitle_and_atmos_tags(self):
+        quality = parse_quality(
+            "黑帮领地 1-2季(2026)【更04集】【4K.DV 杜比视界 "
+            "内封简繁英 杜比全景声】"
+        )
+        self.assertEqual(quality["hdr"], "DOLBY VISION")
+        self.assertEqual(quality["subtitle"], "内封简繁英")
+        self.assertEqual(quality["audio"], "ATMOS")
+        self.assertEqual(
+            quality["tags"],
+            ["4K", "杜比视界", "内封简繁英", "杜比全景声"],
+        )
+
+    def test_free_and_audio_channel_tags(self):
+        free = parse_quality("免费 4K 中字")
+        self.assertEqual(free["tags"], ["免费", "4K", "中字"])
+        audio = parse_quality("名称：各取所需 (2026) 4K WEB-DL "
+                              "HDR10 H265 DDP 5.1")
+        self.assertEqual(audio["tags"], ["4K", "HDR10", "DDP5.1"])
+        aac = parse_quality("名称：冰雪尖刀连 (2023) 4K WEB-DL H265 AAC 2.0")
+        self.assertEqual(aac["tags"], ["4K", "AAC2.0"])
+
     def test_unknown_quality_is_not_rankable(self):
         quality = parse_quality("测试剧 第一季 第1集 中字")
         self.assertFalse(quality["rankable"])

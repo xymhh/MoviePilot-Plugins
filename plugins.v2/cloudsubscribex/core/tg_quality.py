@@ -18,8 +18,8 @@ _RESOLUTION_RE = re.compile(
     re.IGNORECASE,
 )
 _HDR_RE = re.compile(
-    r"(DOLBY\s*VISION|DOVI|HDR10\+|HDR10|HDR(?![A-Z0-9])|"
-    r"SDR(?![A-Z0-9])|(?<![A-Z])DV(?![A-Z0-9]))",
+    r"(杜比\s*视界|DOLBY\s*VISION|DOVI|HDR10\+|HDR10|"
+    r"HDR(?![A-Z0-9])|SDR(?![A-Z0-9])|(?<![A-Z])DV(?![A-Z0-9]))",
     re.IGNORECASE,
 )
 _CODEC_RE = re.compile(
@@ -27,7 +27,8 @@ _CODEC_RE = re.compile(
     re.IGNORECASE,
 )
 _AUDIO_RE = re.compile(
-    r"(ATMOS|TRUEHD|DTS[\s-]*HD|DTS[\s-]*X|DTS|DDP|EAC3|AC3|AAC|FLAC|LPCM)",
+    r"(杜比\s*全景声|ATMOS|TRUEHD|DTS[\s-]*HD|DTS[\s-]*X|DTS|"
+    r"DDP|EAC3|AC3|AAC|FLAC|LPCM)",
     re.IGNORECASE,
 )
 
@@ -42,6 +43,7 @@ _RESOLUTION_ALIASES = {
     "480P": "480P",
 }
 _HDR_ALIASES = {
+    "杜比视界": "DOLBY VISION",
     "DOLBYVISION": "DOLBY VISION",
     "DOVI": "DOLBY VISION",
     "DV": "DOLBY VISION",
@@ -62,6 +64,7 @@ _CODEC_ALIASES = {
     "AV1": "AV1",
 }
 _AUDIO_ALIASES = {
+    "杜比全景声": "ATMOS",
     "ATMOS": "ATMOS",
     "TRUEHD": "TRUEHD",
     "DTSHD": "DTS-HD",
@@ -148,6 +151,38 @@ def _find_alias(pattern: re.Pattern, text: str, aliases: Dict[str, str]) -> Opti
     return found[0][1]
 
 
+_SUBTITLE_PATTERNS = (
+    ("内封简繁英", re.compile(r"内封简繁英|内封简繁英字", re.IGNORECASE)),
+    ("内封简繁", re.compile(r"内封简繁", re.IGNORECASE)),
+    ("中字", re.compile(
+        r"中字|中文字幕|中英字幕|中英双字|简中|繁中|中英|双语字幕",
+        re.IGNORECASE,
+    )),
+)
+_CHANNEL_RE = re.compile(r"(?<!\d)([1-7]\.[01])(?!\d)")
+_SOURCE_RE = re.compile(
+    r"(?<![A-Z0-9])(WEB[- ]?DL|WEBRip|BluRay|REMUX|HDTV)(?![A-Z0-9])",
+    re.IGNORECASE,
+)
+_FREE_RE = re.compile(r"免费")
+
+
+def _subtitle_tag(text: str) -> Optional[str]:
+    for tag, pattern in _SUBTITLE_PATTERNS:
+        if pattern.search(text):
+            return tag
+    return None
+
+
+def _audio_tag(text: str, audio: Optional[str]) -> Optional[str]:
+    if audio == "ATMOS":
+        return "杜比全景声"
+    if not audio:
+        return None
+    channel = _CHANNEL_RE.search(text)
+    return f"{audio}{channel.group(1)}" if channel else audio
+
+
 def _preferred_group(text: str, groups: Iterable[str]) -> Optional[str]:
     compressed = re.sub(r"[\s._-]+", "", text).casefold()
     for group in groups:
@@ -177,6 +212,11 @@ def parse_quality(
     hdr = _find_alias(_HDR_RE, text, _HDR_ALIASES)
     codec = _find_alias(_CODEC_RE, text, _CODEC_ALIASES)
     audio = _find_alias(_AUDIO_RE, text, _AUDIO_ALIASES)
+    subtitle = _subtitle_tag(text)
+    source_match = _SOURCE_RE.search(text)
+    source = source_match.group(1).upper().replace(" ", "-") if source_match else None
+    free = bool(_FREE_RE.search(text))
+    audio_tag = _audio_tag(text, audio)
     group = _preferred_group(text, prefs["preferred_groups"])
 
     resolution_order = prefs["resolution_order"]
@@ -190,6 +230,16 @@ def parse_quality(
     parts = [item for item in (resolution, hdr, codec, group) if item]
     label = ".".join(parts) if parts else "未知"
     rankable = bool(resolution)
+    hdr_tag = "杜比视界" if hdr == "DOLBY VISION" else hdr
+    tags = [
+        tag for tag in (
+            "免费" if free else None,
+            resolution,
+            hdr_tag,
+            subtitle,
+            audio_tag,
+        ) if tag
+    ]
     return {
         "enabled": prefs["enabled"],
         "label": label,
@@ -197,6 +247,10 @@ def parse_quality(
         "hdr": hdr,
         "codec": codec,
         "audio": audio,
+        "subtitle": subtitle,
+        "source": source,
+        "free": free,
+        "tags": tags,
         "group": group,
         "rankable": rankable,
         "preferred_resolution": bool(

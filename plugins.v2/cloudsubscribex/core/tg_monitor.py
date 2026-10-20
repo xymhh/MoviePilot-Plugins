@@ -1240,12 +1240,20 @@ class TgChannelMonitor:
             if not isinstance(item, dict):
                 continue
             quality = item.get("quality")
+            fresh = parse_quality(item.get("title"), prefs)
             if (
                     isinstance(quality, dict)
                     and quality.get("label") not in (None, "", "未知")
             ):
+                # 1.7.14 的旧对象只有 label/rank，没有 tags；补展示字段，
+                # 但不改已有 label，避免覆盖人工或历史排序结果。
+                for key in ("tags", "subtitle", "source", "free"):
+                    if key not in quality:
+                        quality[key] = fresh.get(key)
+                if not quality.get("audio"):
+                    quality["audio"] = fresh.get("audio")
                 continue
-            item["quality"] = parse_quality(item.get("title"), prefs)
+            item["quality"] = fresh
 
     def list_items(self, status: str = "") -> List[dict]:
         items = list(self._store.load(ITEMS_KEY, []) or [])

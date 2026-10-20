@@ -456,8 +456,13 @@ class ScanTest(unittest.TestCase):
 
         self.assertEqual(items["legacy:1"]["quality"]["label"], "4K")
         self.assertEqual(items["legacy:2"]["quality"]["label"], "1080P")
-        # 已有有效标签不覆盖，避免读接口改变人工/新逻辑结果
+        # 已有有效标签不覆盖，避免读接口改变人工/新逻辑结果；
+        # 但旧对象没有 tags 时补展示字段
         self.assertEqual(items["legacy:3"]["quality"]["label"], "手工标签")
+        self.assertEqual(
+            items["legacy:3"]["quality"]["tags"],
+            ["4K", "HDR"],
+        )
 
     def test_scan_dedup_and_store(self):
         class FakeMessage:
