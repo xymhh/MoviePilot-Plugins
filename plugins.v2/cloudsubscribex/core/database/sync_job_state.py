@@ -57,7 +57,9 @@ ALLOWED_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
         JOB_DONE, JOB_RETRY_WAIT, JOB_NEEDS_ATTENTION, JOB_CANCELED,
     }),
     JOB_RETRY_WAIT: frozenset({JOB_QUEUED, JOB_FAILED, JOB_CANCELED}),
-    JOB_DONE: frozenset(),
+    # done 不是数学意义上的终态：目标文件可能被人删除/移走，允许回查后
+    # 重新入队；目标同名但内容不一致时转待处理，绝不自动覆盖。
+    JOB_DONE: frozenset({JOB_QUEUED, JOB_NEEDS_ATTENTION}),
     JOB_FAILED: frozenset(),
     JOB_NEEDS_ATTENTION: frozenset(),
     JOB_CANCELED: frozenset(),

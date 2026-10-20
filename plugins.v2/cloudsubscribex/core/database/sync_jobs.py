@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from .manager import DbOper, db_query, db_update
 from .models import SyncJob
 from .sync_job_state import (
+    JOB_DONE,
     JOB_FAILED,
     JOB_FINALIZING,
     JOB_QUEUED,
@@ -121,10 +122,16 @@ class SyncJobRepository(DbOper):
             to_state: str,
             owner: Optional[str] = None,
             now: Optional[int] = None,
+            expected_updated_at: Optional[int] = None,
             db: Session = None,
             **fields: Any,
     ) -> bool:
-        """按期望状态迁移；``owner`` 非空时同时校验租约持有者。"""
+        """按期望状态迁移；``owner`` 非空时同时校验租约持有者。
+
+        ``expected_updated_at`` 用于 done 回查后的 CAS：只有回查时看到的
+        那条记录仍未被别人改写，才允许重开/转待处理，避免把刚完成的新结果
+        当成旧结果再处理一次。
+        """
         assert_transition(from_state, to_state)
         timestamp = _now(now)
         values = dict(fields)
@@ -145,10 +152,43 @@ class SyncJobRepository(DbOper):
         ]
         if owner is not None:
             conditions.append(SyncJob.lease_owner == str(owner))
+        if expected_updated_at is not None:
+            conditions.append(SyncJob.updated_at == int(expected_updated_at))
 
         statement = update(SyncJob).where(*conditions).values(**values)
         result = db.execute(statement)
         return bool(getattr(result, "rowcount", 0) == 1)
+
+    @db_update
+    def reopen_done(
+            self,
+            job_key: str,
+            reason: str,
+            now: Optional[int] = None,
+            expected_updated_at: Optional[int] = None,
+            db: Session = None,
+    ) -> bool:
+        """把已完成作业重新放回队列（目标文件被删/移走时使用）。
+
+        只允许 ``done -> queued``；清空结果字段并把 ``attempt`` 归零，
+        让下一次 claim 重新走完整转存，而不是继承旧的失败次数。
+        ``expected_updated_at`` 保证只重开回查时看到的那条 done 记录。
+        """
+        timestamp = _now(now)
+        return self.transition(
+            job_key, JOB_DONE, JOB_QUEUED,
+            now=timestamp, expected_updated_at=expected_updated_at, db=db,
+            attempt=0,
+            finished_at=None,
+            lease_owner=None,
+            lease_until=None,
+            result_file_id="",
+            result_name="",
+            result_size=0,
+            result_method="",
+            last_error=str(reason or "")[:2000],
+            last_error_at=timestamp,
+        )
 
     @db_update
     def heartbeat(

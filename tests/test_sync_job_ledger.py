@@ -91,6 +91,10 @@ JOB_DONE = state_module.JOB_DONE
 JOB_FAILED = state_module.JOB_FAILED
 JOB_NEEDS_ATTENTION = state_module.JOB_NEEDS_ATTENTION
 JOB_CANCELED = state_module.JOB_CANCELED
+DONE_CHECK_EXISTS = sync_job_ledger_module.DONE_CHECK_EXISTS
+DONE_CHECK_MISSING = sync_job_ledger_module.DONE_CHECK_MISSING
+DONE_CHECK_MISMATCH = sync_job_ledger_module.DONE_CHECK_MISMATCH
+DONE_CHECK_UNKNOWN = sync_job_ledger_module.DONE_CHECK_UNKNOWN
 
 
 class SyncJobKeyTests(unittest.TestCase):
@@ -165,6 +169,8 @@ class SyncJobKeyTests(unittest.TestCase):
             (JOB_RETRY_WAIT, JOB_QUEUED),
             (JOB_RETRY_WAIT, JOB_FAILED),
             (JOB_RETRY_WAIT, JOB_CANCELED),
+            (JOB_DONE, JOB_QUEUED),
+            (JOB_DONE, JOB_NEEDS_ATTENTION),
         }
         for from_state, to_state in allowed:
             self.assertTrue(
@@ -173,7 +179,7 @@ class SyncJobKeyTests(unittest.TestCase):
             )
         for from_state, to_state in {
             (JOB_QUEUED, JOB_DONE),
-            (JOB_DONE, JOB_QUEUED),
+            (JOB_DONE, JOB_FAILED),
             (JOB_FAILED, JOB_RETRY_WAIT),
             (JOB_NEEDS_ATTENTION, JOB_QUEUED),
             (JOB_CANCELED, JOB_TRANSFERRING),
@@ -338,8 +344,52 @@ class SyncJobRepositoryTests(unittest.TestCase):
         self.assertEqual(row.finished_at, 1004)
         with self.assertRaises(ValueError):
             self.repo.transition(
-                key, JOB_DONE, JOB_QUEUED, owner="worker-a", db=self.db
+                key, JOB_DONE, JOB_FAILED, owner="worker-a", db=self.db
             )
+
+    def test_reopen_done_requires_observed_version(self):
+        values = self._values()
+        self._create(values)
+        key = values["job_key"]
+        self.assertTrue(
+            self.repo.claim(key, "worker-a", ttl_seconds=60, now=1000, db=self.db)
+        )
+        for from_state, to_state in (
+            (JOB_TRANSFERRING, JOB_VERIFYING),
+            (JOB_VERIFYING, JOB_FINALIZING),
+            (JOB_FINALIZING, JOB_DONE),
+        ):
+            self.assertTrue(
+                self.repo.transition(
+                    key, from_state, to_state,
+                    owner="worker-a", now=1004, db=self.db,
+                    result_name="第17集.mp4", result_size=1024,
+                )
+            )
+        self.db.commit()
+
+        # 回查后别人又改过这条记录：旧观察结果不能重开，避免把新结果再传一遍。
+        self.assertFalse(
+            self.repo.reopen_done(
+                key, "目标文件不存在", now=1005,
+                expected_updated_at=999, db=self.db,
+            )
+        )
+        self.db.commit()
+        self.assertEqual(self.repo.get(key, db=self.db).state, JOB_DONE)
+
+        self.assertTrue(
+            self.repo.reopen_done(
+                key, "目标文件不存在", now=1006,
+                expected_updated_at=1004, db=self.db,
+            )
+        )
+        self.db.commit()
+        row = self.repo.get(key, db=self.db)
+        self.assertEqual(row.state, JOB_QUEUED)
+        self.assertEqual(row.attempt, 0)
+        self.assertEqual(row.result_name, "")
+        self.assertIsNone(row.finished_at)
 
     def test_heartbeat_only_for_owner(self):
         values = self._values()
@@ -422,7 +472,10 @@ class SyncJobLedgerTests(unittest.TestCase):
         self.engine.dispose()
 
     @staticmethod
-    def _begin(ledger, *, target_name="第17集.mp4", sha1="a" * 40):
+    def _begin(
+            ledger, *, target_name="第17集.mp4", sha1="a" * 40,
+            verify_done=None,
+    ):
         return ledger.begin(
             target_provider="115",
             target_path="/待整理",
@@ -430,7 +483,18 @@ class SyncJobLedgerTests(unittest.TestCase):
             source={"sha1": sha1, "file_id": "f1", "size": 1024},
             source_provider="115",
             source_name="第17集.mp4",
+            verify_done=verify_done,
         )
+
+    def _done(self):
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(
+            self.ledger.success(
+                lease, result_name="第17集.mp4", result_size=1024,
+            )
+        )
+        return lease.job_key
 
     def _row(self, job_key):
         with self.session_factory() as db:
@@ -459,6 +523,79 @@ class SyncJobLedgerTests(unittest.TestCase):
         reused, reason = self._begin(self.ledger)
         self.assertIsNotNone(reused, reason)
         self.assertTrue(reused.reused)
+
+    def test_done_exists_is_reused_after_verification(self):
+        key = self._done()
+        seen = []
+
+        def verify(result):
+            seen.append(result)
+            return DONE_CHECK_EXISTS
+
+        lease, reason = self._begin(self.ledger, verify_done=verify)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(lease.reused)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0].result_name, "第17集.mp4")
+        self.assertEqual(seen[0].result_size, 1024)
+        self.assertEqual(self._row(key).state, JOB_DONE)
+
+    def test_done_missing_reopens_and_claims(self):
+        key = self._done()
+        lease, reason = self._begin(
+            self.ledger, verify_done=lambda _: DONE_CHECK_MISSING,
+        )
+        self.assertIsNotNone(lease, reason)
+        self.assertFalse(lease.reused)
+        row = self._row(key)
+        self.assertEqual(row.state, JOB_TRANSFERRING)
+        self.assertEqual(row.attempt, 1)
+        self.assertEqual(row.result_name, "")
+        self.assertEqual(row.result_size, 0)
+        self.assertIn("目标文件不存在", row.last_error or "")
+        self.assertIsNone(row.finished_at)
+
+        self.assertTrue(
+            self.ledger.success(
+                lease, result_name="第17集.mp4", result_size=1024,
+            )
+        )
+        row = self._row(key)
+        self.assertEqual(row.state, JOB_DONE)
+        self.assertEqual(row.last_error, "")
+
+    def test_done_unknown_does_not_reuse_or_retransfer(self):
+        key = self._done()
+        lease, reason = self._begin(
+            self.ledger, verify_done=lambda _: DONE_CHECK_UNKNOWN,
+        )
+        self.assertIsNone(lease)
+        self.assertIn("无法确认", reason)
+        row = self._row(key)
+        self.assertEqual(row.state, JOB_DONE)
+        self.assertEqual(row.attempt, 1)
+
+    def test_done_mismatch_marks_needs_attention(self):
+        key = self._done()
+        lease, reason = self._begin(
+            self.ledger, verify_done=lambda _: DONE_CHECK_MISMATCH,
+        )
+        self.assertIsNone(lease)
+        self.assertIn("待处理", reason)
+        row = self._row(key)
+        self.assertEqual(row.state, JOB_NEEDS_ATTENTION)
+        self.assertIn("不一致", row.last_error or "")
+
+    def test_done_verifier_exception_does_not_reuse(self):
+        key = self._done()
+
+        def verify(_):
+            raise RuntimeError("网盘查询超时")
+
+        lease, reason = self._begin(self.ledger, verify_done=verify)
+        self.assertIsNone(lease)
+        self.assertIn("无法确认", reason)
+        self.assertEqual(self._row(key).state, JOB_DONE)
 
     def test_heartbeat_extends_lease(self):
         lease, reason = self._begin(self.ledger)

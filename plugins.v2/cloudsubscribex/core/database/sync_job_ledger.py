@@ -9,13 +9,14 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 from .sync_job_state import (
     JOB_CANCELED,
     JOB_DONE,
     JOB_FAILED,
     JOB_FINALIZING,
+    JOB_NEEDS_ATTENTION,
     JOB_RETRY_WAIT,
     JOB_TRANSFERRING,
     JOB_VERIFYING,
@@ -26,6 +27,17 @@ from .sync_job_state import (
 )
 from .sync_jobs import SyncJobRepository
 
+# done 回查结果：必须区分「确认存在」「确认不存在」「同名不同内容」
+# 「查不清」，不能把查询失败当成文件丢失而重复上传。
+DONE_CHECK_EXISTS = "exists"
+DONE_CHECK_MISSING = "missing"
+DONE_CHECK_MISMATCH = "mismatch"
+DONE_CHECK_UNKNOWN = "unknown"
+_DONE_CHECKS = frozenset({
+    DONE_CHECK_EXISTS, DONE_CHECK_MISSING,
+    DONE_CHECK_MISMATCH, DONE_CHECK_UNKNOWN,
+})
+
 
 @dataclass(frozen=True)
 class SyncJobLease:
@@ -33,6 +45,19 @@ class SyncJobLease:
     job_id: str
     owner: str
     reused: bool = False
+
+
+@dataclass(frozen=True)
+class SyncJobResult:
+    """回查 done 目标所需的只读快照，不把 ORM 对象带出事务。"""
+    job_key: str
+    job_id: str
+    target_provider: str
+    target_path: str
+    target_name: str
+    result_file_id: str = ""
+    result_name: str = ""
+    result_size: int = 0
 
 
 class SyncJobLedger:
@@ -53,6 +78,7 @@ class SyncJobLedger:
             subscribe_id: Optional[int] = None,
             history_id: Optional[str] = None,
             payload: Optional[Mapping[str, Any]] = None,
+            verify_done: Optional[Callable[[SyncJobResult], str]] = None,
     ) -> tuple[Optional[SyncJobLease], str]:
         """入队并认领；返回 ``(lease, reason)``，认领失败时 lease 为 None。"""
         try:
@@ -93,7 +119,46 @@ class SyncJobLedger:
         if row is None:
             return None, "作业入队后未找到记录"
         if row.state == JOB_DONE:
-            return SyncJobLease(row.job_key, row.job_id, "", reused=True), ""
+            check = DONE_CHECK_EXISTS
+            if verify_done is not None:
+                try:
+                    check = str(verify_done(_result_view(row)) or "")
+                except Exception as error:
+                    return None, f"无法确认已完成目标，暂不复用也不重传：{error}"
+                if check not in _DONE_CHECKS:
+                    check = DONE_CHECK_UNKNOWN
+            if check == DONE_CHECK_EXISTS:
+                return SyncJobLease(row.job_key, row.job_id, "", reused=True), ""
+            if check == DONE_CHECK_UNKNOWN:
+                return None, "无法确认已完成目标，暂不复用也不重传"
+            if check == DONE_CHECK_MISMATCH:
+                try:
+                    changed = self._repo.transition(
+                        row.job_key, JOB_DONE, JOB_NEEDS_ATTENTION,
+                        now=int(time.time()),
+                        expected_updated_at=getattr(row, "updated_at", None),
+                        last_error="已完成目标同名文件内容/大小不一致",
+                        last_error_at=int(time.time()),
+                    )
+                except Exception as error:
+                    return None, f"目标不一致，且标记待处理失败：{error}"
+                if not changed:
+                    return None, "作业状态已变化，暂不重传也不改状态"
+                return None, "已完成目标同名文件内容/大小不一致，已转为待处理"
+            # 确认目标文件不存在：清空结果并重新入队，由本次请求继续 claim。
+            try:
+                self._repo.reopen_done(
+                    row.job_key, "目标文件不存在，重新入队",
+                    now=int(time.time()),
+                    expected_updated_at=getattr(row, "updated_at", None),
+                )
+            except Exception as error:
+                return None, f"目标文件不存在，但重新入队失败：{error}"
+            row = self._repo.get(row.job_key)
+            if row is None:
+                return None, "目标文件不存在，重新入队后未找到作业"
+            if row.state == JOB_DONE:
+                return None, "目标文件不存在，但作业仍为已完成状态"
 
         owner = f"{row.job_id}:{uuid.uuid4().hex[:12]}"
         try:
@@ -148,6 +213,8 @@ class SyncJobLedger:
             result_size=_safe_int(result_size),
             result_file_id=str(result_file_id or "")[:255],
             result_method=str(result_method or "")[:32],
+            last_error="",
+            last_error_at=None,
         )
 
     def failure(
@@ -177,6 +244,19 @@ class SyncJobLedger:
         )
 
 
+def _result_view(row: Any) -> SyncJobResult:
+    return SyncJobResult(
+        job_key=str(getattr(row, "job_key", "") or ""),
+        job_id=str(getattr(row, "job_id", "") or ""),
+        target_provider=str(getattr(row, "target_provider", "") or ""),
+        target_path=str(getattr(row, "target_path", "") or ""),
+        target_name=str(getattr(row, "target_name", "") or ""),
+        result_file_id=str(getattr(row, "result_file_id", "") or ""),
+        result_name=str(getattr(row, "result_name", "") or ""),
+        result_size=_safe_int(getattr(row, "result_size", 0)),
+    )
+
+
 def _safe_int(value: Any) -> int:
     try:
         return max(0, int(value or 0))
@@ -184,4 +264,12 @@ def _safe_int(value: Any) -> int:
         return 0
 
 
-__all__ = ["SyncJobLease", "SyncJobLedger"]
+__all__ = [
+    "DONE_CHECK_EXISTS",
+    "DONE_CHECK_MISMATCH",
+    "DONE_CHECK_MISSING",
+    "DONE_CHECK_UNKNOWN",
+    "SyncJobLease",
+    "SyncJobLedger",
+    "SyncJobResult",
+]

@@ -166,6 +166,12 @@ class SyncHandler:
     _SUBSCRIBE_CALENDAR_CACHE_TTL = 26 * 60 * 60
     _NOTIFICATION_BATCH_WINDOW_SECONDS = 2
     _SYNC_JOB_HEARTBEAT_SECONDS = 15
+    # 与 core/database/sync_job_ledger.py 的 DONE_CHECK_* 保持同值；
+    # 这里不导入数据库模块，避免未开启账本时提前加载 SQLAlchemy。
+    _SYNC_DONE_CHECK_EXISTS = "exists"
+    _SYNC_DONE_CHECK_MISSING = "missing"
+    _SYNC_DONE_CHECK_MISMATCH = "mismatch"
+    _SYNC_DONE_CHECK_UNKNOWN = "unknown"
     _CLOUD_MEDIA_ROOT = "/"
     _OFFLINE_RESOURCE_URL_RE = re.compile(
         r"ed2k://\|file\|[^|\r\n]+\|\d+\|[0-9A-Fa-f]{32}"
@@ -2737,6 +2743,7 @@ class SyncHandler:
                 subscribe_id=_safe_optional_int(file_item.get("subscribe_id")),
                 history_id=str(file_item.get("history_id") or "") or None,
                 payload={"entry": "sync_transfer"},
+                verify_done=self._verify_sync_job_result,
             )
         except Exception as error:
             logger.error(f"同步作业账本不可用，已阻止本次转存：{error}")
@@ -2821,6 +2828,63 @@ class SyncHandler:
         except Exception as ledger_error:
             logger.error(f"同步作业失败记账异常：{ledger_error}")
         return False
+
+    def _verify_sync_job_result(self, result) -> str:
+        """回查 done 作业的目标文件，区分存在/删除/冲突/查不清。
+
+        只读网盘，不写任何状态；由 ``SyncJobLedger.begin`` 决定复用还是重开。
+        目录/列表查询失败一律返回 unknown，避免把网络错误当成文件丢失后重传。
+        """
+        path = str(getattr(result, "target_path", "") or "")
+        name = str(
+            getattr(result, "result_name", "")
+            or getattr(result, "target_name", "")
+            or ""
+        )
+        if not path or not name:
+            return self._SYNC_DONE_CHECK_UNKNOWN
+
+        directories = self.__dict__.get("_cloud_directories")
+        if directories is None:
+            return self._SYNC_DONE_CHECK_UNKNOWN
+        try:
+            lookup = directories.resolve_directory(path)
+        except Exception as error:
+            logger.debug(f"同步作业 done 回查目录失败：{path}，{error}")
+            return self._SYNC_DONE_CHECK_UNKNOWN
+        if not bool(getattr(lookup, "checked", False)):
+            return self._SYNC_DONE_CHECK_UNKNOWN
+        directory_id = getattr(lookup, "directory_id", None)
+        if directory_id is None:
+            return self._SYNC_DONE_CHECK_MISSING
+        try:
+            listing = directories.list_directory(directory_id)
+        except Exception as error:
+            logger.debug(f"同步作业 done 回查列表失败：{path}，{error}")
+            return self._SYNC_DONE_CHECK_UNKNOWN
+        if not bool(getattr(listing, "checked", False)):
+            return self._SYNC_DONE_CHECK_UNKNOWN
+
+        found = next(
+            (
+                item for item in (getattr(listing, "files", ()) or ())
+                if not bool(getattr(item, "is_directory", False))
+                and str(getattr(item, "name", "") or "") == name
+            ),
+            None,
+        )
+        if found is None:
+            return self._SYNC_DONE_CHECK_MISSING
+
+        expected_size = int(getattr(result, "result_size", 0) or 0)
+        actual_size = int(getattr(found, "size", 0) or 0)
+        if expected_size and actual_size and expected_size != actual_size:
+            return self._SYNC_DONE_CHECK_MISMATCH
+        expected_id = str(getattr(result, "result_file_id", "") or "")
+        actual_id = str(getattr(found, "id", "") or "")
+        if expected_id and actual_id and expected_id != actual_id:
+            return self._SYNC_DONE_CHECK_MISMATCH
+        return self._SYNC_DONE_CHECK_EXISTS
 
     def _get_sync_job_ledger(self):
         """惰性获取账本业务入口，避免未开启时加载数据库相关模块。"""

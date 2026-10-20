@@ -150,9 +150,57 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
         self.assertEqual(ledger.begin_kwargs["source_provider"], "115")
         self.assertEqual(ledger.begin_kwargs["source"]["sha1"], "a" * 40)
         self.assertEqual(ledger.begin_kwargs["subscribe_id"], 42)
+        self.assertEqual(
+            ledger.begin_kwargs["verify_done"], handler._verify_sync_job_result,
+        )
         self.assertEqual(ledger.success_kwargs["result_name"], "第17集.mp4")
         self.assertEqual(ledger.success_kwargs["result_size"], 1024)
         self.assertIsNone(ledger.failure_kwargs)
+
+    def test_done_verifier_reports_exists_and_mismatch(self):
+        handler = SyncHandler.__new__(SyncHandler)
+        handler._cloud_directories = SimpleNamespace(
+            resolve_directory=lambda _: SimpleNamespace(
+                checked=True, directory_id="d1",
+            ),
+            list_directory=lambda _: SimpleNamespace(
+                checked=True,
+                files=(
+                    SimpleNamespace(
+                        name="第17集.mp4", size=1024, id="f1", is_directory=False,
+                    ),
+                ),
+            ),
+        )
+        result = SimpleNamespace(
+            target_path="/待整理", target_name="第17集.mp4",
+            result_name="第17集.mp4", result_size=1024,
+            result_file_id="f1",
+        )
+        self.assertEqual(handler._verify_sync_job_result(result), "exists")
+        result.result_size = 2048
+        self.assertEqual(handler._verify_sync_job_result(result), "mismatch")
+
+    def test_done_verifier_reports_missing_and_unknown(self):
+        handler = SyncHandler.__new__(SyncHandler)
+        handler._cloud_directories = SimpleNamespace(
+            resolve_directory=lambda _: SimpleNamespace(
+                checked=True, directory_id="d1",
+            ),
+            list_directory=lambda _: SimpleNamespace(
+                checked=True, files=(),
+            ),
+        )
+        result = SimpleNamespace(
+            target_path="/待整理", target_name="第17集.mp4",
+            result_name="第17集.mp4", result_size=1024,
+            result_file_id="",
+        )
+        self.assertEqual(handler._verify_sync_job_result(result), "missing")
+        handler._cloud_directories.resolve_directory = lambda _: SimpleNamespace(
+            checked=False, directory_id=None,
+        )
+        self.assertEqual(handler._verify_sync_job_result(result), "unknown")
 
     def test_false_result_is_retryable(self):
         handler, ledger = self._handler(lease=_lease(), impl_result=False)
