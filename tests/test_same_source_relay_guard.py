@@ -136,18 +136,37 @@ class _RelayHarnessBase(unittest.TestCase):
             require=lambda _capability: SimpleNamespace(download_file=download_file),
         )
 
+        present = set()
+
+        def wrapped_upload(source_path, save_path, target_name,
+                           progress_callback=None):
+            result = (
+                upload_file(source_path, save_path, target_name,
+                            progress_callback)
+                if upload_file else False
+            )
+            if result:
+                present.add(target_name)
+            return result
+
+        def find_file(_path, name, **_kwargs):
+            if name not in present:
+                return None
+            return CloudFile(
+                id="n1", name=name, is_directory=False, size=len(PAYLOAD),
+                sha1=SHA1, md5=MD5,
+            )
+
         def require_target(capability):
             cap = transfer_module.CloudDriveCapability
             if capability == cap.LOCAL_UPLOAD:
                 return SimpleNamespace(
-                    upload_file=upload_file, upload_from_link=None,
+                    upload_file=wrapped_upload, upload_from_link=None,
                     upload_progressive=None,
                 )
             if capability == cap.FILE_QUERY:
-                # 上传完成后校验目标文件存在（find_file 返回 None 会判上传失败）
-                return SimpleNamespace(
-                    find_file=lambda *_args, **_kwargs: self.file_item
-                )
+                # 上传完成后校验目标文件存在；写入前目标不存在。
+                return SimpleNamespace(find_file=find_file)
             raise AssertionError(f"测试不应 require {capability}")
 
         target = SimpleNamespace(
@@ -252,7 +271,8 @@ class SameCacheKeySerializationTests(_RelayHarnessBase):
             len(self.download_calls), 1,
             "B 必须复用 A 留下的完整缓存，不得重新下载（同源互删防护的核心路径）",
         )
-        self.assertEqual(len(self.upload_calls), 2, "两个任务各自上传一次")
+        self.assertEqual(len(self.upload_calls), 1, "目标已存在后第二个任务不再上传")
+        self.assertEqual(task_b["method"], "reuse")
         self.assertTrue(self._wait_cache_gone(), "两任务终态后中继缓存必须删除")
 
     def test_other_key_task_not_serialized(self):

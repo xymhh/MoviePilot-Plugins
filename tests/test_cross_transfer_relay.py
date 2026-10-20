@@ -338,3 +338,246 @@ def test_relay_submit_error_raises_without_fallback():
         assert "深圳中继不可用" in str(error)
     else:
         raise AssertionError("expected RuntimeError")
+
+
+class RunUpload:
+    def __init__(self, target):
+        self.target = target
+        self.upload_file_calls = []
+        self.progressive_calls = []
+        self.from_link_calls = []
+
+    def upload_file(self, local_path, save_path, target_name="", **kwargs):
+        size = os.path.getsize(local_path)
+        self.upload_file_calls.append((save_path, target_name, size))
+        self.target.add_file(save_path, FakeFile(
+            file_id="uploaded", name=target_name, size=size
+        ))
+        return True
+
+    def upload_progressive(
+            self, local_path, save_path, target_name, expected_size,
+            algorithm, checksum, wait_for_range, progress_callback, stop_requested,
+    ):
+        self.progressive_calls.append((save_path, target_name, expected_size))
+        wait_for_range(0, expected_size - 1)
+        self.target.add_file(save_path, FakeFile(
+            file_id="progressive", name=target_name, size=expected_size,
+            sha1=checksum if algorithm == "sha1" else "",
+            md5=checksum if algorithm == "md5" else "",
+        ))
+        return True
+
+    def upload_from_link(
+            self, download_url, download_headers, save_path, target_name,
+            size, algorithm, checksum, progress_callback, stop_requested,
+            refresh_link=None,
+    ):
+        self.from_link_calls.append((save_path, target_name, size))
+        self.target.add_file(save_path, FakeFile(
+            file_id="range", name=target_name, size=size,
+            sha1=checksum if algorithm == "sha1" else "",
+        ))
+        return True
+
+
+class RunTarget(FakeTarget):
+    def __init__(self):
+        super().__init__()
+        self.upload = RunUpload(self)
+
+    def supports(self, capability):
+        return capability in {
+            CloudDriveCapability.FILE_QUERY,
+            CloudDriveCapability.LOCAL_UPLOAD,
+        }
+
+    def require(self, capability):
+        if capability == CloudDriveCapability.LOCAL_UPLOAD:
+            return self.upload
+        return super().require(capability)
+
+
+class RunSource:
+    def __init__(self, name="quark"):
+        self.name = name
+        self.download_calls = []
+        self.link_calls = []
+
+    def supports(self, capability):
+        return capability == CloudDriveCapability.FILE_DOWNLOAD
+
+    def require(self, capability):
+        if capability == CloudDriveCapability.FILE_DOWNLOAD:
+            return self
+        raise AssertionError(f"unexpected capability {capability}")
+
+    def resolve_download_link(self, file_item):
+        self.link_calls.append(file_item)
+        return "https://fake.example/file", {}
+
+    def download_file(
+            self, file_item, local_path, progress_callback=None,
+            stop_requested=None, preserve_partial=False, download_threads=5,
+    ):
+        size = int(file_item.size or 0)
+        with open(local_path, "wb") as handle:
+            handle.write(b"x" * size)
+        self.download_calls.append((local_path, size))
+        if progress_callback:
+            progress_callback(size, size)
+        return str(local_path)
+
+
+def make_run_manager(target, source=None, download_path=""):
+    def resolve(key):
+        return target if key == "115" else source
+
+    return CrossTransferTaskManager(
+        resolve, download_path=download_path, max_concurrent=2,
+    )
+
+
+def make_run_task(
+        target_path="/target", name="a.mkv", total=1024,
+        algorithm="", checksum="", source_path="", source_file=None,
+):
+    return {
+        "id": "task1",
+        "source_provider": "quark",
+        "source_file": source_file,
+        "source_path": source_path,
+        "source_file_name": name,
+        "title": name,
+        "total": total,
+        "target_provider": "115",
+        "target_path": target_path,
+        "algorithm": algorithm,
+        "fallback": True,
+        "stop_event": Event(),
+        "status": "pending",
+    }
+
+
+def run_task(manager, task, checksum):
+    manager._tasks["task1"] = task
+    manager._run("task1", checksum)
+    return task
+
+
+def test_progressive_reuses_existing_target_without_download_or_upload(tmp_path):
+    checksum = "A" * 32
+    target = RunTarget()
+    target.add_file("/progressive", FakeFile(
+        file_id="existing", name="a.mkv", size=1024, md5=checksum
+    ))
+    source = RunSource()
+    manager = make_run_manager(target, source, str(tmp_path))
+    task = make_run_task(
+        target_path="/progressive", total=1024,
+        algorithm="md5", checksum=checksum,
+        source_file=FakeFile(name="a.mkv", size=1024, sha1="", md5=checksum),
+    )
+    run_task(manager, task, checksum)
+    assert task["status"] == "success"
+    assert task["method"] == "reuse"
+    assert task["result_file_id"] == "existing"
+    assert task["result_file_name"] == "a.mkv"
+    assert source.download_calls == []
+    assert target.upload.progressive_calls == []
+
+
+def test_progressive_writes_once_and_backfills_real_name(tmp_path):
+    checksum = "B" * 32
+    target = RunTarget()
+    source = RunSource()
+    manager = make_run_manager(target, source, str(tmp_path))
+    task = make_run_task(
+        target_path="/progressive-write", total=1024,
+        algorithm="md5", checksum=checksum,
+        source_file=FakeFile(name="a.mkv", size=1024, sha1="", md5=""),
+    )
+    run_task(manager, task, checksum)
+    assert task["status"] == "success"
+    assert task["method"] == "progressive"
+    assert task["result_file_id"] == "progressive"
+    assert task["result_file_name"] == "a.mkv"
+    assert len(target.upload.progressive_calls) == 1
+    assert len(source.download_calls) == 1
+
+
+def test_local_upload_reuses_existing_target_without_transfer(tmp_path):
+    local_path = tmp_path / "source.bin"
+    local_path.write_bytes(b"y" * 1024)
+    target = RunTarget()
+    target.add_file("/local", FakeFile(
+        file_id="existing", name="movie.mkv", size=1024
+    ))
+    manager = make_run_manager(target, None, str(tmp_path))
+    task = make_run_task(
+        target_path="/local", name="movie.mkv", total=1024,
+        source_path=str(local_path),
+    )
+    run_task(manager, task, "")
+    assert task["status"] == "success"
+    assert task["method"] == "reuse"
+    assert task["result_file_id"] == "existing"
+    assert task["result_file_name"] == "movie.mkv"
+    assert target.upload.upload_file_calls == []
+
+
+def test_local_upload_writes_once_and_backfills_real_name(tmp_path):
+    local_path = tmp_path / "source.bin"
+    local_path.write_bytes(b"z" * 1024)
+    target = RunTarget()
+    manager = make_run_manager(target, None, str(tmp_path))
+    task = make_run_task(
+        target_path="/local-write", name="movie.mkv", total=1024,
+        source_path=str(local_path),
+    )
+    run_task(manager, task, "")
+    assert task["status"] == "success"
+    assert task["method"] == "fallback"
+    assert task["result_file_id"] == "uploaded"
+    assert task["result_file_name"] == "movie.mkv"
+    assert len(target.upload.upload_file_calls) == 1
+
+
+def test_local_upload_conflict_fails_without_transfer(tmp_path):
+    local_path = tmp_path / "source.bin"
+    local_path.write_bytes(b"w" * 1024)
+    target = RunTarget()
+    target.add_file("/local-conflict", FakeFile(
+        file_id="existing", name="movie.mkv", size=2048
+    ))
+    manager = make_run_manager(target, None, str(tmp_path))
+    task = make_run_task(
+        target_path="/local-conflict", name="movie.mkv", total=1024,
+        source_path=str(local_path),
+    )
+    run_task(manager, task, "")
+    assert task["status"] == "failed"
+    assert target.upload.upload_file_calls == []
+    assert "result_file_id" not in task
+
+
+def test_range_reuses_existing_target_without_upload_from_link(tmp_path):
+    checksum = "C" * 40
+    target = RunTarget()
+    target.add_file("/range", FakeFile(
+        file_id="existing", name="a.mkv", size=1024, sha1=checksum
+    ))
+    source = RunSource()
+    manager = make_run_manager(target, source, str(tmp_path))
+    task = make_run_task(
+        target_path="/range", total=1024,
+        algorithm="sha1", checksum=checksum,
+        source_file=FakeFile(name="a.mkv", size=1024, sha1=checksum),
+    )
+    run_task(manager, task, checksum)
+    assert task["status"] == "success"
+    assert task["method"] == "reuse"
+    assert task["result_file_id"] == "existing"
+    assert task["result_file_name"] == "a.mkv"
+    assert target.upload.from_link_calls == []
+    assert source.link_calls == []

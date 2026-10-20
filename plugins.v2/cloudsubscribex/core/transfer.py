@@ -26,7 +26,12 @@ from .cloud import (
     RapidUploadResult,
 )
 from .relay import RelayClient, RelayError
-from .target_writer import TargetPlan, TargetUnknownError, TargetWriter
+from .target_writer import (
+    TargetConflictError,
+    TargetPlan,
+    TargetUnknownError,
+    TargetWriter,
+)
 
 
 def _fd_safe_workers(requested: int, ceiling: int = 256) -> int:
@@ -1221,6 +1226,21 @@ class CrossTransferTaskManager:
         )
         return CrossDriveTransferResult(item, "progressive") if item else None
 
+    @staticmethod
+    def _target_plan(
+            task: dict, target_path: str, target_name: str,
+            algorithm: str, checksum: str,
+    ) -> TargetPlan:
+        algorithm = str(algorithm or "").strip().lower()
+        return TargetPlan(
+            provider_key=str(task["target_provider"]),
+            path=target_path,
+            name=target_name,
+            size=int(task.get("total") or 0),
+            sha1=str(checksum or "") if algorithm == "sha1" else "",
+            md5=str(checksum or "") if algorithm == "md5" else "",
+        )
+
     def _relay_transfer(
             self, task: dict, task_id: str, target: CloudDriveProvider,
             target_path: str, target_name: str, target_name_text: str,
@@ -1607,6 +1627,44 @@ class CrossTransferTaskManager:
                 "upload_from_link", None,
             ))
             ):
+                range_plan = self._target_plan(
+                    task, target_path, target_name, algorithm, checksum
+                )
+                range_probe = self._target_writer.probe(range_plan)
+                if range_probe.status == "reused":
+                    result_file = range_probe.file
+                    self._update(
+                        task_id, status="success", phase="done", progress=100,
+                        transferred=task["total"],
+                        downloaded_bytes=task["total"],
+                        uploaded_bytes=task["total"],
+                        download_speed_bytes_per_second=0.0,
+                        upload_speed_bytes_per_second=0.0,
+                        speed_bytes_per_second=0.0,
+                        stage_transferred=0, stage_total=0,
+                        message=(
+                            f"目标已存在相同文件，跳过 Range 直传："
+                            f"{range_probe.actual_name}"
+                        ),
+                        method="reuse",
+                        result_file_id=str(getattr(result_file, "id", "") or ""),
+                        result_file_name=str(
+                            getattr(result_file, "name", "")
+                            or range_probe.actual_name or target_name
+                        ),
+                        result_file_size=int(
+                            getattr(result_file, "size", 0)
+                            or range_probe.actual_size or 0
+                        ),
+                        result_sha1=str(getattr(result_file, "sha1", "") or ""),
+                        result_md5=str(getattr(result_file, "md5", "") or ""),
+                        finished_at=time.time(),
+                    )
+                    return
+                if range_probe.status == "conflict":
+                    raise TargetConflictError(range_probe.reason)
+                if range_probe.status == "unknown":
+                    raise TargetUnknownError(range_probe.reason)
                 try:
                     download_url, download_headers = source_provider.require(
                         CloudDriveCapability.FILE_DOWNLOAD
@@ -1679,6 +1737,8 @@ class CrossTransferTaskManager:
                         return
                 except InterruptedError:
                     raise
+                except (TargetConflictError, TargetUnknownError):
+                    raise
                 except Exception as error:  # noqa: BLE001 - 直传失败回退本地缓存
                     logger.warning(
                         f"Range 直传失败，回退本地缓存下载："
@@ -1692,7 +1752,6 @@ class CrossTransferTaskManager:
             temporary_path = ""
             cache_complete = False
             cache_reused = False
-            progressive_result = None
             if not source_path:
                 temporary_path = self._temporary_path(task)
                 cache_path = Path(temporary_path)
@@ -1730,12 +1789,65 @@ class CrossTransferTaskManager:
                     ))
                     )
                     if can_stream:
-                        progressive_result = self._progressive_transfer(
-                            task_id, task, downloader, target, temporary_path,
-                            cache_key, target_name_text,
-                            algorithm, checksum,
+                        progressive_plan = self._target_plan(
+                            task, target_path, target_name, algorithm, checksum
+                        )
+
+                        def write_progressive():
+                            outcome = self._progressive_transfer(
+                                task_id, task, downloader, target, temporary_path,
+                                cache_key, target_name_text,
+                                algorithm, checksum,
+                            )
+                            return outcome.file if outcome else None
+
+                        progressive_target_result = self._target_writer.commit(
+                            progressive_plan, write_progressive
                         )
                         source_path = temporary_path
+                        if progressive_target_result.status in {"reused", "written"}:
+                            result_file = progressive_target_result.file
+                            reused = progressive_target_result.status == "reused"
+                            self._update(
+                                task_id, status="success", phase="done", progress=100,
+                                transferred=task["total"],
+                                downloaded_bytes=task["total"],
+                                uploaded_bytes=task["total"],
+                                download_speed_bytes_per_second=0.0,
+                                upload_speed_bytes_per_second=0.0,
+                                speed_bytes_per_second=0.0,
+                                stage_transferred=0, stage_total=0,
+                                message=(
+                                    "目标已存在相同文件，跳过上传："
+                                    f"{progressive_target_result.actual_name}"
+                                    if reused else
+                                    f"已边下载边上传到{target_name_text}"
+                                ),
+                                method="reuse" if reused else "progressive",
+                                result_file_id=str(
+                                    getattr(result_file, "id", "") or ""
+                                ),
+                                result_file_name=str(
+                                    getattr(result_file, "name", "")
+                                    or progressive_target_result.actual_name
+                                    or target_name
+                                ),
+                                result_file_size=int(
+                                    getattr(result_file, "size", 0)
+                                    or progressive_target_result.actual_size or 0
+                                ),
+                                result_sha1=str(
+                                    getattr(result_file, "sha1", "") or ""
+                                ),
+                                result_md5=str(
+                                    getattr(result_file, "md5", "") or ""
+                                ),
+                                finished_at=time.time(),
+                            )
+                            self._delete_cache_path_for_task(
+                                task, Path(temporary_path)
+                            )
+                            return
                     else:
                         self._update(
                             task_id, phase="downloading",
@@ -1776,27 +1888,6 @@ class CrossTransferTaskManager:
                     "本地中继缓存文件已被清理（可能来自历史删除联动清缓存或手工清理），"
                     "请重新点击重试，插件会重新下载"
                 )
-            if progressive_result:
-                result_file = progressive_result.file
-                self._update(
-                    task_id, status="success", phase="done", progress=100,
-                    transferred=task["total"],
-                    downloaded_bytes=task["total"], uploaded_bytes=task["total"],
-                    download_speed_bytes_per_second=0.0,
-                    upload_speed_bytes_per_second=0.0,
-                    speed_bytes_per_second=0.0,
-                    stage_transferred=0, stage_total=0,
-                    message=f"已边下载边上传到{target_name_text}",
-                    method="progressive",
-                    result_file_id=str(result_file.id or ""),
-                    result_file_name=str(result_file.name or target_name),
-                    result_file_size=int(result_file.size or task["total"] or 0),
-                    result_sha1=str(result_file.sha1 or ""),
-                    result_md5=str(result_file.md5 or ""),
-                    finished_at=time.time(),
-                )
-                self._delete_cache_path_for_task(task, Path(temporary_path))
-                return
             had_download = bool(temporary_path)
             hash_message = (
                 "正在校验本地缓存"
@@ -1851,14 +1942,27 @@ class CrossTransferTaskManager:
                     transfer_checksum = file_checksum(
                         source_path, transfer_algorithm
                     )
-            result = CrossDriveTransfer().transfer(
-                source_path, target, target_path, target_name,
+            local_method = {"value": ""}
+
+            def write_local():
+                uploaded = CrossDriveTransfer().transfer(
+                    source_path, target, target_path, target_name,
+                    transfer_algorithm, transfer_checksum,
+                    # abort 模式：秒传未命中时不进入真实上传（fallback 参数不变）
+                    fallback=(fallback and not rapid_miss_abort),
+                    progress_callback=progress,
+                )
+                if not uploaded:
+                    return None
+                local_method["value"] = uploaded.method
+                return uploaded.file
+
+            local_plan = self._target_plan(
+                task, target_path, target_name,
                 transfer_algorithm, transfer_checksum,
-                # abort 模式：秒传未命中时不进入真实上传（fallback 模式参数不变）
-                fallback=(fallback and not rapid_miss_abort),
-                progress_callback=progress,
             )
-            if not result:
+            local_result = self._target_writer.commit(local_plan, write_local)
+            if local_result.status == "not_written":
                 if rapid_miss_abort:
                     if relay_active and not relay_tried:
                         relay_tried = True
@@ -1870,20 +1974,34 @@ class CrossTransferTaskManager:
                             return
                     raise RapidMissAborted()
                 raise RuntimeError("秒传未命中且普通上传失败" if fallback else "秒传未命中")
-            result_file = result.file
-            rapid = result.method == "rapid"
-            self._update(task_id, status="success", phase="done", progress=100,
-                         transferred=task["total"], speed_bytes_per_second=0.0,
-                         stage_transferred=0, stage_total=0,
-                         message=(f"已秒传到{target_name_text}"
-                                  if rapid else f"已上传到{target_name_text}"),
-                         method="rapid" if rapid else "fallback",
-                         result_file_id=str(result_file.id or ""),
-                         result_file_name=str(result_file.name or target_name),
-                         result_file_size=int(result_file.size or task["total"] or 0),
-                         result_sha1=str(result_file.sha1 or ""),
-                         result_md5=str(result_file.md5 or ""),
-                         finished_at=time.time())
+            result_file = local_result.file
+            reused = local_result.status == "reused"
+            rapid = (not reused) and local_method["value"] == "rapid"
+            self._update(
+                task_id, status="success", phase="done", progress=100,
+                transferred=task["total"], speed_bytes_per_second=0.0,
+                stage_transferred=0, stage_total=0,
+                message=(
+                    f"目标已存在相同文件，跳过上传：{local_result.actual_name}"
+                    if reused else (
+                        f"已秒传到{target_name_text}"
+                        if rapid else f"已上传到{target_name_text}"
+                    )
+                ),
+                method="reuse" if reused else ("rapid" if rapid else "fallback"),
+                result_file_id=str(getattr(result_file, "id", "") or ""),
+                result_file_name=str(
+                    getattr(result_file, "name", "") or local_result.actual_name
+                    or target_name
+                ),
+                result_file_size=int(
+                    getattr(result_file, "size", 0)
+                    or local_result.actual_size or task["total"] or 0
+                ),
+                result_sha1=str(getattr(result_file, "sha1", "") or ""),
+                result_md5=str(getattr(result_file, "md5", "") or ""),
+                finished_at=time.time(),
+            )
             if temporary_path:
                 self._delete_cache_path_for_task(task, Path(temporary_path))
         except InterruptedError:
