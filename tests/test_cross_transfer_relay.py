@@ -581,3 +581,69 @@ def test_range_reuses_existing_target_without_upload_from_link(tmp_path):
     assert task["result_file_name"] == "a.mkv"
     assert target.upload.from_link_calls == []
     assert source.link_calls == []
+
+
+def test_local_upload_renamed_target_is_verified_by_writer(tmp_path):
+    local_path = tmp_path / "source.bin"
+    local_path.write_bytes(b"r" * 1024)
+    checksum = "D" * 40
+    target = RunTarget()
+
+    def upload_file(_local_path, save_path, target_name="", **_kwargs):
+        size = os.path.getsize(_local_path)
+        target.upload.upload_file_calls.append((save_path, target_name, size))
+        target.add_file(save_path, FakeFile(
+            file_id="renamed", name="movie (2).mkv", size=size,
+            sha1=checksum,
+        ))
+        return True
+
+    target.upload.upload_file = upload_file
+    manager = make_run_manager(target, None, str(tmp_path))
+    task = make_run_task(
+        target_path="/local-renamed", name="movie.mkv", total=1024,
+        algorithm="sha1", checksum=checksum, source_path=str(local_path),
+    )
+    run_task(manager, task, checksum)
+    assert task["status"] == "success"
+    assert task["method"] == "fallback"
+    assert task["result_file_name"] == "movie (2).mkv"
+    assert task["result_file_id"] == "renamed"
+    assert len(target.upload.upload_file_calls) == 1
+
+
+def test_progressive_renamed_target_is_verified_by_writer(tmp_path):
+    checksum = "E" * 32
+    target = RunTarget()
+    source = RunSource()
+
+    def upload_progressive(
+            _local_path, save_path, target_name, expected_size,
+            algorithm, _checksum, wait_for_range, _progress_callback,
+            _stop_requested,
+    ):
+        target.upload.progressive_calls.append(
+            (save_path, target_name, expected_size)
+        )
+        wait_for_range(0, expected_size - 1)
+        target.add_file(save_path, FakeFile(
+            file_id="renamed-progressive", name="a (2).mkv",
+            size=expected_size,
+            md5=_checksum if algorithm == "md5" else "",
+        ))
+        return True
+
+    target.upload.upload_progressive = upload_progressive
+    manager = make_run_manager(target, source, str(tmp_path))
+    task = make_run_task(
+        target_path="/progressive-renamed", total=1024,
+        algorithm="md5", checksum=checksum,
+        source_file=FakeFile(name="a.mkv", size=1024, sha1="", md5=""),
+    )
+    run_task(manager, task, checksum)
+    assert task["status"] == "success"
+    assert task["method"] == "progressive"
+    assert task["result_file_name"] == "a (2).mkv"
+    assert task["result_file_id"] == "renamed-progressive"
+    assert len(target.upload.progressive_calls) == 1
+    assert len(source.download_calls) == 1

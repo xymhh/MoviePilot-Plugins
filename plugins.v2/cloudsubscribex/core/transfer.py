@@ -594,7 +594,7 @@ class LocalRapidUploadAdapter:
 
 @dataclass(frozen=True)
 class CrossDriveTransferResult:
-    file: CloudFile
+    file: Optional[CloudFile]
     method: str
 
 
@@ -637,7 +637,7 @@ class CrossDriveTransfer:
         item = target.require(CloudDriveCapability.FILE_QUERY).find_file(
             save_path, target_name
         )
-        return CrossDriveTransferResult(item, "fallback") if item else None
+        return CrossDriveTransferResult(item, "fallback")
 
 
 class CrossTransferTaskManager:
@@ -1224,7 +1224,7 @@ class CrossTransferTaskManager:
         item = target.require(CloudDriveCapability.FILE_QUERY).find_file(
             task["target_path"], task["title"]
         )
-        return CrossDriveTransferResult(item, "progressive") if item else None
+        return CrossDriveTransferResult(item, "progressive")
 
     @staticmethod
     def _target_plan(
@@ -1799,7 +1799,9 @@ class CrossTransferTaskManager:
                                 cache_key, target_name_text,
                                 algorithm, checksum,
                             )
-                            return outcome.file if outcome else None
+                            if not outcome:
+                                return None
+                            return outcome.file if outcome.file is not None else True
 
                         progressive_target_result = self._target_writer.commit(
                             progressive_plan, write_progressive
@@ -1955,7 +1957,7 @@ class CrossTransferTaskManager:
                 if not uploaded:
                     return None
                 local_method["value"] = uploaded.method
-                return uploaded.file
+                return uploaded.file if uploaded.file is not None else True
 
             local_plan = self._target_plan(
                 task, target_path, target_name,
