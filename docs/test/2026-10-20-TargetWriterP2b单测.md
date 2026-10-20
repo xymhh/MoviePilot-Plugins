@@ -52,6 +52,13 @@ python scripts/lint.py --all
 Checked 639 file(s), 0 error(s), 333 warning(s)
 ```
 
+## 发布核验（1.7.20）
+
+- CI：Lint Python `39409157588` success；Test cloudsubscribex (V2) `39409157527` success；Auto Release `39409157521` success。
+- Release：`CloudSubscribeX_v1.7.20`，非 draft / 非 prerelease。
+- 资产：`cloudsubscribex_v1.7.20.zip`，sha256 `a28d7500bf83f6f5fa8b054ab6269b412f48a4d0041cb191f794da4141365ffb`，与 `.sha256` 一致。
+- 包内：顶层目录 `cloudsubscribex`，`plugin_version = "1.7.20"`，含 `core/target_writer.py` 与 `core/transfer.py`。
+
 ## 未覆盖
 
 - 未做真实 115 e2e（删除目标后重传、真实自动改名、并发同名）。

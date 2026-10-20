@@ -1,8 +1,8 @@
 # P2b：TargetWriter 统一目标写入
 
-> 状态：代码完成，未发版（2026-10-20）
+> 状态：已发布 1.7.20（2026-10-20，Release `CloudSubscribeX_v1.7.20`，CI 三绿）
 > 分支：`feat/p2b-target-writer`（基线 `16de7ad`）
-> 提交：`e79c83a` → `f12280b` → `1090711` → `3c0b50c` → `e544500`
+> 提交：`e79c83a` → `f12280b` → `1090711` → `3c0b50c` → `e544500`；合并 `e285537`；发版 `a5815b7`
 > 测试：定向 51 passed；全量 677 passed / 2 例既有 p115client 环境失败；lint 639 文件 0 error
 
 ## 做了什么
@@ -47,7 +47,7 @@
 - **账本 claim 仍在 `service._transfer_file`**：TargetWriter 只负责目标存在性/冲突/串行/写后核验，未接管 `sync_jobs` 状态机。
 - **无哈希时仍可能仅按大小匹配**：已通过源文件 `sha1`/`md5` 回退降低概率；源文件也没有哈希时，同名同大小会被视为匹配。
 - **`list_files_recursive` 是目录递归**：理论上可能匹配到子目录中同大小/同哈希文件；有哈希时风险很低。
-- **未升版本、未发 Release、未 push 分支**；等主 agent 复核后再决定 1.7.20。
+- **1.7.20 已发布**；真实 115 e2e 仍未做。
 
 ## 下一步
 
@@ -56,5 +56,4 @@
    - 同名不同内容 → 失败/待处理，不产生 `(1)`；
    - 删除目标文件后重跑 → 重新上传并回填；
    - 上传后自动改名 → `result_file_name` 为真实名。
-2. 通过后升 `1.7.20`、更新 README/版本、跑 CI、发 Release。
-3. P2c 可评估：把 Range 直传写后核验也纳入 `TargetWriter`，以及把账本 claim 与目标写入合并为单一 commit。
+2. P2c 可评估：把 Range 直传写后核验也纳入 `TargetWriter`，以及把账本 claim 与目标写入合并为单一 commit。
