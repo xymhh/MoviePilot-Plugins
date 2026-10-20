@@ -11,8 +11,6 @@ import sys
 from threading import Event
 from unittest.mock import MagicMock
 
-import pytest
-
 from plugin_env import load_module, register_mock, register_module
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -62,12 +60,6 @@ CloudDriveCapability = cloud_module.CloudDriveCapability
 CrossTransferTaskManager = transfer_module.CrossTransferTaskManager
 RelayError = relay_module.RelayError
 
-
-@pytest.fixture(autouse=True)
-def _clear_relay_done_cache():
-    transfer_module._RELAY_TARGET_DONE.clear()
-    yield
-    transfer_module._RELAY_TARGET_DONE.clear()
 
 
 class FakeFile:
@@ -140,6 +132,7 @@ def make_task():
 
 
 def test_relay_success_returns_true_and_marks_success():
+    transfer_module._RELAY_TARGET_DONE.clear()
     relay = FakeRelay([
         {"status": "running", "phase": "download", "progress": 40,
          "transferred": 400, "message": "下载中"},
@@ -161,6 +154,7 @@ def test_relay_success_returns_true_and_marks_success():
 
 
 def test_relay_payload_carries_configured_connections():
+    transfer_module._RELAY_TARGET_DONE.clear()
     relay = FakeRelay([
         {"status": "success", "phase": "done", "progress": 100,
          "result": {"file_name": "a.mkv", "size": 1024, "sha1": "AB"}},
@@ -175,6 +169,7 @@ def test_relay_payload_carries_configured_connections():
 
 
 def test_relay_same_target_and_sha1_is_not_submitted_twice():
+    transfer_module._RELAY_TARGET_DONE.clear()
     relay = FakeRelay([
         {"status": "success", "phase": "done", "progress": 100,
          "result": {"file_name": "dup.mkv", "size": 1024, "sha1": "DUP"}},
@@ -196,6 +191,7 @@ def test_relay_same_target_and_sha1_is_not_submitted_twice():
 
 
 def test_relay_different_sha1_still_submits():
+    transfer_module._RELAY_TARGET_DONE.clear()
     relay = FakeRelay([
         {"status": "success", "phase": "done", "progress": 100,
          "result": {"file_name": "upgrade.mkv", "size": 1024, "sha1": "OLD"}},
