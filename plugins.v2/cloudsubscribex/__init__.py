@@ -165,7 +165,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.25"
+    plugin_version = "1.7.26"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -820,6 +820,13 @@ class CloudSubscribeX(_PluginBase):
         logger.info(
             f"跨盘中继连通性：{probe_health(self._cross_transfer_relay_url)}")
 
+    def _strm_scan_time_budget(self) -> int:
+        """STRM 全量校准单次时间预算（秒）；读取失败或负数按 0（不限）处理。"""
+        try:
+            return max(0, int(getattr(self, "_strm_full_scan_budget", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
     def run_strm_full_scan(self, reason: str = "手动") -> dict:
         """后台按目录 CID 全量遍历媒体库，补齐/校准 STRM。"""
         sync_handler = getattr(self, "_sync_handler", None)
@@ -833,7 +840,7 @@ class CloudSubscribeX(_PluginBase):
             return {"success": False, "message": "已有 STRM 全量校准在运行"}
 
         overwrite = bool(self._strm_full_scan_overwrite)
-        budget = int(self.__dict__.get("_strm_full_scan_budget") or 0)
+        budget = self._strm_scan_time_budget()
         try:
             state_path = self.get_data_path() / "strm_scan_state.json"
         except Exception:  # noqa: BLE001
