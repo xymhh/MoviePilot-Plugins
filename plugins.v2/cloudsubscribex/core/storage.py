@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 from threading import RLock
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from app.log import logger
 
@@ -23,6 +24,8 @@ class CloudSubscribeDataStore:
     def __init__(self, owner):
         self._lock = RLock()
         self._initialized = False
+        # 历史台账快照缓存：一次同步会反复取 history，避免每次都全表反序列化。
+        self._history_cache: Optional[List[Dict[str, Any]]] = None
         self.manager = CloudSubscribeDatabaseManager(
             owner.get_data_path() / "cloudsubscribe.db"
         )
@@ -78,7 +81,9 @@ class CloudSubscribeDataStore:
 
     def _load_database(self, key: str) -> Any:
         if key == self.HISTORY_KEY:
-            return self.repositories.history.list_all()
+            if self._history_cache is None:
+                self._history_cache = self.repositories.history.list_all()
+            return copy.deepcopy(self._history_cache)
         if key == self.OFFLINE_PENDING_KEY:
             return self.repositories.offline.load_all()
         if key == self.SCHEDULE_KEY:
@@ -102,6 +107,7 @@ class CloudSubscribeDataStore:
     def _save_database(self, key: str, value: Any) -> None:
         if key == self.HISTORY_KEY:
             self.repositories.history.replace_all(value or [])
+            self._history_cache = None
         elif key == self.OFFLINE_PENDING_KEY:
             self.repositories.offline.replace_all(value or {})
         elif key == self.SCHEDULE_KEY:
@@ -169,4 +175,6 @@ class CloudSubscribeDataStore:
         self.repositories.account.save_account(account_key, value)
 
     def close(self) -> None:
+        with self._lock:
+            self._history_cache = None
         self.manager.close()

@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import os
 import re
 from collections import defaultdict
 from threading import RLock
@@ -26,6 +27,21 @@ from .sync_jobs import SyncJobRepository
 from ..history import history_group_key
 from ...drive.common import positive_int
 from ...search.types import normalize_resource_type, resource_type_from_url
+
+
+#: 历史台账默认保留条数（超过后按记录时间淘汰最旧）。可用环境变量覆盖。
+DEFAULT_HISTORY_RETENTION = 5000
+
+
+def history_retention_limit() -> int:
+    """读取历史台账保留上限；0 或负数表示不做上限。"""
+    raw = str(os.environ.get("CLOUDSUBSCRIBE_HISTORY_LIMIT", "") or "").strip()
+    if not raw:
+        return DEFAULT_HISTORY_RETENTION
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_HISTORY_RETENTION
 
 
 def _episode_number(record: Dict[str, Any]) -> Optional[int]:
@@ -206,6 +222,7 @@ class HistoryRepository(DbOper):
             if changes:
                 row.update(db, changes)
         self._invalidate_filter_options()
+        self.prune(db=db)
         return len(normalized)
 
     @db_update
@@ -226,6 +243,27 @@ class HistoryRepository(DbOper):
             select(HistoryRecord).order_by(HistoryRecord.sort_index)
         ).all()
         return [copy.deepcopy(row.payload) for row in rows]
+
+    @db_update
+    def prune(self, limit: Optional[int] = None, db: Session = None) -> int:
+        """按记录时间只保留最近 ``limit`` 条，返回删除条数。"""
+        cap = history_retention_limit() if limit is None else int(limit)
+        if cap <= 0:
+            return 0
+        total = db.scalar(select(func.count()).select_from(HistoryRecord)) or 0
+        if total <= cap:
+            return 0
+        keep_ids = db.scalars(
+            select(HistoryRecord.id)
+            .order_by(HistoryRecord.record_time.desc(), HistoryRecord.id.desc())
+            .limit(cap)
+        ).all()
+        if not keep_ids:
+            return 0
+        deleted = db.execute(
+            delete(HistoryRecord).where(HistoryRecord.id.not_in(keep_ids))
+        ).rowcount or 0
+        return int(deleted)
 
     @staticmethod
     def _filters(

@@ -165,7 +165,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.24"
+    plugin_version = "1.7.25"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -274,6 +274,8 @@ class CloudSubscribeX(_PluginBase):
     _gopeed_token: str = ""
     _gopeed_path_prefix: str = ""
     _gopeed_residue_cleanup: bool = True
+    #: STRM 全量校准单次时间预算（秒），0 表示不限；到达上限后断点续扫。
+    _strm_full_scan_budget: int = 900
     _residue_scheduler: Optional[BackgroundScheduler] = None
     _gopeed_connections: int = 0  # 0=沿用 Gopeed 全局连接数；夸克建议 256
     _subscription_concurrency: int = 2
@@ -831,16 +833,32 @@ class CloudSubscribeX(_PluginBase):
             return {"success": False, "message": "已有 STRM 全量校准在运行"}
 
         overwrite = bool(self._strm_full_scan_overwrite)
+        budget = int(self.__dict__.get("_strm_full_scan_budget") or 0)
+        try:
+            state_path = self.get_data_path() / "strm_scan_state.json"
+        except Exception:  # noqa: BLE001
+            state_path = None
 
         def _run():
             try:
-                stats = sync_handler.rebuild_strm_files(overwrite=overwrite)
-                logger.info(
-                    f"STRM 全量校准完成（{reason}）：目录 {stats.get('directories')}，"
+                stats = sync_handler.rebuild_strm_files(
+                    overwrite=overwrite,
+                    time_budget_seconds=budget,
+                    state_path=state_path,
+                )
+                detail = (
+                    f"（{reason}）：目录 {stats.get('directories')}，"
                     f"视频 {stats.get('files')}，新增 {stats.get('created')}，"
                     f"更新 {stats.get('updated')}，跳过 {stats.get('skipped')}，"
                     f"失败 {stats.get('errors')}"
                 )
+                if stats.get("interrupted"):
+                    logger.info(
+                        f"STRM 全量校准已分批{detail}；本次到时间上限，"
+                        f"剩余 {stats.get('pending_directories')} 个目录留待下次续扫"
+                    )
+                else:
+                    logger.info(f"STRM 全量校准完成{detail}")
             except Exception as error:  # noqa: BLE001
                 logger.error(f"STRM 全量校准失败（{reason}）：{error}")
             finally:
@@ -850,7 +868,7 @@ class CloudSubscribeX(_PluginBase):
         return {"success": True, "message": "已开始后台全量校准，完成后写入日志"}
 
     def _start_strm_full_scan(self) -> None:
-        """每天 05:10 全量校准一次（可在设置页关闭）。"""
+        """每天 04:20 分批校准（可在设置页关闭），避开 04:30 的其它定时任务。"""
         if not (self._strm_full_scan_enabled and self._strm_generate_enabled):
             return
         if self.__dict__.get("_strm_full_scan_scheduler") is not None:
@@ -859,7 +877,7 @@ class CloudSubscribeX(_PluginBase):
             scheduler = BackgroundScheduler(timezone=settings.TZ)
             scheduler.add_job(
                 func=lambda: self.run_strm_full_scan("定时"),
-                trigger=CronTrigger(hour=5, minute=10),
+                trigger=CronTrigger(hour=4, minute=20),
                 id="cloudsubscribe_strm_full_scan",
                 replace_existing=True,
             )
@@ -932,7 +950,7 @@ class CloudSubscribeX(_PluginBase):
         return result
 
     def _start_residue_cleanup(self) -> None:
-        """启动时跑一次 + 每天 04:30 跑一次（同一进程只挂一次）。"""
+        """启动时跑一次 + 每天 03:40 跑一次（同一进程只挂一次），与 STRM 校准错峰。"""
         if not self._gopeed_residue_cleanup:
             return
         if self.__dict__.get("_residue_scheduler") is not None:
@@ -941,7 +959,7 @@ class CloudSubscribeX(_PluginBase):
             scheduler = BackgroundScheduler(timezone=settings.TZ)
             scheduler.add_job(
                 func=lambda: self.cleanup_gopeed_residue("每日"),
-                trigger=CronTrigger(hour=4, minute=30),
+                trigger=CronTrigger(hour=3, minute=40),
                 id="cloudsubscribe_residue_cleanup",
                 replace_existing=True,
             )

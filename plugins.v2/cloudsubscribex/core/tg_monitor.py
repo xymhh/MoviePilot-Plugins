@@ -711,7 +711,7 @@ class TgChannelMonitor:
                     "channel": raw_channel,
                     "cooldown_remaining": remaining,
                 })
-                logger.info(
+                logger.debug(
                     f"TG 频道 {raw_channel} 限流冷却中，剩余 {remaining}s"
                 )
                 continue
@@ -1107,7 +1107,7 @@ class TgChannelMonitor:
                     item["match_status"] = "pending"
                     item["match_reason"] = held_reason[:300]
                     stats["auto_pending"] += 1
-                    logger.info(
+                    logger.debug(
                         f"TG 频道画质偏好保留兜底（{rule.get('channel')}）："
                         f"{item.get('title')} / {held_reason}"
                     )
@@ -1134,7 +1134,7 @@ class TgChannelMonitor:
                 if not matched.get("matched"):
                     stats["auto_pending"] += 1
                     if not old_reason or old_reason != item["match_reason"]:
-                        logger.info(
+                        logger.debug(
                             f"TG 频道自动匹配留待手动（{rule.get('channel')}）："
                             f"{item.get('title')} / {item['match_reason']}"
                         )
@@ -1181,7 +1181,7 @@ class TgChannelMonitor:
                 item["auto_skipped_at"] = int(time.time())
                 item["auto_transfer_error"] = message[:300]
                 stats["auto_skipped"] += 1
-                logger.info(
+                logger.debug(
                     f"TG 频道自动转存无新文件（{rule.get('channel')} / "
                     f"订阅 {subscribe_id}）：{message}"
                 )
