@@ -328,12 +328,14 @@ class BrowserPageSession:
         with self._lock:
             if self._context is None:
                 return
-            if time.monotonic() - self._last_used < self._idle_seconds:
+            idle = time.monotonic() - self._last_used
+            if idle < self._idle_seconds:
                 return
         try:
             self._executor.submit(self._close_locked).result(timeout=5)
         except Exception:
-            pass
+            return
+        logger.info(f"{self._name} 空闲 {idle:.0f}s，已释放浏览器上下文")
 
 
 def turnstile_page_token(
