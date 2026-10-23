@@ -165,7 +165,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.22"
+    plugin_version = "1.7.23"
     # 插件作者
     plugin_author = "xymhh（基于 odomu）"
     # 作者主页
@@ -243,7 +243,7 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_enabled: bool = False
     _cross_transfer_media_types: list = ["movie", "tv"]
     _cross_transfer_download_path: str = ""
-    _cross_transfer_download_threads: int = 5
+    _cross_transfer_download_threads: int = 16
     _cross_transfer_max_concurrent: int = 2
     _cross_transfer_direct_stream: bool = True
     _cross_transfer_upload_concurrency: int = 4
@@ -1263,7 +1263,7 @@ class CloudSubscribeX(_PluginBase):
                                            ] or ["movie", "tv"]
         self._cross_transfer_download_path = str(config.get("cross_transfer_download_path", "") or "").strip()
         self._cross_transfer_download_threads = max(1,
-                                                    min(int(config.get("cross_transfer_download_threads", 5) or 5), 256))
+                                                    min(int(config.get("cross_transfer_download_threads", 16) or 16), 256))
         self._cross_transfer_max_concurrent = max(1, min(int(config.get("cross_transfer_max_concurrent", 2) or 2), 10))
         self._cross_transfer_direct_stream = bool(config.get("cross_transfer_direct_stream", True))
         try:

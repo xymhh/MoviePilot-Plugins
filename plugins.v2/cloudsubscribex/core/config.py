@@ -191,7 +191,7 @@ class UIConfig:
             "cross_transfer_enabled": False,
             "cross_transfer_media_types": ["movie", "tv"],
             "cross_transfer_download_path": "/tmp",
-            "cross_transfer_download_threads": 5,
+            "cross_transfer_download_threads": 16,
             "cross_transfer_max_concurrent": 2,
             "cross_transfer_direct_stream": True,
             "cross_transfer_upload_concurrency": 4,

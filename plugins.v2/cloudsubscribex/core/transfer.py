@@ -8,6 +8,7 @@ import shutil
 import tempfile
 import time
 import uuid
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -141,12 +142,38 @@ class _SpeedSampler:
         return self._speed
 
 
+#: 校验和缓存：下载完算过一次，秒传前就不必再整文件读一遍（几十 GB 省几分钟）。
+#: 键是 (绝对路径, 算法)，值是 (size, mtime_ns, 摘要)；文件被改写后签名对不上就重算。
+_CHECKSUM_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_CHECKSUM_CACHE_LIMIT = 8
+_CHECKSUM_CACHE_LOCK = Lock()
+
+
 def file_checksum(path: str, algorithm: str) -> str:
-    digest = hashlib.new(algorithm.lower())
-    with Path(path).open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+    digest_name = algorithm.lower()
+    target = Path(path)
+    try:
+        resolved = str(target.resolve())
+        stat = target.stat()
+        size, mtime = int(stat.st_size), int(stat.st_mtime_ns)
+    except OSError:
+        resolved, size, mtime = str(target), -1, -1
+    key = (resolved, digest_name)
+    with _CHECKSUM_CACHE_LOCK:
+        cached = _CHECKSUM_CACHE.get(key)
+        if cached and (size < 0 or (cached[0] == size and cached[1] == mtime)):
+            _CHECKSUM_CACHE.move_to_end(key)
+            return cached[2]
+    digest = hashlib.new(digest_name)
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    with _CHECKSUM_CACHE_LOCK:
+        _CHECKSUM_CACHE[key] = (size, mtime, value)
+        while len(_CHECKSUM_CACHE) > _CHECKSUM_CACHE_LIMIT:
+            _CHECKSUM_CACHE.popitem(last=False)
+    return value
 
 
 class _LinkRefresher:
@@ -195,31 +222,114 @@ class _LinkRefresher:
             return self._url, dict(self._headers)
 
 
+class _RetryablePartError(RuntimeError):
+    """分片内可重试的失败（连接断、5xx、链接过期）：保留已落盘字节再续传。"""
+
+
+class _ProgressGate:
+    """进度回调节流：200ms 或 1% 才回调一次。
+
+    旧实现每 256KB 回调一次，1GB 文件要回调 4000 次，而回调会写任务表 +
+    唤醒上传线程——高频写库本身就是下载跑不快的原因之一。
+    """
+
+    def __init__(self, callback, total: int, min_interval: float = 0.2):
+        self._callback = callback
+        self._total = max(0, int(total or 0))
+        self._min_interval = max(0.05, float(min_interval))
+        self._done = 0
+        self._last_at = 0.0
+        self._last_done = 0
+        self._lock = Lock()
+
+    @property
+    def done(self) -> int:
+        with self._lock:
+            return self._done
+
+    def add(self, size: int) -> None:
+        if not self._callback or size <= 0:
+            return
+        with self._lock:
+            self._done += size
+            now = time.monotonic()
+            step = max(1, self._total // 100) if self._total else 0
+            due = (
+                    self._last_at == 0.0
+                    or now - self._last_at >= self._min_interval
+                    or (step and self._done - self._last_done >= step)
+                    or (self._total and self._done >= self._total)
+            )
+            if not due:
+                return
+            self._last_at = now
+            self._last_done = self._done
+            done = self._done
+        self._callback(done, self._total)
+
+    def seed(self, size: int) -> None:
+        """续传时把「已经下过的字节」计入，进度条才不会从 0 跳。"""
+        with self._lock:
+            self._done = max(0, int(size or 0))
+            self._last_done = self._done
+
+    def flush(self) -> None:
+        if not self._callback:
+            return
+        with self._lock:
+            done, total = self._done, self._total
+        self._callback(done, total)
+
+
 class HttpFileDownloadService:
-    """把 Provider 的临时下载地址解析器适配为流式文件下载能力。"""
+    """把 Provider 的临时下载地址解析器适配为流式文件下载能力。
+
+    分片并发下载的实现与 115-station 里 Go 版夸克中继下载器对齐（16MB 级
+    分片、可续传、直链失效自动刷新重试），不再依赖外部下载器。
+    """
+
+    #: 自适应分片的上下界：小于 8MB 的片会让 Range 请求数暴涨，
+    #: 大于 64MB 的片在慢链路上重试代价太高。
+    MIN_PART_SIZE = 8 * 1024 * 1024
+    MAX_PART_SIZE = 64 * 1024 * 1024
+    #: 单连接读取块：256KB → 1MB，高并发下少一个量级的 GIL 切换。
+    READ_CHUNK = 1024 * 1024
 
     def __init__(
             self,
             resolver: Callable[[CloudFile], tuple[str, dict]],
             timeout: int = 300,
             concurrency: int = 5,
-            part_size: int = 10 * 1024 * 1024,
+            part_size: int = 0,
             link_refresh_interval: float = 30.0,
             link_max_age: float = 20 * 60.0,
+            max_retries: int = 6,
     ):
         self._resolver = resolver
         self._timeout = timeout
         self._link_refresh_interval = float(link_refresh_interval)
         self._link_max_age = float(link_max_age)
-        # 云盘 CDN 普遍按「单连接」限速（夸克约 100~200KB/s），提速只能靠并发连接数叠加，
-        # 因此这里只做 256 的兜底保护，真正生效的并发由调用方（下载线程数）决定。
-        self._concurrency = max(1, min(int(concurrency or 5), 256))
-        self._part_size = max(1024 * 1024, int(part_size or 0))
+        # 云盘 CDN 普遍按「单连接」限速（夸克约 100~200KB/s），提速只能靠并发连接数叠加
+        self._concurrency = max(1, min(int(concurrency or 5), 64))
+        # 0 = 自适应（见 _part_size_for）；显式给值时至少 1MB
+        self._part_size = max(0, int(part_size or 0))
+        self._max_retries = max(1, min(int(max_retries or 6), 12))
 
     @property
     def _request_timeout(self) -> tuple[int, int]:
         # CDN 大文件分段可能长时间无数据，不能把调用方配置的 300 秒硬截断为 30 秒。
         return 15, min(max(30, self._timeout), 120)
+
+    def _part_size_for(self, total: int) -> int:
+        """分片大小：显式配置优先，否则按「每线程 2 片」自适应。"""
+        if self._part_size:
+            return max(1024 * 1024, self._part_size)
+        if total <= 0:
+            return 16 * 1024 * 1024
+        target = total // max(1, self._concurrency * 2)
+        target = max(self.MIN_PART_SIZE, min(self.MAX_PART_SIZE, target))
+        # 对齐到 4MB，parts.json 里的 part_size 才好比对
+        return (target // (4 * 1024 * 1024)) * (4 * 1024 * 1024) or self.MIN_PART_SIZE
 
     def _create_session(self) -> requests.Session:
         """复用连接的下载 session。
@@ -229,7 +339,7 @@ class HttpFileDownloadService:
         """
         session = requests.Session()
         adapter = HTTPAdapter(
-            pool_connections=2,
+            pool_connections=max(2, self._concurrency),
             pool_maxsize=max(2, self._concurrency),
             max_retries=0,
             pool_block=True,
@@ -253,6 +363,7 @@ class HttpFileDownloadService:
 
     def _load_completed_ranges(
             self, target: Path, total: int, ranges: list[tuple[int, int]],
+            part_size: int,
     ) -> set[int]:
         parts_path = self._parts_path(target)
         if not target.is_file() or not parts_path.is_file():
@@ -262,7 +373,7 @@ class HttpFileDownloadService:
             if (
                     int(payload.get("version") or 0) != 1
                     or int(payload.get("total") or 0) != total
-                    or int(payload.get("part_size") or 0) != self._part_size
+                    or int(payload.get("part_size") or 0) != part_size
                     or target.stat().st_size != total
             ):
                 return set()
@@ -282,43 +393,146 @@ class HttpFileDownloadService:
 
     def _download_serial(
             self, refresher: _LinkRefresher, session: requests.Session,
-            file_item: CloudFile, target: Path,
-            progress_callback=None, stop_requested=None,
+            file_item: CloudFile, target: Path, gate: _ProgressGate,
+            stop_requested=None,
     ) -> str:
-        done = 0
-        url, headers = refresher.get()
-        with session.get(
-                url,
-                headers=headers,
-                stream=True,
-                timeout=self._request_timeout,
-        ) as response:
-            response.raise_for_status()
-            total = int(
-                response.headers.get("Content-Length") or file_item.size or 0
-            )
-            with target.open("wb") as handle:
-                for chunk in response.iter_content(256 * 1024):
-                    if stop_requested and stop_requested():
-                        raise InterruptedError
-                    if not chunk:
-                        continue
-                    handle.write(chunk)
-                    done += len(chunk)
-                    if progress_callback:
-                        progress_callback(done, total)
-        if done <= 0:
-            raise RuntimeError("源网盘下载为空文件")
-        return str(target)
+        """单连接下载（源盘不支持 Range 时兜底）；有半截文件时从断点续。"""
+        resume_from = target.stat().st_size if target.is_file() else 0
+        emptied = False
+        for attempt in range(1, self._max_retries + 1):
+            url, headers = refresher.get(refresh=attempt > 1)
+            request_headers = dict(headers)
+            if resume_from > 0:
+                request_headers["Range"] = f"bytes={resume_from}-"
+            try:
+                with session.get(
+                        url,
+                        headers=request_headers,
+                        stream=True,
+                        timeout=self._request_timeout,
+                ) as response:
+                    if response.status_code not in (200, 206):
+                        if resume_from > 0 and response.status_code == 416:
+                            resume_from = 0
+                            continue
+                        if (
+                                response.status_code >= 500
+                                or response.status_code in (401, 403, 404, 410, 429)
+                        ):
+                            raise _RetryablePartError(f"HTTP {response.status_code}")
+                        raise _RangeDownloadUnsupported(f"HTTP {response.status_code}")
+                    if resume_from > 0 and response.status_code == 200:
+                        # 服务端忽略了 Range：只能从头下
+                        resume_from = 0
+                    total = int(
+                        response.headers.get("Content-Length") or file_item.size or 0
+                    ) + resume_from
+                    if resume_from:
+                        gate.seed(resume_from)
+                    mode = "ab" if resume_from else "wb"
+                    with target.open(mode) as handle:
+                        for chunk in response.iter_content(self.READ_CHUNK):
+                            if stop_requested and stop_requested():
+                                raise InterruptedError
+                            if not chunk:
+                                continue
+                            handle.write(chunk)
+                            gate.add(len(chunk))
+                    if target.stat().st_size <= 0:
+                        raise RuntimeError("源网盘下载为空文件")
+                    gate.flush()
+                    return str(target)
+            except (_RangeDownloadUnsupported, InterruptedError):
+                raise
+            except (requests.RequestException, OSError, _RetryablePartError) as error:
+                if emptied and attempt >= self._max_retries:
+                    raise
+                if not emptied:
+                    # 首次失败：保留已落盘部分，下次从断点续
+                    emptied = True
+                if attempt >= self._max_retries:
+                    raise
+                time.sleep(min(8.0, float(2 ** (attempt - 1))))
+                resume_from = target.stat().st_size if target.is_file() else 0
+        raise RuntimeError("源网盘下载重试次数用尽")
+
+    def _fetch_part(
+            self, session: requests.Session, refresher: _LinkRefresher,
+            target: Path, start: int, end: int, gate: _ProgressGate,
+            stop_requested, abort_event: Event,
+    ) -> None:
+        """下载一个分片；失败保留已落盘字节，下一次从断点续。"""
+        want = end - start + 1
+        offset = 0
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, self._max_retries + 1):
+            if abort_event.is_set():
+                raise InterruptedError
+            url, headers = refresher.get(refresh=attempt > 1)
+            request_headers = dict(headers)
+            request_headers["Range"] = f"bytes={start + offset}-{end}"
+            try:
+                with session.get(
+                        url,
+                        headers=request_headers,
+                        stream=True,
+                        timeout=self._request_timeout,
+                ) as response:
+                    if response.status_code != 206:
+                        if (
+                                response.status_code >= 500
+                                or response.status_code in (401, 403, 404, 410, 429)
+                        ):
+                            raise _RetryablePartError(f"HTTP {response.status_code}")
+                        raise _RangeDownloadUnsupported(
+                            f"HTTP {response.status_code}"
+                        )
+                    content_range = str(response.headers.get("Content-Range") or "")
+                    if not content_range.lower().startswith(
+                            f"bytes {start + offset}-{end}/".lower()
+                    ):
+                        raise _RangeDownloadUnsupported(
+                            f"无效 Content-Range: {content_range or '空'}"
+                        )
+                    with target.open("r+b") as handle:
+                        handle.seek(start + offset)
+                        for chunk in response.iter_content(self.READ_CHUNK):
+                            if (
+                                    abort_event.is_set()
+                                    or (stop_requested and stop_requested())
+                            ):
+                                raise InterruptedError
+                            if not chunk:
+                                continue
+                            handle.write(chunk)
+                            offset += len(chunk)
+                            gate.add(len(chunk))
+                if offset != want:
+                    raise _RetryablePartError(
+                        f"分片长度不足 {offset}/{want}（{start}-{end}）"
+                    )
+                return
+            except (_RangeDownloadUnsupported, InterruptedError):
+                raise
+            except (requests.RequestException, OSError, _RetryablePartError) as error:
+                last_error = error
+                if attempt >= self._max_retries:
+                    break
+                # 直链过期要立刻换新链，普通抖动给指数退避
+                time.sleep(min(8.0, float(2 ** (attempt - 1))))
+        raise _RetryablePartError(
+            f"分片 {start}-{end} 重试 {self._max_retries} 次仍失败：{last_error}"
+        )
 
     def _download_parallel(
             self, refresher: _LinkRefresher, session: requests.Session,
-            total: int, target: Path,
-            progress_callback=None, stop_requested=None,
+            total: int, target: Path, gate: _ProgressGate,
+            stop_requested=None,
     ) -> str:
+        part_size = self._part_size_for(total)
         ranges = [
-            (start, min(total - 1, start + self._part_size - 1))
-            for start in range(0, total, self._part_size)
+            (start, min(total - 1, start + part_size - 1))
+            for start in range(0, total, part_size)
         ]
         worker_count = min(self._concurrency, len(ranges))
         safe_workers = _fd_safe_workers(worker_count)
@@ -331,106 +545,44 @@ class HttpFileDownloadService:
             raise _RangeDownloadUnsupported
         logger.info(
             f"分段下载启用：{worker_count} 并发连接 × "
-            f"{self._part_size // (1024 * 1024)}MB 分片 → {target.name}"
+            f"{part_size // (1024 * 1024)}MB 分片 → {target.name}"
         )
 
-        progress_lock = Lock()
         abort_event = Event()
         parts_path = self._parts_path(target)
-        completed = self._load_completed_ranges(target, total, ranges)
+        completed = self._load_completed_ranges(target, total, ranges, part_size)
         if not completed:
             with target.open("wb") as handle:
                 handle.truncate(total)
             self._write_parts(parts_path, {
                 "version": 1,
                 "total": total,
-                "part_size": self._part_size,
+                "part_size": part_size,
                 "completed": [],
             })
-        downloaded = sum(
-            end - start + 1 for start, end in ranges if start in completed
-        )
+        gate.seed(sum(end - start + 1 for start, end in ranges if start in completed))
         pending_ranges = [value for value in ranges if value[0] not in completed]
-        if progress_callback and downloaded:
-            progress_callback(downloaded, total)
         if not pending_ranges:
             parts_path.unlink(missing_ok=True)
+            gate.flush()
             return str(target)
 
         def download_part(byte_range: tuple[int, int]) -> None:
-            nonlocal downloaded
-            start, end = byte_range
-            for attempt in range(3):
-                received = 0
-                url, headers = refresher.get(refresh=attempt > 0)
-                request_headers = dict(headers)
-                request_headers["Range"] = f"bytes={start}-{end}"
-                try:
-                    with session.get(
-                            url,
-                            headers=request_headers,
-                            stream=True,
-                            timeout=self._request_timeout,
-                    ) as response:
-                        if response.status_code != 206:
-                            if (
-                                    response.status_code >= 500
-                                    or response.status_code in (401, 403, 404, 410, 429)
-                            ):
-                                # 链接过期/被风控/源站抖动：交给重试逻辑换取新直链
-                                raise requests.RequestException(
-                                    f"HTTP {response.status_code}"
-                                )
-                            raise _RangeDownloadUnsupported(
-                                f"HTTP {response.status_code}"
-                            )
-                        content_range = str(response.headers.get("Content-Range") or "")
-                        if not content_range.lower().startswith(
-                                f"bytes {start}-{end}/".lower()
-                        ):
-                            raise _RangeDownloadUnsupported(
-                                f"无效 Content-Range: {content_range or '空'}"
-                            )
-                        with target.open("r+b") as handle:
-                            handle.seek(start)
-                            for chunk in response.iter_content(256 * 1024):
-                                if (
-                                        abort_event.is_set()
-                                        or (stop_requested and stop_requested())
-                                ):
-                                    raise InterruptedError
-                                if not chunk:
-                                    continue
-                                handle.write(chunk)
-                                received += len(chunk)
-                                with progress_lock:
-                                    downloaded += len(chunk)
-                                    if progress_callback:
-                                        progress_callback(downloaded, total)
-                        if received != end - start + 1:
-                            raise IOError(
-                                f"分段下载不完整：{start}-{end}，实际 {received} 字节"
-                            )
-                    break
-                except (_RangeDownloadUnsupported, InterruptedError):
-                    raise
-                except (requests.RequestException, OSError):
-                    with progress_lock:
-                        downloaded = max(0, downloaded - received)
-                        if progress_callback:
-                            progress_callback(downloaded, total)
-                    if attempt >= 2:
-                        raise
-                    time.sleep(attempt + 1)
+            start, _end = byte_range
+            self._fetch_part(
+                session, refresher, target, byte_range[0], byte_range[1],
+                gate, stop_requested, abort_event,
+            )
             with progress_lock:
                 completed.add(start)
                 self._write_parts(parts_path, {
                     "version": 1,
                     "total": total,
-                    "part_size": self._part_size,
+                    "part_size": part_size,
                     "completed": sorted(completed),
                 })
 
+        progress_lock = Lock()
         executor = ThreadPoolExecutor(
             max_workers=worker_count,
             thread_name_prefix="cloudsubscribe-range-download",
@@ -447,6 +599,7 @@ class HttpFileDownloadService:
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
         parts_path.unlink(missing_ok=True)
+        gate.flush()
         return str(target)
 
     def download_file(self, file_item: CloudFile, local_path: str,
@@ -462,25 +615,14 @@ class HttpFileDownloadService:
         target = Path(local_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         total = int(file_item.size or 0)
-        reported = 0
-
-        def report(done: int, current_total: int) -> None:
-            nonlocal reported
-            reported = max(reported, int(done or 0))
-            if progress_callback:
-                progress_callback(reported, current_total)
+        gate = _ProgressGate(progress_callback, total)
 
         session = self._create_session()
         try:
-            if self._concurrency > 1 and total > self._part_size:
+            if self._concurrency > 1 and total > self._part_size_for(total):
                 try:
                     return self._download_parallel(
-                        refresher,
-                        session,
-                        total,
-                        target,
-                        report,
-                        stop_requested,
+                        refresher, session, total, target, gate, stop_requested,
                     )
                 except _RangeDownloadUnsupported as error:
                     logger.warning(
@@ -491,13 +633,9 @@ class HttpFileDownloadService:
                     refresher.get(refresh=True)
                     target.unlink(missing_ok=True)
                     self._parts_path(target).unlink(missing_ok=True)
+                    gate.seed(0)
             return self._download_serial(
-                refresher,
-                session,
-                file_item,
-                target,
-                report,
-                stop_requested,
+                refresher, session, file_item, target, gate, stop_requested,
             )
         except Exception:
             if not preserve_partial or not self._parts_path(target).is_file():

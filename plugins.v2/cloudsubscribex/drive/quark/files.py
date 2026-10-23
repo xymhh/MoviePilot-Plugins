@@ -87,7 +87,9 @@ class QuarkFileService(CloudDriveFileServiceBase):
         service = HttpFileDownloadService(
             lambda _: self.resolve_download_link(file_item),
             concurrency=download_threads,
-            part_size=10 * 1024 * 1024,
+            # 0 = 自适应分片（8MB~64MB，按「每线程 2 片」算）：小文件不碎成上千片，
+            # 大文件也不会因为片太少让并发吃不饱
+            part_size=0,
         )
         if str(self.cross_transfer_downloader or "builtin").strip().lower() != "gopeed":
             return service.download_file(
