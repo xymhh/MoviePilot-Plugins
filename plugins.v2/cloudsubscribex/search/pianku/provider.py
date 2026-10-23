@@ -38,6 +38,7 @@ def create_pianku_provider(
             SearchCapability.RESOURCE_SEARCH: service,
             SearchCapability.RESOURCE_RESOLVE: service,
             SearchCapability.CACHE_MAINTENANCE: service,
+            SearchCapability.LIFECYCLE: service,
         },
         policy=SearchPolicy(cache_context=cache_context),
     )

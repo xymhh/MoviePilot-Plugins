@@ -23,6 +23,15 @@ class PiankuSearchService:
         self._resource_types = tuple(resource_types)
         self._result_limit = max(1, int(result_limit or 20))
 
+    def close(self) -> None:
+        """释放底层浏览器会话与 HTTP 客户端，供搜索注册表生命周期回收。"""
+        client = self._client
+        if client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception:
+                pass
+
     def search(self, query: SearchQuery):
         return self._resources.normalize(self._resources.search(query))
 

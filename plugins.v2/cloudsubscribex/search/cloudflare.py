@@ -1,5 +1,6 @@
 """搜索渠道共用的 Cloudflare 页面识别与浏览器操作。"""
 
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -84,6 +85,31 @@ def click_challenge_frame(page) -> bool:
         except Exception:
             continue
     return False
+
+
+#: 常驻浏览器会话空闲回收阈值（秒），可用环境变量覆盖；0 表示常驻不回收。
+DEFAULT_BROWSER_IDLE_SECONDS = 600
+
+
+def browser_idle_seconds() -> int:
+    """读取浏览器会话空闲回收阈值（秒）。"""
+    raw = str(os.environ.get("CLOUDSUBSCRIBE_BROWSER_IDLE_SECONDS", "") or "").strip()
+    if not raw:
+        return DEFAULT_BROWSER_IDLE_SECONDS
+    try:
+        return max(0, int(float(raw)))
+    except (TypeError, ValueError):
+        return DEFAULT_BROWSER_IDLE_SECONDS
+
+
+def park_page(page, timeout: int = 5000) -> None:
+    """把页面停到空白页，终止页内脚本轮询，避免常驻标签页持续占用 CPU。"""
+    try:
+        if page is None or page.is_closed():
+            return
+        page.goto("about:blank", wait_until="domcontentloaded", timeout=timeout)
+    except Exception:
+        pass
 
 
 def launch_challenge_context(proxy: Any):
@@ -194,6 +220,9 @@ class BrowserPageSession:
         self._page = None
         self._current_proxy = None
         self._generation = 0
+        self._idle_seconds = browser_idle_seconds()
+        self._idle_timer: Optional[threading.Timer] = None
+        self._last_used = time.monotonic()
         self._lock = threading.RLock()
 
     @property
@@ -217,8 +246,13 @@ class BrowserPageSession:
         """在会话线程内执行页面流程 ``callback(page)``。"""
         target_proxy = self._proxy if proxy is None else proxy
         budget = float(wait_timeout or 0) or (self._timeout + 60)
-        future = self._executor.submit(self._run, callback, target_proxy)
-        return future.result(timeout=budget)
+        self._cancel_idle_timer()
+        try:
+            future = self._executor.submit(self._run, callback, target_proxy)
+            return future.result(timeout=budget)
+        finally:
+            self._last_used = time.monotonic()
+            self._arm_idle_timer()
 
     def _run(self, callback: Any, proxy: Any) -> Any:
         with self._lock:
@@ -259,6 +293,43 @@ class BrowserPageSession:
                 pass
 
     def close(self) -> None:
+        self._cancel_idle_timer()
+        try:
+            self._executor.submit(self._close_locked).result(timeout=5)
+        except Exception:
+            pass
+
+    def _cancel_idle_timer(self) -> None:
+        with self._lock:
+            timer, self._idle_timer = self._idle_timer, None
+        if timer is not None:
+            try:
+                timer.cancel()
+            except Exception:
+                pass
+
+    def _arm_idle_timer(self) -> None:
+        """为下一次空闲检查排程，避免常驻会话长期占用内存与 CPU。"""
+        if self._idle_seconds <= 0:
+            return
+        timer = threading.Timer(float(self._idle_seconds), self._close_if_idle)
+        timer.daemon = True
+        with self._lock:
+            previous, self._idle_timer = self._idle_timer, timer
+        if previous is not None:
+            try:
+                previous.cancel()
+            except Exception:
+                pass
+        timer.start()
+
+    def _close_if_idle(self) -> None:
+        """空闲超时后释放浏览器上下文；下次调用会按需重建。"""
+        with self._lock:
+            if self._context is None:
+                return
+            if time.monotonic() - self._last_used < self._idle_seconds:
+                return
         try:
             self._executor.submit(self._close_locked).result(timeout=5)
         except Exception:
@@ -347,11 +418,13 @@ def playwright_snapshot(url: str, proxy: Any, timeout: int, gate):
     """使用平台浏览器获取页面和同一浏览器会话的 Cookie/UA。"""
 
     def snapshot(page):
-        return {
+        payload = {
             "text": page.content() or "",
             "cookies": page.context.cookies(),
             "user_agent": page.evaluate("navigator.userAgent") or "",
         }
+        park_page(page)
+        return payload
 
     return gate.run(lambda: PlaywrightHelper().action(
         url=url, callback=snapshot, proxies=browser_proxy(proxy),
