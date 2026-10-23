@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import re
+import sys
 import threading
 import time
 import weakref
@@ -60,8 +61,24 @@ RESOLVE_RETRY_SECONDS = 6 * 3600
 
 # 同一进程里只允许一个监控线程：插件热重载会创建新实例，旧实例如果
 # 没被 stop，多个线程会同时扫描并触发 Telegram 限流。
-_ACTIVE_MONITORS: "weakref.WeakSet[TgChannelMonitor]" = weakref.WeakSet()
-_ACTIVE_MONITORS_LOCK = threading.Lock()
+#
+# 注意：登记表不能放在模块级变量里 —— MoviePilot 热重载会重新执行本模块，
+# 模块变量随之重置，新实例就看不见旧实例的线程，旧线程（跑的还是旧代码）
+# 会一直扫下去。所以把它挂在 sys 上，重载后仍然共享同一份。
+_REGISTRY_ATTR = "_cloudsubscribe_tg_monitor_registry"
+
+
+def _shared_monitor_registry():
+    """返回 (活跃实例弱集合, 锁)，跨热重载共享。"""
+    state = getattr(sys, _REGISTRY_ATTR, None)
+    if (
+        not isinstance(state, dict)
+        or not isinstance(state.get("lock"), type(threading.Lock()))
+        or not hasattr(state.get("monitors"), "add")
+    ):
+        state = {"monitors": weakref.WeakSet(), "lock": threading.Lock()}
+        setattr(sys, _REGISTRY_ATTR, state)
+    return state["monitors"], state["lock"]
 STATUS_KEY = "status"
 
 _URL_RE = re.compile(r"https?://[^\s<>\"'）)】，。；、！？】]+")
@@ -562,14 +579,15 @@ class TgChannelMonitor:
 
     # ------------------------------------------------------------------ 线程
     def start(self) -> None:
-        with _ACTIVE_MONITORS_LOCK:
-            for other in list(_ACTIVE_MONITORS):
+        monitors, monitors_lock = _shared_monitor_registry()
+        with monitors_lock:
+            for other in list(monitors):
                 if other is not self:
                     try:
                         other.stop()
                     except Exception:  # noqa: BLE001 - 旧实例清理失败不阻塞
                         pass
-            _ACTIVE_MONITORS.add(self)
+            monitors.add(self)
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
@@ -585,6 +603,9 @@ class TgChannelMonitor:
             self._thread.start()
 
     def stop(self) -> None:
+        monitors, monitors_lock = _shared_monitor_registry()
+        with monitors_lock:
+            monitors.discard(self)
         with self._lock:
             stop_event = self._stop
             thread = self._thread

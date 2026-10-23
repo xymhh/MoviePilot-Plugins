@@ -903,3 +903,35 @@ class TgMonitorApiImportTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class SharedMonitorRegistryTest(unittest.TestCase):
+    """热重载后旧实例仍必须被登记表看见，否则旧线程停不掉。"""
+
+    def test_registry_survives_module_reload(self):
+        class _Fake:
+            pass
+
+        monitors, _lock = tg_module._shared_monitor_registry()
+        stale = _Fake()
+        monitors.add(stale)
+
+        reloaded = load_module(
+            "cloudsubscribex.core.tg_monitor",
+            "plugins.v2/cloudsubscribex/core/tg_monitor.py",
+        )
+        try:
+            monitors_after, _ = reloaded._shared_monitor_registry()
+            self.assertIn(stale, monitors_after)
+            self.assertIn("_cloudsubscribe_tg_monitor_registry", dir(sys))
+        finally:
+            monitors.discard(stale)
+
+    def test_stop_discards_from_registry(self):
+        class _Fake:
+            pass
+
+        monitors, _lock = tg_module._shared_monitor_registry()
+        fake = _Fake()
+        monitors.add(fake)
+        monitors.discard(fake)
+        self.assertNotIn(fake, monitors)
