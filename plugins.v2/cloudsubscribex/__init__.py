@@ -23,6 +23,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from .core import (
+    CloudDriveCapability,
     CloudDriveManager,
     CloudDriveProvider,
     CloudDriveRegistry,
@@ -172,7 +173,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.39"
+    plugin_version = "1.7.40"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -924,11 +925,22 @@ class CloudSubscribeX(_PluginBase):
 
         def _run():
             try:
-                stats = sync_handler.rebuild_strm_files(
-                    overwrite=False,
-                    time_budget_seconds=budget,
-                    state_path=None,
-                )
+                stats = None
+                if getattr(sync_handler, "_cloud_drive", None) is not None:
+                    provider = sync_handler._cloud_drive
+                    if provider.supports(CloudDriveCapability.STRM_EXPORT):
+                        stats = sync_handler.rebuild_strm_increment_by_tree(
+                            timeout_seconds=max(60.0, float(budget)),
+                        )
+                if stats is None or stats.get("errors"):
+                    # 网盘不支持导出目录树 / 导出失败 → 退回逐目录遍历
+                    if stats and stats.get("errors"):
+                        logger.warning("STRM 增量：导出目录树失败，改用逐目录遍历兜底")
+                    stats = sync_handler.rebuild_strm_files(
+                        overwrite=False,
+                        time_budget_seconds=budget,
+                        state_path=None,
+                    )
                 created = int(stats.get("created") or 0)
                 errors = int(stats.get("errors") or 0)
                 if created or errors:

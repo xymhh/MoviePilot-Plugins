@@ -14,6 +14,7 @@ from .magnet import (
 )
 from .strm import StrmGenerator, StrmTemplateError
 from .strm_scan import rebuild_strm_tree
+from .strm_export import rebuild_strm_by_export_tree
 from ..core.media import media_identity
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "StrmGenerator",
     "StrmTemplateError",
     "rebuild_strm_tree",
+    "rebuild_strm_by_export_tree",
     "parse_magnet_metadata",
     "DEFAULT_METADATA_URL_TEMPLATE",
     "configure_magnet_metadata_url",

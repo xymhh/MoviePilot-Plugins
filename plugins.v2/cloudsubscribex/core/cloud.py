@@ -27,6 +27,7 @@ class CloudDriveCapability(str, Enum):
     FILE_DOWNLOAD = "file_download"
     QRCODE_AUTH = "qrcode_auth"
     CACHE_MAINTENANCE = "cache_maintenance"
+    STRM_EXPORT = "strm_export"
 
 
 class CloudDriveCapabilityError(RuntimeError):
@@ -375,6 +376,17 @@ class CacheMaintenanceOperations(Protocol):
     def clear_cache(self) -> Dict[str, int]: ...
 
 
+@runtime_checkable
+class StrmExportOperations(Protocol):
+    """一次导出整棵云端目录树（115「导出目录树」），用于 STRM 差异扫描。"""
+
+    def export_directory_tree(
+            self, directory_id: str, *, timeout_seconds: float = 600.0,
+    ) -> Iterator[str]:
+        """返回相对路径迭代器（目录与文件都含，路径相对 ``directory_id``）。"""
+        ...
+
+
 CAPABILITY_CONTRACTS = {
     CloudDriveCapability.AUTHENTICATION: AuthenticationOperations,
     CloudDriveCapability.ACCOUNT: AccountOperations,
@@ -392,6 +404,7 @@ CAPABILITY_CONTRACTS = {
     CloudDriveCapability.FILE_DOWNLOAD: FileDownloadOperations,
     CloudDriveCapability.QRCODE_AUTH: QrCodeAuthOperations,
     CloudDriveCapability.CACHE_MAINTENANCE: CacheMaintenanceOperations,
+    CloudDriveCapability.STRM_EXPORT: StrmExportOperations,
 }
 
 

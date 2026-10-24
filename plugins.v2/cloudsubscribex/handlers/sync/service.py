@@ -77,7 +77,12 @@ from ...core.media import (
     tmdb_id_of,
 )
 from ...drive.scanner import get_driver_definitions
-from ...utils import StrmGenerator, StrmTemplateError, rebuild_strm_tree
+from ...utils import (
+    StrmGenerator,
+    StrmTemplateError,
+    rebuild_strm_by_export_tree,
+    rebuild_strm_tree,
+)
 from ...utils.cache import create_platform_ttl_cache
 
 _COMPONENT_TYPES = (
@@ -1279,6 +1284,34 @@ class SyncHandler:
                 f"STRM 全量校准进度：目录 {stats['directories']}，"
                 f"文件 {stats['files']}，新增 {stats['created']}，"
                 f"更新 {stats['updated']}"
+            ),
+        )
+
+    def rebuild_strm_increment_by_tree(
+            self, timeout_seconds: float = 600.0,
+    ) -> Dict[str, int]:
+        """用 115 导出目录树做增量补齐（请求数恒定，不逐目录遍历）。
+
+        不支持导出目录树的网盘或导出失败时返回 ``errors``，由调用方决定是否降级。
+        """
+        if not (self._strm_generate_enabled and self._strm_generator
+                and self._local_resource_path and self._cloud_drive):
+            return {
+                "directories": 0, "files": 0, "created": 0,
+                "updated": 0, "skipped": 0, "errors": 0,
+            }
+        return rebuild_strm_by_export_tree(
+            provider=self._cloud_drive,
+            generator=self._strm_generator,
+            local_root=self._local_resource_path,
+            cloud_root=self._CLOUD_MEDIA_ROOT,
+            video_extensions=self._video_extensions,
+            reference_values=self._playback_reference.reference_values,
+            overwrite=False,
+            timeout_seconds=timeout_seconds,
+            progress=lambda stats: logger.info(
+                f"STRM 增量进度：新增 {stats['created']}，"
+                f"已检查 {stats['files']} 个视频"
             ),
         )
 

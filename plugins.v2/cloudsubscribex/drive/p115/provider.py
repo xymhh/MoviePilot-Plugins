@@ -12,6 +12,7 @@ from .files import (
 )
 from .offline import OfflineDownloadService
 from .share import ShareService
+from .strm_export import P115StrmExport
 from .upload import P115UploadService
 from ...core.cloud import (
     CloudDriveCapability,
@@ -78,6 +79,7 @@ def create_p115_provider(manager: Any) -> CloudDriveProvider:
             CloudDriveCapability.FILE_DOWNLOAD: file_query,
             CloudDriveCapability.QRCODE_AUTH: manager.__class__,
             CloudDriveCapability.CACHE_MAINTENANCE: cache_maintenance,
+            CloudDriveCapability.STRM_EXPORT: P115StrmExport(manager),
         },
         policy=CloudDrivePolicy(
             pagination_mode="offset",
