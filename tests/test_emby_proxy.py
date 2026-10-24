@@ -343,5 +343,55 @@ class ServiceFallbackTest(unittest.TestCase):
         )
 
 
+class WebsocketProxyTest(unittest.TestCase):
+    """WebSocket 必须转发给上游；上游缺失时安全关闭，不影响 REST。"""
+
+    def test_websocket_closes_when_upstream_missing(self):
+        owner = SimpleNamespace(_cloud_drive=None)
+        service = main.EmbyProxyService(owner)
+        sent = []
+
+        async def receive():
+            return {"type": "websocket.connect"}
+
+        async def send(message):
+            sent.append(message)
+
+        scope = {
+            "type": "websocket",
+            "path": "/embywebsocket",
+            "query_string": b"api_key=x&deviceId=y",
+            "headers": [],
+        }
+        asyncio.run(main.EmbyProxyApp(service)(scope, receive, send))
+        self.assertEqual(sent[-1]["type"], "websocket.close")
+        self.assertEqual(sent[-1]["code"], 1011)
+
+    def test_ws_connect_falls_back_to_extra_headers(self):
+        calls = []
+
+        class FakeModule:
+            @staticmethod
+            def connect(url, **kwargs):
+                calls.append(kwargs)
+                if "additional_headers" in kwargs:
+                    raise TypeError("unexpected keyword argument")
+
+                async def _ok():
+                    return "conn"
+
+                return _ok()
+
+        conn = asyncio.run(
+            main.EmbyProxyService._ws_connect(
+                FakeModule, "ws://embyserver:8096/embywebsocket", {"A": "b"}
+            )
+        )
+        self.assertEqual(conn, "conn")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("additional_headers", calls[0])
+        self.assertIn("extra_headers", calls[1])
+
+
 if __name__ == "__main__":
     unittest.main()

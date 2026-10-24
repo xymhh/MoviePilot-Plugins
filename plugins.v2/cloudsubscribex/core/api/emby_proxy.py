@@ -452,6 +452,106 @@ class EmbyProxyService:
             return
         await self._proxy(scope, receive, send)
 
+    # ------------------------------------------------------------- WebSocket
+    async def handle_websocket(self, scope, receive, send) -> None:
+        """把 Emby 的 WebSocket 双向转发到上游。
+
+        Emby Web 与客户端登录后会连 ``/embywebsocket`` 收会话通知，不代理会
+        表现为「登录后连接断开」或界面停转。上游连不上就直接关闭，REST 不受影响。
+        """
+        base = self._upstream_base()
+        if not base:
+            await send({"type": "websocket.close", "code": 1011})
+            return
+        path = str(scope.get("path") or "/")
+        query = bytes(scope.get("query_string") or b"").decode("latin-1")
+        url = f"{base.rstrip('/')}{path}"
+        if query:
+            url = f"{url}?{query}"
+        if url.startswith("https://"):
+            url = "wss://" + url[len("https://"):]
+        elif url.startswith("http://"):
+            url = "ws://" + url[len("http://"):]
+        skip = {
+            "host", "connection", "upgrade", "sec-websocket-key",
+            "sec-websocket-version", "sec-websocket-extensions",
+            "sec-websocket-accept", "origin",
+        }
+        headers = {
+            bytes(key).decode("latin-1"): bytes(value).decode("latin-1")
+            for key, value in scope.get("headers") or []
+            if bytes(key).decode("latin-1").lower() not in skip
+        }
+        try:
+            import websockets  # type: ignore
+        except Exception:
+            logger.warning("Emby 反代：缺少 websockets 库，无法代理 WebSocket")
+            await send({"type": "websocket.close", "code": 1011})
+            return
+        try:
+            connection = await self._ws_connect(websockets, url, headers)
+        except Exception as exc:
+            self.stats.increment("error")
+            logger.warning(f"Emby 反代：WebSocket 连接上游失败 {exc}")
+            await send({"type": "websocket.close", "code": 1011})
+            return
+        await send({"type": "websocket.accept"})
+
+        async def pump_client_to_upstream() -> None:
+            while True:
+                message = await receive()
+                if message.get("type") == "websocket.disconnect":
+                    return
+                text = message.get("text")
+                data = message.get("bytes")
+                if text is not None:
+                    await connection.send(text)
+                elif data is not None:
+                    await connection.send(data)
+                else:
+                    return
+
+        async def pump_upstream_to_client() -> None:
+            async for payload in connection:
+                if isinstance(payload, str):
+                    await send({"type": "websocket.send", "text": payload})
+                else:
+                    await send({"type": "websocket.send", "bytes": payload})
+
+        try:
+            await asyncio.gather(
+                pump_client_to_upstream(), pump_upstream_to_client()
+            )
+        except Exception:
+            pass
+        finally:
+            try:
+                await connection.close()
+            except Exception:
+                pass
+            try:
+                await send({"type": "websocket.close", "code": 1000})
+            except Exception:
+                pass
+
+    @staticmethod
+    async def _ws_connect(websockets_module: Any, url: str, headers: Dict[str, str]):
+        """兼容 websockets 新旧版本的头参数名（additional_headers / extra_headers）。"""
+        common = {
+            "open_timeout": 10,
+            "ping_interval": 20,
+            "ping_timeout": 20,
+            "max_size": None,
+        }
+        try:
+            return await websockets_module.connect(
+                url, additional_headers=headers, **common
+            )
+        except TypeError:
+            return await websockets_module.connect(
+                url, extra_headers=headers, **common
+            )
+
     # ------------------------------------------------------------------ 转发
     async def _proxy(self, scope: Mapping[str, Any], receive, send) -> None:
         """原样流式透传，支持 Range 与 HEAD。"""
@@ -580,9 +680,7 @@ class EmbyProxyApp:
             await self._service.handle_http(scope, receive, send)
             return
         if scope.get("type") == "websocket":
-            # TODO(ws): 第一版不代理 WebSocket，直接拒绝升级。
-            logger.debug("Emby 反代：拒绝 WebSocket 升级")
-            await send({"type": "websocket.close", "code": 1008})
+            await self._service.handle_websocket(scope, receive, send)
             return
         if scope.get("type") == "lifespan":
             while True:
