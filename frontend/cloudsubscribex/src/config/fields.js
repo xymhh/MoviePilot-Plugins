@@ -9,6 +9,8 @@ import {createUpgradeSection} from "./fields/upgrade.js";
 import {createSubscribeSection} from "./fields/subscribe.js";
 import {createCheckinSection} from "./fields/checkin.js";
 import {createTgMonitorSection} from "./fields/tg.js";
+import {createStrmSection} from "./fields/strm.js";
+import {createEmbyProxySection} from "./fields/emby.js";
 
 export function createConfigSections(options, config = {}) {
   const cloudDriveItems = createCloudDriveItems(options);
@@ -20,6 +22,8 @@ export function createConfigSections(options, config = {}) {
     createSubscribeSection(options),
     createCheckinSection(options),
     createTgMonitorSection(),
+    createStrmSection(),
+    createEmbyProxySection(),
     createDriveSection(options),
     createSearchSection(resourceTypeItems, options),
     createUpgradeSection(options),
