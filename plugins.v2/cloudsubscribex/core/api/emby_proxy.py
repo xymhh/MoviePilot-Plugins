@@ -583,15 +583,31 @@ class EmbyProxyService:
                     method, url, headers=request_headers, content=body or None
                 )
                 response = await client.send(request, stream=True)
+                encoding = str(
+                    response.headers.get("content-encoding", "")
+                ).strip().lower()
+                # 上游返回压缩体时必须用 aiter_bytes 交给 httpx 解压（我们把
+                # Content-Encoding 剔除了）。206 分段内容不能解压，只能原样透传并
+                # 保留原始编码头。
+                keep_encoding = bool(encoding) and encoding != "identity" and (
+                    response.status_code == 206
+                )
+                response_headers = filter_response_headers(response.headers)
+                if keep_encoding:
+                    response_headers.append(("content-encoding", encoding))
                 await _send_response_start(
-                    send,
-                    response.status_code,
-                    filter_response_headers(response.headers),
+                    send, response.status_code, response_headers
                 )
                 started = True
-                async for chunk in response.aiter_raw(
+                if encoding and encoding != "identity" and not keep_encoding:
+                    stream_iter = response.aiter_bytes(
                         chunk_size=STREAM_CHUNK_SIZE
-                ):
+                    )
+                else:
+                    stream_iter = response.aiter_raw(
+                        chunk_size=STREAM_CHUNK_SIZE
+                    )
+                async for chunk in stream_iter:
                     if chunk:
                         await _send_body(send, chunk, more_body=True)
                 await _send_body(send, b"", more_body=False)
@@ -716,11 +732,15 @@ def _netloc(url: str) -> str:
 
 
 async def _send_response_start(
-        send, status: int, headers: Mapping[str, str]
+        send, status: int, headers: Any
 ) -> None:
+    """发送响应头；headers 既支持 (k, v) 列表也支持字典。"""
+    items = (
+        headers.items() if hasattr(headers, "items") else headers
+    )
     encoded = [
         (str(key).lower().encode("latin-1"), str(value).encode("latin-1"))
-        for key, value in headers.items()
+        for key, value in items
     ]
     await send({
         "type": "http.response.start",

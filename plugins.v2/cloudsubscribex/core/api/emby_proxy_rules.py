@@ -455,20 +455,31 @@ def filter_request_headers(
         if lowered in _HOP_BY_HOP_HEADERS or lowered in {"host", "content-length"}:
             continue
         result[str(key)] = str(value)
-    # 让上游不做压缩：响应里的 Content-Encoding 会被剔除，压缩体无法直接给客户端。
-    result["Accept-Encoding"] = "identity"
+    # 只声明 httpx 能自动解压的编码：Emby 会无视 identity 强制压缩，
+    # 若上游返回压缩体而我们剔除了 Content-Encoding，客户端将无法解析
+    # （登录后 /Users、/Items 全部 JSON 乱码 → 表现为“登录失败”）。
+    result["Accept-Encoding"] = "gzip, deflate"
     if upstream_host:
         result["Host"] = str(upstream_host)
     return result
 
 
-def filter_response_headers(headers: Mapping[str, str]) -> Dict[str, str]:
-    """构造回传给客户端的响应头：剔除逐跳头与 Content-Encoding。"""
-    return {
-        str(key): str(value)
-        for key, value in (headers or {}).items()
+def filter_response_headers(headers: Any) -> List[Tuple[str, str]]:
+    """构造回传给客户端的响应头：剔除逐跳头与 Content-Encoding。
+
+    返回 (key, value) 列表而不是字典：``Set-Cookie`` 这类头允许重复，
+    走字典会被合并成逗号串，浏览器无法解析。
+    """
+    items = (
+        headers.multi_items()
+        if hasattr(headers, "multi_items")
+        else list((headers or {}).items())
+    )
+    return [
+        (str(key), str(value))
+        for key, value in items
         if str(key).lower() not in _RESPONSE_STRIP_HEADERS
-    }
+    ]
 
 
 def allowed_client(user_agent: str, allowed_clients: str) -> bool:

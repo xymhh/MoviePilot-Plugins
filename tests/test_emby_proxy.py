@@ -288,18 +288,35 @@ class PathAndHeaderTest(unittest.TestCase):
         self.assertEqual(headers["Host"], "embyserver:8096")
         self.assertEqual(headers["Range"], "bytes=0-1023")
         self.assertNotIn("Connection", headers)
-        self.assertEqual(headers["Accept-Encoding"], "identity")
+        # Emby 会无视 identity 强制压缩，只声明 httpx 能解压的编码
+        self.assertEqual(headers["Accept-Encoding"], "gzip, deflate")
 
     def test_response_headers_drop_content_encoding(self):
-        headers = rules.filter_response_headers({
+        headers = dict(rules.filter_response_headers({
             "Content-Type": "video/mp4",
             "Content-Encoding": "gzip",
             "Transfer-Encoding": "chunked",
             "Connection": "keep-alive",
-        })
-        self.assertNotIn("Content-Encoding", headers)
-        self.assertNotIn("Transfer-Encoding", headers)
+        }))
+        self.assertNotIn("content-encoding", {k.lower() for k in headers})
+        self.assertNotIn("transfer-encoding", {k.lower() for k in headers})
         self.assertEqual(headers["Content-Type"], "video/mp4")
+
+    def test_response_headers_keep_duplicate_set_cookie(self):
+        class MultiHeaders:
+            def multi_items(self):
+                return [
+                    ("Set-Cookie", "a=1; Path=/"),
+                    ("Set-Cookie", "b=2; Path=/"),
+                    ("Content-Encoding", "br"),
+                ]
+
+        headers = rules.filter_response_headers(MultiHeaders())
+        self.assertEqual(
+            [v for k, v in headers if k.lower() == "set-cookie"],
+            ["a=1; Path=/", "b=2; Path=/"],
+        )
+        self.assertNotIn("content-encoding", {k.lower() for k, _ in headers})
 
     def test_allowed_clients(self):
         self.assertTrue(rules.allowed_client("anything", ""))
