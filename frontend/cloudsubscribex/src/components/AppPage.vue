@@ -92,6 +92,10 @@
             <v-icon icon="mdi-folder-move-outline" size="small" class="mr-2" />
             网盘整理
           </v-tab>
+          <v-tab value="ledger">
+            <v-icon icon="mdi-clipboard-text-search-outline" size="small" class="mr-2" />
+            资源账本
+          </v-tab>
         </v-tabs>
       </div>
 
@@ -101,6 +105,9 @@
         </div>
         <div v-show="mainTab === 'organize'" class="workspace-pane organize-pane">
           <OrganizePanel :api="api" />
+        </div>
+        <div v-show="mainTab === 'ledger'" class="workspace-pane ledger-pane">
+          <CandidateLedgerPanel :api="api" />
         </div>
         <div v-show="mainTab === 'history'" class="workspace-pane history-pane">
           <HistoryTable
@@ -299,6 +306,7 @@ import RuntimeCard from "./dashboard/RuntimeCard.vue";
 import HistoryTable from "./dashboard/HistoryTable.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
 import OrganizePanel from "./dashboard/OrganizePanel.vue";
+import CandidateLedgerPanel from "./dashboard/CandidateLedgerPanel.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";
 import {CACHE_CATEGORIES, useCacheActions} from "../composables/useCacheActions.js";

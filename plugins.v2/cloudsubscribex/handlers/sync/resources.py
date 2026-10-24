@@ -653,6 +653,7 @@ class ResourceTransferService(OwnerDelegator):
             share_url: str,
             reason: str = "",
             resource_label: str = "",
+            resource_title: str = "",
     ) -> None:
         """记录被跳过的候选资源；统计缺失或异常时静默忽略，绝不影响转存主流程。"""
         try:
@@ -674,6 +675,7 @@ class ResourceTransferService(OwnerDelegator):
                 provider,
                 reason=reason,
                 reference=self._resource_log_reference(share_url),
+                resource_title=resource_title,
             )
         except Exception:  # noqa: BLE001 - 统计失败不得影响转存主流程
             return
@@ -683,6 +685,7 @@ class ResourceTransferService(OwnerDelegator):
             share_url: str,
             resource_label: str = "分享链接",
             log_prefix: str = "",
+            resource_title: str = "",
     ) -> bool:
         """使用对应 Provider 的统一能力校验资源链接。"""
         provider = self._resource_provider_for_url(share_url)
@@ -707,6 +710,7 @@ class ResourceTransferService(OwnerDelegator):
             share_url,
             reason=status.status_text,
             resource_label=resource_label,
+            resource_title=resource_title,
         )
         return False
 
@@ -812,6 +816,7 @@ class ResourceTransferService(OwnerDelegator):
                     share_url,
                     reason=skip_reason,
                     resource_label=resource_title,
+                    resource_title=resource_title,
                 )
                 return []
         if mismatch_seen(share_url, resource_title):
@@ -820,7 +825,10 @@ class ResourceTransferService(OwnerDelegator):
             )
             return []
         if not self._validate_resource_url(
-                share_url, resource_label="分享链接", log_prefix=log_prefix
+                share_url,
+                resource_label="分享链接",
+                log_prefix=log_prefix,
+                resource_title=resource_title,
         ):
             return []
         kwargs = {}
@@ -852,6 +860,7 @@ class ResourceTransferService(OwnerDelegator):
                 share_url,
                 reason="无可用文件",
                 resource_label="分享链接",
+                resource_title=resource_title,
             )
             return files
         return self._filter_files_by_explicit_selection(

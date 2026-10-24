@@ -48,8 +48,17 @@ class SkipStatsCollector:
             provider: str,
             reason: str = "",
             reference: str = "",
+            resource_title: str = "",
+            subscribe_id: Any = None,
+            subscribe_title: str = "",
+            season: Any = None,
+            episode: Any = None,
     ) -> None:
-        """记录一条被跳过的候选资源；同 (kind, provider, reference) 只记一次。"""
+        """记录一条被跳过的候选资源；同 (kind, provider, reference) 只记一次。
+
+        ``resource_title`` 及订阅上下文只用于账本明细，不参与去重键，
+        汇总口径与历史行为保持一致。
+        """
         normalized_kind = str(kind or "").strip()
         if not normalized_kind:
             return
@@ -66,6 +75,11 @@ class SkipStatsCollector:
                 "provider": key[1],
                 "reason": str(reason or "").strip(),
                 "reference": key[2],
+                "resource_title": str(resource_title or "").strip(),
+                "subscribe_id": subscribe_id,
+                "subscribe_title": str(subscribe_title or "").strip(),
+                "season": season,
+                "episode": episode,
             }
 
     def reset(self) -> None:
@@ -116,6 +130,8 @@ class SkipStatsCollector:
             "by_kind": by_kind,
             "by_provider": by_provider,
             "by_kind_provider": by_kind_provider,
+            #: 明细用于候选账本落库；汇总文案只读上面的计数字段。
+            "items": items,
         }
 
     @classmethod

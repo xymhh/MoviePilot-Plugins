@@ -2,6 +2,7 @@
 
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from pathlib import Path
 from threading import Event as ThreadEvent, RLock, Thread
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -1164,9 +1165,49 @@ class SyncExecutionService(OwnerDelegator):
             if collector is None:
                 return {}
             snapshot = collector.take()
-            return snapshot if isinstance(snapshot, dict) else {}
+            if not isinstance(snapshot, dict):
+                return {}
+            self._write_candidate_ledger(snapshot)
+            return snapshot
         except Exception:  # noqa: BLE001 - 统计失败不得影响转存主流程
             return {}
+
+    def _write_candidate_ledger(self, snapshot: Dict[str, Any]) -> None:
+        """把本次运行的候选去向落成账本文件，供 /ledger 页面查询。
+
+        账本是辅助观测数据：任何异常都只记 debug，不影响同步结果，
+        也不改变跳过统计的汇总口径。
+        """
+        try:
+            items = snapshot.get("items") if isinstance(snapshot, dict) else None
+            if not items:
+                return
+            plugin = getattr(self, "_plugin", None)
+            data_path = None
+            getter = getattr(plugin, "get_data_path", None)
+            if callable(getter):
+                data_path = getter()
+            if not data_path:
+                return
+            from .candidate_ledger import append_records, purge_old
+
+            run_id = time.strftime("%Y%m%d%H%M%S")
+            append_records(data_path, items, run_id=run_id)
+            # 清理节流：每天最多扫一次目录，避免每轮同步都遍历文件。
+            marker = Path(data_path) / "ledger" / ".purged"
+            today = time.strftime("%Y-%m-%d")
+            try:
+                last = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+            except OSError:
+                last = ""
+            if last != today:
+                purge_old(data_path)
+                try:
+                    marker.write_text(today, encoding="utf-8")
+                except OSError:
+                    pass
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"写入候选账本失败：{error}")
 
     def _notify_sync_completed(
             self,

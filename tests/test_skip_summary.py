@@ -583,6 +583,8 @@ def _run_skip_branch(case, source: str, test_source: str, **namespace):
         "self": ResourceTransferService(_StubOwner(collector=collector)),
         "logger": probe_logger,
         "SkipStatsCollector": SkipStatsCollector,
+        # 候选账本明细会带上资源标题，未显式传入时给空串即可。
+        "resource_title": "",
     }
     scope.update(namespace)
     loop_source = (

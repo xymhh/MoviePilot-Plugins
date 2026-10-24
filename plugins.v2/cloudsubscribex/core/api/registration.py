@@ -106,6 +106,20 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "获取历史记录聚合摘要",
             },
             {
+                "path": "/ledger/list",
+                "endpoint": self.api_ledger_list,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "查询候选资源账本（没转存的原因）",
+            },
+            {
+                "path": "/ledger/summary",
+                "endpoint": self.api_ledger_summary,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "候选资源账本聚合摘要",
+            },
+            {
                 "path": "/ui_options",
                 "endpoint": self.api_vue_ui_options,
                 "methods": ["GET"],

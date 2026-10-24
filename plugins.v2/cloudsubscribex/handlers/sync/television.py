@@ -516,6 +516,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     share_url,
                                     resource_label="Magnet 链接" if self._is_magnet_url(share_url) else "离线下载链接",
                                     log_prefix=search_prefix,
+                                    resource_title=resource_title,
                             ):
                                 continue
                             if not target_episodes:
@@ -606,6 +607,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 SkipStatsCollector.KIND_MISMATCH,
                                 share_url,
                                 reason=reason,
+                                resource_title=resource_title,
                             )
                             continue
 
@@ -644,6 +646,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 SkipStatsCollector.KIND_MISMATCH,
                                 share_url,
                                 reason=reason,
+                                resource_title=resource_title,
                             )
                             continue
                         if absent_episode_numbers:
@@ -795,6 +798,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 SkipStatsCollector.KIND_MISMATCH,
                                 share_url,
                                 reason=f"未匹配到 S{season} 的缺失剧集",
+                                resource_title=resource_title,
                             )
                             continue
 

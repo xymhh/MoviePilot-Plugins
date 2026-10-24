@@ -327,6 +327,7 @@ class UpgradeService(OwnerDelegator):
                                 share_url,
                                 resource_label="Magnet 链接",
                                 log_prefix=upgrade_log_prefix,
+                                resource_title=resource_title,
                         ):
                             continue
                         provider_name = provider_name or resource_title

@@ -375,7 +375,9 @@ class MovieSyncProcessor(OwnerDelegator):
                             resource, share_url
                         )
                         if not self._validate_resource_url(
-                                share_url, resource_label="Magnet 链接"
+                                share_url,
+                                resource_label="Magnet 链接",
+                                resource_title=resource_title,
                         ):
                             continue
                         provider_name = provider_name or resource_title
@@ -396,6 +398,7 @@ class MovieSyncProcessor(OwnerDelegator):
                                 SkipStatsCollector.KIND_MISMATCH,
                                 share_url,
                                 reason="未通过平台优先级规则",
+                                resource_title=resource_title,
                             )
                             continue
                         magnet_size = self._resource_size_bytes(
@@ -493,6 +496,7 @@ class MovieSyncProcessor(OwnerDelegator):
                             SkipStatsCollector.KIND_MISMATCH,
                             share_url,
                             reason=reason,
+                            resource_title=resource_title,
                         )
                         continue
 
