@@ -117,7 +117,7 @@ def _clean_hash(value: Any, algorithm: str) -> str:
 def content_key(source: Any, provider: str = "") -> str:
     """按「SHA1 → MD5 → 文件 ID+大小」生成内容身份。
 
-    哈希格式不合法时继续降级，避免把上游的短哈希/脏值当成稳定身份。
+    哈希格式不合法时继续降级，避免把短哈希/脏值当成稳定身份。
     """
     sha1 = _clean_hash(_read(source, "sha1"), "sha1")
     if sha1:

@@ -1,6 +1,6 @@
 # MoviePilot-Plugins
 
-MoviePilot 自用插件市场（个人 fork 版）——提供 **115网盘STRM助手**（P115StrmHelper，V3 线，含「整理跳过语义」补丁）与 **网盘订阅助手（跨盘优化版）**（CloudSubscribeX，V2 线）两个插件。
+MoviePilot 自用插件市场（个人 fork 版）——提供 **115网盘STRM助手**（P115StrmHelper，V3 线，含「整理跳过语义」补丁）与 **网盘订阅助手**（CloudSubscribeX，V2 线）两个插件。
 
 插件市场源地址（仓库根地址，`main` 分支）：
 
@@ -46,7 +46,7 @@ https://github.com/xymhh/MoviePilot-Plugins
 | 插件 | 用途 | 适用版本 | 源码目录 |
 | --- | --- | --- | --- |
 | **115网盘STRM助手**（P115StrmHelper） | 115 网盘 STRM 生成、302 跳转、转移整理一条龙；本 fork 修补「库内质量更好→整理失败」 | MoviePilot >= 3.0.0（V3 插件线） | `plugins.v3/p115strmhelper` |
-| **网盘订阅助手（跨盘优化版）**（CloudSubscribeX） | 整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容 | MoviePilot >= 2.14.6（V2 插件线，MoviePilot V3 实测可用） | `plugins.v2/cloudsubscribex` |
+| **网盘订阅助手（CloudSubscribeX）** | 整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容 | MoviePilot >= 2.14.6（V2 插件线，MoviePilot V3 实测可用） | `plugins.v2/cloudsubscribex` |
 
 配置项与注意事项见 [`plugins.v2/cloudsubscribex/README.md`](plugins.v2/cloudsubscribex/README.md)；
 两个插件的逐版本改动见 `package.v3.json` / `package.v2.json` 的 `history` 字段（P115StrmHelper 的 2.8.77 是本 fork 相对官方 2.8.76 的唯一功能性改动）。
@@ -78,7 +78,7 @@ https://github.com/xymhh/MoviePilot-Plugins
 | 市场里搜不到本仓库插件 | 本仓库 V3 插件读 `package.v3.json`、V2 插件读 `package.v2.json`（V3 宿主对 v2 条目也兼容）；确认填的是仓库根地址、齿轮按钮要用管理员账号可见，并点过「同步插件源」 |
 | 整理失败：失败阶段=**文件转移**，消息「媒体库存在同名文件，且质量更好」 | 官方 2.8.76 及更早会把它记成失败并**替换掉该路径原成功记录**，导致同一文件被反复重投 → 更新到本仓库 **2.8.77**（跳过语义版） |
 | 已装官方 2.8.76，市场却看不到 2.8.77 | 确认已把本仓库源加进插件市场设置并「同步插件源」；本版版本号高于官方，正常会显示为可更新 |
-| 插件市场里「网盘订阅助手」有两条，一条被顶成上游 1.7.x | 本 fork 自 **1.6.49** 起改用独立 ID **`CloudSubscribeX`**（显示名「网盘订阅助手（跨盘优化版）」），与上游 `odomu` 的同名插件彻底解耦，两者可在 MP 里并存、各自独立升级。升级到 1.6.49 后：装**新 ID 插件** → 它首次启动会**自动**从旧 ID `CloudSubscribe` 迁移配置、持久化数据与私有 SQLite 库（日志里会打「已从旧插件 CloudSubscribe 迁移到独立 ID CloudSubscribeX」）→ 迁移后新插件**保持停用**（防止新旧同时转存）→ 在 MP 里**停用或卸载旧 ID 插件** → 手动启用新插件。旧 ID 插件不装即可，装上也不会互相干扰 |
+| 插件市场里「网盘订阅助手」有两条，一条被顶成上游 1.7.x | 本 fork 自 **1.6.49** 起改用独立 ID **`CloudSubscribeX`**（显示名「网盘订阅助手（CloudSubscribeX）」），与上游 `odomu` 的同名插件彻底解耦，两者可在 MP 里并存、各自独立升级。升级到 1.6.49 后：装**新 ID 插件** → 它首次启动会**自动**从旧 ID `CloudSubscribe` 迁移配置、持久化数据与私有 SQLite 库（日志里会打「已从旧插件 CloudSubscribe 迁移到独立 ID CloudSubscribeX」）→ 迁移后新插件**保持停用**（防止新旧同时转存）→ 在 MP 里**停用或卸载旧 ID 插件** → 手动启用新插件。旧 ID 插件不装即可，装上也不会互相干扰 |
 | 跨盘转存（夸克→115）慢到几十 KB/s | 1.6.22 起固定 16MB 分片 + 115 分片并发 PUT（配置项「115 上传分片并发」0–16，`0` = 关闭并回退单流顺序上传，失败自动回退）；并发不要开太大，夸克有风控 |
 | 转存"实际成功却报失败" | 1.6.18 起修复后处理终态未落库导致的假失败；升级到最新版 |
 | 想换旧版本 | Release 资产按 `cloudsubscribex_v<版本>.zip` 命名（1.6.48 及更早为 `cloudsubscribe_v<版本>.zip`），可在本仓库 Releases 里下载对应版本 |
@@ -113,6 +113,7 @@ https://github.com/xymhh/MoviePilot-Plugins
 ## 文档
 
 - [`docs/README.md`](docs/README.md) — 文档索引（`plan/` 计划、`test/` 证据、`summary/` 结论）
+- [插件改名与去上游痕迹（1.7.29）](docs/summary/2026-10-24-插件改名与去上游痕迹.md) —— 显示名改「网盘订阅助手（CloudSubscribeX）」、作者去掉来源标注、描述重写；插件源码/注释/目录说明里的旧项目归属表述清零，上游出处只留在本 README；顺手修掉 `package.v2.json` 的 5 个重复键
 - [历史重试同集重复记录（1.7.22）](docs/summary/2026-10-20-历史重试同集重复记录.md) —— 重试改扩展名后按 `record_id` 更新原失败记录；历史页同集去重按状态优先级选代表记录，旧失败记录不再遮住已成功的 `.iso`
 - [历史重试同集识别（1.7.21）](docs/summary/2026-10-20-历史重试同集识别.md) —— 重试先精确查名，未命中按 SxxExx/第N集回退匹配季目录；库里已有 `.2160p.mkv`/`.iso` 时不再去校验失效分享，直接复用实际文件名并落成功
 - [同步作业状态机与目标幂等改造（ADR）](docs/plan/2026-10-20-同步作业状态机与幂等改造.md) —— 把「进程内目标锁」升级为持久化 `sync_jobs` 账本 + 统一 `TargetWriter`；P0 表/仓储/状态机、P1 转存入口接线、P2a done 目标回查已发布，P2b 统一 `TargetWriter` 随 1.7.20 发布｜[P1 总结](docs/summary/2026-10-20-同步作业账本P1.md)｜[P2a 线上缺失回查](docs/test/2026-10-20-1.7.19线上P2a缺失回查.md)｜[P2b 总结](docs/summary/2026-10-20-TargetWriterP2b.md)

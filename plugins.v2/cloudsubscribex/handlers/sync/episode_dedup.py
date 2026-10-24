@@ -197,7 +197,7 @@ class EpisodeDedupService(OwnerDelegator):
                 "file_size": int(item.get("file_size") or 0),
                 "score": int(item.get("score") or item.get("rule_score") or 0),
                 "source": "插件基线",
-                # 保留上游来源（MoviePilot整理记录 / 插件转存记录 / 媒体服务器 …），
+                # 保留原始来源（MoviePilot整理记录 / 插件转存记录 / 媒体服务器 …），
                 # 判重时据此决定要不要做「目标目录有实物」校验
                 "origin": str(item.get("source") or "").strip(),
             })

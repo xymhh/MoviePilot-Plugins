@@ -104,11 +104,11 @@ _COMPONENT_TYPES = (
 
 
 class CloudSubscribeX(_PluginBase):
-    """网盘订阅助手（跨盘优化版）插件。
+    """网盘订阅助手插件。
 
-    1.6.49 起使用独立插件 ID ``CloudSubscribeX``，与上游同名插件彻底解耦：两者可在
-    MoviePilot 里并存安装、各自独立升级。首次启动时会自动从旧 ID ``CloudSubscribe``
-    迁移配置、持久化数据与私有数据库（见 :meth:`_migrate_from_legacy_plugin`）。
+    使用独立插件 ID ``CloudSubscribeX``，与早期同名插件（ID ``CloudSubscribe``）
+    彻底解耦：两者可在 MoviePilot 里并存安装、各自独立升级。首次启动时会自动从旧
+    ID 迁移配置、持久化数据与私有数据库（见 :meth:`_migrate_from_legacy_plugin`）。
     """
 
     def post_message(
@@ -159,20 +159,20 @@ class CloudSubscribeX(_PluginBase):
         return self.chain.post_message(notification)
 
     # 插件名称
-    plugin_name = "网盘订阅助手（跨盘优化版）"
+    plugin_name = "网盘订阅助手（CloudSubscribeX）"
     # 插件描述
-    plugin_desc = "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容（xymhh fork：跨盘转存优化版）。"
+    plugin_desc = "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容，支持跨盘转存（如夸克→115）、洗版与整理。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.28"
+    plugin_version = "1.7.29"
     # 插件作者
-    plugin_author = "xymhh（基于 odomu）"
+    plugin_author = "xymhh"
     # 作者主页
     author_url = "https://github.com/xymhh"
     # 插件配置项ID前缀（保持 cloudsubscribe_ 不变，旧配置键与旧数据键无需重写）
     plugin_config_prefix = "cloudsubscribe_"
-    # 旧插件 ID：1.6.49 之前的本 fork 与上游同名插件都用它，首次启动时从它迁移
+    # 旧插件 ID：早期版本与同名旧插件都用它，首次启动时从它迁移
     legacy_plugin_id = "CloudSubscribe"
     plugin_order = 21
     auth_level = 1

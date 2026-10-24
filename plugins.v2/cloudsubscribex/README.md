@@ -1,7 +1,7 @@
 # CloudSubscribeX 源码目录
 
-本目录是 `CloudSubscribeX`（显示名「网盘订阅助手（跨盘优化版）」，fork 自上游 `odomu` 的同名插件）的
-MoviePilot v2 后端源码及 Release 前端产物目录。1.6.49 起使用独立插件 ID，与上游同名插件可在 MP 里并存、各自独立升级。面向用户的安装、配置和功能说明见
+本目录是 `CloudSubscribeX`（显示名「网盘订阅助手（CloudSubscribeX）」）的
+MoviePilot v2 后端源码及 Release 前端产物目录。使用独立插件 ID，可与同名旧插件在 MP 里并存、各自独立升级。面向用户的安装、配置和功能说明见
 [网盘订阅助手使用说明](../../docs/cloudsubscribe.md)。
 
 ## 目录职责
