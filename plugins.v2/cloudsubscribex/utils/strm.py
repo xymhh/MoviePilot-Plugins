@@ -1,6 +1,7 @@
 """STRM 内容与本地目标路径生成。"""
 from pathlib import Path, PurePosixPath
 from string import Formatter
+from urllib.parse import quote
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 
@@ -93,8 +94,9 @@ class StrmGenerator:
     ) -> str:
         values: Dict[str, str] = {
             "base_url": self.base_url,
-            "file_name": str(file_name or "").strip(),
-            "file_path": str(file_path or "").strip(),
+            # 文件名会带空格与中文：不编码会让 HTTP 请求行非法，Emby 直接播不了。
+            "file_name": quote(str(file_name or "").strip(), safe=""),
+            "file_path": quote(str(file_path or "").strip(), safe="/"),
         }
         values.update({
             str(key): str(value or "").strip()

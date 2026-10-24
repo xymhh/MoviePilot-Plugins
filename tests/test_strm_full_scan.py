@@ -83,6 +83,39 @@ class ContainerProvider:
         return self.inner
 
 
+class StrmRenderEncodingTest(unittest.TestCase):
+    """1.7.46 回归：文件名/路径必须 URL 编码，否则播放请求行非法。"""
+
+    def test_chinese_and_space_file_name_is_encoded(self):
+        generator = StrmGenerator(
+            base_url="http://mp:3000/api/v1/plugin/CloudSubscribeX/redirect",
+            template="{base_url}?pickcode={pickcode}&file_name={file_name}",
+            provider_variables=("pickcode",),
+        )
+        url = generator.render(
+            file_name="伟大的长征 - S01E25 - 第25集.mkv",
+            file_path="/Alist/影视/伟大的长征 - S01E25.mkv",
+            template_values={"pickcode": "abcdefghijklmno12"},
+        )
+        self.assertNotIn(" ", url)
+        self.assertTrue(url.startswith("http://mp:3000/api/v1/plugin/CloudSubscribeX/redirect?pickcode="))
+        self.assertIn("%20", url)
+        self.assertIn("S01E25", url)
+
+    def test_file_path_keeps_slashes_when_encoded(self):
+        generator = StrmGenerator(
+            base_url="http://mp:3000",
+            template="{base_url}{file_path}",
+        )
+        url = generator.render(
+            file_name="A B.mkv",
+            file_path="/影视/剧集/A B.mkv",
+        )
+        self.assertIn("/%E5%BD%B1%E8%A7%86/", url)
+        self.assertIn("/A%20B.mkv", url)
+        self.assertNotIn("%2F", url)
+
+
 class StrmFullScanTest(unittest.TestCase):
     def _generator(self):
         return StrmGenerator(
