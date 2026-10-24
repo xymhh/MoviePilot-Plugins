@@ -31,8 +31,10 @@ from .emby_proxy_rules import (
     is_rewritable_playback_response,
     is_transcode_request,
     map_path,
+    playback_path_prefix,
     request_media_ids,
     rewrite_playback_info,
+    strip_media_source_prefix,
 )
 
 #: 代理默认监听端口，可在插件设置里改。
@@ -326,20 +328,43 @@ class EmbyProxyService:
     async def _resolve_media_path(
             self, item_id: str, media_source_id: str
     ) -> str:
-        """MediaSourceId/ItemId → Emby 记录的 Path；结果按 id 缓存 1 小时。"""
+        """MediaSourceId/ItemId → Emby 记录的 Path；结果按 id 缓存 1 小时。
+
+        Emby 4.9+ 会把 MediaSourceId 写成 ``mediasource_31``，这个值不能直接
+        当 ItemId 查（查不到就整条链路降级透传）。所以先按 ItemId 查，再按剥
+        掉前缀的 MediaSourceId 查。
+        """
         cache_key = media_source_id or item_id
         cached = self._path_cache.get(cache_key)
         if cached:
             return str(cached)
-        if not cache_key:
-            return ""
 
+        candidates: list[str] = []
+        for value in (item_id, strip_media_source_prefix(media_source_id)):
+            text = str(value or "").strip()
+            if text and text not in candidates:
+                candidates.append(text)
+
+        for query_id in candidates:
+            path = await self._query_item_path(
+                query_id, media_source_id, item_id
+            )
+            if path:
+                if cache_key:
+                    self._path_cache.put(cache_key, path)
+                return path
+        return ""
+
+    async def _query_item_path(
+            self, query_id: str, media_source_id: str, item_id: str
+    ) -> str:
+        """按单个 id 向 Emby 反查 Path，失败返回空串。"""
         base = self._upstream_base()
-        if not base:
+        if not base or not query_id:
             return ""
         from urllib.parse import quote
 
-        url = f"{base}/emby/Items?Ids={quote(cache_key)}&Fields=Path"
+        url = f"{base}/emby/Items?Ids={quote(query_id)}&Fields=Path,MediaSources"
         api_key = self._api_key()
         headers = {"Accept": "application/json"}
         if api_key:
@@ -353,12 +378,11 @@ class EmbyProxyService:
                 response.raise_for_status()
                 payload = response.json()
         except Exception as error:  # noqa: BLE001 - 反查失败按未命中处理
-            logger.debug(f"Emby 反代：反查媒体路径失败 id={cache_key}（{error}）")
+            logger.debug(
+                f"Emby 反代：反查媒体路径失败 id={query_id}（{error}）"
+            )
             return ""
-        path = extract_media_path(payload, media_source_id, item_id)
-        if path:
-            self._path_cache.put(cache_key, path)
-        return path
+        return extract_media_path(payload, media_source_id, item_id)
 
     async def _resolve_strm_url(
             self, emby_path: str, fallback_name: str = ""
@@ -431,6 +455,11 @@ class EmbyProxyService:
             return
 
         if action == STREAM_REDIRECT:
+            if str(scope.get("method") or "GET").upper() == "HEAD":
+                # HEAD 用于客户端探测能否直连（要真实 Content-Length/时长），
+                # 302 会把探测结果换成 CDN 的响应头，按 MediaWarp 的做法透传。
+                await self._proxy(scope, receive, send)
+                return
             if not is_fake_direct_stream(query) and is_transcode_request(query):
                 # 带转码参数的请求必须交给 Emby，302 会把转码流打断。
                 await self._proxy(scope, receive, send)
@@ -684,8 +713,11 @@ class EmbyProxyService:
                 for source in sources
             )
             if has_strm:
-                origin = build_origin(scope, headers)
-                rewritten = rewrite_playback_info(payload, origin)
+                rewritten = rewrite_playback_info(
+                    payload,
+                    build_origin(scope, headers),
+                    path_prefix=playback_path_prefix(path),
+                )
                 content = encrypt_playback_payload(rewritten)
                 # response_headers 是 (key, value) 列表（保留重复 Set-Cookie），
                 # 不能按字典下标赋值。

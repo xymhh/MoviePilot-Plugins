@@ -157,12 +157,72 @@ class PlaybackInfoTest(unittest.TestCase):
         source = payload["MediaSources"][0]
         self.assertEqual(
             source["DirectStreamUrl"],
-            "http://proxy:3010/Videos/item-1/stream"
+            "/Videos/item-1/stream"
             "?MediaSourceId=source-strm&Static=true&FakeDirectStream=true",
         )
         self.assertFalse(source["SupportsTranscoding"])
         self.assertTrue(source["SupportsDirectPlay"])
         self.assertEqual(source["Protocol"], "Http")
+
+    def test_strm_source_keeps_path_prefix(self):
+        payload = rules.rewrite_playback_info(
+            self._payload(), path_prefix="/emby"
+        )
+        source = payload["MediaSources"][0]
+        self.assertTrue(
+            source["DirectStreamUrl"].startswith("/emby/Videos/item-1/stream?")
+        )
+
+    def test_transcode_fields_dropped(self):
+        payload = self._payload()
+        payload["MediaSources"][0].update({
+            "TranscodingUrl": "/Videos/item-1/master.m3u8?x=1",
+            "TranscodingContainer": "ts",
+            "TranscodingSubProtocol": "hls",
+            "TrancodeLiveStartIndex": 0,
+            "TranscodeLiveStartIndex": 0,
+        })
+        payload = rules.rewrite_playback_info(payload)
+        source = payload["MediaSources"][0]
+        for field_name in (
+                "TranscodingUrl",
+                "TranscodingContainer",
+                "TranscodingSubProtocol",
+                "TrancodeLiveStartIndex",
+                "TranscodeLiveStartIndex",
+        ):
+            self.assertNotIn(field_name, source)
+
+    def test_playback_path_prefix(self):
+        self.assertEqual(
+            rules.playback_path_prefix("/emby/Items/123/PlaybackInfo"), "/emby"
+        )
+        self.assertEqual(
+            rules.playback_path_prefix("/Items/123/PlaybackInfo"), ""
+        )
+
+    def test_strip_media_source_prefix(self):
+        self.assertEqual(rules.strip_media_source_prefix("mediasource_31"), "31")
+        self.assertEqual(rules.strip_media_source_prefix("31"), "31")
+        self.assertEqual(rules.strip_media_source_prefix(None), "")
+
+    def test_extract_media_path_with_prefixed_source_id(self):
+        payload = {
+            "Items": [{
+                "Id": "item-1",
+                "MediaSources": [
+                    {"Id": "other", "Path": "/strm/other.strm"},
+                    {"Id": "mediasource_31", "Path": "/strm/wanted.strm"},
+                ],
+            }]
+        }
+        self.assertEqual(
+            rules.extract_media_path(payload, "mediasource_31"),
+            "/strm/wanted.strm",
+        )
+        self.assertEqual(
+            rules.extract_media_path(payload, "31"), "/strm/wanted.strm"
+        )
 
     def test_non_strm_source_untouched(self):
         payload = rules.rewrite_playback_info(

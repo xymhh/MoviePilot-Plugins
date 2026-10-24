@@ -180,10 +180,45 @@ def build_origin(scope: Mapping[str, Any], headers: Mapping[str, str]) -> str:
     return f"{scheme}://{host}".rstrip("/")
 
 
+#: Emby 4.9+ 给 MediaSourceId 加了 ``mediasource_`` 前缀，查 Items 时必须去掉。
+_MEDIA_SOURCE_PREFIX = "mediasource_"
+#: 转码相关字段：``SupportsTranscoding=false`` 时一并删掉，否则部分客户端
+#: 只看字段存在性就发起转码（MediaWarp 同样处理；4.8 的拼写少一个 s）。
+_TRANSCODE_FIELDS = (
+    "TranscodingUrl",
+    "TranscodingContainer",
+    "TranscodingSubProtocol",
+    "TrancodeLiveStartIndex",
+    "TranscodeLiveStartIndex",
+)
+
+
+def strip_media_source_prefix(value: Any) -> str:
+    """去掉 Emby 4.9+ 的 ``mediasource_`` 前缀。"""
+    text = str(value or "").strip()
+    if text.lower().startswith(_MEDIA_SOURCE_PREFIX):
+        return text[len(_MEDIA_SOURCE_PREFIX):]
+    return text
+
+
+def playback_path_prefix(path: str) -> str:
+    """从 PlaybackInfo 请求路径里取出 API 前缀（``/emby`` 或空）。
+
+    改写后的 ``DirectStreamUrl`` 用相对路径，必须带上这层前缀，否则部署在
+    ``/emby`` 子路径下时客户端会拼到站点根上 404。
+    """
+    lowered = str(path or "").lower()
+    index = lowered.find("/items/")
+    if index < 0:
+        return ""
+    return str(path or "")[:index].rstrip("/")
+
+
 def rewrite_playback_info(
         payload: Any,
-        origin: str,
+        origin: str = "",
         can_resolve: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        path_prefix: str = "",
 ) -> Any:
     """把 STRM MediaSource 改写成经代理的 DirectStreamUrl。
 
@@ -197,7 +232,7 @@ def rewrite_playback_info(
     if not isinstance(sources, list):
         return payload
 
-    base = str(origin or "").rstrip("/")
+    prefix = str(path_prefix or "").rstrip("/")
     parent_item_id = str(payload.get("ItemId") or payload.get("Id") or "")
     for source in sources:
         if not isinstance(source, dict):
@@ -211,8 +246,9 @@ def rewrite_playback_info(
         source_id = str(source.get("Id") or "")
         if not item_id or not source_id:
             continue
+        # 相对路径：客户端按自己连的 host 解析，反代/回源都不用猜 origin。
         source["DirectStreamUrl"] = (
-            f"{base}/Videos/{item_id}/stream"
+            f"{prefix}/Videos/{item_id}/stream"
             f"?MediaSourceId={source_id}&Static=true&FakeDirectStream=true"
         )
         source["TranscodeReasons"] = []
@@ -220,6 +256,8 @@ def rewrite_playback_info(
         source["SupportsDirectPlay"] = True
         source["SupportsDirectStream"] = True
         source["Protocol"] = "Http"
+        for field_name in _TRANSCODE_FIELDS:
+            source.pop(field_name, None)
     return payload
 
 
@@ -249,6 +287,7 @@ def extract_media_path(
     else:
         return ""
 
+    wanted_source = strip_media_source_prefix(media_source_id)
     fallback = ""
     for item in items:
         if not isinstance(item, dict):
@@ -262,7 +301,9 @@ def extract_media_path(
             path = str(source.get(_PATH_FIELD) or "")
             if not path:
                 continue
-            if media_source_id and str(source.get("Id") or "") == media_source_id:
+            if wanted_source and (
+                    strip_media_source_prefix(source.get("Id")) == wanted_source
+            ):
                 return path
             if not fallback:
                 fallback = path
