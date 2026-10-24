@@ -45,6 +45,10 @@ load_module(
     "cloudsubscribex.core.services.skip_stats",
     "plugins.v2/cloudsubscribex/core/services/skip_stats.py",
 )
+load_module(
+    "cloudsubscribex.handlers.sync.candidate_filter",
+    "plugins.v2/cloudsubscribex/handlers/sync/candidate_filter.py",
+)
 _television = load_module(
     "cloudsubscribex.handlers.sync.television",
     "plugins.v2/cloudsubscribex/handlers/sync/television.py",

@@ -3,10 +3,19 @@
 import copy
 import json
 from contextlib import nullcontext
+from dataclasses import fields, is_dataclass
 from hashlib import sha256
+from importlib import import_module
 from typing import Any, Callable, Optional, Sequence
 
 from app.core.cache import TTLCache
+
+try:  # 单测环境可能只注入了 app.core.cache
+    from app.log import logger
+except Exception:  # noqa: BLE001 - 缺少宿主日志时退回标准库
+    import logging
+
+    logger = logging.getLogger(__name__)
 
 
 def _cache_identity(value: Any) -> str:
@@ -39,6 +48,82 @@ def normalize_platform_cache_key(value: Any) -> str:
     return sha256(payload.encode("utf-8")).hexdigest()
 
 
+_CACHE_TAG = "__csx__"
+# 缓存结构版本：编码格式变更时递增，旧区自动失效。
+_CACHE_SCHEMA = "v2"
+
+# 只允许这些插件内的数据类进入缓存；其余对象（含提供方原始响应）一律跳过写入，
+# 避免 MoviePilot 的 Redis 后端在插件热重载后用旧类对象 pickle 失败。
+_CACHE_DOMAIN_TYPES = (
+    "CloudFile",
+    "DirectoryLookup",
+    "DirectoryListing",
+    "RapidUploadResult",
+    "ShareLinkStatus",
+)
+
+# 丢掉的字段：提供方原始响应体积大且不可序列化，关键标识已在 playback_values 中。
+_CACHE_DROPPED_FIELDS = frozenset({"native"})
+
+
+def _domain_type(name: str) -> Any:
+    """按类名取回插件数据类，延迟导入避免循环依赖。"""
+    module = import_module("..core.cloud", __package__)
+    return getattr(module, name)
+
+
+def _encode_cache_value(value: Any) -> Any:
+    """把缓存值转成 JSON 兼容结构；不可缓存的对象抛 TypeError。"""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        name = type(value).__name__
+        if name not in _CACHE_DOMAIN_TYPES:
+            raise TypeError(f"不支持缓存的类型：{name}")
+        payload: dict[str, Any] = {}
+        for item in fields(value):
+            if item.name in _CACHE_DROPPED_FIELDS:
+                continue
+            payload[item.name] = _encode_cache_value(getattr(value, item.name))
+        return {_CACHE_TAG: name, "data": payload}
+    if isinstance(value, tuple):
+        return {_CACHE_TAG: "tuple", "items": [_encode_cache_value(v) for v in value]}
+    if isinstance(value, list):
+        return {_CACHE_TAG: "list", "items": [_encode_cache_value(v) for v in value]}
+    if isinstance(value, dict):
+        return {
+            _CACHE_TAG: "dict",
+            "items": [
+                [_encode_cache_value(k), _encode_cache_value(v)]
+                for k, v in value.items()
+            ],
+        }
+    raise TypeError(f"不支持缓存的类型：{type(value).__name__}")
+
+
+def _decode_cache_value(value: Any) -> Any:
+    """把缓存中读到的 JSON 结构还原成插件对象；失败时上抛由调用方当作未命中。"""
+    if not isinstance(value, dict) or _CACHE_TAG not in value:
+        return value
+    tag = value.get(_CACHE_TAG)
+    if tag == "tuple":
+        return tuple(_decode_cache_value(item) for item in value.get("items") or [])
+    if tag == "list":
+        return [_decode_cache_value(item) for item in value.get("items") or []]
+    if tag == "dict":
+        return {
+            _decode_cache_value(pair[0]): _decode_cache_value(pair[1])
+            for pair in value.get("items") or []
+        }
+    if tag in _CACHE_DOMAIN_TYPES:
+        data = {
+            key: _decode_cache_value(item)
+            for key, item in (value.get("data") or {}).items()
+        }
+        return _domain_type(str(tag))(**data)
+    raise ValueError(f"未知的缓存类型标记：{tag}")
+
+
 class _PlatformTTLCache(TTLCache):
     """确保所有键在进入 MoviePilot 后端前都是稳定字符串。"""
 
@@ -46,11 +131,40 @@ class _PlatformTTLCache(TTLCache):
     def _key(value: Any) -> str:
         return normalize_platform_cache_key(value)
 
+    @staticmethod
+    def _read(raw: Any) -> Any:
+        """解码读出的值；无法识别（例如旧版 pickle 对象）时当作未命中。"""
+        if raw is None:
+            return None
+        if isinstance(raw, (str, int, float, bool)):
+            return raw
+        if not isinstance(raw, (dict, list, tuple)):
+            return None
+        try:
+            return _decode_cache_value(raw)
+        except Exception as error:  # noqa: BLE001 - 旧数据或类型缺失都按未命中处理
+            logger.debug(f"缓存值解码失败，按未命中处理：{error}")
+            return None
+
+    @staticmethod
+    def _write_value(value: Any) -> tuple[Any, bool]:
+        """返回可直接落库的值与是否允许写入。"""
+        try:
+            return _encode_cache_value(value), True
+        except Exception as error:  # noqa: BLE001 - 不可缓存对象直接跳过写入
+            logger.debug(f"缓存值不可序列化，跳过写入：{error}")
+            return None, False
+
     def __getitem__(self, key: Any) -> Any:
-        return super().__getitem__(self._key(key))
+        cached = self._read(super().get(self._key(key)))
+        if cached is None:
+            raise KeyError(key)
+        return cached
 
     def __setitem__(self, key: Any, value: Any) -> None:
-        super().__setitem__(self._key(key), value)
+        payload, ok = self._write_value(value)
+        if ok:
+            super().__setitem__(self._key(key), payload)
 
     def __delitem__(self, key: Any) -> None:
         super().__delitem__(self._key(key))
@@ -59,10 +173,12 @@ class _PlatformTTLCache(TTLCache):
         return super().__contains__(self._key(key))
 
     def get(self, key: Any, **kwargs: Any) -> Any:
-        return super().get(self._key(key), **kwargs)
+        return self._read(super().get(self._key(key), **kwargs))
 
     def set(self, key: Any, value: Any, **kwargs: Any) -> None:
-        super().set(self._key(key), value, **kwargs)
+        payload, ok = self._write_value(value)
+        if ok:
+            super().set(self._key(key), payload, **kwargs)
 
     def delete(self, key: Any, **kwargs: Any) -> None:
         super().delete(self._key(key), **kwargs)
@@ -72,18 +188,21 @@ class _PlatformTTLCache(TTLCache):
 
     def pop(self, key: Any, default: Any = None, **kwargs: Any) -> Any:
         try:
-            return super().pop(self._key(key), default, **kwargs)
+            return self._read(super().pop(self._key(key), **kwargs))
         except KeyError:
             return default
 
     def setdefault(self, key: Any, default: Any = None, **kwargs: Any) -> Any:
-        return super().setdefault(self._key(key), default, **kwargs)
+        cached = self.get(key, **kwargs)
+        if cached is not None:
+            return cached
+        self.set(key, default, **kwargs)
+        return default
 
     def update(self, other: Any, **kwargs: Any) -> None:
-        normalized = {
-            self._key(key): value for key, value in dict(other or {}).items()
-        }
-        super().update(normalized, **kwargs)
+        for key, value in dict(other or {}).items():
+            self.set(key, value)
+
 
 
 def create_platform_ttl_cache(
@@ -97,7 +216,8 @@ def create_platform_ttl_cache(
     identity_text = _cache_identity(identity)
     suffix = sha256(identity_text.encode("utf-8")).hexdigest()[:16]
     return _PlatformTTLCache(
-        region=f"cloudsubscribe:{str(namespace).strip(':')}:{suffix}",
+        # schema 后缀隔离旧版 pickle 数据，格式变更时递增即可整区换代。
+        region=f"cloudsubscribe:{str(namespace).strip(':')}:{suffix}:{_CACHE_SCHEMA}",
         maxsize=max(1, int(maxsize or 1)),
         ttl=max(1, int(ttl or 1)),
     )

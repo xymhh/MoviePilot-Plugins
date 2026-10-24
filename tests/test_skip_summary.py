@@ -111,6 +111,10 @@ search_types_module = load_module(
     "plugins.v2/cloudsubscribex/search/types.py",
 )
 
+load_module(
+    "cloudsubscribex.handlers.sync.candidate_filter",
+    "plugins.v2/cloudsubscribex/handlers/sync/candidate_filter.py",
+)
 resources_module = load_module(
     "cloudsubscribex.handlers.sync.resources",
     "plugins.v2/cloudsubscribex/handlers/sync/resources.py",

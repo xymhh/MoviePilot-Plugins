@@ -35,6 +35,10 @@ mock_utils.MediaFileParser = MediaFileParser
 mock_utils.parse_magnet_metadata = MagicMock()
 
 # 加载 resources.py 中的 SyncResourceManager
+load_module(
+    "cloudsubscribex.handlers.sync.candidate_filter",
+    "plugins.v2/cloudsubscribex/handlers/sync/candidate_filter.py",
+)
 ResourceTransferService = load_module(
     "cloudsubscribex.handlers.sync.resources",
     "plugins.v2/cloudsubscribex/handlers/sync/resources.py",

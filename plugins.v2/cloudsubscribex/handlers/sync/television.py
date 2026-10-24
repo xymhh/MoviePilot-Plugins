@@ -8,6 +8,7 @@ from app.schemas import MediaInfo
 from app.schemas.types import MediaType
 from app.utils.string import StringUtils
 
+from .candidate_filter import remember_mismatch
 from .utils import normalize_season
 from ..notification import MediaServerResolver
 from ...core import OwnerDelegator
@@ -595,7 +596,9 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 share_files, mediainfo, resource_title
                         ):
                             reason = "分享根目录与订阅标题不符"
-                            logger.warning(
+                            # 记下 (链接, 标题)，24h 内不再为它重复读分享目录。
+                            remember_mismatch(share_url, resource_title)
+                            logger.info(
                                 f"{reason}，已跳过：{resource_title} - "
                                 f"{self._resource_log_reference(share_url)}"
                             )

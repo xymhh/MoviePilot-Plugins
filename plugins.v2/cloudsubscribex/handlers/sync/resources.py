@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlsplit
 
 from app.log import logger
 
+from .candidate_filter import mismatch_seen, non_video_reason
 from .utils import extract_ed2k_filename
 from ...core import (
     CloudDriveCapability,
@@ -800,6 +801,24 @@ class ResourceTransferService(OwnerDelegator):
             if not files:
                 logger.debug(f"所选网盘路径没有可处理文件：{self._cloud_resource_path(share_url)}")
             return files
+        # 预筛：明显不是影视的候选（音乐/电子书）不必花一次分享目录读取；
+        # 24h 内已被判定「标题不符」的同一份 (链接, 标题) 也不再重复列目录。
+        if resource_title:
+            skip_reason = non_video_reason(resource_title)
+            if skip_reason:
+                logger.debug(f"跳过候选：{skip_reason} - {resource_title}")
+                self._record_skip_candidate(
+                    SkipStatsCollector.KIND_MISMATCH,
+                    share_url,
+                    reason=skip_reason,
+                    resource_label=resource_title,
+                )
+                return []
+        if mismatch_seen(share_url, resource_title):
+            logger.debug(
+                f"跳过候选：24h 内已判定标题不符 - {resource_title or self._resource_log_reference(share_url)}"
+            )
+            return []
         if not self._validate_resource_url(
                 share_url, resource_label="分享链接", log_prefix=log_prefix
         ):

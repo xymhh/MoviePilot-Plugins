@@ -231,6 +231,10 @@ class TestTransferClassification(unittest.TestCase):
     """转存归类不能再把 139 分享兜底成 115 直存。"""
 
     def _service(self):
+        load_module(
+            "cloudsubscribex.handlers.sync.candidate_filter",
+            "plugins.v2/cloudsubscribex/handlers/sync/candidate_filter.py",
+        )
         module = load_module(
             "cloudsubscribex.handlers.sync.resources",
             "plugins.v2/cloudsubscribex/handlers/sync/resources.py",

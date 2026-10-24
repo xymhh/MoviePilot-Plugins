@@ -15,10 +15,12 @@ import ast
 import asyncio
 import hashlib
 import json
+import os
 import re
 import sys
 import threading
 import time
+import uuid
 import weakref
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -491,11 +493,25 @@ class _JsonStore:
     def save(self, key: str, value: Any) -> None:
         path = self._path(key)
         with self._lock:
-            temp = path.with_suffix(".tmp")
-            temp.write_text(
-                json.dumps(value, ensure_ascii=False), encoding="utf-8",
+            # 固定 .tmp 名会让并发写者互相抢文件：扫描线程 rename 之后，
+            # 另一个写者（定时任务或热重载残留线程）的 replace 就抛 ENOENT
+            # （线上 10 小时 2 次「TG 监控数据写入失败」）。
+            # 用进程/线程/随机数唯一化的临时文件名，os.replace 保证原子提交。
+            temp = path.with_name(
+                f"{path.name}.{os.getpid()}.{threading.get_ident()}."
+                f"{uuid.uuid4().hex[:8]}.tmp"
             )
-            temp.replace(path)
+            try:
+                temp.write_text(
+                    json.dumps(value, ensure_ascii=False), encoding="utf-8",
+                )
+                os.replace(temp, path)
+            finally:
+                if temp.exists():
+                    try:
+                        temp.unlink()
+                    except OSError:
+                        pass
 
 
 class TgChannelMonitor:
@@ -1077,6 +1093,9 @@ class TgChannelMonitor:
             return stats
         rematch_ids = {str(item) for item in (rematch_ids or [])}
         rematch_transfers = 0
+        # 逐条 debug 在订阅多、频道多时能刷出上百行；这里只留汇总 + 少量样例。
+        pending_samples: List[str] = []
+        skipped_samples: List[str] = []
         handler = getattr(self, "_auto_transfer_handler", None)
         if not callable(handler):
             for item, _rule in candidates:
@@ -1154,10 +1173,10 @@ class TgChannelMonitor:
                 )
                 if not matched.get("matched"):
                     stats["auto_pending"] += 1
-                    if not old_reason or old_reason != item["match_reason"]:
-                        logger.debug(
-                            f"TG 频道自动匹配留待手动（{rule.get('channel')}）："
-                            f"{item.get('title')} / {item['match_reason']}"
+                    if (not old_reason or old_reason != item["match_reason"]) \
+                            and len(pending_samples) < 3:
+                        pending_samples.append(
+                            f"{str(item.get('title') or '')[:40]} / {item['match_reason'][:40]}"
                         )
                     continue
                 subscribe_id = int(matched["matched"]["id"])
@@ -1202,10 +1221,8 @@ class TgChannelMonitor:
                 item["auto_skipped_at"] = int(time.time())
                 item["auto_transfer_error"] = message[:300]
                 stats["auto_skipped"] += 1
-                logger.debug(
-                    f"TG 频道自动转存无新文件（{rule.get('channel')} / "
-                    f"订阅 {subscribe_id}）：{message}"
-                )
+                if len(skipped_samples) < 3:
+                    skipped_samples.append(f"订阅 {subscribe_id}：{str(message)[:40]}")
             else:
                 item["auto_transfer_error"] = message[:300]
                 item["auto_subscribe_id"] = subscribe_id
@@ -1215,6 +1232,16 @@ class TgChannelMonitor:
                     f"TG 频道自动转存失败（{rule.get('channel')} / "
                     f"订阅 {subscribe_id}）：{message}"
                 )
+        if pending_samples:
+            logger.debug(
+                f"TG 频道自动匹配留待手动 {stats['auto_pending']} 条，样例："
+                + "；".join(pending_samples)
+            )
+        if skipped_samples:
+            logger.debug(
+                f"TG 频道自动转存无新文件 {stats['auto_skipped']} 条，样例："
+                + "；".join(skipped_samples)
+            )
         return stats
 
     # ------------------------------------------------------------------ 查询
