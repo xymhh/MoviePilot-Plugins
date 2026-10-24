@@ -68,6 +68,21 @@ def values(item):
     return dict(item.playback_values)
 
 
+class ContainerProvider:
+    """模拟 CloudDriveProvider 能力容器：自身没有目录方法，只能 require 取服务。"""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.required = []
+
+    def supports(self, capability):
+        return True
+
+    def require(self, capability):
+        self.required.append(capability)
+        return self.inner
+
+
 class StrmFullScanTest(unittest.TestCase):
     def _generator(self):
         return StrmGenerator(
@@ -100,6 +115,26 @@ class StrmFullScanTest(unittest.TestCase):
             )
             # 未开启覆盖：旧内容保持原样
             self.assertEqual(existing.read_text(encoding="utf-8"), "old")
+
+    def test_provider_container_is_unwrapped_before_scan(self):
+        """1.7.44 回归：provider 是能力容器时必须先 require(DIRECTORY_READ)。
+
+        线上症状：STRM 增量补齐每轮抛
+        `'CloudDriveProvider' object has no attribute 'resolve_directory'`。
+        """
+        container = ContainerProvider(FakeProvider())
+        with TemporaryDirectory() as tmp:
+            stats = rebuild_strm_tree(
+                provider=container,
+                generator=self._generator(),
+                local_root=tmp,
+                cloud_root="/media",
+                video_extensions=[".mkv"],
+                reference_values=values,
+            )
+            self.assertEqual(stats["created"], 2)
+            self.assertTrue(container.required)
+            self.assertTrue((Path(tmp) / "Show" / "Season 01" / "E01.strm").is_file())
 
     def test_overwrite_rewrites_changed_content(self):
         with TemporaryDirectory() as tmp:

@@ -173,7 +173,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.43"
+    plugin_version = "1.7.44"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1808,6 +1808,15 @@ class CloudSubscribeX(_PluginBase):
                 if self._strm_full_scan_scheduler.running:
                     self._strm_full_scan_scheduler.shutdown()
                 self._strm_full_scan_scheduler = None
+        except Exception:
+            pass
+
+        try:
+            if self._strm_increment_scheduler:
+                self._strm_increment_scheduler.remove_all_jobs()
+                if self._strm_increment_scheduler.running:
+                    self._strm_increment_scheduler.shutdown()
+                self._strm_increment_scheduler = None
         except Exception:
             pass
 

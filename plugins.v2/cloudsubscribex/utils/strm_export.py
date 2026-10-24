@@ -18,6 +18,22 @@ from app.log import logger
 from ..core.cloud import CloudDriveCapability
 
 
+def _directory_ops(provider):
+    """取目录读取服务。
+
+    ``CloudDriveProvider`` 只是能力容器，自身不暴露 ``resolve_directory`` /
+    ``list_directory``，必须用 ``require(DIRECTORY_READ)`` 拿到带 IO 限流的服务对象；
+    直接传入服务对象（测试与内部直调）时原样返回。
+    """
+    require = getattr(provider, "require", None)
+    if callable(require) and hasattr(provider, "supports"):
+        try:
+            return require(CloudDriveCapability.DIRECTORY_READ)
+        except Exception as error:  # noqa: BLE001 - 能力缺失时退回原对象
+            logger.debug(f"取目录读取服务失败，按原对象调用：{error}")
+    return provider
+
+
 def rebuild_strm_by_export_tree(
         provider,
         generator,
@@ -45,7 +61,8 @@ def rebuild_strm_by_export_tree(
         logger.warning("STRM 增量：当前网盘不支持导出目录树")
         return stats
 
-    lookup = provider.resolve_directory(cloud_root)
+    directory_ops = _directory_ops(provider)
+    lookup = directory_ops.resolve_directory(cloud_root)
     if not lookup.checked or lookup.directory_id is None:
         stats["errors"] += 1
         logger.warning(f"STRM 增量：无法解析媒体库根目录 {cloud_root}")
@@ -127,12 +144,12 @@ def rebuild_strm_by_export_tree(
     for cloud_dir, names in pending.items():
         if progress:
             progress(stats)
-        lookup = provider.resolve_directory(cloud_dir)
+        lookup = directory_ops.resolve_directory(cloud_dir)
         if not lookup.checked or lookup.directory_id is None:
             stats["errors"] += len(names)
             logger.warning(f"STRM 增量：无法解析目录 {cloud_dir}")
             continue
-        listing = provider.list_directory(str(lookup.directory_id))
+        listing = directory_ops.list_directory(str(lookup.directory_id))
         if not listing.checked:
             stats["errors"] += len(names)
             continue

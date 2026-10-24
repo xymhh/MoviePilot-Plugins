@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from .strm import StrmGenerator, StrmTemplateError
+from .strm_export import _directory_ops
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +104,8 @@ def rebuild_strm_tree(
         "skipped": 0,
         "errors": 0,
     }
-    lookup = provider.resolve_directory(cloud_root)
+    directory_ops = _directory_ops(provider)
+    lookup = directory_ops.resolve_directory(cloud_root)
     if not lookup.checked or lookup.directory_id is None:
         stats["errors"] += 1
         logger.warning(f"STRM 全量校准：无法解析媒体库根目录 {cloud_root}")
@@ -145,7 +147,7 @@ def rebuild_strm_tree(
         if cid in visited:
             continue
         visited.add(cid)
-        listing = provider.list_directory(cid)
+        listing = directory_ops.list_directory(cid)
         if not listing.checked:
             stats["errors"] += 1
             continue

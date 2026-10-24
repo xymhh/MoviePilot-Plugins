@@ -147,13 +147,38 @@ class EmbyProxyService:
         if not value:
             value = str(self._get("media_server_host", "") or "").strip()
         if not value:
+            # 1.7.44：插件没填时回落 MP 里已配置的 Emby/Jellyfin 地址，
+            # 避免只开开关就被判定「未配置上游」而全部 502。
+            value = self._media_server_fallback("host")
+        if not value:
             return ""
         if not value.startswith(("http://", "https://")):
             value = f"http://{value}"
         return value.rstrip("/")
 
+    @staticmethod
+    def _media_server_fallback(field: str) -> str:
+        """从 MP 的媒体服务器配置里取 host / api_key。"""
+        try:
+            try:
+                from app.helper.mediaserver import MediaServerHelper
+            except ImportError:  # MP v3 新路径
+                from app.application.mediaserver import MediaServerHelper
+            for config in (MediaServerHelper().get_configs() or {}).values():
+                if str(getattr(config, "type", "")).lower() not in ("emby", "jellyfin"):
+                    continue
+                value = str(getattr(config, field, "") or "").strip()
+                if value:
+                    return value
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"读取 MP 媒体服务器配置失败：{error}")
+        return ""
+
     def _api_key(self) -> str:
-        return str(self._get("media_server_api_key", "") or "").strip()
+        value = str(self._get("media_server_api_key", "") or "").strip()
+        if value:
+            return value
+        return self._media_server_fallback("api_key")
 
     def _path_mappings(self) -> str:
         return str(self._get("media_server_path_mappings", "") or "")
