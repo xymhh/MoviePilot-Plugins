@@ -1,12 +1,13 @@
 """跨盘中继残留清理。
 
-只处理 ``cloud-transfer-<32位hash>.bin`` 及其 Gopeed 改名副本
+只处理 ``cloud-transfer-<32位hash>.bin`` 及其自动改名副本
 ``… (1).bin``、伴随文件 ``.meta.json`` / ``.parts.json``（含 ``.tmp``），
 目录里其他文件一律不碰。
 
 判定为残留需同时满足：
 1. 修改时间早于保留期（默认 24 小时，运行中的下载会持续刷新 mtime）；
-2. 文件名不出现在 Gopeed 任务列表里（暂停任务即使过期也保留）。
+2. （可选）文件名不出现在调用方给出的活跃任务名列表里 —— 现在没有外部
+   任务列表可查，运行中的下载靠 mtime 持续刷新即可判定，因此默认只看时间。
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ _VARIANT_PATTERN = re.compile(r" \(\d+\)(?=\.bin(?:\.|$))")
 
 
 def _canonical(name: str) -> str:
-    """去掉 Gopeed AutoRename 的 `` (n)`` 变体，便于与任务名比对。"""
+    """去掉下载器 AutoRename 的 `` (n)`` 变体，便于与任务名比对。"""
     return _VARIANT_PATTERN.sub("", str(name or ""))
 
 

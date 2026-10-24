@@ -200,10 +200,10 @@ class RuntimeApi(OwnerDelegator):
     def api_vue_cleanup_residue(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:
-        """手动清理 cloud-transfer-* 残留（Gopeed 中继缓存）。"""
+        """手动清理 cloud-transfer-* 残留（跨盘中继半截文件）。"""
         del payload
         try:
-            result = self._owner.cleanup_gopeed_residue("手动")
+            result = self._owner.cleanup_transfer_residue("手动")
             freed = int(result.get("freed_bytes") or 0) / (1024 * 1024)
             message = (
                 f"已清理 {result.get('deleted_files')} 个残留文件，"

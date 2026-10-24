@@ -561,7 +561,7 @@ async function cleanupResidue(field) {
   residueCleaning.value = true
   try {
     const endpoint =
-      field?.endpoint || "plugin/CloudSubscribeX/gopeed/cleanup_residue"
+      field?.endpoint || "plugin/CloudSubscribeX/residue/cleanup"
     const result = await props.api.post(endpoint, {})
     if (!result?.success) throw new Error(result?.message || "执行失败")
     emit("notify", result.message || "已开始执行", "success")

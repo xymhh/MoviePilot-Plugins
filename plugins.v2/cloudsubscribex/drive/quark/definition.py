@@ -168,8 +168,4 @@ class QuarkDriverDefinition(DriverDefinition):
             cross_transfer_downloader=(
                 config_value("cross_transfer_downloader", "builtin").lower() or "builtin"
             ),
-            gopeed_url=config_value("gopeed_url", "http://gopeed:9999"),
-            gopeed_token=config_value("gopeed_token"),
-            gopeed_path_prefix=config_value("gopeed_path_prefix"),
-            gopeed_connections=max(0, config_int("gopeed_connections", 0)),
         ))

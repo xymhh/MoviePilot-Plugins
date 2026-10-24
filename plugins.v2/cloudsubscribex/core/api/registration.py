@@ -535,7 +535,7 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "按目录 CID 全量校准 STRM",
             },
             {
-                "path": "/gopeed/cleanup_residue",
+                "path": "/residue/cleanup",
                 "endpoint": self.api_vue_cleanup_residue,
                 "methods": ["POST"],
                 "auth": "bear",

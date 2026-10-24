@@ -241,7 +241,7 @@ export function createTransferSection(options) {
             default: 0,
             min: 0,
             max: 128,
-            hint: "随任务下发给中继的 Gopeed 下载连接数；0 = 用中继自己的配置（GOPEED_CONNECTIONS，默认 64）。中继需 0.6.2 及以上版本",
+            hint: "随任务下发给中继的下载连接数；0 = 用中继自己的配置（默认 64）。中继需 0.6.2 及以上版本",
             cols: 4,
             show: (config) =>
               Boolean(config.cross_transfer_enabled) &&
@@ -298,96 +298,21 @@ export function createTransferSection(options) {
             show: enabled("cross_transfer_enabled"),
           },
           {
-            key: "cross_transfer_downloader",
-            label: "外部下载器",
-            type: "select",
-            items: [
-              { title: "内置下载器（默认）", value: "builtin" },
-              { title: "Gopeed（外部）", value: "gopeed" },
-            ],
-            hint: "「夸克→本地」一步可交给外部 Gopeed 执行，其余链路不变；选内置（关闭本项）即完全走内置下载器，Gopeed 侧失败会自动回落内置",
+            key: "cross_transfer_residue_cleanup",
+            label: "自动清理中继残留",
+            type: "switch",
+            default: true,
+            hint: "插件启动时清理一次，之后每天 03:40 清理：只删超过 24 小时的 cloud-transfer-* 及其伴随文件（运行中的下载会持续刷新修改时间）",
             cols: 4,
             show: enabled("cross_transfer_enabled"),
           },
           {
-            key: "gopeed_url",
-            label: "Gopeed 地址",
-            type: "text",
-            placeholder: "http://gopeed:9999",
-            hint: "与 MoviePilot 同网络时用容器名即可，如 http://gopeed:9999",
-            cols: 4,
-            show: (config) =>
-              Boolean(config.cross_transfer_enabled) &&
-              config.cross_transfer_downloader === "gopeed",
-          },
-          {
-            key: "gopeed_token",
-            label: "Gopeed 接口令牌",
-            type: "password",
-            hint: "在 Gopeed → 设置 → 高级 → 接口令牌 获取；仅作请求头鉴权，不写入日志/历史/通知",
-            cols: 4,
-            show: (config) =>
-              Boolean(config.cross_transfer_enabled) &&
-              config.cross_transfer_downloader === "gopeed",
-          },
-          {
-            key: "gopeed_path_prefix",
-            label: "路径前缀映射",
-            type: "text",
-            placeholder: "/downloads=/tmp",
-            hint: "可选。格式：Gopeed侧前缀=本机前缀（如 /downloads=/tmp），逗号可写多条；Gopeed 与 MP 需把同一宿主目录挂到同一容器路径，两边挂载路径不同时才需要映射",
-            cols: 8,
-            show: (config) =>
-              Boolean(config.cross_transfer_enabled) &&
-              config.cross_transfer_downloader === "gopeed",
-          },
-          {
-            key: "gopeed_connections",
-            label: "Gopeed 连接数",
-            type: "number",
-            default: 0,
-            min: 0,
-            hint: "0=沿用 Gopeed 全局连接数；夸克建议 256",
-            cols: 4,
-            show: (config) =>
-              Boolean(config.cross_transfer_enabled) &&
-              config.cross_transfer_downloader === "gopeed",
-          },
-          {
-            key: "gopeed_residue_cleanup",
-            label: "自动清理中继残留",
-            type: "switch",
-            default: true,
-            hint: "插件启动时清理一次，之后每天 04:30 清理：只删超过 24 小时、且不在 Gopeed 任务列表里的 cloud-transfer-* 文件",
-            cols: 4,
-            show: (config) =>
-              Boolean(config.cross_transfer_enabled) &&
-              config.cross_transfer_downloader === "gopeed",
-          },
-          {
-            key: "gopeed_cleanup_residue",
+            key: "cross_transfer_cleanup_residue",
             label: "立即清理残留",
             type: "cleanup-residue",
             hint: "只删 cloud-transfer-* 及其伴随文件，不碰目录里其他内容",
             cols: 8,
-            show: (config) =>
-              Boolean(config.cross_transfer_enabled) &&
-              config.cross_transfer_downloader === "gopeed",
-          },
-          {
-            key: "gopeed_downloader_info",
-            type: "info",
-            label: "Gopeed 外部下载器说明",
-            lines: [
-              "启用后仅替换「夸克下载到本地中继」这一步：取链仍由插件完成，下载交给 Gopeed REST，完成后再继续上传 115；转存、重命名、通知、历史、STRM 等链路完全不变。",
-              "Gopeed 与 MoviePilot 需要把同一宿主目录挂到同一容器路径（如都挂 /mnt/cache），路径不一致时用「路径前缀映射」换算。",
-              "接口令牌在 Gopeed → 设置 → 高级 → 接口令牌 获取；令牌只进请求头，不写入日志、历史或通知。",
-              "「外部下载器」选回内置下载器（关闭本项）即完全走内置下载器；Gopeed 连不上、鉴权失败或任务失败时也会自动回落内置，主链路不中断。",
-            ],
-            cols: 12,
-            show: (config) =>
-              Boolean(config.cross_transfer_enabled) &&
-              config.cross_transfer_downloader === "gopeed",
+            show: enabled("cross_transfer_enabled"),
           },
         ],
       },
