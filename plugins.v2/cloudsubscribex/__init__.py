@@ -169,7 +169,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.32"
+    plugin_version = "1.7.33"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -274,6 +274,7 @@ class CloudSubscribeX(_PluginBase):
     _tg_monitor_scan_limit: int = 20
     _tg_monitor_interval_minutes: int = 10
     _tg_monitor_max_items: int = 500
+    _tg_monitor_keep_unmatched: bool = False
     _gopeed_url: str = "http://gopeed:9999"
     _gopeed_token: str = ""
     _gopeed_path_prefix: str = ""
@@ -1054,6 +1055,11 @@ class CloudSubscribeX(_PluginBase):
         except (TypeError, ValueError):
             max_items = 500
         self._tg_monitor_max_items = max(50, min(max_items, 5000))
+        # 白名单模式下与本频道关注订阅无关的消息是否仍入池。
+        # 默认 False：只保留最近 50 条供回补匹配，其余不进池，避免占满配额。
+        self._tg_monitor_keep_unmatched = bool(
+            config.get("tg_monitor_keep_unmatched", False)
+        )
         quality_preferences = {
             "enabled": config.get("tg_quality_preference_enabled", True),
             "resolution_order": config.get(
@@ -1093,6 +1099,7 @@ class CloudSubscribeX(_PluginBase):
                 quality_preferences=quality_preferences,
                 auto_transfer_handler=self._auto_transfer_tg_item,
                 subscribe_provider=self._tg_subscribe_rows,
+                keep_unmatched=self._tg_monitor_keep_unmatched,
             )
         except Exception as error:  # noqa: BLE001 - 监控不可用不应拖垮插件
             logger.warning(f"TG 频道监控初始化失败：{error}")

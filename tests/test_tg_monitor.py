@@ -319,7 +319,7 @@ class ChannelRulesTest(unittest.TestCase):
         self.assertEqual(
             stats,
             {"auto_transferred": 1, "auto_skipped": 0,
-             "auto_failed": 1, "auto_pending": 0},
+             "auto_failed": 1, "auto_pending": 0, "auto_ignored": 0},
         )
 
     def test_rematch_caps_transfers_per_scan(self):
@@ -386,10 +386,11 @@ class ChannelRulesTest(unittest.TestCase):
         }
         rule = {"channel": "@a", "monitor_mode": "subscriptions"}
         stats = monitor._run_auto_transfers([(item, rule)])
-        self.assertEqual(calls, [])
-        self.assertEqual(item["match_status"], "pending")
-        self.assertIn("多个相近订阅", item["match_reason"])
-        self.assertEqual(stats["auto_pending"], 1)
+        # 1.7.33 起：同名 + 同季 + 同类型的重复登记不再算「多候选」，
+        # 自动取 id 更大（更新）的一条；否则真实资源会被永久挂起。
+        self.assertEqual(calls, [114])
+        self.assertEqual(item["status"], "transferred")
+        self.assertEqual(stats["auto_transferred"], 1)
 
         unique_monitor = TgChannelMonitor(self.owner)
         unique_monitor.configure(
@@ -405,6 +406,7 @@ class ChannelRulesTest(unittest.TestCase):
             "title": "现在就出发 第四季(2026) 第5集 [旅行/综艺]",
             "status": "new",
         }
+        calls.clear()
         stats = unique_monitor._run_auto_transfers([(unique, rule)])
         self.assertEqual(calls, [113])
         self.assertEqual(unique["status"], "transferred")

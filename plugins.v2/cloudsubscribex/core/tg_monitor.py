@@ -56,6 +56,12 @@ SCAN_CATCHUP_FACTOR = 5
 SCAN_CATCHUP_MAX = 500
 # 每次扫描最多补转 5 条旧的 pending 条目，避免一次把扫描线程卡太久。
 MAX_REMATCH_TRANSFERS = 5
+# 白名单模式下与本频道关注订阅无关的消息：默认不入池，只保留最近 N 条，
+# 供「新增订阅后回补匹配」用。2026-10-24 线上 500 条里 379 条是这类噪音，
+# 把池子占满后新资源只能在边缘排队。
+UNMATCHED_KEEP = 50
+# skipped/transferred 只是历史记录，最多占池子的一半；其余名额留给待处理条目。
+HISTORY_QUOTA_RATIO = 0.5
 
 # 邀请链接解析失败后的冷却时间：CheckChatInvite 每轮都调会被 Telegram
 # 按 420 FLOOD_WAIT 重罚，失败后先退避，别连续试探。
@@ -81,6 +87,8 @@ def _shared_monitor_registry():
         state = {"monitors": weakref.WeakSet(), "lock": threading.Lock()}
         setattr(sys, _REGISTRY_ATTR, state)
     return state["monitors"], state["lock"]
+
+
 STATUS_KEY = "status"
 
 _URL_RE = re.compile(r"https?://[^\s<>\"'）)】，。；、！？】]+")
@@ -550,6 +558,7 @@ class TgChannelMonitor:
             quality_preferences: Any = None,
             auto_transfer_handler: Any = None,
             subscribe_provider: Any = None,
+            keep_unmatched: bool = False,
     ) -> None:
         with self._lock:
             self._enabled = bool(enabled)
@@ -568,6 +577,7 @@ class TgChannelMonitor:
             )
             self._auto_transfer_handler = auto_transfer_handler
             self._subscribe_provider = subscribe_provider
+            self._keep_unmatched = bool(keep_unmatched)
             self._channels = [rule["channel"] for rule in self._channel_rules]
             # 旧字段保留，供 status/兼容读取；扫描只认每频道规则
             self._keywords = [str(item).lower() for item in keywords if str(item).strip()]
@@ -735,6 +745,13 @@ class TgChannelMonitor:
             rule_keywords = list(rule.get("keywords") or [])
             rule_exclude = list(rule.get("exclude_keywords") or [])
             rule_limit = int(rule.get("scan_limit") or self._scan_limit)
+            # 上一轮打满上限说明频道在积压：本轮临时把回溯条数翻倍（最多 4 倍），
+            # 追平后自动回落，不需要用户手调 scan_limit。
+            backlog = int(state.get(f"backlog:{raw_channel}") or 0)
+            if backlog:
+                rule_limit = min(
+                    rule_limit * (2 ** min(backlog, 2)), SCAN_CATCHUP_MAX,
+                )
             cached_id = str(
                 state.get(f"resolved:{raw_channel}") or ""
             ).strip()
@@ -867,6 +884,10 @@ class TgChannelMonitor:
                 errors.append(f"{channel_title}: 读取消息失败（{error}）")
                 continue
             messages = list(messages or [])
+            if len(messages) >= fetch_cap:
+                state[f"backlog:{raw_channel}"] = min(backlog + 1, 2)
+            else:
+                state.pop(f"backlog:{raw_channel}", None)
             scanned += len(messages)
             rule_debug.append({
                 "channel": raw_channel,
@@ -929,8 +950,7 @@ class TgChannelMonitor:
                     auto_candidates.append((item, dict(rule)))
             state[channel_key] = max_id
             state[f"{channel_key}:logic_version"] = SCAN_LOGIC_VERSION
-        if len(items) > self._max_items:
-            items = items[: self._max_items]
+        items = self._trim_items(items)
         # 旧条目补匹配：解析规则升级或订阅新增后，pending 不能永远停在旧结果。
         # 只补匹配，不重复转存；已转存/已跳过/已失败/已忽略的条目不碰。
         candidate_ids = {str(item.get("id")) for item, _rule in auto_candidates}
@@ -961,6 +981,8 @@ class TgChannelMonitor:
         auto_stats = self._run_auto_transfers(
             auto_candidates, rematch_ids=rematch_ids,
         )
+        # 自动匹配会打上 ignored 标记，这里再裁一次，让配额真正生效
+        items = self._trim_items(items)
         self._store.save(ITEMS_KEY, items)
         self._last_scan_at = time.time()
         self._last_error = "; ".join(errors[-3:])
@@ -978,6 +1000,7 @@ class TgChannelMonitor:
             "auto_skipped": auto_stats["auto_skipped"],
             "auto_failed": auto_stats["auto_failed"],
             "auto_pending": auto_stats["auto_pending"],
+            "auto_ignored": auto_stats["auto_ignored"],
         }
         self._store.save(STATUS_KEY, {
             "last_scan_at": self._last_scan_at,
@@ -1083,6 +1106,58 @@ class TgChannelMonitor:
                     }
         return selections
 
+    def _mark_unmatched(self, item: Dict[str, Any], rule: Dict[str, Any]) -> bool:
+        """白名单模式下与本频道关注订阅无关的消息 → 标记 ignored。
+
+        返回 True 表示已标记为噪音（调用方不再计入 pending）。
+        只在「频道配置了 subscriptions 模式 + 非空白名单 + 未关闭过滤」时生效：
+        用户没圈定范围时保留全部消息，行为与旧版本一致。
+        """
+        if getattr(self, "_keep_unmatched", False):
+            return False
+        if _rule_mode(rule) != "subscriptions":
+            return False
+        whitelist = _rule_whitelist(rule)
+        if not whitelist:
+            return False
+        if str(item.get("status") or "") in ("transferred", "skipped"):
+            return False
+        item["status"] = "ignored"
+        item["match_status"] = "unmatched"
+        return True
+
+    def _trim_items(self, items: List[dict]) -> List[dict]:
+        """按状态分层裁剪池子，避免历史记录把待处理条目挤出去。
+
+        - ignored（白名单外噪音）只留最近 ``UNMATCHED_KEEP`` 条，供补匹配；
+        - skipped/transferred 最多占 ``max_items * HISTORY_QUOTA_RATIO``；
+        - 其余名额全部留给 new/pending。
+        """
+        if not items:
+            return items
+        cap = max(50, int(self._max_items or 500))
+        history_cap = max(20, int(cap * HISTORY_QUOTA_RATIO))
+
+        def _ts(row):
+            return int(row.get("created_at") or 0)
+
+        ignored = [row for row in items if row.get("status") == "ignored"]
+        history = [
+            row for row in items
+            if row.get("status") in ("skipped", "transferred")
+        ]
+        active = [
+            row for row in items
+            if row.get("status") not in ("ignored", "skipped", "transferred")
+        ]
+        if len(ignored) > UNMATCHED_KEEP:
+            ignored = sorted(ignored, key=_ts, reverse=True)[:UNMATCHED_KEEP]
+        if len(history) > history_cap:
+            history = sorted(history, key=_ts, reverse=True)[:history_cap]
+        merged = active + history + ignored
+        merged.sort(key=_ts, reverse=True)
+        return merged[:cap]
+
     def _run_auto_transfers(
             self, candidates: List[Tuple[dict, dict]],
             rematch_ids: Optional[Iterable[str]] = None,
@@ -1090,7 +1165,7 @@ class TgChannelMonitor:
         """扫描后按频道规则自动转存；失败只记在条目上，不重试、不阻塞下次扫描。"""
         stats = {
             "auto_transferred": 0, "auto_skipped": 0,
-            "auto_failed": 0, "auto_pending": 0,
+            "auto_failed": 0, "auto_pending": 0, "auto_ignored": 0,
         }
         if not candidates:
             return stats
@@ -1175,6 +1250,9 @@ class TgChannelMonitor:
                     "matched" if matched.get("matched") else "pending"
                 )
                 if not matched.get("matched"):
+                    if self._mark_unmatched(item, rule):
+                        stats["auto_ignored"] += 1
+                        continue
                     stats["auto_pending"] += 1
                     if (not old_reason or old_reason != item["match_reason"]) \
                             and len(pending_samples) < 3:

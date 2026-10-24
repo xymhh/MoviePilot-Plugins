@@ -57,8 +57,14 @@ _QUALITY_RE = re.compile(
     r"H\.?264|H\.?265|HEVC|AVC|"
     r"REMUX|DoVi|(?<![A-Za-z])DV(?![A-Za-z])|WEB(?:[- ]?DL|Rip)?|HDTV|ACC|CHS|CHT|简英|双语|"
     r"10bit|SDR|简繁|简体|繁体|中字|国语|粤语|英语|字幕|内嵌|外挂|内封|简中|"
-    r"高码率|高码|臻彩(?:MAX)?|无损|\d+Audio|Audio|\d+\s*(?:FPS|帧)|"
-    r"(?<![A-Za-z])IQ(?![A-Za-z])|更新中|连载中|已完结|完结)",
+    r"高码率?版?|臻彩(?:MAX)?|无损|\d+Audio|Audio|\d+\s*(?:FPS|帧率?)|"
+    r"(?<![A-Za-z])IQ(?![A-Za-z])|更新中|连载中|已完结|完结|"
+    # 1.7.33：线上真实样本残留（"金银岛AMZN单集4.8GB""Doctor1080NF高码版精修简韩特效sup"）
+    r"AMZN|ATVP|DSNP|HMAX|iTunes|"
+    r"(?<![A-Za-z])NF(?![A-Za-z])|"
+    r"单集\s*\d+(?:\.\d+)?\s*[GgTt][Bb]?|"
+    r"特效|精修|简韩|简日|繁日|简繁日|"
+    r"sup|ass|srt)",
     re.IGNORECASE,
 )
 # 标题与演员表之间常用逗号分隔；演员名通常是 2-4 个汉字，用 / 或 、 分隔。
@@ -90,7 +96,9 @@ _BRACKET_RE = re.compile(r"[\[【(（][^\]】)）]*[\]】)）]")
 _TECH_RESIDUE_RE = re.compile(
     r"(?<=[\u4e00-\u9fff0-9])[\s\-_.·|/:：,，;；]*"
     r"(?:web|webdl|webrip|hdtv|dovi|dv|hdr\d*|sdr|aac|acc|hevc|avc|"
-    r"h26[45]|2160p|1080p|720p|\d+\.\d+)"
+    r"h26[45]|2160p|1080p|720p|\d+\.\d+|"
+    # 1.7.33：点号分割后裸分辨率与平台/字幕缩写残留
+    r"2160|1080|720|480|amzn|atvp|dsnp|hmax|nf|sup|ass|srt)"
     r"(?=$|[\s\-_.·|/:：,，;；])",
     re.IGNORECASE,
 )
@@ -271,6 +279,71 @@ def _short_suffix_score(sub_title: str, item_title: str) -> int:
     return 94
 
 
+def _alias_suffix_score(sub_title: str, item_title: str) -> int:
+    """主标题后跟别名/原名/台标残留时给 92 分。
+
+    与 ``_short_suffix_score``（2-8 字演员/副标题，94 分）互补：频道常把
+    作品原名直接贴在中文名后面，例如
+
+    - ``某暗部的少女共栖 とある暗部の少女共棲``
+    - ``FX战士久留美 FX戦士くるみちゃん``
+
+    归一化后原名与中文名连成一串，长度超过 8，旧逻辑只给 88 分前缀分，
+    低于 90 的自动转存门槛，于是真实资源被永久挂起（2026-10-24 线上 4 条）。
+
+    保护：``Doctor`` 不应该吞掉 ``Doctor Who`` —— 订阅名全是拉丁字母、
+    后缀是独立的拉丁单词时不提分。
+    """
+    if len(sub_title) < 2 or not item_title.startswith(sub_title):
+        return 0
+    suffix = item_title[len(sub_title):]
+    if len(suffix) < 3:
+        return 0
+    if suffix.isdigit():
+        return 0
+    if suffix.startswith(_TITLE_SUFFIX_FORBIDDEN):
+        return 0
+    if sub_title.isascii():
+        if re.fullmatch(r"[a-z]{2,}", suffix):
+            return 0
+    return 92
+
+
+_LATIN_ONLY_RE = re.compile(r"[a-z0-9]+")
+
+
+def dedupe_duplicate_subscriptions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """同名 + 同季 + 同类型的多条订阅只保留一条。
+
+    线上实例：``#68`` 与 ``#207`` 都是「Doctor X：白色黑手党时代」S01 电视剧，
+    两条打分完全一致（100 vs 100，差 0），于是每条真实资源都被判
+    「匹配到多个相近订阅」永久挂起——5 条 2026 新番全部卡在 pending。
+
+    保留优先级：仍在订阅中（state=R）> id 更大（更新的一条）。
+    """
+    if len(candidates) <= 1:
+        return list(candidates)
+    groups: Dict[Tuple[str, int, str], List[Dict[str, Any]]] = {}
+    for row in candidates:
+        key = (
+            normalize_title(row.get("name")),
+            int(row.get("season") or 0),
+            str(row.get("type") or ""),
+        )
+        groups.setdefault(key, []).append(row)
+    kept: List[Dict[str, Any]] = []
+    for rows in groups.values():
+        if len(rows) == 1:
+            kept.append(rows[0])
+            continue
+        kept.append(max(rows, key=lambda row: (
+            1 if str(row.get("state") or "").upper() == "R" else 0,
+            int(row.get("id") or 0),
+        )))
+    kept.sort(key=lambda row: (-int(row["score"]), int(row["id"])))
+    return kept
+
+
 def score_subscription(
         parsed: Dict[str, Any], sub: Dict[str, Any],
         ignore_season: bool = False,
@@ -298,8 +371,11 @@ def score_subscription(
             # 其余前缀只作为候选提示，不达到自动转存阈值：
             # “Doctor” 不应该自动吞掉 “Doctor Who”。
             short_score = _short_suffix_score(sub_title, item_title)
+            alias_score = _alias_suffix_score(sub_title, item_title)
             if short_score:
                 score, reason = short_score, "标题+短后缀"
+            elif alias_score:
+                score, reason = alias_score, "标题+原名/别名"
             else:
                 score, reason = 88, "标题前缀"
         elif sub_title.startswith(item_title) and len(item_title) >= 2:
@@ -351,6 +427,7 @@ def score_subscription(
         "name": str(sub.get("name") or sub.get("title") or ""),
         "season": sub_season,
         "type": str(sub.get("type") or ""),
+        "state": str(sub.get("state") or ""),
         "score": best_score,
         "reason": best_reason,
     }
@@ -424,6 +501,13 @@ def match_item(
         }
     top = candidates[0]
     close = [row for row in candidates if top["score"] - row["score"] <= 5]
+    # 同名重复登记（#68/#207 同时订阅同一部剧）不该算「多候选」：
+    # 一个订阅被登记两遍会让每条真实资源永久挂起。
+    if len(close) > 1:
+        deduped = dedupe_duplicate_subscriptions(close)
+        if len(deduped) == 1:
+            close = deduped
+            top = deduped[0]
     if len(close) > 1:
         names = "、".join(f"#{row['id']} {row['name']}" for row in close[:3])
         reason = f"匹配到多个相近订阅（{names}），留待手动选择"
