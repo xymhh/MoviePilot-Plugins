@@ -195,7 +195,6 @@ class UIConfig:
             "cross_transfer_max_concurrent": 2,
             "cross_transfer_direct_stream": True,
             "cross_transfer_upload_concurrency": 4,
-            "cross_transfer_downloader": "builtin",
             "cross_transfer_rapid_miss_action": "fallback",
             # 国内中继上传（实验）：秒传未命中时把「下载源文件 + 上传 115」整段
             # 交给国内阿里云中继执行，中继同地域走 115 内网 OSS。默认关闭。

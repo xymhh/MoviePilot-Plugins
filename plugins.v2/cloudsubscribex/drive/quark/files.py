@@ -66,7 +66,6 @@ class QuarkFileService(CloudDriveFileServiceBase):
     provider_name = "夸克"
     provider_key = "quark"
     # 外部下载器分流（默认 builtin，行为与旧版逐字节一致）；token 不进 repr/日志
-    cross_transfer_downloader: str = "builtin"
     _directory_lock: RLock = field(default_factory=RLock, repr=False)
     _directory_cache: TTLCache = field(init=False, repr=False)
 

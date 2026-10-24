@@ -163,9 +163,4 @@ class QuarkDriverDefinition(DriverDefinition):
             except (TypeError, ValueError):
                 return default
 
-        return create_quark_provider(QuarkDrive(
-            client=client,
-            cross_transfer_downloader=(
-                config_value("cross_transfer_downloader", "builtin").lower() or "builtin"
-            ),
-        ))
+        return create_quark_provider(QuarkDrive(client=client))
