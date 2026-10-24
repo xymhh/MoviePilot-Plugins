@@ -149,6 +149,14 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             cols: 8,
           },
           {
+            key: "period_episode_rules",
+            label: "期集换算规则",
+            type: "textarea",
+            placeholder: "现在就出发 = 2",
+            hint: "每行一条「节目名 = 每期集数」，用于文件名只写「第N期（上/下）」的综艺：填 2 时 第3期上 → E05、第3期下 → E06。留空表示期号就是集号（原行为）；文件名里已有 SxxExx 的以明确标记为准",
+            cols: 12,
+          },
+          {
             key: "media_server_ignore_paths",
             label: "忽略媒体库路径",
             type: "textarea",

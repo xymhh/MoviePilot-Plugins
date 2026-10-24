@@ -239,6 +239,7 @@ class UIConfig:
             "tg_monitor_scan_limit": 20,
             "tg_monitor_interval_minutes": 10,
             "tg_monitor_max_items": 500,
+            "period_episode_rules": "",
             # 白名单模式下，与本频道关注订阅无关的消息是否仍进池子。
             # 关闭（默认）时只保留最近 50 条供回补匹配，其余不入池 ——
             # 否则频道里大量无关资源会把 500 条配额占满。

@@ -26,8 +26,111 @@ class FileMatcher:
     # 跨季路径守卫：只看文件所在的分享目录/相对路径（文件名自身的季号仍走
     # contains_other_season 原逻辑）。开关由插件配置 cross_season_path_guard 写入。
     path_season_guard_enabled: bool = True
+    # 期集换算规则：{节目名: 每期集数}，由插件配置 period_episode_rules 写入。
+    # 留空（默认）时期号就是集号，行为与历史版本完全一致。
+    period_episode_rules: Dict[str, int] = {}
+    # 「第N期」中文期号标记
+    _PERIOD_MARK = re.compile(r"第\s*(\d{1,4})\s*期")
+    # 文件名里已带明确季集编号时不参与期号换算
+    _EXPLICIT_EPISODE_MARK = re.compile(
+        r"[Ss]\d{1,2}[ ._~-]*[Ee]\d{1,4}|(?<![A-Za-z])[Ee][Pp]?\d{1,4}(?![0-9])",
+    )
     _PATH_SEASON_DIR_FIELDS = ("_relative_path", "relative_path")
     _PATH_SEASON_DIR_AS_IS_FIELDS = ("parent_path", "cloud_path")
+
+    @classmethod
+    def period_episode_override(cls, name: str, mediainfo: Any = None) -> int | None:
+        """按「每期 N 集」把中文期号换算成集号。
+
+        综艺文件名常只写「第3期上」：平台解析会得到 E03，但实际按上下半场
+        各算一集时它对应 E05（第1期上=E01、第1期下=E02、第2期上=E03…）。
+        规则由插件配置 ``period_episode_rules`` 提供，配置为空时完全不介入；
+        文件名里已有明确 SxxExx 的以明确标记为准。
+        """
+        rules = cls.period_episode_rules or {}
+        if not rules or not name:
+            return None
+        if cls._EXPLICIT_EPISODE_MARK.search(name):
+            return None
+        size = cls._period_rule_size(rules, mediainfo)
+        if size <= 0:
+            return None
+        mark = cls._PERIOD_MARK.search(name)
+        if not mark:
+            return None
+        try:
+            period = int(mark.group(1))
+        except (TypeError, ValueError):
+            return None
+        if period <= 0:
+            return None
+        offset = cls._period_segment_offset(name, mark.end(), size)
+        episode = (period - 1) * size + offset + 1
+        return episode if episode > 0 else None
+
+    @classmethod
+    def _period_segment_offset(cls, name: str, mark_end: int, size: int) -> int:
+        """期号后紧跟的半场标记换算成 0 基偏移：上/无=0，中=1，下=size-1。"""
+        tail = str(name or "")[mark_end:mark_end + 6]
+        if "下" in tail:
+            return max(0, size - 1)
+        if "中" in tail:
+            return min(1, max(0, size - 1))
+        return 0
+
+    @classmethod
+    def _period_rule_size(cls, rules: Dict[str, int], mediainfo: Any = None) -> int:
+        """按当前媒体标题查每期集数；未命中返回 0（不换算）。"""
+        if mediainfo is None:
+            return 0
+        titles = []
+        for key in ("title", "en_title", "original_title", "original_name"):
+            value = getattr(mediainfo, key, None)
+            if value:
+                titles.append(str(value))
+        names = getattr(mediainfo, "names", None)
+        if names is None and isinstance(mediainfo, dict):
+            names = mediainfo.get("names")
+        if isinstance(names, (list, tuple, set)):
+            titles.extend(str(value) for value in names if value)
+        if not titles:
+            return 0
+        normalized: Dict[str, int] = {}
+        for rule_title, raw_size in (rules or {}).items():
+            try:
+                size = int(raw_size)
+            except (TypeError, ValueError):
+                continue
+            key = cls._normalize_period_rule_title(rule_title)
+            if key and size > 0:
+                normalized[key] = size
+        if not normalized:
+            return 0
+        for title in titles:
+            key = cls._normalize_period_rule_title(title)
+            if not key:
+                continue
+            if key in normalized:
+                return normalized[key]
+        for title in titles:
+            key = cls._normalize_period_rule_title(title)
+            if not key:
+                continue
+            for rule_title, size in normalized.items():
+                if rule_title in key or key in rule_title:
+                    return size
+        return 0
+
+    @staticmethod
+    def _normalize_period_rule_title(value: Any) -> str:
+        """去掉季号、年份、标点与空白，只留可比对的节目标题。"""
+        text = str(value or "").strip().lower()
+        if not text:
+            return ""
+        text = re.sub(r"[\(（\[【].*?[\)）\]】]", "", text)
+        text = re.sub(r"(?:第\s*[0-9一二三四五六七八九十]+\s*[季部])|(?:s\d{1,2}\b)", "", text)
+        text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+        return text
 
     @staticmethod
     def _matches_target_media(meta: Any, mediainfo: Any, season: int | None = None) -> bool:
@@ -398,6 +501,10 @@ class FileMatcher:
         if conflict:
             cls._log_path_season_rejection(conflict_path, season, found_season)
             return None
+        # 配置了「每期 N 集」的节目，先按中文期号换算（第3期上 -> E05）
+        period_episode = cls.period_episode_override(name, mediainfo)
+        if period_episode is not None:
+            return period_episode
         meta = cls._platform_meta(name)
         if not meta:
             return None

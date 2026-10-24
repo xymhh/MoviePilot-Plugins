@@ -169,7 +169,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.37"
+    plugin_version = "1.7.38"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -284,6 +284,8 @@ class CloudSubscribeX(_PluginBase):
     _transfer_risk_cooldown: int = 1800
     _skip_other_season_dirs: bool = True
     _cross_season_path_guard: bool = True
+    # 「节目名 = 每期集数」多行配置：综艺期号换算成集号（留空=期号即集号）
+    _period_episode_rules_text: str = ""
     _video_extensions: List[str] = [".mkv", ".mp4", ".avi", ".iso"]
     _subtitle_extensions: List[str] = [
         ".srt", ".ass", ".ssa", ".vtt", ".sub", ".sup", ".idx", ".smi", ".mks"
@@ -972,6 +974,31 @@ class CloudSubscribeX(_PluginBase):
         Thread(target=_run_once, daemon=True).start()
 
     @staticmethod
+    def _parse_period_episode_rules(value: Any) -> Dict[str, int]:
+        """解析「节目名 = 每期集数」多行配置。
+
+        例：``现在就出发 = 2`` 表示该节目每期分上下两集，第3期上 → E05。
+        只接受 1~10 之间的整数，其余行静默忽略，避免把写错的配置带进匹配。
+        """
+        rules: Dict[str, int] = {}
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            normalized = line.replace("：", "=").replace("＝", "=")
+            if "=" not in normalized:
+                continue
+            key, _, raw_size = normalized.partition("=")
+            key = key.strip()
+            try:
+                size = int(str(raw_size).strip())
+            except (TypeError, ValueError):
+                continue
+            if key and 1 <= size <= 10:
+                rules[key] = size
+        return rules
+
+    @staticmethod
     def _split_multiline(value: Any) -> list:
         """把设置页的多行/逗号文本拆成去重列表。
 
@@ -1349,6 +1376,13 @@ class CloudSubscribeX(_PluginBase):
         # 跨季路径守卫：分享目录季号与目标季冲突时拒绝进候选（file_matcher 类级开关）
         self._cross_season_path_guard = bool(config.get("cross_season_path_guard", True))
         FileMatcher.path_season_guard_enabled = self._cross_season_path_guard
+        # 期集换算规则（综艺「第N期上/下」→ 集号），空配置保持原行为
+        self._period_episode_rules_text = str(
+            config.get("period_episode_rules", "") or ""
+        )
+        FileMatcher.period_episode_rules = self._parse_period_episode_rules(
+            self._period_episode_rules_text
+        )
         configured_video_exts, configured_sub_exts = MediaFileParser.configure_extensions(
             video_extensions=config.get("video_extensions"),
             subtitle_extensions=config.get("subtitle_extensions"),
