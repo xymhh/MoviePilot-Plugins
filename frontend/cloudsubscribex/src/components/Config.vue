@@ -95,14 +95,6 @@
               <!-- 底部：开源社区链接与支持 -->
               <div class="status-panel-links">
                 <a
-                  class="status-action-link"
-                  title="赞赏支持作者"
-                  @click="rewardDialogVisible = true">
-                  <v-icon icon="mdi-coffee-outline" size="13" class="mr-1" />
-                  <span>赞赏支持</span>
-                  <v-icon icon="mdi-chevron-right" size="12" class="ml-auto opacity-50" />
-                </a>
-                <a
                   v-if="repoUrl"
                   :href="repoUrl"
                   target="_blank"
@@ -243,7 +235,6 @@
       :provider="directoryProvider"
       :initial-path="directoryInitialPath"
       @select="selectDirectory" />
-    <RewardDialog v-model="rewardDialogVisible" />
     <v-dialog v-model="sourceTestVisible" max-width="640" class="source-test-dialog">
       <v-card class="source-test-card" :class="{ 'source-test-card--results': tmdbSearched || testSubmitted }">
         <v-card-title class="source-test-header d-flex align-center ga-2">
@@ -675,9 +666,6 @@ import {createConfigSections} from "../config/fields.js";
 
 const QrCodeDialog = defineAsyncComponent(() => import("./dialogs/QrCodeDialog.vue"))
 const DirectoryDialog = defineAsyncComponent(() => import("./dialogs/DirectoryDialog.vue"));
-const RewardDialog = defineAsyncComponent(() => import("./dialogs/RewardDialog.vue"));
-
-const rewardDialogVisible = ref(false);
 
 const props = defineProps({
   api: { type: [Object, Function], required: true },
@@ -2550,23 +2538,6 @@ watch(
 
 .save-config-button:hover :deep(.v-icon) {
   transform: scale(1.12);
-}
-
-.reward-card {
-  background-color: rgb(var(--v-theme-surface)) !important;
-  border: 1px solid rgba(var(--v-border-color), 0.12);
-}
-
-.reward-img-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-}
-
-.reward-qrcode {
-  background-color: #ffffff !important;
-  padding: 8px;
-  border: 1px solid rgba(var(--v-border-color), 0.15);
 }
 
 .save-config-button:active {

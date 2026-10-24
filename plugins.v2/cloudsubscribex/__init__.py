@@ -159,13 +159,13 @@ class CloudSubscribeX(_PluginBase):
         return self.chain.post_message(notification)
 
     # 插件名称
-    plugin_name = "网盘订阅助手（CloudSubscribeX）"
+    plugin_name = "网盘订阅助手"
     # 插件描述
-    plugin_desc = "整合网盘能力与多渠道资源搜索，自动查找并补充订阅缺失的影视内容，支持跨盘转存（如夸克→115）、洗版与整理。"
+    plugin_desc = "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。"
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.29"
+    plugin_version = "1.7.30"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
