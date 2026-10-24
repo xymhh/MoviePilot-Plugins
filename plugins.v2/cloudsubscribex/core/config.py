@@ -157,6 +157,11 @@ class UIConfig:
             "media_server_ignore_paths": "",
             "media_server_path_mappings": "",
             "media_server_refresh_delay": 0,
+            # 内置 Emby 302 反代：独立端口，播放请求命中 STRM 时 302 到网盘 CDN。
+            "emby_proxy_enabled": False,
+            "emby_proxy_port": 3010,
+            "emby_proxy_upstream": "",
+            "emby_proxy_allowed_clients": "",
             "emby_mediainfo_enabled": False,
             "platform_media_sync_enabled": False,
             "platform_deep_delete_enabled": False,

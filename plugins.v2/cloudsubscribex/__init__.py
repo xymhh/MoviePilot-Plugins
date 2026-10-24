@@ -327,6 +327,10 @@ class CloudSubscribeX(_PluginBase):
     _media_server_ignore_paths: str = ""
     _media_server_path_mappings: str = ""
     _media_server_refresh_delay: int = 0
+    _emby_proxy_enabled: bool = False
+    _emby_proxy_port: int = 3010
+    _emby_proxy_upstream: str = ""
+    _emby_proxy_allowed_clients: str = ""
     _emby_mediainfo_enabled: bool = False
     _platform_media_sync_enabled: bool = False
     _platform_deep_delete_enabled: bool = False
@@ -543,6 +547,13 @@ class CloudSubscribeX(_PluginBase):
         # 初始化独立数据库并修复历史分组键。
         self._get_data_store().initialize()
         self._apply_plugin_config(config, reset_runtime=True)
+        # 内置 Emby 302 反代：开关关闭时不建线程、不占端口。
+        try:
+            from .core.api.emby_proxy import start_emby_proxy
+
+            start_emby_proxy(self)
+        except Exception as error:  # noqa: BLE001 - 反代失败不得影响插件主流程
+            logger.error(f"Emby 302 反代初始化失败：{error}")
 
     def _migrate_from_legacy_plugin(self, config: Optional[dict]) -> Optional[dict]:
         """首次启动时把旧插件 ID（CloudSubscribe）的配置/数据/私有库搬到独立 ID。
@@ -641,6 +652,10 @@ class CloudSubscribeX(_PluginBase):
             "media_server_ignore_paths",
             "media_server_path_mappings",
             "media_server_refresh_delay",
+            "emby_proxy_enabled",
+            "emby_proxy_port",
+            "emby_proxy_upstream",
+            "emby_proxy_allowed_clients",
             "emby_mediainfo_enabled",
             "platform_media_sync_enabled",
             "platform_deep_delete_enabled",
@@ -791,6 +806,14 @@ class CloudSubscribeX(_PluginBase):
         self._start_strm_full_scan()
         self._start_strm_increment()
         self._start_organize_schedule()
+        # 配置保存可能改了开关/端口：apply 末尾同步一次代理运行态
+        # （stop_service 在重载开头已经停过，这里按新配置重新决定起不起）。
+        try:
+            from .core.api.emby_proxy import start_emby_proxy
+
+            start_emby_proxy(self)
+        except Exception as error:  # noqa: BLE001 - 反代失败不得影响插件主流程
+            logger.error(f"Emby 302 反代同步启停失败：{error}")
 
         # 调度一次性任务。
         if self._auto_subscribe_onlyonce:
@@ -1262,6 +1285,18 @@ class CloudSubscribeX(_PluginBase):
         self._media_server_refresh_delay = max(
             0, int(config.get("media_server_refresh_delay", 0) or 0)
         )
+        self._emby_proxy_enabled = bool(
+            config.get("emby_proxy_enabled", False)
+        )
+        self._emby_proxy_port = max(
+            1, int(config.get("emby_proxy_port", 3010) or 3010)
+        )
+        self._emby_proxy_upstream = str(
+            config.get("emby_proxy_upstream", "") or ""
+        ).strip()
+        self._emby_proxy_allowed_clients = str(
+            config.get("emby_proxy_allowed_clients", "") or ""
+        ).strip()
         self._emby_mediainfo_enabled = bool(
             config.get("emby_mediainfo_enabled", False)
         )
@@ -1675,6 +1710,12 @@ class CloudSubscribeX(_PluginBase):
 
     def stop_service(self, preserve_subscribe_queue: bool = False):
         """停止服务"""
+        try:
+            from .core.api.emby_proxy import stop_emby_proxy
+
+            stop_emby_proxy(self)
+        except Exception as error:  # noqa: BLE001 - 反代停止失败不得阻塞插件卸载
+            logger.warning(f"Emby 302 反代停止失败：{error}")
         if not preserve_subscribe_queue and self._subscribe_search_queue_lock is not None:
             self.cancel_pending_subscribe_searches(shutdown=True)
             executor = self._sync_operation_executor

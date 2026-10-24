@@ -28,6 +28,7 @@ from ..agent import (
     CloudSubscribeSyncTool,
 )
 from ..config import UIConfig
+from .emby_proxy import emby_proxy_status, restart_emby_proxy
 
 
 class _WorkflowActionHandler(dict):
@@ -535,6 +536,20 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "STRM 播放直链 302 跳转（pickcode → 网盘直链）",
             },
             {
+                "path": "/emby_proxy/status",
+                "endpoint": self.api_emby_proxy_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "Emby 302 反代运行状态",
+            },
+            {
+                "path": "/emby_proxy/restart",
+                "endpoint": self.api_emby_proxy_restart,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重启 Emby 302 反代",
+            },
+            {
                 "path": "/strm/full_scan",
                 "endpoint": self.api_vue_strm_full_scan,
                 "methods": ["POST"],
@@ -626,6 +641,14 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "115 网盘整理：最近执行摘要",
             },
         ]
+
+    def api_emby_proxy_status(self) -> Dict[str, Any]:
+        """返回内置 Emby 302 反代的开关、运行态与命中统计。"""
+        return emby_proxy_status(self._owner)
+
+    def api_emby_proxy_restart(self) -> Dict[str, Any]:
+        """停再起自带反代；配置关闭时只停不起。"""
+        return restart_emby_proxy(self._owner)
 
     def get_dashboard_meta(self) -> List[Dict[str, str]]:
         if not self._enabled:
