@@ -597,13 +597,16 @@ class TgChannelMonitor:
     def start(self) -> None:
         monitors, monitors_lock = _shared_monitor_registry()
         with monitors_lock:
-            for other in list(monitors):
-                if other is not self:
-                    try:
-                        other.stop()
-                    except Exception:  # noqa: BLE001 - 旧实例清理失败不阻塞
-                        pass
+            # 只在这里做集合读写。禁止持锁调用其它实例的方法：
+            # 对端的 stop() 会再次获取同一把不可重入锁，同线程二次获取即死锁
+            # （2026-10-24 插件更新后长期停在“等待加载”的根因）。
+            others = [other for other in monitors if other is not self]
             monitors.add(self)
+        for other in others:
+            try:
+                other.stop()
+            except Exception:  # noqa: BLE001 - 旧实例清理失败不阻塞
+                pass
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return

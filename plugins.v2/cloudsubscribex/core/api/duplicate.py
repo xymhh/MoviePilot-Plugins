@@ -12,7 +12,6 @@
 
 from typing import Any, Dict, List, Optional
 
-from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 
 from .. import OwnerDelegator
@@ -69,6 +68,10 @@ class DuplicateApi(OwnerDelegator):
         paused: List[int] = []
         failed: List[Dict[str, Any]] = []
         try:
+            # 延迟导入：插件模块加载阶段不触碰 app.db，避免在 MP 启动 /
+            # 更新流程里因数据库尚未就绪而阻塞插件加载。
+            from app.db.subscribe_oper import SubscribeOper
+
             oper = SubscribeOper()
             for subscribe_id in targets:
                 try:
