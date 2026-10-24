@@ -678,7 +678,19 @@ class EmbyProxyService:
                 origin = build_origin(scope, headers)
                 rewritten = rewrite_playback_info(payload, origin)
                 content = encrypt_playback_payload(rewritten)
-                response_headers["Content-Type"] = "application/json; charset=utf-8"
+                # response_headers 是 (key, value) 列表（保留重复 Set-Cookie），
+                # 不能按字典下标赋值。
+                response_headers = [
+                    (key, value)
+                    for key, value in response_headers
+                    if str(key).lower() != "content-type"
+                ]
+                response_headers.append(
+                    ("Content-Type", "application/json; charset=utf-8")
+                )
+                logger.info(
+                    f"Emby 反代：PlaybackInfo 已改写为 302 直连 {path}"
+                )
         await _send_response_start(
             send, response.status_code, response_headers
         )
