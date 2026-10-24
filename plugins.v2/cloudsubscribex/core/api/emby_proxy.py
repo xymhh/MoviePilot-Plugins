@@ -416,6 +416,15 @@ class EmbyProxyService:
             for key, value in scope.get("headers") or []
         }
         action = classify_request(path, query, headers)
+        if (
+            action in (STREAM_REDIRECT, PLAYBACK_INFO)
+            or "stream" in path.lower()
+            or "playbackinfo" in path.lower()
+        ):
+            logger.info(
+                f"Emby 反代：{scope.get('method')} {path} "
+                f"action={action} ua={headers.get('user-agent', '')[:48]}"
+            )
 
         if action == INDEX_REDIRECT:
             await _send_redirect(send, "/web/index.html")
