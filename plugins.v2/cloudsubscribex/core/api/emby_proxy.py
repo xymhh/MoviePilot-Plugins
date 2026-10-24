@@ -158,7 +158,28 @@ class EmbyProxyService:
 
     @staticmethod
     def _media_server_fallback(field: str) -> str:
-        """从 MP 的媒体服务器配置里取 host / api_key。"""
+        """从 MP 系统设置里已配置的 Emby/Jellyfin 取 host / apikey。
+
+        媒体服务器在 MP 里存成 ``{"name","type","enabled","config":{...}}``，
+        ``MediaServerHelper.get_configs()`` 并不保证暴露扁平 host 字段，因此优先
+        直接读系统设置，helper 只作二级兜底。
+        """
+        config_key = {"host": "host", "api_key": "apikey"}.get(field, field)
+        try:
+            from app.db.systemconfig_oper import SystemConfigOper
+            from app.schemas.types import SystemConfigKey
+
+            servers = SystemConfigOper().get(SystemConfigKey.MediaServers) or []
+            for item in servers:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("type") or "").lower() not in ("emby", "jellyfin"):
+                    continue
+                value = str((item.get("config") or {}).get(config_key) or "").strip()
+                if value:
+                    return value
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"读取 MP 媒体服务器设置失败：{error}")
         try:
             try:
                 from app.helper.mediaserver import MediaServerHelper
