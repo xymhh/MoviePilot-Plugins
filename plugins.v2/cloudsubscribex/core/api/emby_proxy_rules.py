@@ -32,7 +32,7 @@ _PLAYBACK_INFO_PATTERN = re.compile(
 )
 #: 视频流路径。``stream.mkv`` 这种带扩展名的写法也要认。
 _VIDEO_STREAM_PATTERN = re.compile(
-    r"(?:^|/)(?:emby/)?Videos/[^/]+/(?:stream(?:\.[^/]*)?|original)/?$",
+    r"(?:^|/)(?:emby/)?Videos/[^/]+/(?:stream|original)(?:\.[^/]*)?/?$",
     re.IGNORECASE,
 )
 #: 音频流路径。``universal`` 是 Emby 客户端的音频通用入口。

@@ -68,6 +68,28 @@ class ClassifyRequestTest(unittest.TestCase):
             rules.STREAM_REDIRECT,
         )
 
+    def test_video_original_strm(self):
+        """Yamby 播 strm 走 /emby/videos/{id}/original.strm，必须命中 302。"""
+        for path in (
+            "/emby/videos/680340/original.strm",
+            "/videos/680340/original.strm",
+            "/emby/videos/680340/original",
+            "/emby/videos/680340/stream.mkv",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(
+                    rules.classify_request(path, "", {}),
+                    rules.STREAM_REDIRECT,
+                )
+
+    def test_subtitle_is_not_stream(self):
+        self.assertEqual(
+            rules.classify_request(
+                "/emby/videos/680340/subtitles/1/0/Stream.srt", "", {}
+            ),
+            rules.PASSTHROUGH,
+        )
+
     def test_video_stream_with_extension(self):
         self.assertEqual(
             rules.classify_request("/Videos/1/stream.mkv"),
