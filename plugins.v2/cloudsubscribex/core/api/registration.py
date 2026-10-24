@@ -528,6 +528,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "清空搜索和分享缓存",
             },
             {
+                "path": "/redirect",
+                "endpoint": self.api_strm_redirect,
+                "methods": ["GET", "HEAD"],
+                "allow_anonymous": True,
+                "summary": "STRM 播放直链 302 跳转（pickcode → 网盘直链）",
+            },
+            {
                 "path": "/strm/full_scan",
                 "endpoint": self.api_vue_strm_full_scan,
                 "methods": ["POST"],

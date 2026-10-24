@@ -12,6 +12,20 @@ https://github.com/xymhh/MoviePilot-Plugins
 
 ---
 
+## 只装一个插件就够了（CloudSubscribeX 1.7.39+）
+
+CS 1.7.39 起自带 STRM 全量 / 增量与 Emby 302 播放，**不再需要装「115网盘STRM助手」（P115StrmHelper）**：
+
+| 能力 | 实现 | 配置 |
+| --- | --- | --- |
+| 播放 302 | `GET /api/v1/plugin/CloudSubscribeX/redirect?pickcode=xxx&file_name=yyy`，实时换 115 直链后 302（直链缓存 6 小时，流量不过 MoviePilot） | 把 STRM 地址改成 `http://<MP地址>/api/v1/plugin/CloudSubscribeX/redirect`，模板 `{base_url}?pickcode={pickcode}&file_name={file_name}` |
+| 增量补齐 | 每 10 分钟扫一遍媒体库，只补缺失 `.strm`，不改写已有文件 | `strm_increment_enabled`（默认开）/ `strm_increment_minutes`（默认 10）/ `strm_increment_budget`（默认 180 秒） |
+| 全量校准 | 每天 04:20 按目录 CID 遍历，分批 + 断点续扫，可选覆盖 | `strm_full_scan_enabled` / `strm_full_scan_overwrite` / `strm_full_scan_budget`（由设置页「STRM」分组控制） |
+
+迁移三步：① 确认新 STRM 模板能播出画面（先手动改一部剧的 `.strm` 试）；② 设置页把 `strm_base_url` + `strm_url_template` 改成本插件 redirect；③ 停用并卸载 P115StrmHelper。全库 `.strm` 内容不会自动重写 —— 新增集数走增量直接生成新模板，历史文件保持原样仍能用（直到 115 直链服务失效，届时跑一次全量校准 `strm_full_scan_overwrite=true`）。
+
+---
+
 ## 沿革：2026-10-11 先撤下、当天恢复
 
 | 内容 | 现状 |

@@ -20,6 +20,7 @@ from app.schemas import Notification
 from app.schemas.types import ChainEventType, EventType, NotificationType
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from .core import (
     CloudDriveManager,
@@ -40,6 +41,7 @@ from .core.api import (
     OrganizeApi,
     PageApi,
     QRCodeService,
+    RedirectApi,
     RuntimeApi,
     SearchApi,
     SyncApi,
@@ -88,6 +90,7 @@ _COMPONENT_TYPES = (
     RuntimeApi,
     MediaLibraryApi,
     QRCodeService,
+    RedirectApi,
     HistoryApi,
     LedgerApi,
     DuplicateApi,
@@ -169,7 +172,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.38"
+    plugin_version = "1.7.39"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -314,6 +317,10 @@ class CloudSubscribeX(_PluginBase):
     _strm_full_scan_enabled: bool = True
     _strm_full_scan_overwrite: bool = False
     _strm_full_scan_scheduler: Optional[BackgroundScheduler] = None
+    _strm_increment_enabled: bool = True
+    _strm_increment_minutes: int = 10
+    _strm_increment_budget: int = 180
+    _strm_increment_scheduler: Optional[BackgroundScheduler] = None
     _media_server_refresh_enabled: bool = False
     _media_servers: List[str] = []
     _media_server_ignore_paths: str = ""
@@ -781,6 +788,7 @@ class CloudSubscribeX(_PluginBase):
         self._log_relay_state()
         self._start_residue_cleanup()
         self._start_strm_full_scan()
+        self._start_strm_increment()
         self._start_organize_schedule()
 
         # 调度一次性任务。
@@ -894,6 +902,74 @@ class CloudSubscribeX(_PluginBase):
             self._strm_full_scan_scheduler = scheduler
         except Exception as error:  # noqa: BLE001
             logger.warning(f"STRM 全量校准定时任务启动失败：{error}")
+
+    def run_strm_increment(self, reason: str = "增量") -> dict:
+        """轻量增量补齐：只补缺失的 STRM，不改写已有文件。
+
+        与全量共用同一把扫描锁，避免两条链路同时写同一目录；
+        不写断点文件，保证不会污染全量校准的续扫进度。
+        """
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler or not hasattr(sync_handler, "rebuild_strm_files"):
+            return {"success": False, "message": "同步服务未就绪"}
+        lock = self.__dict__.get("_strm_scan_lock")
+        if lock is None:
+            lock = Lock()
+            self._strm_scan_lock = lock
+        if not lock.acquire(blocking=False):
+            logger.debug(f"STRM 增量补齐（{reason}）：全量校准正在运行，本次跳过")
+            return {"success": False, "message": "全量校准运行中，本次跳过"}
+
+        budget = max(30, int(getattr(self, "_strm_increment_budget", 180) or 180))
+
+        def _run():
+            try:
+                stats = sync_handler.rebuild_strm_files(
+                    overwrite=False,
+                    time_budget_seconds=budget,
+                    state_path=None,
+                )
+                created = int(stats.get("created") or 0)
+                errors = int(stats.get("errors") or 0)
+                if created or errors:
+                    logger.info(
+                        f"STRM 增量补齐（{reason}）：目录 {stats.get('directories')}，"
+                        f"视频 {stats.get('files')}，新增 {created}，"
+                        f"失败 {errors}，跳过 {stats.get('skipped')}"
+                    )
+                else:
+                    logger.debug(
+                        f"STRM 增量补齐（{reason}）：无新增，"
+                        f"已检查 {stats.get('files')} 个视频"
+                    )
+            except Exception as error:  # noqa: BLE001
+                logger.error(f"STRM 增量补齐（{reason}）异常：{error}")
+            finally:
+                lock.release()
+
+        Thread(target=_run, daemon=True).start()
+        return {"success": True, "message": "已开始后台增量补齐"}
+
+    def _start_strm_increment(self) -> None:
+        """每 N 分钟补一次缺失 STRM（可在设置页关闭）。"""
+        if not (self._strm_increment_enabled and self._strm_generate_enabled):
+            return
+        if self.__dict__.get("_strm_increment_scheduler") is not None:
+            return
+        try:
+            scheduler = BackgroundScheduler(timezone=settings.TZ)
+            scheduler.add_job(
+                func=lambda: self.run_strm_increment("定时"),
+                trigger=IntervalTrigger(
+                    minutes=max(1, int(self._strm_increment_minutes or 10))
+                ),
+                id="cloudsubscribe_strm_increment",
+                replace_existing=True,
+            )
+            scheduler.start()
+            self._strm_increment_scheduler = scheduler
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"STRM 增量补齐定时任务启动失败：{error}")
 
     def _start_organize_schedule(self) -> None:
         """按 Cron 定时扫描 115 整理源目录；默认关闭。"""
@@ -1419,6 +1495,19 @@ class CloudSubscribeX(_PluginBase):
         self._strm_generate_enabled = bool(config.get("strm_generate_enabled", True))
         self._strm_full_scan_enabled = bool(config.get("strm_full_scan_enabled", True))
         self._strm_full_scan_overwrite = bool(config.get("strm_full_scan_overwrite", False))
+        self._strm_increment_enabled = bool(config.get("strm_increment_enabled", True))
+        try:
+            self._strm_increment_minutes = max(
+                1, min(int(config.get("strm_increment_minutes", 10) or 10), 1440)
+            )
+        except (TypeError, ValueError):
+            self._strm_increment_minutes = 10
+        try:
+            self._strm_increment_budget = max(
+                30, min(int(config.get("strm_increment_budget", 180) or 180), 3600)
+            )
+        except (TypeError, ValueError):
+            self._strm_increment_budget = 180
         self._organize_source_path = str(config.get("organize_source_path", "") or "").strip()
         try:
             organize_max_files = int(config.get("organize_max_files", 500) or 500)

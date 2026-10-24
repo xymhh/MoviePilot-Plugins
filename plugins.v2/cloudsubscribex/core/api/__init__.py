@@ -10,6 +10,7 @@ from .media_library import MediaLibraryApi
 from .organize import OrganizeApi
 from .page import PageApi
 from .qrcode import QRCodeService
+from .redirect import RedirectApi
 from .registration import MoviePilotRegistration
 from .runtime import RuntimeApi
 from .search import SearchApi
@@ -28,6 +29,7 @@ __all__ = [
     "MoviePilotRegistration",
     "PageApi",
     "QRCodeService",
+    "RedirectApi",
     "RuntimeApi",
     "SearchApi",
     "SyncApi",
