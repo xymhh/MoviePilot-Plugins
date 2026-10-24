@@ -908,6 +908,11 @@ const navGroups = computed(() => {
       items: ["tg", "drive", "search"].map((v) => map.get(v)).filter(Boolean),
     },
     {
+      // 1.7.43：navGroups 是白名单，新增 section 必须登记，否则导航不渲染
+      name: "播放与媒体",
+      items: ["strm", "emby"].map((v) => map.get(v)).filter(Boolean),
+    },
+    {
       name: "服务通知",
       items: ["checkin", "notify"].map((v) => map.get(v)).filter(Boolean),
     },
