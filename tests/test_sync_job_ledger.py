@@ -171,6 +171,8 @@ class SyncJobKeyTests(unittest.TestCase):
             (JOB_RETRY_WAIT, JOB_CANCELED),
             (JOB_DONE, JOB_QUEUED),
             (JOB_DONE, JOB_NEEDS_ATTENTION),
+            # 用户停止的作业可以重新入队（1.7.37）
+            (JOB_CANCELED, JOB_QUEUED),
         }
         for from_state, to_state in allowed:
             self.assertTrue(
@@ -390,6 +392,41 @@ class SyncJobRepositoryTests(unittest.TestCase):
         self.assertEqual(row.attempt, 0)
         self.assertEqual(row.result_name, "")
         self.assertIsNone(row.finished_at)
+
+    def test_canceled_job_can_be_reopened_and_reclaimed(self):
+        """用户停止留下的 canceled 不能永久挡住同内容的重新转存。"""
+        values = self._values()
+        self._create(values)
+        key = values["job_key"]
+        self.assertTrue(
+            self.repo.claim(key, "worker-a", ttl_seconds=60, now=1000, db=self.db)
+        )
+        self.assertTrue(
+            self.repo.transition(
+                key, JOB_TRANSFERRING, JOB_CANCELED, owner="worker-a", now=1001,
+                last_error="用户停止", db=self.db,
+            )
+        )
+        self.db.commit()
+        self.assertFalse(
+            self.repo.claim(key, "worker-b", ttl_seconds=60, now=1002, db=self.db)
+        )
+        self.db.commit()
+
+        # 用户重新发起同步 → 重开并归零
+        self.assertTrue(
+            self.repo.reopen_canceled(
+                key, "用户重新发起同步", now=1003, db=self.db,
+            )
+        )
+        self.db.commit()
+        row = self.repo.get(key, db=self.db)
+        self.assertEqual(row.state, JOB_QUEUED)
+        self.assertEqual(row.attempt, 0)
+        self.assertIsNone(row.finished_at)
+        self.assertTrue(
+            self.repo.claim(key, "worker-b", ttl_seconds=60, now=1004, db=self.db)
+        )
 
     def test_heartbeat_only_for_owner(self):
         values = self._values()

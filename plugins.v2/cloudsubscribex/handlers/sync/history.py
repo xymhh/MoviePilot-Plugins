@@ -1246,6 +1246,12 @@ class HistoryService(OwnerDelegator):
             # 文件级兜底匹配：历史记录缺 finalize_key（或值不同）时，
             # 用 (file_name, cloud_dir) 精确相等定位，禁止模糊/包含匹配。
             fallback_pairs: Dict[Tuple[str, str], str] = {}
+            # 目录+季集兜底：平台侧历史记录的可能是带集名的正式名
+            # （「金银岛 - S01E02 - 第 2 集.mkv」），而 pending 里存的是上游
+            # 资源名（「金银岛 - S01E02.mp4」），文件名对不上时按
+            # 「同一目标目录 + 同一季集号」定位，避免终态永远写不进去而
+            # 每 60 秒重排队（1.7.37 修复）。
+            fallback_episodes: Dict[Tuple[str, int, int], str] = {}
             if isinstance(pending, dict):
                 for key in normalized_keys:
                     entry = pending.get(key)
@@ -1257,6 +1263,16 @@ class HistoryService(OwnerDelegator):
                     )
                     if pair[0] and pair[1]:
                         fallback_pairs.setdefault(pair, key)
+                    try:
+                        episode_key = (
+                            str(entry.get("cloud_dir") or "").strip(),
+                            int(entry.get("season") or 0),
+                            int(entry.get("episode") or 0),
+                        )
+                    except (TypeError, ValueError):
+                        episode_key = ("", 0, 0)
+                    if episode_key[0] and episode_key[1] and episode_key[2]:
+                        fallback_episodes.setdefault(episode_key, key)
             history = self._get_data("history") or []
             changed = False
             for item in history:
@@ -1274,6 +1290,17 @@ class HistoryService(OwnerDelegator):
                     )
                     if record_pair[0] and record_pair[1]:
                         matched_key = fallback_pairs.get(record_pair)
+                if not matched_key and fallback_episodes:
+                    try:
+                        record_episode = (
+                            str(item.get("cloud_dir") or "").strip(),
+                            int(item.get("season") or 0),
+                            int(item.get("episode") or 0),
+                        )
+                    except (TypeError, ValueError):
+                        record_episode = ("", 0, 0)
+                    if record_episode[0] and record_episode[1] and record_episode[2]:
+                        matched_key = fallback_episodes.get(record_episode)
                 if not matched_key:
                     continue
                 matched_records += 1

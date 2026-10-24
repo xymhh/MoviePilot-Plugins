@@ -2,6 +2,7 @@
 
 import sys
 import threading
+import time
 import types
 import unittest
 from unittest.mock import MagicMock, patch
@@ -668,12 +669,32 @@ class TestHistoryResyncTermination(unittest.TestCase):
             self.assertEqual(mock_logger.warning.call_count, 1)
             self.assertEqual(mock_logger.debug.call_count, 2)
             mock_logger.reset_mock()
+            # 历史终态重排队现在还有墙钟上限：用「刚刚创建」的 item 验证 10 次
+            # 计数以内会重排队，而不是被墙钟上限直接结算。
+            resync_item = {
+                "file_name": "Show.S01E01.mkv",
+                "created_at": time.time(),
+                "_monitor_token": "tok",
+            }
             for _ in range(3):
                 self.assertFalse(
-                    service._resolve_history_record(item, pending_key, "成功")
+                    service._resolve_history_record(resync_item, pending_key, "成功")
                 )
             self.assertEqual(mock_logger.warning.call_count, 1)
             self.assertEqual(mock_logger.debug.call_count, 2)
+
+    def test_resync_gives_up_after_wall_clock_limit(self):
+        """历史一直没落盘时，超过墙钟上限必须直接结算，不能让卡片卡十几分钟。"""
+        service = self._service()
+        self._seed_pending(service)
+        pending_key = "pansou:ABCDEF:123"
+        item = {
+            "file_name": "Show.S01E01.mkv",
+            "created_at": time.time() - service._HISTORY_RESYNC_MAX_AGE_SECONDS - 1,
+            "_monitor_token": "tok",
+        }
+        self.assertTrue(service._resolve_history_record(item, pending_key, "成功"))
+        self.assertNotIn(pending_key, service._get_data_store[_OFFLINE_KEY])
 
 
 if __name__ == "__main__":

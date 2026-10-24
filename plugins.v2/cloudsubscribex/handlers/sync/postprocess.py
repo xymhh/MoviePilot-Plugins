@@ -148,6 +148,8 @@ class PostprocessService(OwnerDelegator):
     )
 
     _FINALIZE_MAX_FAILURES = 5
+    # 历史记录终态重排队的墙钟上限（秒）；到点强制结算，避免 UI 长时间卡住
+    _HISTORY_RESYNC_MAX_AGE_SECONDS = 1800
     _FINALIZE_DEAD_LOG = "文件后处理连续失败 {} 次，已终止重试：{}"
     _FINALIZE_DEAD_REASON = "文件后处理连续失败 {} 次，已停止自动重试"
     _FINALIZE_DEAD_TITLE = "网盘文件后处理失败"
@@ -896,7 +898,14 @@ class PostprocessService(OwnerDelegator):
             return True
         limit = int(getattr(self, "_HISTORY_RESYNC_LIMIT", 10) or 10)
         retries = int(item.get("history_resync_count") or 0)
-        if retries < limit:
+        # 除次数上限外再加墙钟上限：10 次 ×60 秒会让卡片在 UI 上「卡」十几分钟，
+        # 而真正的原因（历史记录文件名与上游资源名不一致）往往不会自愈。
+        max_age = float(
+            getattr(self, "_HISTORY_RESYNC_MAX_AGE_SECONDS", 1800) or 1800
+        )
+        created_at = float(item.get("created_at") or 0)
+        aged_out = bool(created_at) and (time.time() - created_at) >= max_age
+        if retries < limit and not aged_out:
             retries += 1
             item["history_resync_count"] = retries
             item["history_ready"] = False

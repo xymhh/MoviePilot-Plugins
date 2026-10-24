@@ -62,7 +62,10 @@ ALLOWED_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     JOB_DONE: frozenset({JOB_QUEUED, JOB_NEEDS_ATTENTION}),
     JOB_FAILED: frozenset(),
     JOB_NEEDS_ATTENTION: frozenset(),
-    JOB_CANCELED: frozenset(),
+    # canceled 只是「用户停掉了这一次」，不是「这文件永远不要」：
+    # 用户之后重新发起同步时，同一 job_key 必须能重新入队，否则该内容会被
+    # 永久跳过（1.7.37 修复：金银岛 S01E02 转存被 canceled 记录挡住）。
+    JOB_CANCELED: frozenset({JOB_QUEUED}),
 }
 
 _HASH_PATTERNS: Final = {

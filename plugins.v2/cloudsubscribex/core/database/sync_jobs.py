@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from .manager import DbOper, db_query, db_update
 from .models import SyncJob
 from .sync_job_state import (
+    JOB_CANCELED,
     JOB_DONE,
     JOB_FAILED,
     JOB_FINALIZING,
@@ -186,6 +187,34 @@ class SyncJobRepository(DbOper):
             result_name="",
             result_size=0,
             result_method="",
+            last_error=str(reason or "")[:2000],
+            last_error_at=timestamp,
+        )
+
+    @db_update
+    def reopen_canceled(
+            self,
+            job_key: str,
+            reason: str,
+            now: Optional[int] = None,
+            expected_updated_at: Optional[int] = None,
+            db: Session = None,
+    ) -> bool:
+        """把用户主动停止的作业重新放回队列。
+
+        ``canceled`` 表示「用户停掉了这一次」，不是「这个文件永远不要」：
+        用户之后重新发起同步时，同一 ``job_key`` 必须能重新转存，否则该内容
+        会被永久跳过。重开时把 ``attempt`` 归零 —— 这是用户的一次新意图，
+        不该继承上一轮已经用掉的次数。
+        """
+        timestamp = _now(now)
+        return self.transition(
+            job_key, JOB_CANCELED, JOB_QUEUED,
+            now=timestamp, expected_updated_at=expected_updated_at, db=db,
+            attempt=0,
+            finished_at=None,
+            lease_owner=None,
+            lease_until=None,
             last_error=str(reason or "")[:2000],
             last_error_at=timestamp,
         )

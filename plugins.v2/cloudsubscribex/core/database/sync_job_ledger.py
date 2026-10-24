@@ -179,6 +179,27 @@ class SyncJobLedger:
         current = self._repo.get(row.job_key)
         if current is not None and current.state == JOB_DONE:
             return SyncJobLease(current.job_key, current.job_id, "", reused=True), ""
+        # canceled 是「用户停掉了上一次」，不是永久不可用：同内容再次被发起
+        # 同步时允许重新入队，否则该文件永远转存不进来（1.7.37）。
+        if current is not None and current.state == JOB_CANCELED:
+            try:
+                reopened = self._repo.reopen_canceled(
+                    current.job_key, "用户重新发起同步，重新入队",
+                    expected_updated_at=getattr(current, "updated_at", None),
+                )
+            except Exception as error:
+                return None, f"已取消作业重新入队失败：{error}"
+            if reopened:
+                retry_owner = f"{current.job_id}:{uuid.uuid4().hex[:12]}"
+                if self._repo.claim(current.job_key, retry_owner):
+                    logger.info(
+                        "同步作业已取消，重新入队并认领（job=%s，target=%s/%s）",
+                        current.job_key, current.target_path, current.target_name,
+                    )
+                    return SyncJobLease(
+                        current.job_key, current.job_id, retry_owner
+                    ), ""
+            current = self._repo.get(row.job_key)
         state = current.state if current is not None else "missing"
         return None, f"作业由其他 worker 持有或已终止：{state}"
 
