@@ -61,7 +61,7 @@
             <!-- 手机端：平铺横向流畅滑动 -->
             <template v-else>
               <button
-                v-for="section in sections"
+                v-for="section in flatSections"
                 :key="section.value"
                 type="button"
                 class="sidebar-nav-item"
@@ -900,11 +900,12 @@ const navGroups = computed(() => {
   const groups = [
     {
       name: "核心配置",
-      items: ["basic", "transfer", "subscribe", "upgrade"].map((v) => map.get(v)).filter(Boolean),
+      items: ["basic", "transfer", "organize", "subscribe", "upgrade"]
+        .map((v) => map.get(v)).filter(Boolean),
     },
     {
       name: "渠道配置",
-      items: ["drive", "search"].map((v) => map.get(v)).filter(Boolean),
+      items: ["tg", "drive", "search"].map((v) => map.get(v)).filter(Boolean),
     },
     {
       name: "服务通知",
@@ -913,6 +914,11 @@ const navGroups = computed(() => {
   ];
   return groups.filter((g) => g.items.length > 0);
 });
+// 移动端与 PC 端共用同一份顺序：先按分组次序展开，再平铺渲染，
+// 避免两端出现「选项不同、顺序不同」的问题。
+const flatSections = computed(() =>
+  (navGroups.value || []).flatMap((group) => group.items)
+);
 const currentSection = computed(() => {
   return sections.value.find((s) => s.value === activeTab.value) || sections.value[0];
 });
@@ -2980,16 +2986,15 @@ watch(
     border-radius: 6px !important;
   }
 
+  /* 移动端：原先是横滑单行，后面的「频道设置/网盘整理」滑不到；
+     改成自适应网格，一屏内全部可见，顺序与 PC 完全一致。 */
   .sidebar-nav {
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
     padding: 2px 10px 8px;
     gap: 6px;
-    overflow-x: auto;
-    white-space: nowrap;
-    -webkit-overflow-scrolling: touch;
-    touch-action: pan-x;
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
+    overflow: visible;
+    white-space: normal;
   }
 
   .sidebar-nav::-webkit-scrollbar {
@@ -2997,12 +3002,20 @@ watch(
   }
 
   .sidebar-nav-item {
-    flex: 0 0 auto;
-    width: auto;
-    height: 32px;
-    padding: 0 10px;
-    font-size: 0.8125rem;
+    width: 100%;
+    height: 34px;
+    padding: 0 8px;
+    gap: 5px;
+    justify-content: center;
+    font-size: 0.75rem;
     border-radius: 6px;
+    text-align: center;
+  }
+
+  .sidebar-nav-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* 移动端横向 Tab 栏严禁显示 > 指示箭头与侧边指示条 */

@@ -39,19 +39,33 @@
       频道监控未启用：到「配置 → 频道监控」填写 TG api_id / api_hash、登录，并添加频道后启用。
     </v-alert>
 
-    <v-table v-if="items.length" density="compact" class="tg-table mt-2">
+    <div v-if="items.length" class="tg-filter-row">
+      <v-chip
+        v-for="option in filterOptions"
+        :key="option.value"
+        size="small"
+        :variant="statusFilter === option.value ? 'flat' : 'tonal'"
+        :color="statusFilter === option.value ? 'primary' : undefined"
+        class="tg-filter-chip"
+        @click="selectFilter(option.value)">
+        {{ option.title }}
+        <span class="tg-filter-count">{{ option.count }}</span>
+      </v-chip>
+    </div>
+
+    <v-table v-if="filteredItems.length" density="compact" class="tg-table mt-2">
       <thead>
         <tr>
-          <th style="width: 96px">时间</th>
-          <th style="width: 160px">频道</th>
+          <th style="width: 88px">时间</th>
+          <th style="width: 132px">频道</th>
           <th>资源</th>
-          <th style="width: 120px">类型</th>
-          <th style="width: 80px">状态</th>
-          <th style="width: 150px">操作</th>
+          <th style="width: 96px">类型</th>
+          <th style="width: 72px">状态</th>
+          <th style="width: 132px">操作</th>
         </tr>
       </thead>
       <tbody>
-        <tr v-for="item in items" :key="item.id">
+        <tr v-for="item in pagedItems" :key="item.id">
           <td class="text-caption">{{ formatTime(item.published_at || item.created_at) }}</td>
           <td class="text-caption">{{ item.channel_title }}</td>
           <td>
@@ -108,8 +122,8 @@
         </tr>
       </tbody>
     </v-table>
-    <div v-if="items.length" class="tg-cards mt-2">
-      <article v-for="item in items" :key="`card-${item.id}`" class="tg-card">
+    <div v-if="filteredItems.length" class="tg-cards mt-2">
+      <article v-for="item in pagedItems" :key="`card-${item.id}`" class="tg-card">
         <div class="tg-card-head">
           <div class="tg-card-channel">{{ item.channel_title || "未知频道" }}</div>
           <v-chip size="x-small" :color="statusColor(item.status)" variant="tonal">
@@ -166,7 +180,20 @@
         </div>
       </article>
     </div>
-    <div v-if="!items.length" class="tg-empty">还没有抓到资源。启用监控后点「立即扫描」，或等后台定时任务抓取。</div>
+    <div v-if="filteredItems.length && pageCount > 1" class="tg-pager">
+      <v-pagination
+        v-model="page"
+        :length="pageCount"
+        :total-visible="5"
+        density="compact"
+        size="small" />
+      <span class="tg-pager-meta">
+        第 {{ page }}/{{ pageCount }} 页 · 共 {{ filteredItems.length }} 条
+      </span>
+    </div>
+    <div v-if="!filteredItems.length" class="tg-empty">
+      {{ items.length ? "当前筛选下没有记录，换个状态看看。" : "还没有抓到资源。启用监控后点「立即扫描」，或等后台定时任务抓取。" }}
+    </div>
 
     <v-dialog v-model="transferVisible" max-width="560">
       <v-card>
@@ -233,7 +260,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from "vue"
+import { computed, onMounted, onUnmounted, ref, watch } from "vue"
 
 const props = defineProps({
   api: { type: Object, required: true },
@@ -252,6 +279,9 @@ const status = ref({
   last_error: "",
 })
 const items = ref([])
+const statusFilter = ref("active")
+const page = ref(1)
+const PAGE_SIZE = 30
 const scanning = ref(false)
 const loadingSubscribes = ref(false)
 const subscribes = ref([])
@@ -268,6 +298,50 @@ const loginLoading = ref(false)
 let timer = null
 
 const hasApi = computed(() => Boolean(status.value.has_api))
+
+// 「有动作的」= 待处理 + 已转存 + 失败；未转存和已忽略属于历史/噪音，默认不展示，
+// 否则 170 条里 150 多条是这两类，真实待办的几条会被淹没。
+const FILTERS = [
+  { value: "active", title: "待办与已转存",
+    test: (item) => item.status === "new" || item.status === "transferred" },
+  { value: "new", title: "待处理", test: (item) => item.status === "new" },
+  { value: "transferred", title: "已转存", test: (item) => item.status === "transferred" },
+  { value: "skipped", title: "未转存", test: (item) => item.status === "skipped" },
+  { value: "ignored", title: "已忽略", test: (item) => item.status === "ignored" },
+  { value: "all", title: "全部", test: () => true },
+]
+
+const filterOptions = computed(() => {
+  const rows = items.value || []
+  return FILTERS.map((filter) => ({
+    value: filter.value,
+    title: filter.title,
+    count: rows.filter(filter.test).length,
+  }))
+})
+
+const filteredItems = computed(() => {
+  const active = FILTERS.find((f) => f.value === statusFilter.value) || FILTERS[0]
+  return (items.value || []).filter(active.test)
+})
+
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(filteredItems.value.length / PAGE_SIZE))
+)
+
+const pagedItems = computed(() => {
+  const start = (page.value - 1) * PAGE_SIZE
+  return filteredItems.value.slice(start, start + PAGE_SIZE)
+})
+
+function selectFilter(value) {
+  statusFilter.value = value
+  page.value = 1
+}
+
+watch(filteredItems, () => {
+  if (page.value > pageCount.value) page.value = pageCount.value
+})
 const subscribeOptions = computed(() =>
   subscribes.value.map((sub) => ({
     value: sub.id,
@@ -490,6 +564,31 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.tg-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.tg-filter-chip {
+  cursor: pointer;
+}
+.tg-filter-count {
+  margin-left: 6px;
+  font-size: 0.6875rem;
+  opacity: 0.72;
+}
+.tg-pager {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 10px 0 4px;
+}
+.tg-pager-meta {
+  font-size: 0.6875rem;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+}
 .tg-monitor {
   padding: 12px;
   overflow: auto;

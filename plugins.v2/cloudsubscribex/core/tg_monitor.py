@@ -60,8 +60,9 @@ MAX_REMATCH_TRANSFERS = 5
 # 供「新增订阅后回补匹配」用。2026-10-24 线上 500 条里 379 条是这类噪音，
 # 把池子占满后新资源只能在边缘排队。
 UNMATCHED_KEEP = 50
-# skipped/transferred 只是历史记录，最多占池子的一半；其余名额留给待处理条目。
-HISTORY_QUOTA_RATIO = 0.5
+# skipped/transferred 只是历史记录，最多占池子的 12%（500 条时约 60 条）；
+# 其余名额留给待处理条目。线上实测 104 条 skipped 会把列表淹掉。
+HISTORY_QUOTA_RATIO = 0.12
 
 # 邀请链接解析失败后的冷却时间：CheckChatInvite 每轮都调会被 Telegram
 # 按 420 FLOOD_WAIT 重罚，失败后先退避，别连续试探。
