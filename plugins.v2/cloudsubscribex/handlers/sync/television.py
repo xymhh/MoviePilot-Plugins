@@ -597,6 +597,19 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 share_files, mediainfo, resource_title
                         ):
                             reason = "分享根目录与订阅标题不符"
+                            # 把实际根目录名带进原因：账本页据此复盘是「真换片」
+                            # 还是「装饰太多导致误杀」，不必再翻容器日志。
+                            try:
+                                from ...utils import FileMatcher as _FM
+                                _roots = sorted(_FM.share_root_names(share_files))
+                            except Exception:  # noqa: BLE001
+                                _roots = []
+                            if _roots:
+                                reason = (
+                                    "分享根目录与订阅标题不符（根目录："
+                                    + " / ".join(root[:60] for root in _roots[:3])
+                                    + "）"
+                                )
                             # 记下 (链接, 标题)，24h 内不再为它重复读分享目录。
                             remember_mismatch(share_url, resource_title)
                             logger.info(

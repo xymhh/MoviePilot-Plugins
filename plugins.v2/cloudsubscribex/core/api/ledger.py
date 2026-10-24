@@ -11,6 +11,7 @@ from app.log import logger
 
 from .. import OwnerDelegator
 from ..services.candidate_ledger import read_records, summarize
+from ...utils.cache import cache_stats
 
 
 class LedgerApi(OwnerDelegator):
@@ -55,6 +56,14 @@ class LedgerApi(OwnerDelegator):
         except Exception as error:  # noqa: BLE001
             logger.error(f"聚合候选账本失败：{error}")
             return {"success": False, "message": str(error), "data": {"total": 0}}
+
+    def api_cache_stats(self) -> dict:
+        """缓存健康度：编码失败 / 解码失败 / 命中率，用于判断缓存层是否退化。"""
+        try:
+            return {"success": True, "data": cache_stats()}
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"读取缓存健康度失败：{error}")
+            return {"success": False, "message": str(error), "data": {}}
 
     def _ledger_data_path(self):
         """插件数据目录；拿不到时返回 None，由调用方降级为空结果。"""

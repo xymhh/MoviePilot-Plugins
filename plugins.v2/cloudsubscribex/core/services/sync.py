@@ -257,6 +257,7 @@ class SyncExecutionService(OwnerDelegator):
         canonical = []
         duplicate_count = 0
         duplicate_details = []
+        groups_for_ui: List[Dict[str, Any]] = []
         for group in grouped.values():
             canonical_item = min(
                 group,
@@ -278,14 +279,37 @@ class SyncExecutionService(OwnerDelegator):
                         f"#{getattr(item, 'id', '')}" for item in duplicates
                     )
                 )
+                groups_for_ui.append({
+                    "name": str(getattr(canonical_item, "name", "") or ""),
+                    "type": str(getattr(canonical_item, "type", "") or ""),
+                    "season": getattr(canonical_item, "season", None),
+                    "keep_id": int(getattr(canonical_item, "id", 0) or 0),
+                    "keep_state": str(getattr(canonical_item, "state", "") or ""),
+                    "duplicates": [
+                        {
+                            "id": int(getattr(item, "id", 0) or 0),
+                            "state": str(getattr(item, "state", "") or ""),
+                            "season": getattr(item, "season", None),
+                            "date": str(getattr(item, "date", "") or ""),
+                        }
+                        for item in duplicates
+                    ],
+                })
         if duplicate_count:
             details = "；".join(duplicate_details[:10])
             if len(duplicate_details) > 10:
                 details += f"；另有 {len(duplicate_details) - 10} 组"
             logger.warning(
                 f"发现 {duplicate_count} 个同媒体重复订阅，本轮仅处理最早创建的订阅卡片："
-                f"{details}"
+                f"{details}（可在「资源账本 → 重复订阅」暂停多余的卡片）"
             )
+        # 暴露给管理接口：让用户能看到重复组并主动暂停，而不是只翻日志。
+        try:
+            plugin = getattr(self, "_owner", None) or getattr(self, "_plugin", None)
+            if plugin is not None:
+                plugin._duplicate_subscribe_groups = groups_for_ui
+        except Exception:  # noqa: BLE001
+            pass
         return canonical, duplicate_count
 
     def queue_subscribe_search(
@@ -1182,7 +1206,7 @@ class SyncExecutionService(OwnerDelegator):
             items = snapshot.get("items") if isinstance(snapshot, dict) else None
             if not items:
                 return
-            plugin = getattr(self, "_plugin", None)
+            plugin = getattr(self, "_owner", None) or getattr(self, "_plugin", None)
             data_path = None
             getter = getattr(plugin, "get_data_path", None)
             if callable(getter):

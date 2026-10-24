@@ -252,6 +252,29 @@ class FileMatcher:
         normalized_clean = normalize_title(cleaned)
         return not normalized_clean or normalized_clean in cls._GENERIC_SHARE_ROOTS
 
+    @staticmethod
+    def _title_similar_enough(
+            candidate: str, titles: Any, threshold: float = 0.75
+    ) -> bool:
+        """去装饰后仍有足够相似度时放行，兜住「标题被大量 emoji/标签包住」的误杀。
+
+        只在上面的精确包含判断全部失败后作为最后一道放行条件：
+        normal 化后长度不足 3 的候选不参与，避免短词误命中；
+        相似度阈值 0.75 意味着 4 字中文至少 3 字一致。
+        """
+        from difflib import SequenceMatcher
+
+        left = normalize_title(candidate)
+        if len(left) < 3:
+            return False
+        for title in titles or ():
+            right = normalize_title(title or "")
+            if len(right) < 2:
+                continue
+            if SequenceMatcher(None, left, right).ratio() >= threshold:
+                return True
+        return False
+
     @classmethod
     def share_title_mismatch(
             cls, files: Any, mediainfo: Any, resource_title: str = ""
@@ -300,6 +323,11 @@ class FileMatcher:
                         or normalized in expected_title
                 ):
                     return False
+            # 最后一道容错：装饰过多导致精确包含失败时，按相似度放行。
+            if cls._title_similar_enough(
+                    cleaned or root, (target_title, expected_title)
+            ):
+                return False
         return True
 
     @classmethod

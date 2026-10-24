@@ -63,6 +63,34 @@
     </div>
 
     <v-alert
+      v-if="duplicateTotal > 0"
+      type="info"
+      variant="tonal"
+      density="compact"
+      class="mb-2">
+      <div class="dup-row">
+        <span>
+          同步时发现 <strong>{{ duplicateTotal }}</strong> 张重复订阅卡片（同一部剧被订阅多次），
+          同步只会处理最早创建的那张。
+        </span>
+        <v-btn
+          size="small"
+          color="warning"
+          variant="flat"
+          :loading="pausing"
+          @click="pauseDuplicates">
+          暂停多余卡片
+        </v-btn>
+      </div>
+      <div class="text-caption mt-1 dup-detail">
+        <span v-for="group in duplicateGroups" :key="group.keep_id" class="dup-group">
+          {{ group.name || `#${group.keep_id}` }}：保留 #{{ group.keep_id }}，多余
+          {{ (group.duplicates || []).map((item) => `#${item.id}`).join("、") }}
+        </span>
+      </div>
+    </v-alert>
+
+    <v-alert
       v-if="errorMessage"
       type="warning"
       variant="tonal"
@@ -115,6 +143,14 @@
       </tbody>
     </v-table>
 
+    <div class="ledger-footer text-caption">
+      <span>
+        缓存健康度：命中 {{ cacheStats.hit_rate ?? 0 }}% ·
+        编码跳过 {{ cacheStats.encode_skip ?? 0 }} ·
+        解码失败 {{ cacheStats.decode_fail ?? 0 }}
+      </span>
+    </div>
+
     <div v-if="total > pageSize" class="ledger-pager">
       <v-btn
         size="small"
@@ -155,6 +191,10 @@ const pageSize = 100;
 const summary = ref({total: 0, by_kind: {}});
 const loading = ref(false);
 const errorMessage = ref("");
+const duplicateGroups = ref([]);
+const duplicateTotal = ref(0);
+const pausing = ref(false);
+const cacheStats = ref({});
 
 const dayOptions = [
   {title: "今天", value: 1},
@@ -256,9 +296,50 @@ async function loadPage() {
   }
 }
 
+async function loadDuplicates() {
+  try {
+    const data = await request("duplicate/list", {});
+    duplicateGroups.value = Array.isArray(data?.groups) ? data.groups : [];
+    duplicateTotal.value = Number(data?.duplicate_total || 0);
+  } catch (error) {
+    duplicateGroups.value = [];
+    duplicateTotal.value = 0;
+  }
+}
+
+async function loadCacheStats() {
+  try {
+    cacheStats.value = await request("cache/stats", {});
+  } catch (error) {
+    cacheStats.value = {};
+  }
+}
+
+async function pauseDuplicates() {
+  pausing.value = true;
+  try {
+    const response = await props.api.post(
+      `plugin/${props.pluginId}/duplicate/pause`,
+      { all: true },
+    );
+    const payload = response?.data !== undefined ? response.data : response;
+    errorMessage.value = payload?.message || "已提交暂停请求";
+    await Promise.all([loadDuplicates(), loadPage()]);
+  } catch (error) {
+    errorMessage.value = String(error?.message || error);
+  } finally {
+    pausing.value = false;
+  }
+}
+
 async function reload() {
   page.value = 1;
-  await Promise.all([loadSummary(), loadPage()]);
+  await Promise.all([
+    loadSummary(),
+    loadPage(),
+    loadDuplicates(),
+    loadCacheStats(),
+  ]);
 }
 
 function goPage(target) {
@@ -370,6 +451,28 @@ onMounted(() => {
 .empty-cell {
   text-align: center;
   padding: 24px 0;
+}
+
+.dup-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dup-detail {
+  opacity: 0.8;
+}
+
+.dup-group {
+  display: inline-block;
+  margin-right: 10px;
+}
+
+.ledger-footer {
+  opacity: 0.7;
+  padding: 2px 2px 0;
 }
 
 .ledger-pager {

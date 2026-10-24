@@ -1,6 +1,7 @@
 """CloudSubscribe 对 MoviePilot 平台缓存工具的轻量封装。"""
 
 import copy
+import threading
 import json
 from contextlib import nullcontext
 from dataclasses import fields, is_dataclass
@@ -51,6 +52,33 @@ def normalize_platform_cache_key(value: Any) -> str:
 _CACHE_TAG = "__csx__"
 # 缓存结构版本：编码格式变更时递增，旧区自动失效。
 _CACHE_SCHEMA = "v2"
+
+# 缓存健康度计数：线上曾因旧类对象进 Redis 导致 169 条 pickle 报错而无人察觉，
+# 这里把「编码失败 / 解码失败 / 命中」记下来，供自检接口暴露。
+_STATS_LOCK = threading.Lock()
+_CACHE_STATS: dict = {
+    "encode_ok": 0,
+    "encode_skip": 0,
+    "decode_fail": 0,
+    "hit": 0,
+    "miss": 0,
+}
+
+
+def _bump(name: str, amount: int = 1) -> None:
+    with _STATS_LOCK:
+        _CACHE_STATS[name] = _CACHE_STATS.get(name, 0) + amount
+
+
+def cache_stats() -> dict:
+    """返回当前进程的缓存健康度快照。"""
+    with _STATS_LOCK:
+        snapshot = dict(_CACHE_STATS)
+    total_read = snapshot.get("hit", 0) + snapshot.get("miss", 0)
+    snapshot["hit_rate"] = (
+        round(snapshot.get("hit", 0) * 100.0 / total_read, 1) if total_read else 0.0
+    )
+    return snapshot
 
 # 只允许这些插件内的数据类进入缓存；其余对象（含提供方原始响应）一律跳过写入，
 # 避免 MoviePilot 的 Redis 后端在插件热重载后用旧类对象 pickle 失败。
@@ -135,14 +163,20 @@ class _PlatformTTLCache(TTLCache):
     def _read(raw: Any) -> Any:
         """解码读出的值；无法识别（例如旧版 pickle 对象）时当作未命中。"""
         if raw is None:
+            _bump("miss")
             return None
         if isinstance(raw, (str, int, float, bool)):
+            _bump("hit")
             return raw
         if not isinstance(raw, (dict, list, tuple)):
+            _bump("decode_fail")
             return None
         try:
-            return _decode_cache_value(raw)
+            value = _decode_cache_value(raw)
+            _bump("hit")
+            return value
         except Exception as error:  # noqa: BLE001 - 旧数据或类型缺失都按未命中处理
+            _bump("decode_fail")
             logger.debug(f"缓存值解码失败，按未命中处理：{error}")
             return None
 
@@ -150,8 +184,11 @@ class _PlatformTTLCache(TTLCache):
     def _write_value(value: Any) -> tuple[Any, bool]:
         """返回可直接落库的值与是否允许写入。"""
         try:
-            return _encode_cache_value(value), True
+            payload = _encode_cache_value(value)
+            _bump("encode_ok")
+            return payload, True
         except Exception as error:  # noqa: BLE001 - 不可缓存对象直接跳过写入
+            _bump("encode_skip")
             logger.debug(f"缓存值不可序列化，跳过写入：{error}")
             return None, False
 

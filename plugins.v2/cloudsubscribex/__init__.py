@@ -33,6 +33,7 @@ from .core.api import (
     ConfigApi,
     CheckinApi,
     MoviePilotRegistration,
+    DuplicateApi,
     HistoryApi,
     LedgerApi,
     MediaLibraryApi,
@@ -89,6 +90,7 @@ _COMPONENT_TYPES = (
     QRCodeService,
     HistoryApi,
     LedgerApi,
+    DuplicateApi,
     TgMonitorApi,
     MessageRoutingHook,
     PluginEventHandler,
@@ -167,7 +169,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.30"
+    plugin_version = "1.7.31"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页

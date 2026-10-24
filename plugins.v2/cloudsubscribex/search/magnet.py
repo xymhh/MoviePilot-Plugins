@@ -52,13 +52,6 @@ def extract_magnet_hash(text: str) -> Optional[str]:
     return None
 
 
-def extract_magnet_links(text: str) -> List[str]:
-    """从文本中提取所有完整的磁力链接。"""
-    if not text:
-        return []
-    return [match.group(0) for match in _MAGNET_REGEX.finditer(text)]
-
-
 def build_magnet_url(info_hash: str, display_name: Optional[str] = None) -> str:
     """标准构建磁力链接。"""
     clean_hash = str(info_hash or "").strip().lower()

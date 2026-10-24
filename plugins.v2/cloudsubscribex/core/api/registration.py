@@ -113,6 +113,27 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "查询候选资源账本（没转存的原因）",
             },
             {
+                "path": "/duplicate/list",
+                "endpoint": self.api_duplicate_list,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "列出重复订阅组",
+            },
+            {
+                "path": "/duplicate/pause",
+                "endpoint": self.api_duplicate_pause,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "暂停重复订阅卡片（保留最早创建的一张）",
+            },
+            {
+                "path": "/cache/stats",
+                "endpoint": self.api_cache_stats,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "缓存健康度（编码失败/解码失败/命中率）",
+            },
+            {
                 "path": "/ledger/summary",
                 "endpoint": self.api_ledger_summary,
                 "methods": ["GET"],

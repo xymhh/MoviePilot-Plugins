@@ -4,6 +4,7 @@ from .account import AccountApi
 from .checkin import CheckinApi
 from .config import ConfigApi
 from .history import HistoryApi
+from .duplicate import DuplicateApi
 from .ledger import LedgerApi
 from .media_library import MediaLibraryApi
 from .organize import OrganizeApi
@@ -20,6 +21,7 @@ __all__ = [
     "CheckinApi",
     "ConfigApi",
     "HistoryApi",
+    "DuplicateApi",
     "LedgerApi",
     "MediaLibraryApi",
     "OrganizeApi",
