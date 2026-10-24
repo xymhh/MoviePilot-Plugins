@@ -224,6 +224,53 @@ class PlaybackInfoTest(unittest.TestCase):
             rules.extract_media_path(payload, "31"), "/strm/wanted.strm"
         )
 
+    def test_is_strm_source_detects_container_and_redirect(self):
+        self.assertTrue(rules.is_strm_source({"Container": "strm"}))
+        self.assertTrue(rules.is_strm_source({"Path": "/a/b.strm"}))
+        self.assertTrue(rules.is_strm_source({
+            "Container": "strm",
+            "Path": "http://moviepilot:3000/api/v1/plugin/P115StrmHelper/redirect_url?pickcode=abc",
+        }))
+        self.assertFalse(
+            rules.is_strm_source({"Container": "mkv", "Path": "/a/b.mkv"})
+        )
+
+    def test_extract_media_path_prefers_item_strm_path(self):
+        # 线上实测：P115StrmHelper 把 MediaSource.Path 写成 redirect 端点，
+        # 只有 item.Path 才是本地 .strm 文件，302 必须拿这一条。
+        payload = {"Items": [{
+            "Id": "item-1",
+            "Path": "/media/strm/115网盘/x.strm",
+            "MediaSources": [{
+                "Id": "mediasource_9",
+                "Container": "strm",
+                "Path": "http://moviepilot-v3:3000/api/v1/plugin/"
+                        "P115StrmHelper/redirect_url?pickcode=abc",
+            }],
+        }]}
+        self.assertEqual(
+            rules.extract_media_path(payload, "mediasource_9", "item-1"),
+            "/media/strm/115网盘/x.strm",
+        )
+
+    def test_redirect_source_is_rewritten(self):
+        payload = {"ItemId": "item-1", "MediaSources": [{
+            "Id": "s1",
+            "ItemId": "item-1",
+            "Container": "strm",
+            "Path": "http://moviepilot-v3:3000/api/v1/plugin/"
+                    "P115StrmHelper/redirect_url?pickcode=abc",
+            "SupportsTranscoding": True,
+        }]}
+        out = rules.rewrite_playback_info(payload, path_prefix="/emby")
+        source = out["MediaSources"][0]
+        self.assertEqual(
+            source["DirectStreamUrl"],
+            "/emby/Videos/item-1/stream?MediaSourceId=s1"
+            "&Static=true&FakeDirectStream=true",
+        )
+        self.assertFalse(source["SupportsTranscoding"])
+
     def test_non_strm_source_untouched(self):
         payload = rules.rewrite_playback_info(
             self._payload(), "http://proxy:3010"

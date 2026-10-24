@@ -29,6 +29,7 @@ from .emby_proxy_rules import (
     filter_response_headers,
     is_fake_direct_stream,
     is_rewritable_playback_response,
+    is_strm_source,
     is_transcode_request,
     map_path,
     playback_path_prefix,
@@ -708,9 +709,7 @@ class EmbyProxyService:
                 payload.get("MediaSources") if isinstance(payload, dict) else None
             )
             has_strm = isinstance(sources, list) and any(
-                isinstance(source, dict)
-                and str(source.get("Path") or "").lower().endswith(".strm")
-                for source in sources
+                is_strm_source(source) for source in sources
             )
             if has_strm:
                 rewritten = rewrite_playback_info(

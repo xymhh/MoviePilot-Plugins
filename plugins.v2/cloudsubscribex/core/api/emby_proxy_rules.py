@@ -237,8 +237,7 @@ def rewrite_playback_info(
     for source in sources:
         if not isinstance(source, dict):
             continue
-        path = str(source.get(_PATH_FIELD) or "")
-        if not path.lower().endswith(".strm"):
+        if not is_strm_source(source):
             continue
         if can_resolve is not None and not can_resolve(source):
             continue
@@ -272,6 +271,24 @@ def is_rewritable_playback_response(status_code: int, content: bytes) -> bool:
     return True
 
 
+def is_strm_source(source: Any) -> bool:
+    """判断一个 MediaSource 是否来自 ``.strm`` 文件。
+
+    不能只看 ``Path`` 后缀：P115StrmHelper 之类会把 strm 内容（一个 HTTP
+    redirect 端点）写进 MediaSource.Path，此时 ``Container`` 仍是 ``strm``。
+    """
+    if not isinstance(source, dict):
+        return False
+    if str(source.get("Container") or "").strip().lower() == "strm":
+        return True
+    path = str(source.get(_PATH_FIELD) or "").strip().lower()
+    if not path:
+        return False
+    if path.endswith(".strm"):
+        return True
+    return "/redirect_url" in path or "/redirect?" in path or "/redirect/" in path
+
+
 def extract_media_path(
         payload: Any,
         media_source_id: str = "",
@@ -288,10 +305,21 @@ def extract_media_path(
         return ""
 
     wanted_source = strip_media_source_prefix(media_source_id)
-    fallback = ""
+    best: Optional[Tuple[int, str]] = None
+
+    def consider(path: str, priority: int) -> None:
+        nonlocal best
+        text = str(path or "").strip()
+        if not text:
+            return
+        if best is None or priority < best[0]:
+            best = (priority, text)
+
     for item in items:
         if not isinstance(item, dict):
             continue
+        item_path = str(item.get(_PATH_FIELD) or "")
+        item_is_strm = item_path.lower().endswith(".strm")
         sources = item.get("MediaSources")
         if not isinstance(sources, list):
             sources = []
@@ -301,18 +329,20 @@ def extract_media_path(
             path = str(source.get(_PATH_FIELD) or "")
             if not path:
                 continue
-            if wanted_source and (
+            matched = bool(wanted_source) and (
                     strip_media_source_prefix(source.get("Id")) == wanted_source
-            ):
-                return path
-            if not fallback:
-                fallback = path
-        direct_path = str(item.get(_PATH_FIELD) or "")
-        if direct_path and not fallback:
-            fallback = direct_path
-        if item_id and str(item.get("Id") or "") == item_id and direct_path:
-            return direct_path
-    return fallback
+            )
+            is_strm = path.lower().endswith(".strm")
+            if matched:
+                consider(path, 0 if is_strm else 2)
+            else:
+                consider(path, 4 if is_strm else 5)
+        # item.Path 才是磁盘上的 .strm 路径；MediaSource.Path 可能已被
+        # redirect 端点覆盖（P115StrmHelper 等），优先级必须高于它。
+        consider(item_path, 1 if item_is_strm else 3)
+        if item_id and str(item.get("Id") or "") == item_id:
+            consider(item_path, 1 if item_is_strm else 3)
+    return best[1] if best else ""
 
 
 @dataclass(frozen=True)
