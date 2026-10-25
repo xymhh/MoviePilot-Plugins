@@ -229,6 +229,25 @@ class StripDuplicatedPrefixTest(unittest.TestCase):
         )
         self.assertEqual(_strip_duplicated_prefix(root, "/"), "/")
 
+    def test_trims_full_prefix_and_repeated_duplicates(self):
+        from cloudsubscribex.utils.strm_export import _strip_duplicated_prefix
+
+        root = "/Alist/影视/moviepilot/媒体库"
+        # 线上实测形态：relative 已是完整路径
+        self.assertEqual(
+            _strip_duplicated_prefix(
+                root, "/Alist/影视/moviepilot/媒体库/剧集/国产剧/某剧/Season 1"
+            ),
+            "/剧集/国产剧/某剧/Season 1",
+        )
+        # 重复两遍也能剥干净
+        self.assertEqual(
+            _strip_duplicated_prefix(
+                root, "/moviepilot/媒体库/moviepilot/媒体库/剧集/某剧"
+            ),
+            "/剧集/某剧",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

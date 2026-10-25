@@ -32,11 +32,21 @@ def _strip_duplicated_prefix(root_path: str, relative: str) -> str:
     rel_parts = [part for part in str(relative or "").strip("/").split("/") if part]
     if not root_parts or not rel_parts:
         return relative
-    for size in range(min(len(root_parts), len(rel_parts)), 0, -1):
-        if rel_parts[:size] == root_parts[-size:]:
-            rest = rel_parts[size:]
-            return "/" + "/".join(rest) if rest else ""
-    return relative
+
+    # 情况一：导出路径本身已经是从根开始的完整路径（线上实测还会出现这种）
+    if rel_parts[:len(root_parts)] == root_parts:
+        rest = rel_parts[len(root_parts):]
+        return "/" + "/".join(rest) if rest else ""
+
+    # 情况二：导出路径以媒体库根的一段后缀开头，反复剥离直到不再重复
+    while True:
+        for size in range(min(len(root_parts), len(rel_parts)), 0, -1):
+            if rel_parts[:size] == root_parts[-size:]:
+                rel_parts = rel_parts[size:]
+                break
+        else:
+            break
+    return "/" + "/".join(rel_parts) if rel_parts else ""
 
 
 def _directory_ops(provider):
