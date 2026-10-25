@@ -1302,9 +1302,10 @@ class SyncHandler:
             if len(sample) < 3:
                 sample.append({"path": str(target), "content": content})
 
+        refreshed = self.refresh_media_servers() if (created or updated) else {}
         logger.info(
             f"分享 STRM 生成完成：{share_code} 新增 {created} / 更新 {updated} "
-            f"/ 跳过 {skipped}，目录={root}"
+            f"/ 跳过 {skipped}，目录={root}，媒体库刷新={refreshed or '未触发'}"
         )
         return {
             "share_code": share_code,
@@ -1314,7 +1315,36 @@ class SyncHandler:
             "updated": updated,
             "skipped": skipped,
             "sample": sample,
+            "media_refresh": refreshed,
         }
+
+    def refresh_media_servers(self) -> Dict[str, Any]:
+        """让媒体服务器重新扫描库，用于文件被删除/新增后立刻生效。"""
+        results: Dict[str, Any] = {}
+        notifier = getattr(self, "_media_server_notifier", None)
+        if notifier is None:
+            return results
+        try:
+            services = notifier._services() or {}
+        except Exception as error:  # noqa: BLE001 - 媒体服务器不可用不该阻断主流程
+            logger.warning(f"媒体服务器列表获取失败：{error}")
+            return results
+        for name, service in services.items():
+            try:
+                instance = service.instance
+                if service.type == "emby":
+                    instance.post("Library/Refresh")
+                elif hasattr(instance, "refresh_library_by_items"):
+                    instance.refresh_library_by_items([])
+                else:
+                    results[name] = "unsupported"
+                    continue
+                results[name] = "ok"
+                logger.info(f"媒体库刷新已提交：{name}")
+            except Exception as error:  # noqa: BLE001
+                results[name] = str(error)
+                logger.warning(f"媒体库刷新失败：{name}（{error}）")
+        return results
 
     def clean_share_strm(
             self,
@@ -1353,14 +1383,17 @@ class SyncHandler:
             except OSError as error:
                 logger.warning(f"分享 STRM 删除失败：{target}（{error}）")
 
+        refreshed = self.refresh_media_servers() if removed else {}
         logger.info(
-            f"分享 STRM 清理完成：{share_code} 删除 {removed} / 不存在 {missing}，目录={root}"
+            f"分享 STRM 清理完成：{share_code} 删除 {removed} / 不存在 {missing}，"
+            f"目录={root}，媒体库刷新={refreshed or '未触发'}"
         )
         return {
             "share_code": share_code,
             "path": str(Path(root)),
             "removed": removed,
             "missing": missing,
+            "media_refresh": refreshed,
         }
 
     def rebuild_strm_files(

@@ -173,7 +173,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.59"
+    plugin_version = "1.7.60"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -900,6 +900,21 @@ class CloudSubscribeX(_PluginBase):
                 f"分享 STRM 已清理：删除 {data.get('removed')}，"
                 f"不存在 {data.get('missing')}"
             ),
+            "data": data,
+        }
+
+    def refresh_media_servers(self) -> dict:
+        """手动触发媒体库刷新。"""
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler or not hasattr(sync_handler, "refresh_media_servers"):
+            return {"success": False, "message": "同步服务未就绪"}
+        try:
+            data = sync_handler.refresh_media_servers()
+        except Exception as error:  # noqa: BLE001
+            return {"success": False, "message": str(error)}
+        return {
+            "success": True,
+            "message": f"已提交媒体库刷新：{data or '无可用媒体服务器'}",
             "data": data,
         }
 

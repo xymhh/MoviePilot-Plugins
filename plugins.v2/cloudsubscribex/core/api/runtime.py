@@ -211,6 +211,12 @@ class RuntimeApi(OwnerDelegator):
             return {"success": False, "message": "请填写 115 分享链接"}
         return self._owner.clean_share_strm(share_url, save_path=save_path)
 
+    def api_vue_strm_refresh_media(
+            self, payload: Optional[Dict[str, Any]] = None
+    ) -> dict:
+        """手动触发 Emby/Plex 等媒体库刷新。"""
+        return self._owner.refresh_media_servers()
+
     def api_vue_strm_full_scan(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:

@@ -564,6 +564,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "删除某个 115 分享链接生成的 STRM",
             },
             {
+                "path": "/strm/refresh_media",
+                "endpoint": self.api_vue_strm_refresh_media,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "手动触发媒体库刷新",
+            },
+            {
                 "path": "/strm/full_scan",
                 "endpoint": self.api_vue_strm_full_scan,
                 "methods": ["POST"],
