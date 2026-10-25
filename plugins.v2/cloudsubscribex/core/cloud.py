@@ -351,7 +351,7 @@ class RapidUploadOperations(Protocol):
 @runtime_checkable
 class FileDownloadOperations(Protocol):
     def resolve_download_link(
-            self, file_item: CloudFile,
+            self, file_item: CloudFile, user_agent: str = "",
     ) -> tuple[str, Mapping[str, str]]: ...
 
     def download_file(

@@ -18,6 +18,27 @@ from app.log import logger
 from ..core.cloud import CloudDriveCapability
 
 
+def _strip_duplicated_prefix(root_path: str, relative: str) -> str:
+    """去掉导出树路径里与媒体库根重复的那一段。
+
+    115 的 ``export_dir`` 是以「导出目录自身」为根给出相对路径的，但我们拿到的
+    ``directory_id`` 可能指向媒体库的某级父目录，于是 ``relative`` 开头会带上
+    ``root_path`` 的尾部（线上实测：root=``/Alist/影视/moviepilot/媒体库``，
+    relative=``/moviepilot/媒体库/电影/...``）。直接拼接会得到
+    ``.../媒体库/moviepilot/媒体库/...`` 这种不存在的路径，每个目录都解析失败。
+    这里找 ``root_path`` 的最长后缀并去掉。
+    """
+    root_parts = [part for part in str(root_path or "").strip("/").split("/") if part]
+    rel_parts = [part for part in str(relative or "").strip("/").split("/") if part]
+    if not root_parts or not rel_parts:
+        return relative
+    for size in range(min(len(root_parts), len(rel_parts)), 0, -1):
+        if rel_parts[:size] == root_parts[-size:]:
+            rest = rel_parts[size:]
+            return "/" + "/".join(rest) if rest else ""
+    return relative
+
+
 def _directory_ops(provider):
     """取目录读取服务。
 
@@ -109,6 +130,7 @@ def rebuild_strm_by_export_tree(
         if suffix not in extensions:
             continue  # 目录行与非视频文件
         parent_relative = relative.rsplit("/", 1)[0]
+        parent_relative = _strip_duplicated_prefix(root_path, parent_relative)
         cloud_dir = (
             f"{root_path.rstrip('/')}{parent_relative}"
             if parent_relative not in ("", "/")

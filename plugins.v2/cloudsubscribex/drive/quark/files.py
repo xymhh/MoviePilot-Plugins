@@ -90,7 +90,9 @@ class QuarkFileService(CloudDriveFileServiceBase):
             preserve_partial=preserve_partial,
         )
 
-    def resolve_download_link(self, file_item: CloudFile) -> tuple[str, dict]:
+    def resolve_download_link(
+            self, file_item: CloudFile, user_agent: str = "",
+    ) -> tuple[str, dict]:
         """取夸克直链。
 
         取链通道按「PC 客户端 UA + drive-pc 通道优先」排列：夸克对下载请求会

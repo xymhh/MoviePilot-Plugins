@@ -86,7 +86,9 @@ class P123FileService(CloudDriveFileServiceBase):
             preserve_partial=preserve_partial,
         )
 
-    def resolve_download_link(self, file_item: CloudFile) -> tuple[str, dict]:
+    def resolve_download_link(
+            self, file_item: CloudFile, user_agent: str = "",
+    ) -> tuple[str, dict]:
         raw = file_item.native if isinstance(file_item.native, Mapping) else {}
         values = file_item.playback_values or {}
         payload = {

@@ -88,7 +88,9 @@ class GuangyaFileService(CloudDriveFileServiceBase):
             preserve_partial=preserve_partial,
         )
 
-    def resolve_download_link(self, file_item: CloudFile) -> tuple[str, dict]:
+    def resolve_download_link(
+            self, file_item: CloudFile, user_agent: str = "",
+    ) -> tuple[str, dict]:
         """获取光鸭文件直链下载地址。"""
         access_token = str(
             file_item.playback_values.get("share_access_token") or ""

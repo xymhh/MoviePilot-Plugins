@@ -386,7 +386,8 @@ class EmbyProxyService:
         return extract_media_path(payload, media_source_id, item_id)
 
     async def _resolve_strm_url(
-            self, emby_path: str, fallback_name: str = ""
+            self, emby_path: str, fallback_name: str = "",
+            user_agent: str = "",
     ) -> str:
         """Path → 本地 STRM → 直链；每一步失败都返回空串触发透传。"""
         local_path = map_path(emby_path, self._path_mappings())
@@ -405,7 +406,7 @@ class EmbyProxyService:
 
             api = RedirectApi(self._owner)
             url, error_code = await asyncio.to_thread(
-                api._resolve_link, link.value, file_name
+                api._resolve_link, link.value, file_name, user_agent
             )
         except Exception as error:  # noqa: BLE001 - 换链失败必须回落
             logger.debug(f"Emby 反代：换链异常 pickcode={link.value}（{error}）")
@@ -417,14 +418,18 @@ class EmbyProxyService:
             return ""
         return str(url)
 
-    async def _try_redirect(self, path: str, query: str) -> str:
+    async def _try_redirect(
+            self, path: str, query: str, user_agent: str = ""
+    ) -> str:
         item_id, media_source_id = request_media_ids(path, query)
         emby_path = await self._resolve_media_path(item_id, media_source_id)
         if not emby_path:
             self.stats.increment("miss")
             return ""
         url = await self._resolve_strm_url(
-            emby_path, fallback_name=f"{media_source_id or item_id}.mkv"
+            emby_path,
+            fallback_name=f"{media_source_id or item_id}.mkv",
+            user_agent=user_agent,
         )
         if not url:
             self.stats.increment("fallback")
@@ -470,7 +475,9 @@ class EmbyProxyService:
             ):
                 await self._proxy(scope, receive, send)
                 return
-            url = await self._try_redirect(path, query)
+            url = await self._try_redirect(
+                path, query, headers.get("user-agent", "")
+            )
             if url:
                 logger.debug(f"Emby 反代：302 {path} -> 115 CDN")
                 await _send_redirect(send, url)

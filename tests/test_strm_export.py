@@ -202,6 +202,33 @@ class ExportTreeIncrementTest(unittest.TestCase):
         self.assertEqual(stats["errors"], 1)
         self.assertEqual(provider.list_calls, [])
 
+    def test_export_tree_path_duplicating_root_is_trimmed(self):
+        # 线上实测：export_dir 给出的相对路径带上了媒体库根的尾部，直接拼接会
+        # 变成 /媒体库/媒体库/... 导致每个目录都解析失败。
+        exporter = _Exporter(["/媒体库/剧集/某剧/Season 1/某剧.S01E01.mkv"])
+        stats, _generator, provider = self._run(exporter)
+        self.assertEqual(stats["errors"], 0)
+        self.assertEqual(stats["created"], 1)
+        self.assertEqual(provider.list_calls, ["300"])
+
+
+class StripDuplicatedPrefixTest(unittest.TestCase):
+    def test_trims_longest_root_suffix(self):
+        from cloudsubscribex.utils.strm_export import _strip_duplicated_prefix
+
+        root = "/Alist/影视/moviepilot/媒体库"
+        self.assertEqual(
+            _strip_duplicated_prefix(root, "/moviepilot/媒体库/电影/外语电影"),
+            "/电影/外语电影",
+        )
+        self.assertEqual(
+            _strip_duplicated_prefix(root, "/媒体库/电影"), "/电影"
+        )
+        self.assertEqual(
+            _strip_duplicated_prefix(root, "/电影"), "/电影"
+        )
+        self.assertEqual(_strip_duplicated_prefix(root, "/"), "/")
+
 
 if __name__ == "__main__":
     unittest.main()

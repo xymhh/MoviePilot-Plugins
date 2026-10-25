@@ -47,7 +47,9 @@ class TianyiFileService(CloudDriveFileServiceBase):
             preserve_partial=preserve_partial,
         )
 
-    def resolve_download_link(self, file_item: CloudFile) -> tuple[str, dict]:
+    def resolve_download_link(
+            self, file_item: CloudFile, user_agent: str = "",
+    ) -> tuple[str, dict]:
         data = self.client.request(
             "GET", "https://cloud.189.cn/api/portal/getFileInfo.action",
             params={"fileId": file_item.id},

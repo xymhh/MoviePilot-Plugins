@@ -51,9 +51,16 @@ class RedirectApi(OwnerDelegator):
         cls._link_cache[key] = (url, time.time() + _CACHE_TTL_SECONDS)
 
     # ------------------------------------------------------------------ 换链
-    def _resolve_link(self, pickcode: str, file_name: str) -> Tuple[str, int]:
-        """返回 (直链, 错误码)；错误时直链为空。"""
-        cached = self._cache_get(pickcode)
+    def _resolve_link(
+            self, pickcode: str, file_name: str, user_agent: str = "",
+    ) -> Tuple[str, int]:
+        """返回 (直链, 错误码)；错误时直链为空。
+
+        User-Agent 参与缓存键：115 的直链签名绑定取链时的 UA（``f=1``），
+        同一个 pickcode 在不同播放器上必须各自换链。
+        """
+        cache_key = f"{pickcode}|{user_agent or ''}"
+        cached = self._cache_get(cache_key)
         if cached:
             return cached, 0
 
@@ -74,13 +81,24 @@ class RedirectApi(OwnerDelegator):
             playback_values={"pickcode": pickcode},
         )
         try:
-            url, _headers = downloader.resolve_download_link(item)
+            url, _headers = downloader.resolve_download_link(
+                item, user_agent=user_agent or "",
+            )
+        except TypeError:
+            # 老能力实现不接受额外参数（理论上已全部支持）
+            try:
+                url, _headers = downloader.resolve_download_link(item)
+            except Exception as error:  # noqa: BLE001
+                logger.warning(
+                    f"302 跳转：换取直链失败 pickcode={pickcode}（{error}）"
+                )
+                return "", 502
         except Exception as error:  # noqa: BLE001 - 上游异常统一转 502
             logger.warning(f"302 跳转：换取直链失败 pickcode={pickcode}（{error}）")
             return "", 502
         if not url:
             return "", 502
-        self._cache_put(pickcode, str(url))
+        self._cache_put(cache_key, str(url))
         return str(url), 0
 
     # ------------------------------------------------------------------ 路由
@@ -102,7 +120,11 @@ class RedirectApi(OwnerDelegator):
                 content={"success": False, "message": f"pickcode 非法：{pickcode}"},
             )
 
-        url, error_code = self._resolve_link(pickcode, file_name)
+        try:
+            user_agent = str(request.headers.get("user-agent") or "")
+        except AttributeError:  # 测试替身可能没有 headers
+            user_agent = ""
+        url, error_code = self._resolve_link(pickcode, file_name, user_agent)
         if error_code:
             return JSONResponse(
                 status_code=error_code,

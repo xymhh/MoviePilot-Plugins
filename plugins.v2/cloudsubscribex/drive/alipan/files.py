@@ -325,7 +325,9 @@ class AliPanFileService(CloudDriveFileServiceBase):
             self._directory_path_cache.clear()
         return deleted
 
-    def resolve_download_link(self, file_item: CloudFile) -> tuple[str, dict]:
+    def resolve_download_link(
+            self, file_item: CloudFile, user_agent: str = "",
+    ) -> tuple[str, dict]:
         data = self.client.request("/v2/file/get_download_url", {
             "drive_id": self.client.drive_id,
             "file_id": file_item.id,

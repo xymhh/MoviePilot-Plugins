@@ -140,12 +140,19 @@ class P115FileQuery:
             preserve_partial=preserve_partial,
         )
 
-    def resolve_download_link(self, file_item: CloudFile) -> tuple[str, dict]:
+    def resolve_download_link(
+            self, file_item: CloudFile, user_agent: str = "",
+    ) -> tuple[str, dict]:
         pickcode = str(file_item.playback_values.get("pickcode") or "")
         client = getattr(self.manager, "client", None)
         if not client or not pickcode:
             raise RuntimeError("115 文件缺少 pickcode 或客户端未登录")
-        value = self.manager.rate_limiter.call(client.download_url, pickcode)
+        # 115 直链的 ``f=1`` 要求请求时携带与取链一致的 User-Agent；p115client
+        # 默认发空 UA，客户端带自己的 UA 访问就会 403 invalid signature。
+        # 因此取链时必须把播放端的 UA 传进去。
+        value = self.manager.rate_limiter.call(
+            client.download_url, pickcode, user_agent=str(user_agent or ""),
+        )
         return str(value or ""), dict(getattr(value, "headers", None) or {})
 
 

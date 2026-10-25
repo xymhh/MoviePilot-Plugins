@@ -105,7 +105,9 @@ class Yun139FileService(CloudDriveFileServiceBase):
             return None
         return CloudFile(folder_id, str(data.get("name") or name), True, native=data)
 
-    def resolve_download_link(self, file_item: CloudFile) -> tuple[str, dict]:
+    def resolve_download_link(
+            self, file_item: CloudFile, user_agent: str = "",
+    ) -> tuple[str, dict]:
         """取下载直链；CDN 开关关闭时回落到源站地址。"""
         data = self.client.request("/file/getDownloadUrl", {"fileId": file_item.id})
         cdn_url = str(data.get("cdnUrl") or "").strip()
