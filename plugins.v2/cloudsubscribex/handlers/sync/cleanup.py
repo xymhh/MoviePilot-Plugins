@@ -13,6 +13,7 @@ from app.schemas.types import MediaType
 
 from ...core import OwnerDelegator
 from ...core.media import list_subscribes_by_tmdb_id
+from ...utils.deep_delete_match import match_history_record_to_targets
 
 
 class HistoryCleanupService(OwnerDelegator):
@@ -149,16 +150,8 @@ class HistoryCleanupService(OwnerDelegator):
             if not file_name:
                 continue
 
-            record_file_cf = file_name.casefold()
-            record_stem_cf = Path(file_name).stem.casefold()
-
-            is_match = False
-            # 策略 1：跨端词干或文件名直接匹配（彻底消除 .strm vs .mkv 以及挂载前缀映射差异）
-            if record_file_cf in target_filenames or record_stem_cf in target_stems:
-                is_match = True
-
-            # 策略 2：通过本地路径转换与媒体服务器路径前缀匹配
-            if not is_match and cloud_dir and self._local_resource_path:
+            record_ms_path = ""
+            if cloud_dir and self._local_resource_path:
                 try:
                     local_path = self._path_mapper.local_path(
                         local_root=self._local_resource_path,
@@ -166,26 +159,31 @@ class HistoryCleanupService(OwnerDelegator):
                         cloud_dir=cloud_dir,
                         file_name=file_name,
                     )
-                    media_server_path = self._media_server_notifier.media_server_path(
-                        local_path
+                    record_ms_path = self._normalize_media_server_path(
+                        self._media_server_notifier.media_server_path(local_path)
                     )
-                    clean_ms = self._normalize_media_server_path(media_server_path)
-                    clean_ms_stem = str(Path(clean_ms).with_suffix("")).casefold()
-
-                    for tgt in normalized_targets:
-                        if (
-                                clean_ms.casefold() == tgt.casefold()
-                                or clean_ms_stem == str(Path(tgt).with_suffix("")).casefold()
-                        ):
-                            is_match = True
-                            break
                 except Exception as error:
                     logger.debug(f"计算深度删除匹配路径失败：{file_name} - {error}")
 
-            if is_match:
+            if match_history_record_to_targets(
+                    file_name, record_ms_path, target_filenames,
+                    target_stems, normalized_targets,
+            ):
                 matched.append(record)
 
         if not matched:
+            samples = []
+            for record in (self._get_data("history") or [])[:2000]:
+                cloud_dir = str(record.get("cloud_dir") or "").strip()
+                file_name = str(record.get("file_name") or "").strip()
+                if cloud_dir or file_name:
+                    samples.append(f"{cloud_dir}/{file_name}".strip("/"))
+                if len(samples) >= 3:
+                    break
+            logger.debug(
+                f"深度删除未命中诊断：目标={normalized_targets}，"
+                f"历史样本={samples}"
+            )
             return {"matched": 0, "deleted": 0, "linked_deleted": 0,
                     "cache_deleted": 0, "skipped": 0}
         result = self.delete_history_records(matched, delete_linked_files=True)
