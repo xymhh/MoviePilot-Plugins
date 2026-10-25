@@ -18,11 +18,14 @@ from app.schemas import MediaInfo, RefreshMediaItem
 from app.schemas.types import MediaType
 from app.utils.http import RequestUtils
 
+from ...utils.path_map import map_local_to_server_path
+
 try:
     from ...core.media_scope import is_ignored_media_path
 except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过滤模块
     def is_ignored_media_path(path):
         return False
+
 
 
 class MediaServerResolver:
@@ -875,6 +878,10 @@ class MediaServerNotifier:
             self._mediainfo_timers[key] = timer
             timer.start()
 
+    def map_to_server_path(self, path: Path | str) -> str:
+        """把 MP 侧本地路径翻译成媒体服务器侧路径。"""
+        return map_local_to_server_path(path, self.path_mappings)
+
     def _trigger_emby_mediainfo(
             self, name: str, path: Path, attempt: int
     ) -> None:
@@ -883,7 +890,7 @@ class MediaServerNotifier:
             logger.warning(f"Emby 媒体信息提取配置无效或服务未连接：{name}")
             return
         host, api_key, user_id = connection
-        file_path = path.as_posix()
+        file_path = self.map_to_server_path(path)
         try:
             with RequestUtils(timeout=15).get_res(
                     url=f"{host}/emby/Items",
@@ -911,6 +918,7 @@ class MediaServerNotifier:
                 else:
                     logger.warning(
                         f"Emby 入库后仍未找到媒体项，跳过媒体信息提取：{name} - {file_path}"
+                        f"（本地路径 {path.as_posix()}；检查媒体服务器路径映射）"
                     )
                 return
             with RequestUtils(timeout=30).post_res(
