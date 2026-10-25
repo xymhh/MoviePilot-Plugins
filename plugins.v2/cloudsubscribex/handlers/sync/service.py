@@ -1282,6 +1282,7 @@ class SyncHandler:
         )
         target_root = Path(root)
         created = updated = 0
+        sample = []
         for target, content in planned:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -1298,6 +1299,8 @@ class SyncHandler:
                 updated += 1
             else:
                 created += 1
+            if len(sample) < 3:
+                sample.append({"path": str(target), "content": content})
 
         logger.info(
             f"分享 STRM 生成完成：{share_code} 新增 {created} / 更新 {updated} "
@@ -1310,6 +1313,7 @@ class SyncHandler:
             "created": created,
             "updated": updated,
             "skipped": skipped,
+            "sample": sample,
         }
 
     def rebuild_strm_files(
