@@ -1325,12 +1325,14 @@ class SyncHandler:
             services = MediaServerResolver._services() or {}
         except Exception as error:  # noqa: BLE001 - 媒体服务器不可用不该阻断主流程
             logger.warning(f"媒体服务器列表获取失败：{error}")
-            return results
+            services = {}
         for name, service in services.items():
             try:
-                instance = service.instance
+                instance = getattr(service, "instance", None)
                 if service.type == "emby":
-                    instance.post("Library/Refresh")
+                    if not self._refresh_emby(instance):
+                        results[name] = "unsupported"
+                        continue
                 elif hasattr(instance, "refresh_library_by_items"):
                     instance.refresh_library_by_items([])
                 else:
@@ -1341,6 +1343,57 @@ class SyncHandler:
             except Exception as error:  # noqa: BLE001
                 results[name] = str(error)
                 logger.warning(f"媒体库刷新失败：{name}（{error}）")
+        if not results:
+            results.update(self._refresh_emby_from_settings())
+        return results
+
+    @staticmethod
+    def _refresh_emby(instance: Any) -> bool:
+        """对 Emby 触发全库刷新（MP 的 Emby 客户端无 post，直接走 HTTP）。"""
+        host = str(getattr(instance, "host", "") or getattr(instance, "_host", "") or "")
+        apikey = str(
+            getattr(instance, "apikey", "") or getattr(instance, "_apikey", "") or ""
+        )
+        return SyncHandler._emby_library_refresh(host, apikey)
+
+    @staticmethod
+    def _emby_library_refresh(host: str, apikey: str) -> bool:
+        host = str(host or "").rstrip("/")
+        apikey = str(apikey or "")
+        if not host or not apikey:
+            return False
+        import httpx
+
+        response = httpx.post(
+            f"{host}/Library/Refresh", params={"api_key": apikey}, timeout=30,
+        )
+        return response.status_code in (200, 204)
+
+    def _refresh_emby_from_settings(self) -> Dict[str, Any]:
+        """兜底：从 MP 系统设置里读 Emby 连接信息直接请求。"""
+        results: Dict[str, Any] = {}
+        try:
+            from app.core.config import settings
+
+            servers = (
+                getattr(settings, "MEDIASSERVERS", None)
+                or getattr(settings, "MEDIASSERVER", None)
+                or []
+            )
+        except Exception:  # noqa: BLE001
+            return results
+        for server in servers or []:
+            if str(server.get("type") or "") != "emby" or not server.get("enabled"):
+                continue
+            config = server.get("config") or {}
+            name = str(server.get("name") or "emby")
+            try:
+                ok = self._emby_library_refresh(
+                    config.get("host", ""), config.get("apikey", ""),
+                )
+                results[name] = "ok" if ok else "failed"
+            except Exception as error:  # noqa: BLE001
+                results[name] = str(error)
         return results
 
     def clean_share_strm(
