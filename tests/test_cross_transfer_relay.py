@@ -687,3 +687,57 @@ def test_local_upload_source_sha1_match_reuses_without_transfer(tmp_path):
     assert task["method"] == "reuse"
     assert task["result_file_id"] == "existing"
     assert target.upload.upload_file_calls == []
+
+
+def test_relay_always_is_stored_and_defaults_off():
+    manager = make_manager(FakeRelay([]))
+    assert manager._relay_always is False
+
+    manager = CrossTransferTaskManager(
+        lambda key: FakeTarget(),
+        relay_client=FakeRelay([]),
+        relay_max_bytes=10 * 1024 ** 3,
+        relay_timeout_seconds=60,
+        relay_fallback_local=True,
+        relay_always=True,
+    )
+    assert manager._relay_always is True
+
+
+def test_relay_always_takes_over_without_rapid_probe(monkeypatch):
+    """一律走中继：不探 115 秒传、不下载，直接提交中继任务。"""
+    target = FakeTarget()
+    relay = FakeRelay(
+        [_success_status()],
+        on_success=lambda _s: target.add_file("/整理/待整理", FakeFile()),
+    )
+    manager = make_manager(relay, target=target)
+    manager._relay_always = True
+    manager._rapid_miss_action = "fallback"
+    updates = []
+    manager._update = lambda *args, **kwargs: updates.append(kwargs)
+
+    called = {"download": 0}
+
+    def _boom(*args, **kwargs):
+        called["download"] += 1
+        raise AssertionError("一律走中继时不应触发本机下载")
+
+    monkeypatch.setattr(manager, "_download_quark_file", _boom, raising=False)
+
+    task = make_task()
+    task.update({
+        "id": "task-always",
+        "algorithm": "SHA1",
+        "cache_key": "",
+        "stop_event": Event(),
+        "status": "queued",
+        "fallback": False,
+        "image": "",
+        "description": "",
+        "source_file": FakeFile(),
+    })
+    manager._tasks["task-always"] = task
+    manager._run_locked("task-always", "AB", "")
+    assert relay.submitted, "中继应收到任务"
+    assert called["download"] == 0

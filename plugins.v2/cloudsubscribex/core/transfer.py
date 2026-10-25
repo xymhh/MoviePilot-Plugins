@@ -794,6 +794,7 @@ class CrossTransferTaskManager:
                  relay_timeout_seconds: int = 0,
                  relay_fallback_local: bool = True,
                  relay_connections: int = 0,
+                 relay_always: bool = False,
                  on_change: Optional[Callable[[], None]] = None):
         self._provider_resolver = provider_resolver
         self._target_writer = TargetWriter(provider_resolver)
@@ -813,6 +814,8 @@ class CrossTransferTaskManager:
         self._relay_fallback_local = bool(relay_fallback_local)
         # 中继下载腿线程数：0=用中继自己的配置（GOPEED_CONNECTIONS，默认 64）
         self._relay_connections = max(0, min(int(relay_connections or 0), 128))
+        # 一律走中继：跳过 115 秒传探测与本机下载，夸克跨盘文件直接交深圳中继
+        self._relay_always = bool(relay_always)
         self._transfer_slots = Semaphore(max(1, min(int(max_concurrent or 2), 10)))
         self._tasks: dict[str, dict] = {}
         self._lock = Lock()
@@ -1598,18 +1601,37 @@ class CrossTransferTaskManager:
                 and target.supports(CloudDriveCapability.FILE_QUERY)
             )
             if relay_active:
-                logger.debug(
-                    f"中继接管条件满足：{target_name}（{int(task['total'] or 0)} 字节）"
+                logger.info(
+                    f"中继接管条件满足：{target_name}（{int(task['total'] or 0)} 字节，"
+                    f"{'一律走中继' if self._relay_always else '秒传未命中时接管'}）"
                 )
             elif not source_path and str(task.get("source_provider") or "") == "quark":
-                logger.debug(
+                logger.info(
                     "中继未接管："
                     f"client={'有' if self._relay_client else '无'} "
                     f"大小={int(task['total'] or 0)} 上限={self._relay_max_bytes} "
                     f"目标可查={target.supports(CloudDriveCapability.FILE_QUERY)}"
+                    f" 源={task.get('source_provider') or '-'}"
                 )
             relay_tried = False
             remote_rapid_attempted = False
+            if relay_active and self._relay_always:
+                # 「跨盘任务一律走中继」：不探秒传、不本机下载，直接交深圳中继。
+                # 中继失败仍按 relay_fallback_local 决定回落本机还是记失败。
+                self._update(
+                    task_id, phase="relay", progress=6,
+                    message="交由国内中继接管（一律走中继）",
+                )
+                logger.info(
+                    f"一律走中继：{target_name}（{int(task['total'] or 0)} 字节）"
+                )
+                relay_tried = True
+                if self._relay_transfer(
+                        task, task_id, target, target_path, target_name,
+                        target_name_text, checksum,
+                        int(task["total"] or 0), stop_event,
+                ):
+                    return
             if (
                     not source_path and algorithm and checksum
                     and target.supports(CloudDriveCapability.RAPID_UPLOAD)

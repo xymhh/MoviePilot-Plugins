@@ -67,6 +67,9 @@ class CloudDriveManager:
             relay_connections=int(getattr(
                 self._plugin, "_cross_transfer_relay_threads", 0
             ) or 0),
+            relay_always=bool(getattr(
+                self._plugin, "_cross_transfer_relay_always", False
+            )),
             on_change=getattr(self._plugin, "_mark_runtime_changed", None),
         )
 
