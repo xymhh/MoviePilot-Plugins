@@ -34,6 +34,8 @@ wheels/
 # （V2 线插件的 dist 由 CI 构建后打进 Release 资产，不入库）
 !plugins.v3/*/dist/
 !plugins.v3/*/dist/**
+!plugins.v2/*/dist/
+!plugins.v2/*/dist/**
 
 # 数据库与运行时数据
 *.db
