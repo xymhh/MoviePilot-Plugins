@@ -557,6 +557,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "为 115 分享链接直接生成 STRM（不转存）",
             },
             {
+                "path": "/strm/share/clean",
+                "endpoint": self.api_vue_strm_share_clean,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除某个 115 分享链接生成的 STRM",
+            },
+            {
                 "path": "/strm/full_scan",
                 "endpoint": self.api_vue_strm_full_scan,
                 "methods": ["POST"],

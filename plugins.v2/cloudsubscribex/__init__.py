@@ -173,7 +173,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.58"
+    plugin_version = "1.7.59"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -880,6 +880,25 @@ class CloudSubscribeX(_PluginBase):
             "message": (
                 f"分享 STRM 生成完成：新增 {data.get('created')}，"
                 f"更新 {data.get('updated')}，跳过 {data.get('skipped')}"
+            ),
+            "data": data,
+        }
+
+    def clean_share_strm(self, share_url: str, save_path: str = "") -> dict:
+        """删除某个分享链接生成的 STRM。"""
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler or not hasattr(sync_handler, "clean_share_strm"):
+            return {"success": False, "message": "同步服务未就绪"}
+        try:
+            data = sync_handler.clean_share_strm(share_url, save_path=save_path)
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"分享 STRM 清理失败：{error}")
+            return {"success": False, "message": str(error)}
+        return {
+            "success": True,
+            "message": (
+                f"分享 STRM 已清理：删除 {data.get('removed')}，"
+                f"不存在 {data.get('missing')}"
             ),
             "data": data,
         }

@@ -200,6 +200,17 @@ class RuntimeApi(OwnerDelegator):
             share_url, save_path=save_path, overwrite=overwrite,
         )
 
+    def api_vue_strm_share_clean(
+            self, payload: Optional[Dict[str, Any]] = None
+    ) -> dict:
+        """删除某个 115 分享链接生成的 STRM。"""
+        data = payload or {}
+        share_url = str(data.get("share_url") or "").strip()
+        save_path = str(data.get("save_path") or "").strip()
+        if not share_url:
+            return {"success": False, "message": "请填写 115 分享链接"}
+        return self._owner.clean_share_strm(share_url, save_path=save_path)
+
     def api_vue_strm_full_scan(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:

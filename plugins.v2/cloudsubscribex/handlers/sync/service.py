@@ -1316,6 +1316,53 @@ class SyncHandler:
             "sample": sample,
         }
 
+    def clean_share_strm(
+            self,
+            share_url: str,
+            save_path: str = "",
+    ) -> Dict[str, Any]:
+        """删除某个分享链接生成的 STRM（只删 .strm，不碰原片与目录）。"""
+        share_service = self._share_transfer
+        if share_service is None or not hasattr(share_service, "resolve_share_download_link"):
+            raise RuntimeError("当前网盘不支持分享 STRM")
+        share_url = str(share_url or "").strip()
+        if not share_url:
+            raise ValueError("请填写 115 分享链接（含提取码）")
+        info = share_service.extract_share_info(share_url)
+        share_code = str(info.get("share_code") or "")
+        receive_code = str(info.get("receive_code") or "")
+        if not share_code or not receive_code:
+            raise ValueError("分享链接解析失败，请确认链接与提取码完整")
+
+        root = str(save_path or self._local_resource_path or "").strip()
+        if not root:
+            raise ValueError("未配置本地资源目录，请指定 save_path")
+
+        files = share_service.list_share_files(share_url, max_depth=10) or []
+        planned, _skipped = plan_share_strm_files(
+            root, files, "http://placeholder.invalid", share_code, receive_code,
+        )
+        removed = missing = 0
+        for target, _content in planned:
+            try:
+                if target.exists():
+                    target.unlink()
+                    removed += 1
+                else:
+                    missing += 1
+            except OSError as error:
+                logger.warning(f"分享 STRM 删除失败：{target}（{error}）")
+
+        logger.info(
+            f"分享 STRM 清理完成：{share_code} 删除 {removed} / 不存在 {missing}，目录={root}"
+        )
+        return {
+            "share_code": share_code,
+            "path": str(Path(root)),
+            "removed": removed,
+            "missing": missing,
+        }
+
     def rebuild_strm_files(
             self,
             overwrite: bool = False,
