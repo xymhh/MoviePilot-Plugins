@@ -85,6 +85,7 @@ from ...utils import (
     rebuild_strm_tree,
 )
 from ...utils.cache import create_platform_ttl_cache
+from ...utils.legacy_strm import iter_strm_files, migrate_strm_content
 
 _COMPONENT_TYPES = (
     MovieSyncProcessor,
