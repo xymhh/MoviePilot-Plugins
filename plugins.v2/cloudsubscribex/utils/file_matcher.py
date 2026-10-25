@@ -339,8 +339,16 @@ class FileMatcher:
 
     @classmethod
     def _is_generic_share_root(cls, name: str) -> bool:
-        """判断分享根目录是否只是泛称/格式词，无法据此识别剧名。"""
+        """判断分享根目录是否只是泛称/格式词，无法据此识别剧名。
+
+        分享把文件直接摊在根目录时，``share_root_names`` 取到的是文件名
+        （``01-4K.mp4`` / ``S01E01.mkv``）。这类纯集数文件名必须先剥扩展名
+        与尾部标点，再判定为泛称，否则会被当成「另一部剧的剧名」整批拦下
+        （线上实测：尚公主 E01-E04 的 4 个候选全部因此被跳过）。
+        """
         text = str(name or "").strip()
+        # 无目录时这里是文件名：先去掉扩展名，避免 "01-4K.mp4" 判不出集数。
+        text = re.sub(r"\.[A-Za-z0-9]{2,5}$", "", text)
         if not text:
             return True
         normalized = normalize_title(text)
@@ -350,6 +358,7 @@ class FileMatcher:
             return True
         cleaned = cls._SHARE_ROOT_TAG_RE.sub("", text)
         cleaned = cls._SHARE_ROOT_UPDATE_RE.sub("", cleaned).strip()
+        cleaned = cleaned.strip(" -_.·[]()（）【】")
         if cls._EPISODE_ONLY_ROOT_RE.match(cleaned):
             return True
         normalized_clean = normalize_title(cleaned)
