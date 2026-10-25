@@ -80,10 +80,12 @@ from ...drive.scanner import get_driver_definitions
 from ...utils import (
     StrmGenerator,
     StrmTemplateError,
+    plan_share_strm_files,
     rebuild_strm_by_export_tree,
     rebuild_strm_tree,
 )
 from ...utils.cache import create_platform_ttl_cache
+from ...utils.organize_plan import VIDEO_EXTENSIONS
 
 _COMPONENT_TYPES = (
     MovieSyncProcessor,
@@ -1243,6 +1245,73 @@ class SyncHandler:
                 "pending_key": pending_key,
             })
         return results
+
+    def generate_share_strm(
+            self,
+            share_url: str,
+            save_path: str = "",
+            overwrite: bool = False,
+    ) -> Dict[str, Any]:
+        """把 115 分享内的视频直接生成 STRM（不转存，不占网盘空间）。
+
+        STRM 内容指向本插件 ``/redirect`` 端点；播放时用
+        ``p115client.share_download_url`` 现场换链，文件始终留在分享方，
+        本地只多出几百字节的 .strm。
+        """
+        share_service = self._share_transfer
+        if share_service is None or not hasattr(share_service, "resolve_share_download_link"):
+            raise RuntimeError("当前网盘不支持分享 STRM")
+        if self._strm_generator is None:
+            raise RuntimeError("STRM 生成未启用，请先在设置中开启并配置基础地址")
+        share_url = str(share_url or "").strip()
+        if not share_url:
+            raise ValueError("请填写 115 分享链接（含提取码）")
+        info = share_service.extract_share_info(share_url)
+        share_code = str(info.get("share_code") or "")
+        receive_code = str(info.get("receive_code") or "")
+        if not share_code or not receive_code:
+            raise ValueError("分享链接解析失败，请确认链接与提取码完整")
+
+        root = str(save_path or self._local_resource_path or "").strip()
+        if not root:
+            raise ValueError("未配置本地资源目录，请指定 save_path")
+
+        files = share_service.list_share_files(share_url, max_depth=10) or []
+        base_url = str(getattr(self._strm_generator, "base_url", "") or "").rstrip("/")
+        planned, skipped = plan_share_strm_files(
+            root, files, base_url, share_code, receive_code, VIDEO_EXTENSIONS,
+        )
+        target_root = Path(root)
+        created = updated = 0
+        for target, content in planned:
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                existed = target.exists()
+                if existed and not overwrite:
+                    skipped += 1
+                    continue
+                target.write_text(content, encoding="utf-8")
+            except OSError as error:
+                logger.warning(f"分享 STRM 写入失败：{target}（{error}）")
+                skipped += 1
+                continue
+            if existed:
+                updated += 1
+            else:
+                created += 1
+
+        logger.info(
+            f"分享 STRM 生成完成：{share_code} 新增 {created} / 更新 {updated} "
+            f"/ 跳过 {skipped}，目录={root}"
+        )
+        return {
+            "share_code": share_code,
+            "receive_code": receive_code,
+            "path": str(target_root),
+            "created": created,
+            "updated": updated,
+            "skipped": skipped,
+        }
 
     def rebuild_strm_files(
             self,

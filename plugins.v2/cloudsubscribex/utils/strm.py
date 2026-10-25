@@ -9,6 +9,62 @@ class StrmTemplateError(ValueError):
     """STRM 模板配置错误。"""
 
 
+#: 分享 STRM 走同一套 302 端点，但参数换成 share_code/receive_code/id。
+SHARE_QUERY_KEYS = ("share_code", "receive_code", "id", "file_name")
+
+
+def build_share_strm_url(
+        base_url: str,
+        share_code: str,
+        receive_code: str,
+        file_id: str,
+        file_name: str = "",
+) -> str:
+    """拼出分享型 STRM 内容（播放时由插件现场换链，不转存）。"""
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        raise StrmTemplateError("STRM base_url 不能为空")
+    query = (
+        f"share_code={quote(str(share_code))}"
+        f"&receive_code={quote(str(receive_code))}"
+        f"&id={quote(str(file_id))}"
+    )
+    if file_name:
+        query += f"&file_name={quote(str(file_name))}"
+    return f"{base}{StrmGenerator.REDIRECT_PATH}?{query}"
+
+
+def plan_share_strm_files(
+        root: str,
+        files: Iterable[Mapping[str, Any]],
+        base_url: str,
+        share_code: str,
+        receive_code: str,
+        video_extensions: Iterable[str],
+) -> Tuple[list, int]:
+    """把分享文件清单规划成 [(本地路径, STRM 内容)]，返回 (计划, 跳过的非视频数)。"""
+    allowed = {str(ext).lower() for ext in video_extensions}
+    target_root = Path(str(root))
+    planned = []
+    skipped = 0
+    for item in files:
+        name = str(item.get("name") or "")
+        file_id = str(item.get("id") or "")
+        if not name or not file_id:
+            continue
+        suffix = PurePosixPath(name).suffix.lower()
+        if suffix not in allowed:
+            skipped += 1
+            continue
+        relative = str(item.get("relative_path") or name)
+        target = (target_root / relative).with_suffix(".strm")
+        planned.append((
+            target,
+            build_share_strm_url(base_url, share_code, receive_code, file_id, name),
+        ))
+    return planned, skipped
+
+
 class StrmGenerator:
     """按固定变量渲染 STRM URL，并写入本地挂载目录。"""
 

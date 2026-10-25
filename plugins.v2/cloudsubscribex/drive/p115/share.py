@@ -254,6 +254,33 @@ class ShareService(OwnerDelegator):
             self._share_file_cache[cache_key] = copy.deepcopy(files)
         return files
 
+    def resolve_share_download_link(
+            self, share_code: str, receive_code: str, file_id: str,
+            user_agent: str = "",
+    ) -> str:
+        """把分享里的单个文件换成 CDN 直链（不转存）。
+
+        走 ``p115client.share_download_url``：115 允许直接为分享内的文件换链，
+        不需要先保存到自己网盘，所以这类 STRM 不占空间、也不进转存记录。
+        """
+        if not self.client:
+            return ""
+        try:
+            file_id_int = int(str(file_id or "0"))
+        except (TypeError, ValueError):
+            return ""
+        if not share_code or not receive_code or file_id_int <= 0:
+            return ""
+        payload = {
+            "share_code": str(share_code),
+            "receive_code": str(receive_code),
+            "file_id": file_id_int,
+        }
+        value = self.rate_limiter.call(
+            self.client.share_download_url, payload, app="android",
+        )
+        return str(value or "")
+
     def list_share_directory(
             self, share_url: str, parent_id: str = ""
     ) -> List[dict]:

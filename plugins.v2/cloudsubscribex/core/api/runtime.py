@@ -186,6 +186,20 @@ class RuntimeApi(OwnerDelegator):
         "search", "cloud", "sync", "interface", "platform",
     })
 
+    def api_vue_strm_share(
+            self, payload: Optional[Dict[str, Any]] = None
+    ) -> dict:
+        """为 115 分享链接直接生成 STRM（不转存）。"""
+        data = payload or {}
+        share_url = str(data.get("share_url") or "").strip()
+        save_path = str(data.get("save_path") or "").strip()
+        overwrite = bool(data.get("overwrite") or False)
+        if not share_url:
+            return {"success": False, "message": "请填写 115 分享链接"}
+        return self._owner.generate_share_strm(
+            share_url, save_path=save_path, overwrite=overwrite,
+        )
+
     def api_vue_strm_full_scan(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:

@@ -101,13 +101,85 @@ class RedirectApi(OwnerDelegator):
         self._cache_put(cache_key, str(url))
         return str(url), 0
 
+    def _resolve_share_link(
+            self, share_code: str, receive_code: str, file_id: str,
+            user_agent: str = "",
+    ) -> Tuple[str, int]:
+        """分享文件换链（不转存）：返回 (直链, 错误码)。"""
+        cache_key = f"share|{share_code}|{receive_code}|{file_id}|{user_agent or ''}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached, 0
+
+        provider = getattr(self._owner, "_cloud_drive", None)
+        if provider is None:
+            logger.warning("302 跳转：网盘客户端未初始化")
+            return "", 503
+        try:
+            share_service = provider.require(CloudDriveCapability.SHARE_TRANSFER)
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"302 跳转：当前网盘不支持分享换链（{error}）")
+            return "", 503
+
+        try:
+            url = share_service.resolve_share_download_link(
+                share_code, receive_code, file_id, user_agent=user_agent or "",
+            )
+        except Exception as error:  # noqa: BLE001 - 上游异常统一转 502
+            logger.warning(
+                f"302 跳转：分享换链失败 share_code={share_code} id={file_id}（{error}）"
+            )
+            return "", 502
+        if not url:
+            return "", 502
+        self._cache_put(cache_key, str(url))
+        return str(url), 0
+
     # ------------------------------------------------------------------ 路由
     async def api_strm_redirect(
             self, request: Request, pickcode: str = "", file_name: str = "",
+            share_code: str = "", receive_code: str = "", id: str = "",
     ) -> Response:
-        """GET：302 到直链；HEAD：返回元信息供播放器探测。"""
+        """GET：302 到直链；HEAD：返回元信息供播放器探测。
+
+        ``share_code`` 非空时按「分享文件」换链（不转存），否则走 pickcode。
+        """
         pickcode = str(pickcode or "").strip()
         file_name = str(file_name or "").strip()
+        share_code = str(share_code or "").strip()
+        receive_code = str(receive_code or "").strip()
+        share_file_id = str(id or "").strip()
+
+        if share_code:
+            try:
+                user_agent = str(request.headers.get("user-agent") or "")
+            except AttributeError:  # 测试替身可能没有 headers
+                user_agent = ""
+            url, error_code = self._resolve_share_link(
+                share_code, receive_code, share_file_id, user_agent,
+            )
+            if error_code:
+                return JSONResponse(
+                    status_code=error_code,
+                    content={
+                        "success": False,
+                        "message": "获取分享直链失败" if error_code != 503
+                        else "网盘客户端不可用",
+                        "share_code": share_code,
+                        "id": share_file_id,
+                    },
+                )
+            if request.method == "HEAD":
+                return Response(
+                    status_code=200, headers={"Accept-Ranges": "bytes"},
+                )
+            logger.debug(
+                f"302 跳转：share_code={share_code} id={share_file_id}"
+            )
+            return RedirectResponse(
+                url=url, status_code=302,
+                headers={"Cache-Control": "no-store"},
+            )
 
         if not pickcode:
             return JSONResponse(

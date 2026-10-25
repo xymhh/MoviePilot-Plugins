@@ -550,6 +550,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "重启 Emby 302 反代",
             },
             {
+                "path": "/strm/share",
+                "endpoint": self.api_vue_strm_share,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "为 115 分享链接直接生成 STRM（不转存）",
+            },
+            {
                 "path": "/strm/full_scan",
                 "endpoint": self.api_vue_strm_full_scan,
                 "methods": ["POST"],

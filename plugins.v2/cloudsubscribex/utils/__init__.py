@@ -12,7 +12,12 @@ from .magnet import (
     configure_magnet_metadata_url,
     parse_magnet_metadata,
 )
-from .strm import StrmGenerator, StrmTemplateError
+from .strm import (
+    StrmGenerator,
+    StrmTemplateError,
+    build_share_strm_url,
+    plan_share_strm_files,
+)
 from .strm_scan import rebuild_strm_tree
 from .strm_export import rebuild_strm_by_export_tree
 from ..core.media import media_identity

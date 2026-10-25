@@ -173,7 +173,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.56"
+    plugin_version = "1.7.57"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -860,6 +860,29 @@ class CloudSubscribeX(_PluginBase):
             return max(0, int(getattr(self, "_strm_full_scan_budget", 0) or 0))
         except (TypeError, ValueError):
             return 0
+
+    def generate_share_strm(
+            self, share_url: str, save_path: str = "", overwrite: bool = False,
+    ) -> dict:
+        """为 115 分享直接生成 STRM（不转存）。"""
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler or not hasattr(sync_handler, "generate_share_strm"):
+            return {"success": False, "message": "同步服务未就绪"}
+        try:
+            data = sync_handler.generate_share_strm(
+                share_url, save_path=save_path, overwrite=overwrite,
+            )
+        except Exception as error:  # noqa: BLE001 - 统一回给前端
+            logger.error(f"分享 STRM 生成失败：{error}")
+            return {"success": False, "message": str(error)}
+        return {
+            "success": True,
+            "message": (
+                f"分享 STRM 生成完成：新增 {data.get('created')}，"
+                f"更新 {data.get('updated')}，跳过 {data.get('skipped')}"
+            ),
+            "data": data,
+        }
 
     def run_strm_full_scan(self, reason: str = "手动") -> dict:
         """后台按目录 CID 全量遍历媒体库，补齐/校准 STRM。"""
