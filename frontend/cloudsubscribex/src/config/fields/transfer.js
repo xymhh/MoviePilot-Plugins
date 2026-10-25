@@ -248,6 +248,17 @@ export function createTransferSection(options) {
               Boolean(config.cross_transfer_relay_enabled),
           },
           {
+            key: "cross_transfer_relay_always",
+            label: "跨盘任务一律走中继",
+            type: "switch",
+            default: false,
+            hint: "开启：不试 115 秒传、不在本机下载，凡是源为夸克且不超过单文件上限的文件都直接交深圳中继（秒传本可命中的也会真实下载，更慢但链路统一）；关闭：维持原逻辑，只有秒传确认未命中才交中继",
+            cols: 4,
+            show: (config) =>
+              Boolean(config.cross_transfer_enabled) &&
+              Boolean(config.cross_transfer_relay_enabled),
+          },
+          {
             key: "cross_transfer_relay_fallback_local",
             label: "中继失败回落本机上传",
             type: "switch",

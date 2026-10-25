@@ -3,13 +3,14 @@
         "name": "网盘订阅助手",
         "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
         "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-        "version": "1.7.69",
+        "version": "1.7.70",
         "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
         "author": "xymhh",
         "level": 1,
         "release": true,
         "system_version": ">=2.14.6",
         "history": {
+            "1.7.70": "跨盘任务可配置为「一律走中继」：勾选后跳过 115 秒传探测与本机下载，夸克跨盘文件全部交深圳中继（默认关闭，行为不变）。同时把「中继接管/未接管」判定日志从 debug 提到 info。配置页新增同名开关。",
             "1.7.69": "跨盘任务可配置为「一律走中继」：跳过 115 秒传探测与本机下载，夸克跨盘文件全部交深圳中继；默认关闭，行为不变。同时把「中继接管/未接管」判定日志从 debug 提到 info，便于定位。",
             "v1.7.56": "`strm_base_url` 只需填基础地址。\n\n以前必须在 `strm_base_url` 里手写完整端点 `/api/v1/plugin/CloudSubscribeX/redirect`，很容易写错、也跟 P115StrmHelper 的用法不一致。现在：\n\n①`strm_base_url` 只填到主机端口（例如容器内 `http://moviepilot-v3:3000`），插件自动补 `/api/v1/plugin/CloudSubscribeX/redirect?pickcode=…&file_name=…`；\n②老配置（base_url 带完整端点 + 模板 `{base_url}?pickcode=…`）会被自动归一化，不用手动改；\n③自定义模板（如 `{base_url}{file_path}`）保持原样，不受影响。\n\n注意：地址变更后旧 STRM 内容不会自动改写，需要开启「全量覆盖」跑一次重建。",
             "v1.7.55": "修复 STRM 增量仍然「无法解析目录」。\n\n1.7.54 只剥离了一层重复前缀，但 115 `export_dir` 给出的相对路径本身会重复两遍（线上实测拼出 `/Alist/影视/moviepilot/媒体库/moviepilot/媒体库/剧集/…`），剥一层后依旧重复。现在改成：① 相对路径若已是完整路径，直接按媒体库根截断；② 否则循环剥离「媒体库根后缀 == 相对路径前缀」，直到不再重复。",
@@ -188,8 +189,9 @@
             "v1.0.0": "支持订阅搜索、资源推荐、网盘转存、离线下载、STRM生成、网盘洗版和平台集成。"
         }
     },
-    "version": "1.7.69",
+    "version": "1.7.70",
     "history": {
+        "1.7.70": "跨盘任务可配置为「一律走中继」：勾选后跳过 115 秒传探测与本机下载，夸克跨盘文件全部交深圳中继（默认关闭，行为不变）。同时把「中继接管/未接管」判定日志从 debug 提到 info。配置页新增同名开关。",
         "1.7.69": "跨盘任务可配置为「一律走中继」：跳过 115 秒传探测与本机下载，夸克跨盘文件全部交深圳中继；默认关闭，行为不变。同时把「中继接管/未接管」判定日志从 debug 提到 info，便于定位。"
     }
 }
