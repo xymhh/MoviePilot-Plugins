@@ -85,7 +85,6 @@ from ...utils import (
     rebuild_strm_tree,
 )
 from ...utils.cache import create_platform_ttl_cache
-from ...utils.organize_plan import VIDEO_EXTENSIONS
 
 _COMPONENT_TYPES = (
     MovieSyncProcessor,
@@ -1279,7 +1278,7 @@ class SyncHandler:
         files = share_service.list_share_files(share_url, max_depth=10) or []
         base_url = str(getattr(self._strm_generator, "base_url", "") or "").rstrip("/")
         planned, skipped = plan_share_strm_files(
-            root, files, base_url, share_code, receive_code, VIDEO_EXTENSIONS,
+            root, files, base_url, share_code, receive_code,
         )
         target_root = Path(root)
         created = updated = 0

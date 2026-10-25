@@ -9,6 +9,12 @@ class StrmTemplateError(ValueError):
     """STRM 模板配置错误。"""
 
 
+#: 分享 STRM 默认跳过的非视频后缀之外的判定集合（不依赖 organize_plan，避免循环导入）。
+DEFAULT_VIDEO_EXTENSIONS = frozenset({
+    ".mkv", ".mp4", ".avi", ".iso", ".ts", ".m2ts",
+    ".wmv", ".mov", ".flv", ".rmvb", ".rm", ".webm", ".mpg", ".mpeg",
+})
+
 #: 分享 STRM 走同一套 302 端点，但参数换成 share_code/receive_code/id。
 SHARE_QUERY_KEYS = ("share_code", "receive_code", "id", "file_name")
 
@@ -40,10 +46,13 @@ def plan_share_strm_files(
         base_url: str,
         share_code: str,
         receive_code: str,
-        video_extensions: Iterable[str],
+        video_extensions: Optional[Iterable[str]] = None,
 ) -> Tuple[list, int]:
     """把分享文件清单规划成 [(本地路径, STRM 内容)]，返回 (计划, 跳过的非视频数)。"""
-    allowed = {str(ext).lower() for ext in video_extensions}
+    allowed = {
+        str(ext).lower()
+        for ext in (video_extensions or DEFAULT_VIDEO_EXTENSIONS)
+    }
     target_root = Path(str(root))
     planned = []
     skipped = 0
