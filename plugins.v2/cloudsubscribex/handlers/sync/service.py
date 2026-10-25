@@ -1446,6 +1446,49 @@ class SyncHandler:
             "media_refresh": refreshed,
         }
 
+    def migrate_legacy_strm(
+            self, root: str = "", dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """把 P115StrmHelper 生成的 STRM 改写成本插件端点（保留查询参数）。"""
+        target_root = str(root or self._local_resource_path or "").strip()
+        if not target_root:
+            raise ValueError("未配置本地资源目录，请指定 root")
+        scanned = migrated = skipped = failed = 0
+        for path in iter_strm_files(target_root):
+            scanned += 1
+            try:
+                content = path.read_text(encoding="utf-8", errors="ignore")
+            except OSError as error:
+                failed += 1
+                logger.warning(f"读取 STRM 失败：{path}（{error}）")
+                continue
+            new_content = migrate_strm_content(content)
+            if new_content is None:
+                skipped += 1
+                continue
+            if not dry_run:
+                try:
+                    path.write_text(new_content, encoding="utf-8")
+                except OSError as error:
+                    failed += 1
+                    logger.warning(f"改写 STRM 失败：{path}（{error}）")
+                    continue
+            migrated += 1
+        refreshed = {} if dry_run else self.refresh_media_servers()
+        logger.info(
+            f"旧 STRM 迁移完成：{'预演' if dry_run else '执行'} 扫描 {scanned} / "
+            f"改写 {migrated} / 跳过 {skipped} / 失败 {failed}，目录={target_root}"
+        )
+        return {
+            "path": str(Path(target_root)),
+            "scanned": scanned,
+            "migrated": migrated,
+            "skipped": skipped,
+            "failed": failed,
+            "dry_run": dry_run,
+            "media_refresh": refreshed,
+        }
+
     def rebuild_strm_files(
             self,
             overwrite: bool = False,

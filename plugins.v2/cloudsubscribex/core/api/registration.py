@@ -571,6 +571,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "手动触发媒体库刷新",
             },
             {
+                "path": "/strm/migrate_legacy",
+                "endpoint": self.api_vue_strm_migrate_legacy,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "把 P115StrmHelper 生成的 STRM 改写成本插件端点",
+            },
+            {
                 "path": "/strm/full_scan",
                 "endpoint": self.api_vue_strm_full_scan,
                 "methods": ["POST"],

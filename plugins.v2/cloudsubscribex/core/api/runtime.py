@@ -217,6 +217,15 @@ class RuntimeApi(OwnerDelegator):
         """手动触发 Emby/Plex 等媒体库刷新。"""
         return self._owner.refresh_media_servers()
 
+    def api_vue_strm_migrate_legacy(
+            self, payload: Optional[Dict[str, Any]] = None
+    ) -> dict:
+        """把 P115StrmHelper 生成的 STRM 改写成本插件端点。"""
+        data = payload or {}
+        root = str(data.get("root") or "").strip()
+        dry_run = bool(data.get("dry_run") or False)
+        return self._owner.migrate_legacy_strm(root=root, dry_run=dry_run)
+
     def api_vue_strm_full_scan(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:

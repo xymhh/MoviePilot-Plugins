@@ -173,7 +173,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.63"
+    plugin_version = "1.7.64"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -915,6 +915,26 @@ class CloudSubscribeX(_PluginBase):
         return {
             "success": True,
             "message": f"已提交媒体库刷新：{data or '无可用媒体服务器'}",
+            "data": data,
+        }
+
+    def migrate_legacy_strm(self, root: str = "", dry_run: bool = False) -> dict:
+        """把 P115StrmHelper 生成的 STRM 改写成本插件端点。"""
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler or not hasattr(sync_handler, "migrate_legacy_strm"):
+            return {"success": False, "message": "同步服务未就绪"}
+        try:
+            data = sync_handler.migrate_legacy_strm(root=root, dry_run=dry_run)
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"旧 STRM 迁移失败：{error}")
+            return {"success": False, "message": str(error)}
+        return {
+            "success": True,
+            "message": (
+                f"旧 STRM 迁移{'预演' if dry_run else '完成'}："
+                f"扫描 {data.get('scanned')}，改写 {data.get('migrated')}，"
+                f"跳过 {data.get('skipped')}，失败 {data.get('failed')}"
+            ),
             "data": data,
         }
 
