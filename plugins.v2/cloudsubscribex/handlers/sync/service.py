@@ -1321,11 +1321,8 @@ class SyncHandler:
     def refresh_media_servers(self) -> Dict[str, Any]:
         """让媒体服务器重新扫描库，用于文件被删除/新增后立刻生效。"""
         results: Dict[str, Any] = {}
-        notifier = getattr(self, "_media_server_notifier", None)
-        if notifier is None:
-            return results
         try:
-            services = notifier._services() or {}
+            services = MediaServerResolver._services() or {}
         except Exception as error:  # noqa: BLE001 - 媒体服务器不可用不该阻断主流程
             logger.warning(f"媒体服务器列表获取失败：{error}")
             return results
