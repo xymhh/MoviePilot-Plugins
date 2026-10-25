@@ -102,6 +102,46 @@ class StrmRenderEncodingTest(unittest.TestCase):
         self.assertIn("%20", url)
         self.assertIn("S01E25", url)
 
+    def test_base_url_only_auto_appends_redirect_endpoint(self):
+        """只填基础地址（容器地址）时，端点与查询参数由插件自动补齐。"""
+        generator = StrmGenerator(
+            base_url="http://moviepilot-v3:3000",
+            template=StrmGenerator.LEGACY_REDIRECT_TEMPLATE,
+            provider_variables=("pickcode",),
+        )
+        self.assertEqual(generator.base_url, "http://moviepilot-v3:3000")
+        self.assertEqual(generator.template, StrmGenerator.REDIRECT_TEMPLATE)
+        url = generator.render(
+            file_name="某剧.S01E01.mkv",
+            file_path="/影视/某剧.S01E01.mkv",
+            template_values={"pickcode": "abcdefghijklmno12"},
+        )
+        self.assertEqual(
+            url,
+            "http://moviepilot-v3:3000/api/v1/plugin/CloudSubscribeX/redirect"
+            "?pickcode=abcdefghijklmno12&file_name=%E6%9F%90%E5%89%A7.S01E01.mkv",
+        )
+
+    def test_legacy_full_endpoint_base_is_trimmed(self):
+        """老配置（base_url 里带完整端点）也能被归一化。"""
+        generator = StrmGenerator(
+            base_url="http://mp:3000/api/v1/plugin/CloudSubscribeX/redirect",
+            template=StrmGenerator.LEGACY_REDIRECT_TEMPLATE,
+            provider_variables=("pickcode",),
+        )
+        self.assertEqual(generator.base_url, "http://mp:3000")
+        url = generator.render(
+            file_name="a.mkv",
+            file_path="/a.mkv",
+            template_values={"pickcode": "aaaaaaaaaaaaaaa1"},
+        )
+        self.assertTrue(
+            url.startswith(
+                "http://mp:3000/api/v1/plugin/CloudSubscribeX/redirect?pickcode="
+            ),
+            url,
+        )
+
     def test_file_path_keeps_slashes_when_encoded(self):
         generator = StrmGenerator(
             base_url="http://mp:3000",

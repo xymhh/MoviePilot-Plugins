@@ -15,6 +15,13 @@ class StrmGenerator:
     CORE_VARIABLES = {"base_url", "file_name", "file_path"}
     DEFAULT_BASE_URL = "http://172.17.0.1:9527"
     DEFAULT_TEMPLATE = "{base_url}{file_path}"
+    #: 本插件内置 302 端点；`strm_base_url` 只需要填到主机端口，这一段由插件自动补齐。
+    REDIRECT_PATH = "/api/v1/plugin/CloudSubscribeX/redirect"
+    REDIRECT_TEMPLATE = (
+        "{base_url}" + REDIRECT_PATH + "?pickcode={pickcode}&file_name={file_name}"
+    )
+    #: 1.7.39 ~ 1.7.55 的老形态：base_url 里已经带了完整端点。
+    LEGACY_REDIRECT_TEMPLATE = "{base_url}?pickcode={pickcode}&file_name={file_name}"
 
     def __init__(
             self,
@@ -22,12 +29,20 @@ class StrmGenerator:
             template: str,
             provider_variables: Iterable[str] = (),
     ):
-        self.base_url = str(
+        raw_base = str(
             self.DEFAULT_BASE_URL if base_url is None else base_url
         ).strip().rstrip("/")
-        self.template = str(
+        raw_template = str(
             self.DEFAULT_TEMPLATE if template is None else template
         ).strip()
+        # 老配置把完整端点写进了 base_url：截回纯基础地址，端点由模板负责。
+        if raw_base.endswith(self.REDIRECT_PATH):
+            raw_base = raw_base[: -len(self.REDIRECT_PATH)].rstrip("/")
+        # 老模板 `{base_url}?pickcode=…` 缺少端点，自动补上。
+        if raw_template == self.LEGACY_REDIRECT_TEMPLATE:
+            raw_template = self.REDIRECT_TEMPLATE
+        self.base_url = raw_base
+        self.template = raw_template
         self.allowed_variables = self.CORE_VARIABLES | {
             str(value or "").strip()
             for value in provider_variables
