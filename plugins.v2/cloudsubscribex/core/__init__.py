@@ -1,5 +1,7 @@
 """插件核心基础能力。"""
 
+from ..utils.notify_template import render_template, resolve_template
+
 from .cloud import (
     CloudDriveCapability,
     CloudDriveCapabilityError,

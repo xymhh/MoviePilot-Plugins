@@ -14,7 +14,7 @@ from app.core.metainfo import MetaInfo
 from app.log import logger
 from app.schemas.types import MediaType
 
-from ...core import CloudDriveCapability, OwnerDelegator
+from ...core import CloudDriveCapability, OwnerDelegator, render_template, resolve_template
 from ...utils.organize_plan import (
     OrganizeEntry,
     PackagePlan,
@@ -1070,13 +1070,25 @@ class OrganizeService(OwnerDelegator):
             trigger_is_schedule = "定时" in str(trigger)
         if trigger_is_schedule and notify and not cancelled:
             try:
+                fallback_text = (
+                    f"源目录：{record['source_path']}\n"
+                    f"分组：{record['groups']}，可执行：{record['ready']}\n"
+                    f"成功 {done}，跳过 {skipped}，失败 {failed}"
+                    + (f"\n清理空目录：{removed_dirs} 个" if removed_dirs else "")
+                )
+                templates = getattr(self, "_notify_templates", None) or {}
                 self.post_message(
                     title="115 网盘整理完成",
-                    text=(
-                        f"源目录：{record['source_path']}\n"
-                        f"分组：{record['groups']}，可执行：{record['ready']}\n"
-                        f"成功 {done}，跳过 {skipped}，失败 {failed}"
-                        + (f"\n清理空目录：{removed_dirs} 个" if removed_dirs else "")
+                    text=render_template(
+                        resolve_template(templates, "notify_template_organize"),
+                        fallback_text,
+                        source=record["source_path"],
+                        groups=record["groups"],
+                        ready=record["ready"],
+                        done=done,
+                        skipped=skipped,
+                        failed=failed,
+                        removed_dirs=removed_dirs,
                     ),
                 )
             except Exception as error:  # noqa: BLE001

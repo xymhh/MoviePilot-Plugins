@@ -14,7 +14,7 @@ except ImportError:
 from app.log import logger
 from sqlalchemy import func
 
-from .. import OwnerDelegator
+from .. import OwnerDelegator, render_template, resolve_template
 from ..media import media_server_tmdb_filters, tmdb_id_of
 try:
     from ..media_scope import filter_media_rows
@@ -125,10 +125,15 @@ class MediaLibraryApi(OwnerDelegator):
         logger.info(f"深度删除联动完成：{message}")
         if self._notify:
             try:
+                templates = getattr(self, "_notify_templates", None) or {}
                 self.post_message(
                     mtype=self._notification_type,
                     title="【网盘订阅】深度联动删除完成",
-                    text=message,
+                    text=render_template(
+                        resolve_template(templates, "notify_template_delete"),
+                        message,
+                        message=message,
+                    ),
                 )
             except Exception as error:
                 logger.warning(f"深度删除结果通知发送失败：{error}")

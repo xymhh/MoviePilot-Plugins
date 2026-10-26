@@ -22,6 +22,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
+from .utils.notify_template import DEFAULT_TEMPLATES
 from .core import (
     CloudDriveCapability,
     CloudDriveManager,
@@ -1339,6 +1340,10 @@ class CloudSubscribeX(_PluginBase):
 
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:
         self._notify = bool(config.get("notify", False))
+        self._notify_templates = {
+            key: str(config.get(key) or "").strip() or default
+            for key, default in DEFAULT_TEMPLATES.items()
+        }
         self._notification_type = self._resolve_notification_type(
             config.get("notification_type")
         )

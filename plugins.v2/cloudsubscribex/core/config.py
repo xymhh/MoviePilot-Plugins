@@ -16,6 +16,7 @@ from app.log import logger
 from app.schemas.types import MediaType
 
 from .media import tmdb_id_of
+from ..utils.notify_template import DEFAULT_TEMPLATES
 
 DEFAULT_AUTO_SUBSCRIBE_USERNAME = "网盘订阅助手"
 
@@ -38,6 +39,7 @@ class UIConfig:
             "subscribe_season_limit": 0,
             "notify": True,
             "notification_type": "Plugin",
+            **DEFAULT_TEMPLATES,
             "webhook_enabled": False,
             "webhook_url": "",
             "webhook_method": "POST",

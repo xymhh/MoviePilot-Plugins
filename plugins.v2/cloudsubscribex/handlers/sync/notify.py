@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional
 from app.log import logger
 from app.schemas.types import NotificationType
 
-from ...core import OwnerDelegator
+from ...core import OwnerDelegator, render_template, resolve_template
 
 
 class SyncNotificationService(OwnerDelegator):
@@ -86,9 +86,9 @@ class SyncNotificationService(OwnerDelegator):
         notification_type = getattr(self, "_notification_type", NotificationType.Plugin)
 
         kind_config = {
-            "transfer": ("【网盘订阅助手】转存完成", "转存"),
-            "cross_transfer": ("【网盘订阅助手】跨盘转存完成", "跨盘转存"),
-            "upgrade": ("【网盘洗版】洗版完成", "洗版"),
+            "transfer": ("【网盘订阅助手】转存完成", "转存", "notify_template_transfer"),
+            "cross_transfer": ("【网盘订阅助手】跨盘转存完成", "跨盘转存", "notify_template_cross_transfer"),
+            "upgrade": ("【网盘洗版】洗版完成", "洗版", "notify_template_upgrade"),
         }
         grouped: Dict[str, List[Dict[str, Any]]] = {}
         for detail in transfer_details:
@@ -127,11 +127,20 @@ class SyncNotificationService(OwnerDelegator):
             if len(text_lines) > 10:
                 text_lines = text_lines[:10]
                 text_lines.append(f"... 等共 {len(details)} 项")
-            notification_title, action = kind_config[kind]
+            notification_title, action, template_key = kind_config[kind]
+            fallback_text = f"本次共{action} {file_count} 个文件\n\n" + "\n".join(text_lines)
+            templates = getattr(self, "_notify_templates", None) or {}
             post_message(
                 mtype=notification_type,
                 title=notification_title,
-                text=f"本次共{action} {file_count} 个文件\n\n" + "\n".join(text_lines),
+                text=render_template(
+                    resolve_template(templates, template_key),
+                    fallback_text,
+                    action=action,
+                    count=file_count,
+                    labels=list(text_lines),
+                    items=list(details),
+                ),
                 image=first_image,
             )
             logger.info(

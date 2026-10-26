@@ -14,7 +14,7 @@ import pytz
 from app.core.config import settings
 from app.log import logger
 
-from .. import OwnerDelegator
+from .. import OwnerDelegator, render_template, resolve_template
 from ..checkin_manager import get_checkin_definitions
 from ..definitions import CheckinDefinition
 from ..search import SearchCapability
@@ -578,6 +578,8 @@ class CheckinService(OwnerDelegator):
             )
         if not record.get("success") and record.get("message"):
             lines.append(f"原因：{record.get('message')}")
+        fallback_text = "\n".join(lines)
+        templates = getattr(self, "_notify_templates", None) or {}
         self.post_message(
             mtype=self._notification_type,
             title=(
@@ -585,7 +587,13 @@ class CheckinService(OwnerDelegator):
                 if record.get("success")
                 else f"【网盘订阅助手】{provider.name} 签到失败"
             ),
-            text="\n".join(lines),
+            text=render_template(
+                resolve_template(templates, "notify_template_checkin"),
+                fallback_text,
+                provider=provider.name,
+                success=bool(record.get("success")),
+                lines=list(lines),
+            ),
         )
 
     @staticmethod
@@ -623,10 +631,18 @@ class CheckinService(OwnerDelegator):
         """批量签到完成后发送一条短汇总，避免每个渠道各发一条。"""
         if not self._notify or not results:
             return
+        summary_lines = [self._summary_line(item) for item in results]
+        templates = getattr(self, "_notify_templates", None) or {}
         self.post_message(
             mtype=self._notification_type,
             title=f"【网盘订阅】{title}",
-            text="\n".join(self._summary_line(item) for item in results),
+            text=render_template(
+                resolve_template(templates, "notify_template_checkin"),
+                "\n".join(summary_lines),
+                provider=title,
+                success=all(bool(item.get("success")) for item in results),
+                lines=summary_lines,
+            ),
         )
 
     def _build_record(
