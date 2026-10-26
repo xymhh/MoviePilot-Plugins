@@ -7,3 +7,5 @@ telethon>=1.36.0
 # MoviePilot 运行时已提供；声明出来是为了让纯 CI/私有库环境也能跑账本单测
 sqlalchemy~=2.0.0
 alembic~=1.13
+# 通知模板渲染；MoviePilot 运行时已提供，声明出来让纯 CI 环境也能跑模板单测
+jinja2>=3.1.0

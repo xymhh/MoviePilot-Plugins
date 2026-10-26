@@ -852,6 +852,8 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         self._set_task_phase(subscribe, "登记文件后处理", 95)
                         batch_success_episodes = []
                         batch_detail_episodes = {}
+                        batch_detail_size: Dict[str, int] = {}
+                        batch_detail_source: Dict[str, str] = {}
                         completed_missing_episodes = set()
 
                         # 1.6.52 落盘自检：批内非 pending 的成功条目共用一次季目录列目录
@@ -974,6 +976,14 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     batch_detail_episodes.setdefault(
                                         notification_kind, []
                                     ).append(episode)
+                                    batch_detail_size[notification_kind] = (
+                                        batch_detail_size.get(notification_kind, 0)
+                                        + self._detail_size(history_item, item)
+                                    )
+                                    if not batch_detail_source.get(notification_kind):
+                                        batch_detail_source[notification_kind] = (
+                                            self._detail_source_text(history_item)
+                                        )
 
                                 batch_success_episodes.append(episode)
                             else:
@@ -992,6 +1002,8 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             self._append_tv_transfer_detail(
                                 transfer_details, mediainfo, season, episodes,
                                 notification_kind=notification_kind,
+                                size_bytes=batch_detail_size.get(notification_kind, 0),
+                                source_text=batch_detail_source.get(notification_kind, ""),
                             )
 
                         # 记录下载历史

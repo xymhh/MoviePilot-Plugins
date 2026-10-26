@@ -742,6 +742,8 @@ class MovieSyncProcessor(OwnerDelegator):
                                         if history_item.get("transfer_mode") == "cross"
                                         else "transfer"
                                     ),
+                                    "size": self._detail_size(history_item, matched_file),
+                                    "source": self._detail_source_text(history_item),
                                 })
 
                             self._record_download_history(

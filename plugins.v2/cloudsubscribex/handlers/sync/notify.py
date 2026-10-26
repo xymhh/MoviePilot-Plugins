@@ -8,6 +8,7 @@ from app.log import logger
 from app.schemas.types import NotificationType
 
 from ...core import OwnerDelegator, render_template, resolve_template
+from ...drive.common import format_size
 
 
 class SyncNotificationService(OwnerDelegator):
@@ -59,6 +60,28 @@ class SyncNotificationService(OwnerDelegator):
             f"静默 {wait_seconds} 秒后合并发送"
         )
 
+    @staticmethod
+    def _media_type_icon(type_text: str) -> str:
+        """通知行首图标：用类型区分电影/剧集/动漫。"""
+        return {
+            "电影": "🎬",
+            "电视剧": "📺",
+            "剧集": "📺",
+            "动漫": "🍿",
+            "动画": "🍿",
+        }.get(str(type_text or "").strip(), "📦")
+
+    @staticmethod
+    def _media_type_name(type_text: str) -> str:
+        """通知里展示的中文类型名。"""
+        return {
+            "电影": "电影",
+            "电视剧": "剧集",
+            "剧集": "剧集",
+            "动漫": "动漫",
+            "动画": "动漫",
+        }.get(str(type_text or "").strip(), "")
+
     def _flush_transfer_notifications(self) -> None:
         with self._notification_batch_lock:
             timer = self._notification_batch_timer
@@ -95,15 +118,32 @@ class SyncNotificationService(OwnerDelegator):
             kind = str(detail.get("notification_kind") or "transfer")
             grouped.setdefault(kind if kind in kind_config else "transfer", []).append(detail)
 
+        kind_prefix = {
+            "transfer": "",
+            "cross_transfer": "🔀 ",
+            "upgrade": "⬆️ ",
+        }
         for kind, details in grouped.items():
             text_lines = []
             first_image = None
             file_count = 0
+            total_size = 0
             for detail in details:
-                if detail.get("type") == "电影":
+                type_text = str(detail.get("type") or "").strip()
+                icon = self._media_type_icon(type_text)
+                meta = []
+                if type_text:
+                    meta.append(self._media_type_name(type_text))
+                size = int(detail.get("size") or 0)
+                if size > 0:
+                    meta.append(format_size(size))
+                source = str(detail.get("source") or "").strip()
+                if source:
+                    meta.append(source)
+                if type_text == "电影":
                     title = detail.get("title", "未知")
                     year = detail.get("year", "")
-                    text_lines.append(f"{title} ({year})")
+                    headline = f"{title} ({year})".replace(" ()", "")
                     file_count += 1
                 else:
                     title = detail.get("title", "未知")
@@ -118,17 +158,28 @@ class SyncNotificationService(OwnerDelegator):
                                 f"E{episodes[0]:02d}-E{episodes[-1]:02d} "
                                 f"共{len(episodes)}集"
                             )
-                        text_lines.append(f"{title} S{season:02d} {ep_str}".strip())
+                        headline = f"{title} S{season:02d} {ep_str}".strip()
                     else:
                         file_count += 1
-                        text_lines.append(f"{title} S{season:02d}".strip())
+                        headline = f"{title} S{season:02d}".strip()
+                total_size += max(0, size)
+                line = f"{kind_prefix.get(kind, '')}{icon} {headline}"
+                if meta:
+                    line = f"{line} · {' · '.join(meta)}"
+                text_lines.append(line)
                 if not first_image and detail.get("image"):
                     first_image = detail.get("image")
             if len(text_lines) > 10:
                 text_lines = text_lines[:10]
                 text_lines.append(f"... 等共 {len(details)} 项")
             notification_title, action, template_key = kind_config[kind]
-            fallback_text = f"本次共{action} {file_count} 个文件\n\n" + "\n".join(text_lines)
+            total_size_text = format_size(total_size) if total_size > 0 else ""
+            fallback_text = (
+                f"本次共{action} {file_count} 个文件"
+                + (f"，合计 {total_size_text}" if total_size_text else "")
+                + "\n\n"
+                + "\n".join(text_lines)
+            )
             templates = getattr(self, "_notify_templates", None) or {}
             post_message(
                 mtype=notification_type,
@@ -138,6 +189,7 @@ class SyncNotificationService(OwnerDelegator):
                     fallback_text,
                     action=action,
                     count=file_count,
+                    total_size=total_size_text,
                     labels=list(text_lines),
                     items=list(details),
                 ),

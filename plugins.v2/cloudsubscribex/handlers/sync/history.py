@@ -178,12 +178,50 @@ class HistoryService(OwnerDelegator):
             return False
 
     @staticmethod
+    @staticmethod
+    def _detail_source_text(history_item: Optional[Dict[str, Any]]) -> str:
+        """通知里展示的网盘来源：跨盘写「源 → 目标」，同盘只写目标盘。"""
+        item = history_item or {}
+        target = str(
+            item.get("target_drive_name") or item.get("cloud_drive_name") or ""
+        ).strip()
+        source = str(item.get("source_drive_name") or "").strip()
+        # 跨盘才写「源 → 目标」；同盘只写目标盘名
+        if source and target and source != target:
+            return f"{source} → {target}"
+        return target or source or ""
+
+    @staticmethod
+    def _detail_size(
+            history_item: Optional[Dict[str, Any]], file_info: Any = None
+    ) -> int:
+        """通知里展示的文件大小：优先历史记录，其次网盘文件对象。"""
+        candidates: List[Any] = []
+        if isinstance(history_item, dict):
+            candidates.append(history_item.get("file_size"))
+            candidates.append(history_item.get("size"))
+        if isinstance(file_info, dict):
+            candidates.append(file_info.get("size"))
+            inner = file_info.get("file")
+            if isinstance(inner, dict):
+                candidates.append(inner.get("size"))
+        for value in candidates:
+            try:
+                size = int(value or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size > 0:
+                return size
+        return 0
+
     def _append_tv_transfer_detail(
             transfer_details: List[Dict[str, Any]],
             mediainfo: MediaInfo,
             season: int,
             episodes: List[int],
             notification_kind: str = "transfer",
+            size_bytes: int = 0,
+            source_text: str = "",
     ) -> None:
         """按媒体季批量合并通知详情，避免逐集重复扫描列表。"""
         normalized = sorted({
@@ -204,6 +242,9 @@ class HistoryService(OwnerDelegator):
             detail["episodes"] = sorted(
                 set(detail.get("episodes") or []) | set(normalized)
             )
+            detail["size"] = int(detail.get("size") or 0) + max(0, int(size_bytes or 0))
+            if source_text and not detail.get("source"):
+                detail["source"] = source_text
             return
         transfer_details.append({
             "type": MediaType.TV.value,
@@ -213,6 +254,8 @@ class HistoryService(OwnerDelegator):
             "episodes": normalized,
             "image": mediainfo.get_poster_image(),
             "notification_kind": notification_kind,
+            "size": max(0, int(size_bytes or 0)),
+            "source": source_text,
         })
 
     @staticmethod

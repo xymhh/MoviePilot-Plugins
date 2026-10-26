@@ -584,6 +584,8 @@ class UpgradeService(OwnerDelegator):
                     if not transfer_results:
                         break
                     batch_detail_episodes = []
+                    batch_detail_size = 0
+                    batch_detail_source = ""
                     batch_success_episodes = []
                     for transfer_result in transfer_results:
                         item = transfer_result["item"]
@@ -627,6 +629,13 @@ class UpgradeService(OwnerDelegator):
                                 )
                             if not pending_key:
                                 batch_detail_episodes.append(episode)
+                                batch_detail_size += self._detail_size(
+                                    history_item, item
+                                )
+                                if not batch_detail_source:
+                                    batch_detail_source = self._detail_source_text(
+                                        history_item
+                                    )
                             batch_success_episodes.append(episode)
 
                             logger.debug(
@@ -643,6 +652,8 @@ class UpgradeService(OwnerDelegator):
                     self._append_tv_transfer_detail(
                         transfer_details, mediainfo, season, batch_detail_episodes,
                         notification_kind="upgrade",
+                        size_bytes=batch_detail_size,
+                        source_text=batch_detail_source,
                     )
                     if batch_success_episodes:
                         self._record_download_history(

@@ -22,7 +22,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from .utils.notify_template import DEFAULT_TEMPLATES
+from .utils.notify_template import (
+    DEFAULT_TEMPLATES,
+    upgrade_legacy_templates,
+)
 from .core import (
     CloudDriveCapability,
     CloudDriveManager,
@@ -174,7 +177,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.74"
+    plugin_version = "1.7.75"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -571,12 +574,18 @@ class CloudSubscribeX(_PluginBase):
             for key, default in DEFAULT_TEMPLATES.items()
             if not str(config.get(key) or "").strip()
         }
-        if not missing:
+        # 仍是旧默认值的模板随版本升级到新排版；用户改过的不动
+        upgraded = upgrade_legacy_templates(config)
+        if not missing and not upgraded:
             return
         merged = dict(config)
         merged.update(missing)
+        merged.update(upgraded)
         if self.update_config(merged):
-            logger.info(f"已为配置补全 {len(missing)} 个通知模板默认值")
+            if missing:
+                logger.info(f"已为配置补全 {len(missing)} 个通知模板默认值")
+            if upgraded:
+                logger.info(f"已将 {len(upgraded)} 个旧版通知模板升级为新排版")
         else:
             logger.warning("通知模板默认值写回配置失败，运行时将使用内置默认模板")
 
