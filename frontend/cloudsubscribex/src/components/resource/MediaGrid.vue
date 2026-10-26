@@ -65,7 +65,7 @@
             <v-icon icon="mdi-star" size="12" color="amber" class="mr-0.5" />
             {{ getRatingText(item) }}
           </div>
-          <div v-if="item.media_type === 'tv' && hasMissingEpisodes(item)" class="missing-badge">缺集</div>
+          <div v-if="item.media_type === 'tv' && item.in_library !== false && hasMissingEpisodes(item)" class="missing-badge">缺集</div>
           <div class="media-caption">
             <h3 class="media-title" :title="item.title">{{ item.title }}</h3>
             <span v-if="item.year" class="media-year">{{ item.year }}</span>
