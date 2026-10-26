@@ -549,6 +549,7 @@ class CloudSubscribeX(_PluginBase):
         # 初始化独立数据库并修复历史分组键。
         self._get_data_store().initialize()
         self._apply_plugin_config(config, reset_runtime=True)
+        self._ensure_notify_template_defaults(config)
         # 内置 Emby 302 反代：开关关闭时不建线程、不占端口。
         try:
             from .core.api.emby_proxy import start_emby_proxy
@@ -556,6 +557,28 @@ class CloudSubscribeX(_PluginBase):
             start_emby_proxy(self)
         except Exception as error:  # noqa: BLE001 - 反代失败不得影响插件主流程
             logger.error(f"Emby 302 反代初始化失败：{error}")
+
+    def _ensure_notify_template_defaults(self, config: Optional[dict]) -> None:
+        """把缺失的通知模板默认值写回配置。
+
+        配置页读的是数据库里的原始配置，新版本新增的模板键在用户保存之前并不存在，
+        这里在初始化时补全，保证首次打开「消息通知」就能看到可编辑的默认文案。
+        """
+        if not isinstance(config, dict):
+            return
+        missing = {
+            key: default
+            for key, default in DEFAULT_TEMPLATES.items()
+            if not str(config.get(key) or "").strip()
+        }
+        if not missing:
+            return
+        merged = dict(config)
+        merged.update(missing)
+        if self.update_config(merged):
+            logger.info(f"已为配置补全 {len(missing)} 个通知模板默认值")
+        else:
+            logger.warning("通知模板默认值写回配置失败，运行时将使用内置默认模板")
 
     def _migrate_from_legacy_plugin(self, config: Optional[dict]) -> Optional[dict]:
         """首次启动时把旧插件 ID（CloudSubscribe）的配置/数据/私有库搬到独立 ID。
