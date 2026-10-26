@@ -193,12 +193,28 @@ class DefaultTemplateTest(unittest.TestCase):
 
 class LegacyUpgradeTest(unittest.TestCase):
     def test_legacy_default_is_replaced(self):
-        config = {"notify_template_delete": _tpl.LEGACY_DEFAULT_TEMPLATES["notify_template_delete"]}
+        config = {"notify_template_transfer": _tpl.LEGACY_DEFAULT_TEMPLATES["notify_template_transfer"][0]}
         updated = _tpl.upgrade_legacy_templates(config)
         self.assertEqual(
-            updated["notify_template_delete"],
-            _tpl.DEFAULT_TEMPLATES["notify_template_delete"],
+            updated["notify_template_transfer"],
+            _tpl.DEFAULT_TEMPLATES["notify_template_transfer"],
         )
+
+    def test_every_legacy_generation_is_upgraded(self):
+        for key, variants in _tpl.LEGACY_DEFAULT_TEMPLATES.items():
+            current = _tpl.DEFAULT_TEMPLATES[key]
+            for index, variant in enumerate(variants):
+                if variant.strip() == current.strip():
+                    continue  # 本版未改这一类，旧值即新值，无需回写
+                self.assertIn(
+                    key,
+                    _tpl.upgrade_legacy_templates({key: variant}),
+                    f"{key} 第 {index} 代旧默认值未被升级",
+                )
+
+    def test_new_default_is_not_rewritten(self):
+        for key, default in _tpl.DEFAULT_TEMPLATES.items():
+            self.assertEqual(_tpl.upgrade_legacy_templates({key: default}), {}, key)
 
     def test_customized_template_is_kept(self):
         config = {"notify_template_transfer": "我的模板 {{ count }}"}
@@ -210,7 +226,7 @@ class LegacyUpgradeTest(unittest.TestCase):
         )
 
     def test_whitespace_differences_still_upgrade(self):
-        legacy = _tpl.LEGACY_DEFAULT_TEMPLATES["notify_template_checkin"]
+        legacy = _tpl.LEGACY_DEFAULT_TEMPLATES["notify_template_checkin"][0]
         noisy = "\n".join(
             line + "   " for line in legacy.splitlines()
         ) + "\n\n"

@@ -5,7 +5,7 @@
 """
 
 from datetime import datetime
-from typing import Any, Dict, Mapping
+from typing import Any, Dict, List, Mapping
 
 from app.log import logger
 from jinja2 import Environment, TemplateError
@@ -19,7 +19,7 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
         "\n"
         "{% for label in labels %}{{ label }}\n"
-        "{% endfor %}"
+        "{% endfor %}\n"
         "🕐 {{ time }}"
     ),
     "notify_template_cross_transfer": (
@@ -27,7 +27,7 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
         "\n"
         "{% for label in labels %}{{ label }}\n"
-        "{% endfor %}"
+        "{% endfor %}\n"
         "🕐 {{ time }}"
     ),
     "notify_template_upgrade": (
@@ -35,14 +35,14 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
         "\n"
         "{% for label in labels %}{{ label }}\n"
-        "{% endfor %}"
+        "{% endfor %}\n"
         "🕐 {{ time }}"
     ),
     "notify_template_checkin": (
         "{{ '✅' if success else '❌' }} {{ provider }} 签到{{ '成功' if success else '失败' }}\n"
         "\n"
         "{% for line in lines %}· {{ line }}\n"
-        "{% endfor %}"
+        "{% endfor %}\n"
         "🕐 {{ time }}"
     ),
     "notify_template_organize": (
@@ -64,57 +64,120 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
     ),
 }
 
-#: 1.7.72–1.7.74 的默认模板：用户没改过就必须随版本升级，否则新排版永远不生效
-LEGACY_DEFAULT_TEMPLATES: Dict[str, str] = {
-    "notify_template_transfer": (
-        "📦 本次{{ action }} {{ count }} 个文件\n"
-        "\n"
-        "{% for label in labels %}▫️ {{ label }}\n"
-        "{% endfor %}"
-        "\n"
-        "🕐 {{ time }}"
-    ),
-    "notify_template_cross_transfer": (
-        "📦 本次{{ action }} {{ count }} 个文件\n"
-        "\n"
-        "{% for label in labels %}🔀 {{ label }}\n"
-        "{% endfor %}"
-        "\n"
-        "🕐 {{ time }}"
-    ),
-    "notify_template_upgrade": (
-        "🔁 本次{{ action }} {{ count }} 个文件\n"
-        "\n"
-        "{% for label in labels %}⭐ {{ label }}\n"
-        "{% endfor %}"
-        "\n"
-        "🕐 {{ time }}"
-    ),
-    "notify_template_checkin": (
-        "{{ '✅' if success else '❌' }} {{ provider }} 签到{{ '成功' if success else '失败' }}\n"
-        "\n"
-        "{% for line in lines %}▫️ {{ line }}\n"
-        "{% endfor %}"
-        "\n"
-        "🕐 {{ time }}"
-    ),
-    "notify_template_organize": (
-        "🗂 115 网盘整理完成\n"
-        "\n"
-        "📁 源目录：{{ source }}\n"
-        "📊 分组 {{ groups }} · 可执行 {{ ready }}\n"
-        "✅ 成功 {{ done }} · ⏭ 跳过 {{ skipped }} · ❌ 失败 {{ failed }}"
-        "{% if removed_dirs %}\n🧹 清理空目录 {{ removed_dirs }} 个{% endif %}\n"
-        "\n"
-        "🕐 {{ time }}"
-    ),
-    "notify_template_delete": (
-        "🗑 深度联动删除完成\n"
-        "\n"
-        "{{ message }}\n"
-        "\n"
-        "🕐 {{ time }}"
-    ),
+#: 历史版本的默认模板：用户没改过就必须随版本升级，否则新排版永远不生效。
+#: 每代默认值都留档，升级时逐个比对（1.7.72–1.7.74 一代、1.7.75 一代）。
+LEGACY_DEFAULT_TEMPLATES: Dict[str, List[str]] = {
+    "notify_template_transfer": [
+        # 1.7.72–1.7.74
+        (
+            "📦 本次{{ action }} {{ count }} 个文件\n"
+            "\n"
+            "{% for label in labels %}▫️ {{ label }}\n"
+            "{% endfor %}"
+            "\n"
+            "🕐 {{ time }}"
+        ),
+        # 1.7.75
+        (
+            "📦 本次{{ action }} {{ count }} 个文件"
+            "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
+            "\n"
+            "{% for label in labels %}{{ label }}\n"
+            "{% endfor %}"
+            "🕐 {{ time }}"
+        ),
+    ],
+    "notify_template_cross_transfer": [
+        (
+            "📦 本次{{ action }} {{ count }} 个文件\n"
+            "\n"
+            "{% for label in labels %}🔀 {{ label }}\n"
+            "{% endfor %}"
+            "\n"
+            "🕐 {{ time }}"
+        ),
+        (
+            "🔀 本次{{ action }} {{ count }} 个文件"
+            "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
+            "\n"
+            "{% for label in labels %}{{ label }}\n"
+            "{% endfor %}"
+            "🕐 {{ time }}"
+        ),
+    ],
+    "notify_template_upgrade": [
+        (
+            "🔁 本次{{ action }} {{ count }} 个文件\n"
+            "\n"
+            "{% for label in labels %}⭐ {{ label }}\n"
+            "{% endfor %}"
+            "\n"
+            "🕐 {{ time }}"
+        ),
+        (
+            "⬆️ 本次{{ action }} {{ count }} 个文件"
+            "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
+            "\n"
+            "{% for label in labels %}{{ label }}\n"
+            "{% endfor %}"
+            "🕐 {{ time }}"
+        ),
+    ],
+    "notify_template_checkin": [
+        (
+            "{{ '✅' if success else '❌' }} {{ provider }} 签到{{ '成功' if success else '失败' }}\n"
+            "\n"
+            "{% for line in lines %}▫️ {{ line }}\n"
+            "{% endfor %}"
+            "\n"
+            "🕐 {{ time }}"
+        ),
+        (
+            "{{ '✅' if success else '❌' }} {{ provider }} 签到{{ '成功' if success else '失败' }}\n"
+            "\n"
+            "{% for line in lines %}· {{ line }}\n"
+            "{% endfor %}"
+            "🕐 {{ time }}"
+        ),
+    ],
+    "notify_template_organize": [
+        (
+            "🗂 115 网盘整理完成\n"
+            "\n"
+            "📁 源目录：{{ source }}\n"
+            "📊 分组 {{ groups }} · 可执行 {{ ready }}\n"
+            "✅ 成功 {{ done }} · ⏭ 跳过 {{ skipped }} · ❌ 失败 {{ failed }}"
+            "{% if removed_dirs %}\n🧹 清理空目录 {{ removed_dirs }} 个{% endif %}\n"
+            "\n"
+            "🕐 {{ time }}"
+        ),
+        (
+            "🗂️ 115 网盘整理完成\n"
+            "\n"
+            "📁 {{ source }}\n"
+            "🧩 分组 {{ groups }}｜可执行 {{ ready }}\n"
+            "✅ 成功 {{ done }}｜⏭️ 跳过 {{ skipped }}｜❌ 失败 {{ failed }}"
+            "{% if removed_dirs %}\n🧹 清理空目录 {{ removed_dirs }} 个{% endif %}\n"
+            "\n"
+            "🕐 {{ time }}"
+        ),
+    ],
+    "notify_template_delete": [
+        (
+            "🗑 深度联动删除完成\n"
+            "\n"
+            "{{ message }}\n"
+            "\n"
+            "🕐 {{ time }}"
+        ),
+        (
+            "🗑️ 深度联动删除完成\n"
+            "\n"
+            "{{ message }}\n"
+            "\n"
+            "🕐 {{ time }}"
+        ),
+    ],
 }
 
 #: 模板变量说明，前端 hint 与文档共用
@@ -183,7 +246,12 @@ def upgrade_legacy_templates(config: Mapping[str, Any]) -> Dict[str, str]:
         stored = str((config or {}).get(key) or "").strip()
         if not stored:
             continue
-        legacy = LEGACY_DEFAULT_TEMPLATES.get(key)
-        if legacy and _normalize(stored) == _normalize(legacy):
-            updated[key] = default
+        normalized_default = _normalize(default)
+        for legacy in LEGACY_DEFAULT_TEMPLATES.get(key, []):
+            # 两代默认值相同（如 organize/delete 本版未改）时不必回写
+            if _normalize(legacy) == normalized_default:
+                continue
+            if _normalize(stored) == _normalize(legacy):
+                updated[key] = default
+                break
     return updated
