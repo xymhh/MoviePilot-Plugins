@@ -179,6 +179,22 @@ class RedirectApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(len(downloader.calls), 1)
 
+    def test_cache_ttl_is_45_minutes(self):
+        """直链 TTL 收敛到 45 分钟：115 直链实测 ≤70 分钟就 request expired。"""
+        self.assertEqual(redirect_module._CACHE_TTL_SECONDS, 45 * 60)
+
+    def test_expired_cache_entry_is_reminted(self):
+        """缓存条目过期后必须重新换链，不能把过期直链交给播放器。"""
+        downloader = _FakeDownloader()
+        owner = _owner(downloader)
+        self._call(owner)
+        key = f"{PICKCODE}|"
+        url, _ = RedirectApi._link_cache[key]
+        RedirectApi._link_cache[key] = (url, 1.0)  # 已过期
+        response = self._call(owner)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(len(downloader.calls), 2)
+
     def test_head_returns_200(self):
         downloader = _FakeDownloader()
         response = self._call(_owner(downloader), method="HEAD")

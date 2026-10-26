@@ -16,8 +16,12 @@ from .. import CloudDriveCapability, CloudFile, OwnerDelegator
 
 #: pickcode 固定 17 位字母数字（115）
 _PICKCODE_LENGTH = 17
-#: 直链缓存 TTL；115 直链约 12h 有效，取半衰期留余量
-_CACHE_TTL_SECONDS = 6 * 3600
+#: 直链缓存 TTL。115 直链实测寿命远短于官方描述：
+#: 2026-10-26 实测 19:46 签发的直链 20:56 已返回
+#: ``{"message":"request expired","status":403}``（≤70 分钟），
+#: 缓存 6h 会让 ffprobe / 定时提取任务拿到失效链接（403 无媒体信息）。
+#: 取 45 分钟，低于实测寿命且不会显著抬高换链频次。
+_CACHE_TTL_SECONDS = 45 * 60
 #: 缓存条目上限
 _CACHE_MAX_ENTRIES = 512
 

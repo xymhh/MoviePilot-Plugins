@@ -5,7 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
 from threading import RLock, Timer
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.chain.mediaserver import MediaServerChain
 
@@ -317,6 +317,12 @@ class MediaServerNotifier:
     _EMBY_REFRESH_DEDUPE_SECONDS = 15
     _EMBY_REFRESH_RETRY_DELAYS = (0, 1, 2)
     _EMBY_RETRY_STATUS_CODES = {500, 502, 503, 504}
+    #: 媒体信息提取任务名（Emby「计划任务」里神医助手注册的任务）。
+    #: 直接触发该任务比自己拼 PlaybackInfo 更可靠：实测 PlaybackInfo
+    #: 返回 200 但 MediaStreams 仍为 0，只有神医任务会真正 ffprobe。
+    _MEDIAINFO_TASK_NAME = "Extract MediaInfo"
+    #: 同一媒体服务器触发该任务的冷却时间（秒），避免成批剧集反复触发全库任务
+    _MEDIAINFO_TASK_COOLDOWN = 300.0
 
     def __init__(
             self,
@@ -345,6 +351,7 @@ class MediaServerNotifier:
         )
         self._emby_refresh_recent: Dict[str, float] = {}
         self._mediainfo_timers: Dict[str, Timer] = {}
+        self._mediainfo_task_recent: Dict[str, float] = {}
 
     def begin_task_batch(self) -> bool:
         """记录任务批次；通知仍按延迟窗口独立提交。"""
@@ -882,6 +889,97 @@ class MediaServerNotifier:
         """把 MP 侧本地路径翻译成媒体服务器侧路径。"""
         return map_local_to_server_path(path, self.path_mappings)
 
+    @staticmethod
+    def _emby_request(
+            url: str,
+            params: Dict[str, Any],
+            method: str = "get",
+            timeout: int = 15,
+    ) -> Tuple[Optional[Any], Optional[str]]:
+        """请求 Emby，返回 ``(response, 错误描述)``。
+
+        ``RequestUtils.get_res/post_res`` 在连接异常时返回 ``None``，
+        旧代码直接 ``with`` 它，抛出的 ``TypeError: 'NoneType' object does
+        not support the context manager protocol`` 会把真实原因吞掉。
+        这里统一用 ``raise_exception=True`` 并原样带出异常类型与消息。
+        """
+        try:
+            return RequestUtils(timeout=timeout).request(
+                method=method,
+                url=url,
+                params=params,
+                raise_exception=True,
+            ), None
+        except Exception as error:  # noqa: BLE001 - 诊断信息需要原样保留
+            return None, f"{type(error).__name__}: {error}"
+
+    def _trigger_mediainfo_task(self, name: str, host: str, api_key: str) -> bool:
+        """触发媒体服务器上的媒体信息提取任务（神医助手注册的计划任务）。"""
+        now = time.time()
+        with self._batch_lock:
+            last = self._mediainfo_task_recent.get(name, 0.0)
+            if now - last < self._MEDIAINFO_TASK_COOLDOWN:
+                return False
+
+        response, error = self._emby_request(
+            f"{host}/emby/ScheduledTasks", {"api_key": api_key},
+        )
+        status_text = f"状态码 {getattr(response, 'status_code', None)}"
+        if error or response is None or getattr(response, "status_code", None) != 200:
+            logger.warning(
+                f"Emby 计划任务查询失败，跳过媒体信息提取：{name}，"
+                f"原因：{error or status_text}"
+            )
+            return False
+        try:
+            tasks = response.json() or []
+        except Exception as error:  # noqa: BLE001 - 响应非 JSON 时给出原始错误
+            logger.warning(f"Emby 计划任务响应解析失败：{name}，原因：{error}")
+            return False
+
+        wanted = self._MEDIAINFO_TASK_NAME.strip().lower()
+        target = next(
+            (
+                task for task in tasks
+                if str(task.get("Name") or "").strip().lower() == wanted
+            ),
+            None,
+        )
+        if not target:
+            logger.warning(
+                f"未找到媒体信息提取任务（{self._MEDIAINFO_TASK_NAME}），"
+                f"跳过触发：{name}"
+            )
+            return False
+
+        task_id = target.get("Id")
+        state = str(target.get("State") or "").strip().lower()
+        if state in {"running", "cancelling"}:
+            with self._batch_lock:
+                self._mediainfo_task_recent[name] = now
+            logger.debug(f"媒体信息提取任务正在运行，无需重复触发：{name}")
+            return True
+        if not task_id:
+            logger.warning(f"媒体信息提取任务缺少 Id，跳过触发：{name}")
+            return False
+
+        response, error = self._emby_request(
+            f"{host}/emby/ScheduledTasks/Running/{task_id}",
+            {"api_key": api_key},
+            method="post",
+            timeout=20,
+        )
+        status_code = getattr(response, "status_code", None)
+        if error or status_code not in (200, 204):
+            logger.warning(
+                f"媒体信息提取任务触发失败：{name}，"
+                f"原因：{error or f'状态码 {status_code}'}"
+            )
+            return False
+        with self._batch_lock:
+            self._mediainfo_task_recent[name] = now
+        return True
+
     def _trigger_emby_mediainfo(
             self, name: str, path: Path, attempt: int
     ) -> None:
@@ -889,56 +987,59 @@ class MediaServerNotifier:
         if not connection:
             logger.warning(f"Emby 媒体信息提取配置无效或服务未连接：{name}")
             return
-        host, api_key, user_id = connection
+        host, api_key, _user_id = connection
         file_path = self.map_to_server_path(path)
-        try:
-            with RequestUtils(timeout=15).get_res(
-                    url=f"{host}/emby/Items",
-                    params={
-                        "Path": file_path,
-                        "Recursive": "true",
-                        "Fields": "Path",
-                        "IncludeItemTypes": "Movie,Episode,Folder,Series",
-                        "api_key": api_key,
-                    },
-            ) as response:
-                items = response.json().get("Items", []) if response else []
-            item_id = next(
-                (
-                    item.get("Id")
-                    for item in items
-                    if str(item.get("Path") or "").replace("\\", "/")
-                       == file_path
-                ),
-                None,
+        response, error = self._emby_request(
+            f"{host}/emby/Items",
+            {
+                "Path": file_path,
+                "Recursive": "true",
+                "Fields": "Path",
+                "IncludeItemTypes": "Movie,Episode,Folder,Series",
+                "api_key": api_key,
+            },
+        )
+        if error or response is None:
+            logger.warning(
+                f"Emby 媒体信息提取请求失败：{name} - {file_path}，原因：{error or '无响应'}"
             )
-            if not item_id:
-                if attempt < 4:
-                    self._schedule_emby_mediainfo(name, path, attempt + 1)
-                else:
-                    logger.warning(
-                        f"Emby 入库后仍未找到媒体项，跳过媒体信息提取：{name} - {file_path}"
-                        f"（本地路径 {path.as_posix()}；检查媒体服务器路径映射）"
-                    )
-                return
-            with RequestUtils(timeout=30).post_res(
-                    url=f"{host}/emby/Items/{item_id}/PlaybackInfo",
-                    params={
-                        "AutoOpenLiveStream": "true",
-                        "IsPlayback": "true",
-                        "api_key": api_key,
-                        "UserId": user_id,
-                    },
-            ) as response:
-                success = bool(response and response.status_code == 200)
-            if success:
-                logger.debug(f"Emby 媒体信息提取已触发：{name} - {file_path}")
-            else:
-                status_code = getattr(response, "status_code", None)
-                logger.warning(
-                    f"Emby 媒体信息提取失败：{name} - {file_path}，状态码：{status_code}"
-                )
-        except Exception as error:
-            logger.warning(f"Emby 媒体信息提取异常：{name} - {file_path}，原因：{error}")
             if attempt < 4:
                 self._schedule_emby_mediainfo(name, path, attempt + 1)
+            return
+        status_code = getattr(response, "status_code", None)
+        if status_code != 200:
+            logger.warning(
+                f"Emby 媒体信息提取查询失败：{name} - {file_path}，状态码：{status_code}"
+            )
+            if attempt < 4:
+                self._schedule_emby_mediainfo(name, path, attempt + 1)
+            return
+        try:
+            items = (response.json() or {}).get("Items", [])
+        except Exception as parse_error:  # noqa: BLE001 - 响应非 JSON 时给出原始错误
+            logger.warning(
+                f"Emby 媒体信息提取响应解析失败：{name} - {file_path}，原因：{parse_error}"
+            )
+            return
+
+        item_id = next(
+            (
+                item.get("Id")
+                for item in items
+                if str(item.get("Path") or "").replace("\\", "/")
+                   == file_path
+            ),
+            None,
+        )
+        if not item_id:
+            if attempt < 4:
+                self._schedule_emby_mediainfo(name, path, attempt + 1)
+            else:
+                logger.warning(
+                    f"Emby 入库后仍未找到媒体项，跳过媒体信息提取：{name} - {file_path}"
+                    f"（本地路径 {path.as_posix()}；检查媒体服务器路径映射）"
+                )
+            return
+
+        if self._trigger_mediainfo_task(name, host, api_key):
+            logger.info(f"已触发 Emby 媒体信息提取任务：{name} <- {file_path}")
