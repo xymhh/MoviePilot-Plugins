@@ -255,3 +255,22 @@ def upgrade_legacy_templates(config: Mapping[str, Any]) -> Dict[str, str]:
                 updated[key] = default
                 break
     return updated
+
+def apply_runtime_updates(state: Any, updates: Mapping[str, str]) -> int:
+    """把模板更新同步进运行期状态字典，返回实际改写的键数。
+
+    ``__init__._ensure_notify_template_defaults`` 在 ``_apply_plugin_config`` 之后执行，
+    此时运行期 ``_notify_templates`` 已按旧配置建好；只写数据库不同步内存，本次进程内
+    仍然按旧排版发通知（1.7.75 线上实测「升级了但通知没变化」就是这个原因）。
+    """
+    if not isinstance(state, dict) or not updates:
+        return 0
+    changed = 0
+    for key, value in updates.items():
+        text = str(value or "")
+        if not text:
+            continue
+        if state.get(key) != text:
+            state[key] = text
+            changed += 1
+    return changed

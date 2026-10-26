@@ -151,6 +151,39 @@ class TransferDetailLineTest(unittest.TestCase):
         )
 
 
+class RuntimeSyncTest(unittest.TestCase):
+    """1.7.77：模板升级必须同步进运行期状态，否则本次进程内仍发旧排版。"""
+
+    def test_updates_are_written_into_state(self):
+        state = {"notify_template_transfer": "旧模板 {{ count }}"}
+        changed = _tpl.apply_runtime_updates(
+            state, {"notify_template_transfer": "新模板 {{ count }}"}
+        )
+        self.assertEqual(changed, 1)
+        self.assertEqual(state["notify_template_transfer"], "新模板 {{ count }}")
+
+    def test_unchanged_values_are_not_counted(self):
+        state = {"notify_template_delete": "同一份"}
+        self.assertEqual(
+            _tpl.apply_runtime_updates(state, {"notify_template_delete": "同一份"}), 0
+        )
+
+    def test_none_state_is_safe(self):
+        self.assertEqual(_tpl.apply_runtime_updates(None, {"a": "b"}), 0)
+
+    def test_legacy_upgrade_reaches_runtime_state(self):
+        # 复刻 init 顺序：先按旧配置建运行期状态，再升级 → 状态必须变成新模板
+        state = {
+            key: _tpl.LEGACY_DEFAULT_TEMPLATES[key][0]
+            for key in _tpl.DEFAULT_TEMPLATES
+        }
+        config = dict(state)
+        upgraded = _tpl.upgrade_legacy_templates(config)
+        self.assertTrue(upgraded)
+        _tpl.apply_runtime_updates(state, upgraded)
+        self.assertEqual(state, dict(_tpl.DEFAULT_TEMPLATES))
+
+
 class DefaultTemplateTest(unittest.TestCase):
     def test_all_defaults_render(self):
         for key, template in _tpl.DEFAULT_TEMPLATES.items():

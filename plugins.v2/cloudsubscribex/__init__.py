@@ -24,6 +24,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from .utils.notify_template import (
     DEFAULT_TEMPLATES,
+    apply_runtime_updates,
     upgrade_legacy_templates,
 )
 from .core import (
@@ -177,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.76"
+    plugin_version = "1.7.77"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -581,6 +582,7 @@ class CloudSubscribeX(_PluginBase):
         merged = dict(config)
         merged.update(missing)
         merged.update(upgraded)
+        updates = {**missing, **upgraded}
         if self.update_config(merged):
             if missing:
                 logger.info(f"已为配置补全 {len(missing)} 个通知模板默认值")
@@ -588,6 +590,13 @@ class CloudSubscribeX(_PluginBase):
                 logger.info(f"已将 {len(upgraded)} 个旧版通知模板升级为新排版")
         else:
             logger.warning("通知模板默认值写回配置失败，运行时将使用内置默认模板")
+        # 本方法在 _apply_plugin_config 之后执行，内存里还是旧模板；
+        # 不同步就会「配置已更新但通知照旧」（1.7.75 线上实测）。
+        changed = apply_runtime_updates(
+            getattr(self, "_notify_templates", None), updates
+        )
+        if changed:
+            logger.info(f"运行期通知模板已同步 {changed} 项，本次进程内立即生效")
 
     def _migrate_from_legacy_plugin(self, config: Optional[dict]) -> Optional[dict]:
         """首次启动时把旧插件 ID（CloudSubscribe）的配置/数据/私有库搬到独立 ID。
