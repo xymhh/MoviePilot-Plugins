@@ -178,6 +178,12 @@ def handle_push() -> List[Dict]:
             for plugin_id in all_plugin_ids:
                 old_info = old_package_data.get(plugin_id, {})
                 new_info = new_package_data.get(plugin_id, {})
+                # 清单里除插件 ID 外还有 "version" / "history" 这类顶层元数据键，
+                # 直接 .get() 会抛 AttributeError 把整轮检测吞成空矩阵（1.7.75 踩过：
+                # 自动发布显示 success，实际没有生成 Release）。
+                if not isinstance(old_info, dict) or not isinstance(new_info, dict):
+                    log(f"[Debug] ⏩ 跳过非插件键: {plugin_id}")
+                    continue
 
                 # 获取新旧版本信息
                 old_version = old_info.get("version")
