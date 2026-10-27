@@ -5,8 +5,10 @@
   因此私有频道（账号已加入）和公开频道都能读，Bot API 做不到这一点。
 - 扫描是增量的：每个频道记住最后处理的消息 id，只读新消息；首次按
   ``scan_limit`` 回溯。
-- 抓到资源先入库；频道规则开启自动转存且配置了白名单时，按标题/季号匹配
-  唯一订阅后复用插件既有的手动转存流程，其余条目保留为 pending 供人工选择。
+- 抓到资源先入库，按标题/季号与**全部订阅**匹配：唯一高置信命中才转存
+  （缺集优先、其次洗版，由既有同步链路保证），未命中直接 ignored。
+- 转存不占用扫描线程：命中条目入队，由单线程 worker 按订阅合并成批、串行
+  调用手动转存链路（1.7.89 起，根治「一次扫描几十条把扫描线程卡几小时」）。
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import asyncio
 import hashlib
 import json
 import os
+import queue
 import re
 import sys
 import threading
@@ -54,12 +57,12 @@ SCAN_LOGIC_VERSION = 2
 # 长期高于每轮 scan_limit 时游标一直落后。
 SCAN_CATCHUP_FACTOR = 5
 SCAN_CATCHUP_MAX = 500
-# 每次扫描最多补转 5 条旧的 pending 条目，避免一次把扫描线程卡太久。
-MAX_REMATCH_TRANSFERS = 5
-# 白名单模式下与本频道关注订阅无关的消息：默认不入池，只保留最近 N 条，
-# 供「新增订阅后回补匹配」用。2026-10-24 线上 500 条里 379 条是这类噪音，
-# 把池子占满后新资源只能在边缘排队。
-UNMATCHED_KEEP = 50
+# 未命中订阅的消息直接忽略；只留最近 N 条用于排障，不占待处理名额。
+UNMATCHED_KEEP = 20
+# 转存队列上限：超过就忽略（reason=队列积压），避免一次性把 115 打满。
+QUEUE_MAX = 200
+# 同一订阅一次合并提交的最大链接数（手动转存接口上限是 50）。
+BATCH_LINK_LIMIT = 20
 # skipped/transferred 只是历史记录，最多占池子的 12%（500 条时约 60 条）；
 # 其余名额留给待处理条目。线上实测 104 条 skipped 会把列表淹掉。
 HISTORY_QUOTA_RATIO = 0.12
@@ -448,10 +451,8 @@ def normalize_channel_rules(
         if not normalized or normalized in seen:
             continue
         seen.add(normalized)
-        rule_mode = _rule_mode({
-            "monitor_mode": rule_monitor_mode,
-            "auto_transfer": rule_auto_transfer,
-        })
+        # 1.7.89 起判定链只有一条：命中全部订阅才转存。
+        # 旧配置里的 monitor_mode / auto_subscribe_ids 保留解析但不再生效。
         rules.append({
             "channel": normalized,
             "enabled": rule_enabled,
@@ -460,13 +461,10 @@ def normalize_channel_rules(
                 word.lower() for word in _split_terms(rule_exclude)
             ],
             "scan_limit": max(1, min(rule_limit, 200)),
-            "auto_transfer": rule_mode == "subscriptions",
-            "monitor_mode": rule_mode,
-            "auto_subscribe_id": max(0, rule_auto_subscribe_id),
-            "auto_subscribe_ids": _rule_whitelist({
-                "auto_subscribe_ids": rule_auto_subscribe_ids,
-                "auto_subscribe_id": rule_auto_subscribe_id,
-            }),
+            "auto_transfer": True,
+            "monitor_mode": "subscriptions",
+            "auto_subscribe_id": 0,
+            "auto_subscribe_ids": [],
         })
     return rules
 
@@ -542,7 +540,14 @@ class TgChannelMonitor:
         self._last_error = ""
         self._running = False
         self._auto_transfer_handler = None
+        self._auto_transfer_batch_handler = None
         self._subscribe_provider = None
+        # 扫描与转存 worker 都会改池子：读写一律走这把锁，避免互相覆盖。
+        self._items_lock = threading.RLock()
+        self._transfer_queue: "queue.Queue[str]" = queue.Queue()
+        self._transfer_thread: Optional[threading.Thread] = None
+        self._transfer_stop = threading.Event()
+        self._queued_ids: set = set()
         self.configure(
             enabled=False, api_id=0, api_hash="", session="", channels=[],
             keywords=[], exclude_keywords=[], scan_limit=20,
@@ -558,6 +563,7 @@ class TgChannelMonitor:
             channel_rules: Any = None,
             quality_preferences: Any = None,
             auto_transfer_handler: Any = None,
+            auto_transfer_batch_handler: Any = None,
             subscribe_provider: Any = None,
             keep_unmatched: bool = False,
     ) -> None:
@@ -577,8 +583,10 @@ class TgChannelMonitor:
                 quality_preferences
             )
             self._auto_transfer_handler = auto_transfer_handler
+            self._auto_transfer_batch_handler = auto_transfer_batch_handler
             self._subscribe_provider = subscribe_provider
-            self._keep_unmatched = bool(keep_unmatched)
+            # 旧开关保留但不再生效：未命中订阅一律忽略（1.7.89）。
+            self._keep_unmatched = False
             self._channels = [rule["channel"] for rule in self._channel_rules]
             # 旧字段保留，供 status/兼容读取；扫描只认每频道规则
             self._keywords = [str(item).lower() for item in keywords if str(item).strip()]
@@ -631,6 +639,7 @@ class TgChannelMonitor:
             )
             self._running = True
             self._thread.start()
+        self._start_transfer_worker()
 
     def stop(self) -> None:
         monitors, monitors_lock = _shared_monitor_registry()
@@ -642,6 +651,7 @@ class TgChannelMonitor:
             self._thread = None
             self._running = False
         stop_event.set()
+        self._stop_transfer_worker()
         if (
             thread and thread.is_alive()
             and thread is not threading.current_thread()
@@ -662,6 +672,226 @@ class TgChannelMonitor:
                 logger.warning(f"TG 频道监控扫描失败：{error}")
             if stop_event.wait(self._interval):
                 return
+
+    # --------------------------------------------------------------- 转存 worker
+    def _start_transfer_worker(self) -> None:
+        with self._lock:
+            if self._transfer_thread and self._transfer_thread.is_alive():
+                return
+            stop_event = threading.Event()
+            self._transfer_stop = stop_event
+            self._transfer_thread = threading.Thread(
+                target=self._transfer_loop, args=(stop_event,),
+                name="cloudsubscribe-tg-transfer", daemon=True,
+            )
+            self._transfer_thread.start()
+        self._recover_queued_items()
+
+    def _stop_transfer_worker(self) -> None:
+        with self._lock:
+            stop_event = self._transfer_stop
+            thread = self._transfer_thread
+            self._transfer_thread = None
+        stop_event.set()
+        if (
+                thread and thread.is_alive()
+                and thread is not threading.current_thread()
+        ):
+            thread.join(timeout=2)
+
+    def _recover_queued_items(self) -> None:
+        """插件重启后把残留 queued 条目重新入队。"""
+        try:
+            items = self._load_items()
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"TG 转存队列恢复失败：{error}")
+            return
+        for item in items:
+            if str(item.get("status") or "") == "queued":
+                self._enqueue_item(item)
+
+    def _load_items(self) -> List[dict]:
+        with self._items_lock:
+            return list(self._store.load(ITEMS_KEY, []) or [])
+
+    def _save_items(self, items: List[dict]) -> None:
+        with self._items_lock:
+            self._store.save(ITEMS_KEY, items)
+
+    def _enqueue_item(self, item: Dict[str, Any]) -> bool:
+        """把已判定为 queued 的条目放进转存队列（同一 id 只入一次）。"""
+        item_id = str((item or {}).get("id") or "")
+        if not item_id:
+            return False
+        with self._items_lock:
+            if item_id in self._queued_ids:
+                return False
+            if self._transfer_queue.qsize() >= QUEUE_MAX:
+                return False
+            self._queued_ids.add(item_id)
+        self._transfer_queue.put(item_id)
+        return True
+
+    def _mark_items(
+            self, item_ids: Iterable[str], status: str, **changes: Any,
+    ) -> int:
+        """按 id 更新池子条目并落盘；调用方不必自己处理加锁。"""
+        wanted = {str(item) for item in item_ids if str(item)}
+        if not wanted:
+            return 0
+        with self._items_lock:
+            items = list(self._store.load(ITEMS_KEY, []) or [])
+            touched = 0
+            for item in items:
+                if str(item.get("id")) in wanted:
+                    item["status"] = status
+                    item.update(changes)
+                    touched += 1
+            if touched:
+                self._store.save(ITEMS_KEY, items)
+        return touched
+
+    def _transfer_loop(self, stop_event: threading.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                first = self._transfer_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            batch_ids = [first]
+            # 一次最多捞 100 个 id，再按订阅分组，避免批次过大。
+            while len(batch_ids) < 100:
+                try:
+                    batch_ids.append(self._transfer_queue.get_nowait())
+                except queue.Empty:
+                    break
+            try:
+                self._process_transfer_items(batch_ids, stop_event)
+            except Exception as error:  # noqa: BLE001 - worker 不能死
+                for item_id in batch_ids:
+                    self._queued_ids.discard(item_id)
+                self._mark_items(
+                    batch_ids, "failed",
+                    auto_transfer_error=f"转存异常：{error}"[:300],
+                )
+                logger.warning(f"TG 频道转存批次异常：{error}")
+
+    def _process_transfer_items(
+            self, item_ids: List[str], stop_event: threading.Event,
+    ) -> None:
+        items = self._load_items()
+        by_id = {str(item.get("id")): item for item in items}
+        groups: Dict[int, List[dict]] = {}
+        for item_id in item_ids:
+            self._queued_ids.discard(item_id)
+            item = by_id.get(item_id)
+            if not item or str(item.get("status") or "") != "queued":
+                continue
+            try:
+                subscribe_id = int(
+                    item.get("matched_subscribe_id")
+                    or item.get("subscribe_id") or 0
+                )
+            except (TypeError, ValueError):
+                subscribe_id = 0
+            if subscribe_id <= 0:
+                self._mark_items(
+                    [item_id], "failed",
+                    auto_transfer_error="缺少目标订阅",
+                )
+                continue
+            groups.setdefault(subscribe_id, []).append(item)
+        for subscribe_id, rows in groups.items():
+            if stop_event.is_set():
+                return
+            self._transfer_group(subscribe_id, rows)
+
+    def _transfer_group(
+            self, subscribe_id: int, rows: List[dict],
+    ) -> None:
+        """同一订阅的多条资源合并成一次手动转存，减少重复建立基线。"""
+        batch_handler = getattr(self, "_auto_transfer_batch_handler", None)
+        single_handler = getattr(self, "_auto_transfer_handler", None)
+        item_ids = [str(row.get("id") or "") for row in rows]
+        if len(rows) > 1 and callable(batch_handler):
+            # 手动转存接口单次上限 50 个链接，这里按 20 个链接切块，留足余量。
+            chunk: List[dict] = []
+            links_in_chunk = 0
+            for row, item_id in zip(rows, item_ids):
+                link_count = max(1, len(row.get("links") or []))
+                if chunk and links_in_chunk + link_count > BATCH_LINK_LIMIT:
+                    self._run_batch_chunk(batch_handler, subscribe_id, chunk, links_in_chunk)
+                    chunk, links_in_chunk = [], 0
+                chunk.append({"row": row, "id": item_id})
+                links_in_chunk += link_count
+            if chunk:
+                self._run_batch_chunk(batch_handler, subscribe_id, chunk, links_in_chunk)
+            return
+        if not callable(single_handler):
+            self._mark_items(
+                item_ids, "failed",
+                auto_transfer_error="自动转存未启用：插件未提供转存处理器",
+            )
+            return
+        for row, item_id in zip(rows, item_ids):
+            result = self._call_transfer(single_handler, row, subscribe_id)
+            outcome, message = _auto_transfer_outcome(result)
+            self._apply_group_outcome(
+                [item_id], subscribe_id, outcome, message, [row],
+            )
+
+    def _run_batch_chunk(
+            self, batch_handler: Any, subscribe_id: int,
+            chunk: List[Dict[str, Any]], link_count: int,
+    ) -> None:
+        rows = [entry["row"] for entry in chunk]
+        item_ids = [str(entry["id"]) for entry in chunk]
+        result = self._call_transfer(batch_handler, rows, subscribe_id)
+        outcome, message = _auto_transfer_outcome(result)
+        if outcome == "skipped" and link_count:
+            message = message or "库中已有，未转存新文件"
+        self._apply_group_outcome(item_ids, subscribe_id, outcome, message, rows)
+
+    @staticmethod
+    def _call_transfer(handler: Any, payload: Any, subscribe_id: int) -> Any:
+        try:
+            return handler(payload, subscribe_id)
+        except Exception as error:  # noqa: BLE001 - 单批失败不影响后续
+            return {"success": False, "message": str(error)}
+
+    def _apply_group_outcome(
+            self, item_ids: List[str], subscribe_id: int,
+            outcome: str, message: str, rows: List[dict],
+    ) -> None:
+        now = int(time.time())
+        changes: Dict[str, Any] = {"subscribe_id": subscribe_id}
+        if outcome == "transferred":
+            changes.update({
+                "match_status": "transferred",
+                "auto_transferred_at": now,
+                "auto_transfer_error": "",
+            })
+            self._mark_items(item_ids, "transferred", **changes)
+            logger.info(
+                f"TG 频道自动转存完成：订阅 {subscribe_id}，"
+                f"{len(item_ids)} 条消息（{str(rows[0].get('title') or '')[:40]} 等）"
+            )
+            return
+        if outcome == "skipped":
+            changes.update({
+                "match_status": "skipped",
+                "auto_skipped_at": now,
+                "auto_transfer_error": (message or "库中已有，未转存新文件")[:300],
+            })
+            self._mark_items(item_ids, "skipped", **changes)
+            return
+        changes.update({
+            "match_status": "failed",
+            "auto_transfer_error": (message or "转存失败")[:300],
+        })
+        self._mark_items(item_ids, "failed", **changes)
+        logger.warning(
+            f"TG 频道自动转存失败（订阅 {subscribe_id}）：{message}"
+        )
 
     # ------------------------------------------------------------------ 客户端
     def _new_client(self, session: str = ""):
@@ -947,44 +1177,40 @@ class TgChannelMonitor:
                 added.append(item)
                 existing.add(item_id)
                 existing_links.update(item["links"])
-                if _rule_mode(rule) == "subscriptions":
-                    auto_candidates.append((item, dict(rule)))
+                auto_candidates.append((item, dict(rule)))
             state[channel_key] = max_id
             state[f"{channel_key}:logic_version"] = SCAN_LOGIC_VERSION
         items = self._trim_items(items)
-        # 旧条目补匹配：解析规则升级或订阅新增后，pending 不能永远停在旧结果。
-        # 只补匹配，不重复转存；已转存/已跳过/已失败/已忽略的条目不碰。
+        # 旧条目补判定：旧版本留下的 new/pending 条目重新走一次匹配，
+        # 已转存/已忽略/在队列里的条目不碰。
         candidate_ids = {str(item.get("id")) for item, _rule in auto_candidates}
         rules_by_channel = {
             str(rule.get("channel") or ""): rule
             for rule in self._channel_rules
             if rule.get("enabled", True)
-            and _rule_mode(rule) == "subscriptions"
         }
-        rematch_ids = set()
         for item in items:
             item_id = str(item.get("id"))
-            if item.get("status") != "new" or item_id in candidate_ids:
+            if item_id in candidate_ids:
                 continue
-            if item.get("match_status") not in (None, "pending"):
+            if str(item.get("status") or "") not in ("new", "pending"):
                 continue
             rule = rules_by_channel.get(str(item.get("channel") or ""))
             if not rule:
                 continue
-            rematch_ids.add(item_id)
             auto_candidates.append((item, dict(rule)))
         # 画质标签是 1.7.14 才写入的新字段；旧版扫描留下的
         # skipped/transferred 条目不会进入重新匹配，因此永远缺字段。
         # 在保存前统一补齐，前端无需重扫即可显示历史记录画质。
         self._fill_missing_quality(items)
-        self._store.save(ITEMS_KEY, items)
-        self._store.save(STATE_KEY, state)
-        auto_stats = self._run_auto_transfers(
-            auto_candidates, rematch_ids=rematch_ids,
-        )
-        # 自动匹配会打上 ignored 标记，这里再裁一次，让配额真正生效
+        auto_stats, to_queue = self._match_and_enqueue(auto_candidates)
+        # 判定会打上 ignored/queued 标记，先落盘再入队：
+        # 否则 worker 可能先拿到 id、读到的还是 new，条目就永远停住了。
         items = self._trim_items(items)
         self._store.save(ITEMS_KEY, items)
+        self._store.save(STATE_KEY, state)
+        for item in to_queue:
+            self._enqueue_item(item)
         self._last_scan_at = time.time()
         self._last_error = "; ".join(errors[-3:])
         result = {
@@ -997,11 +1223,9 @@ class TgChannelMonitor:
             ),
             "errors": errors,
             "debug": rule_debug,
-            "auto_transferred": auto_stats["auto_transferred"],
-            "auto_skipped": auto_stats["auto_skipped"],
-            "auto_failed": auto_stats["auto_failed"],
-            "auto_pending": auto_stats["auto_pending"],
-            "auto_ignored": auto_stats["auto_ignored"],
+            "auto_queued": auto_stats["queued"],
+            "auto_ignored": auto_stats["ignored"],
+            "auto_failed": auto_stats["failed"],
         }
         self._store.save(STATUS_KEY, {
             "last_scan_at": self._last_scan_at,
@@ -1048,10 +1272,10 @@ class TgChannelMonitor:
             self, candidates: List[Tuple[dict, dict]],
             subscriptions: Optional[List[Dict[str, Any]]],
     ) -> Dict[str, Dict[str, Any]]:
-        """按全局画质偏好挑出同集最优候选，其余留作兜底。
+        """按全局画质偏好挑出同集最优候选，其余标记丢弃。
 
         Returns:
-            ``{item_id: {"matched": ..., "held_reason": ...}}``。
+            ``{item_id: {"matched": ..., "held_reason"/"discard_reason": ...}}``。
             没有画质标签或不参与同集比较的条目不会出现在这里。
         """
         selections: Dict[str, Dict[str, Any]] = {}
@@ -1100,32 +1324,11 @@ class TgChannelMonitor:
                 else:
                     selections[item_id] = {
                         "matched": row["matched"],
-                        "held_reason": (
-                            f"同集有更优画质优先：{best_label}"
-                            f"（{best_title}）；本条保留兜底"
+                        "discard_reason": (
+                            f"同集已有更优画质：{best_label}（{best_title}）"
                         ),
                     }
         return selections
-
-    def _mark_unmatched(self, item: Dict[str, Any], rule: Dict[str, Any]) -> bool:
-        """白名单模式下与本频道关注订阅无关的消息 → 标记 ignored。
-
-        返回 True 表示已标记为噪音（调用方不再计入 pending）。
-        只在「频道配置了 subscriptions 模式 + 非空白名单 + 未关闭过滤」时生效：
-        用户没圈定范围时保留全部消息，行为与旧版本一致。
-        """
-        if getattr(self, "_keep_unmatched", False):
-            return False
-        if _rule_mode(rule) != "subscriptions":
-            return False
-        whitelist = _rule_whitelist(rule)
-        if not whitelist:
-            return False
-        if str(item.get("status") or "") in ("transferred", "skipped"):
-            return False
-        item["status"] = "ignored"
-        item["match_status"] = "unmatched"
-        return True
 
     def _trim_items(self, items: List[dict]) -> List[dict]:
         """按状态分层裁剪池子，避免历史记录把待处理条目挤出去。
@@ -1159,172 +1362,83 @@ class TgChannelMonitor:
         merged.sort(key=_ts, reverse=True)
         return merged[:cap]
 
-    def _run_auto_transfers(
+    def _match_and_enqueue(
             self, candidates: List[Tuple[dict, dict]],
-            rematch_ids: Optional[Iterable[str]] = None,
-    ) -> Dict[str, int]:
-        """扫描后按频道规则自动转存；失败只记在条目上，不重试、不阻塞下次扫描。"""
-        stats = {
-            "auto_transferred": 0, "auto_skipped": 0,
-            "auto_failed": 0, "auto_pending": 0, "auto_ignored": 0,
-        }
+    ) -> Tuple[Dict[str, int], List[dict]]:
+        """按「命中订阅」判定每条候选：命中入队，其余直接忽略。
+
+        返回 ``(统计, 待入队条目)``。真正的入队由调用方在落盘之后执行，
+        保证 worker 读到的状态已经是 queued。
+        """
+        stats = {"queued": 0, "ignored": 0, "failed": 0}
         if not candidates:
-            return stats
-        rematch_ids = {str(item) for item in (rematch_ids or [])}
-        rematch_transfers = 0
-        # 逐条 debug 在订阅多、频道多时能刷出上百行；这里只留汇总 + 少量样例。
-        pending_samples: List[str] = []
-        skipped_samples: List[str] = []
-        handler = getattr(self, "_auto_transfer_handler", None)
-        if not callable(handler):
-            for item, _rule in candidates:
-                item["auto_transfer_error"] = "自动转存未启用：插件未提供转存处理器"
-            stats["auto_failed"] = len(candidates)
-            return stats
-
+            return stats, []
         provider = getattr(self, "_subscribe_provider", None)
-        subscriptions = None
-        provider_error = ""
-        if callable(provider):
-            try:
-                subscriptions = list(provider() or [])
-            except Exception as error:  # noqa: BLE001 - 读订阅失败不应误转
-                provider_error = str(error)
-                logger.warning(f"TG 频道自动匹配读取订阅失败：{error}")
-
-        for item, _rule in candidates:
-            item["quality"] = parse_quality(
-                item.get("title"), getattr(self, "_quality_preferences", None)
-            )
-        quality_selections: Dict[str, Dict[str, Any]] = {}
-        if callable(provider) and not provider_error:
-            quality_selections = self._select_quality_candidates(
-                candidates, subscriptions
-            )
-
-        for item, rule in candidates:
-            subscribe_id = 0
-            is_rematch = str(item.get("id")) in rematch_ids
-            old_reason = str(item.get("match_reason") or "")
-            selection = quality_selections.get(str(item.get("id") or ""))
-            if selection:
-                matched = selection.get("matched") or {}
-                item["match_candidates"] = [
-                    {
-                        "id": row["id"], "name": row["name"],
-                        "season": row["season"], "type": row["type"],
-                        "score": row["score"], "reason": row["reason"],
-                    }
-                    for row in (matched.get("candidates") or [])
-                ]
-                item["match_reason"] = matched.get("reason") or ""
-                item["match_status"] = "matched"
-                subscribe_id = int(matched["matched"]["id"])
-                item["matched_subscribe_id"] = subscribe_id
-                held_reason = str(selection.get("held_reason") or "")
-                if held_reason:
-                    item["match_status"] = "pending"
-                    item["match_reason"] = held_reason[:300]
-                    stats["auto_pending"] += 1
-                    logger.debug(
-                        f"TG 频道画质偏好保留兜底（{rule.get('channel')}）："
-                        f"{item.get('title')} / {held_reason}"
-                    )
-                    continue
-            elif callable(provider):
-                if provider_error:
-                    item["match_status"] = "pending"
-                    item["match_reason"] = f"读取订阅列表失败：{provider_error}"[:300]
-                    stats["auto_pending"] += 1
-                    continue
-                matched = match_item(item, subscriptions or [], allowed_ids=None)
-                item["match_candidates"] = [
-                    {
-                        "id": row["id"], "name": row["name"],
-                        "season": row["season"], "type": row["type"],
-                        "score": row["score"], "reason": row["reason"],
-                    }
-                    for row in (matched.get("candidates") or [])
-                ]
-                item["match_reason"] = matched.get("reason") or ""
-                item["match_status"] = (
-                    "matched" if matched.get("matched") else "pending"
-                )
-                if not matched.get("matched"):
-                    if self._mark_unmatched(item, rule):
-                        stats["auto_ignored"] += 1
-                        continue
-                    stats["auto_pending"] += 1
-                    if (not old_reason or old_reason != item["match_reason"]) \
-                            and len(pending_samples) < 3:
-                        pending_samples.append(
-                            f"{str(item.get('title') or '')[:40]} / {item['match_reason'][:40]}"
-                        )
-                    continue
-                subscribe_id = int(matched["matched"]["id"])
-                item["matched_subscribe_id"] = subscribe_id
-            else:
-                subscribe_id = 0
-            if is_rematch and subscribe_id > 0:
-                if rematch_transfers >= MAX_REMATCH_TRANSFERS:
-                    # 本轮补转名额用完；匹配结果先保存，下一轮继续补转。
-                    item["match_status"] = "pending"
-                    item["match_reason"] = (
-                        f"已匹配 #{subscribe_id} "
-                        f"{matched['matched'].get('name') or ''}，"
-                        f"待下轮补转（单轮上限 {MAX_REMATCH_TRANSFERS}）"
-                    )[:300]
-                    stats["auto_pending"] += 1
-                    continue
-                rematch_transfers += 1
-            if subscribe_id <= 0:
+        if not callable(provider):
+            for item, _rule in candidates:
                 item["match_status"] = "pending"
-                item["match_reason"] = "需要订阅列表才能匹配目标订阅"
-                stats["auto_pending"] += 1
-                continue
+                item["match_reason"] = "未配置订阅列表，无法匹配"[:300]
+            stats["failed"] = len(candidates)
+            return stats, []
+        try:
+            subscriptions = list(provider() or [])
+        except Exception as error:  # noqa: BLE001 - 读订阅失败不应误转
+            logger.warning(f"TG 频道匹配读取订阅失败：{error}")
+            for item, _rule in candidates:
+                item["match_status"] = "pending"
+                item["match_reason"] = f"读取订阅列表失败：{error}"[:300]
+            stats["failed"] = len(candidates)
+            return stats, []
 
-            try:
-                result = handler(item, subscribe_id)
-            except Exception as error:  # noqa: BLE001 - 单条失败不影响扫描
-                result = {"success": False, "message": str(error)}
-            outcome, message = _auto_transfer_outcome(result)
-            item["subscribe_id"] = subscribe_id
-            if outcome == "transferred":
-                item["status"] = "transferred"
-                item["match_status"] = "transferred"
-                item["auto_transferred_at"] = int(time.time())
-                item.pop("auto_transfer_error", None)
-                stats["auto_transferred"] += 1
-            elif outcome == "skipped":
-                # 同步成功但没转出文件：通常库里已有该集，或资源没有可下载文件。
-                # 不能标成“已转存”，否则用户会以为历史记录漏了。
-                item["status"] = "skipped"
-                item["match_status"] = "skipped"
-                item["auto_skipped_at"] = int(time.time())
-                item["auto_transfer_error"] = message[:300]
-                stats["auto_skipped"] += 1
-                if len(skipped_samples) < 3:
-                    skipped_samples.append(f"订阅 {subscribe_id}：{str(message)[:40]}")
-            else:
-                item["auto_transfer_error"] = message[:300]
-                item["auto_subscribe_id"] = subscribe_id
-                item["match_status"] = "failed"
-                stats["auto_failed"] += 1
-                logger.warning(
-                    f"TG 频道自动转存失败（{rule.get('channel')} / "
-                    f"订阅 {subscribe_id}）：{message}"
-                )
-        if pending_samples:
-            logger.debug(
-                f"TG 频道自动匹配留待手动 {stats['auto_pending']} 条，样例："
-                + "；".join(pending_samples)
+        selections = self._select_quality_candidates(candidates, subscriptions)
+        queue_full = self._transfer_queue.qsize() >= QUEUE_MAX
+        to_queue: List[dict] = []
+        for item, _rule in candidates:
+            item_id = str(item.get("id") or "")
+            if not item_id:
+                continue
+            selection = selections.get(item_id) or {}
+            discard_reason = str(selection.get("discard_reason") or "")
+            if discard_reason:
+                item["status"] = "ignored"
+                item["match_status"] = "ignored"
+                item["match_reason"] = discard_reason[:300]
+                stats["ignored"] += 1
+                continue
+            matched = selection.get("matched") or match_item(
+                item, subscriptions, allowed_ids=None
             )
-        if skipped_samples:
-            logger.debug(
-                f"TG 频道自动转存无新文件 {stats['auto_skipped']} 条，样例："
-                + "；".join(skipped_samples)
-            )
-        return stats
+            item["match_candidates"] = [
+                {
+                    "id": row["id"], "name": row["name"],
+                    "season": row["season"], "type": row["type"],
+                    "score": row["score"], "reason": row["reason"],
+                }
+                for row in (matched.get("candidates") or [])
+            ]
+            item["match_reason"] = str(matched.get("reason") or "")[:300]
+            if not matched.get("matched"):
+                # 不合适的直接忽略：只留少量样本用于排障，不进待处理列表。
+                item["status"] = "ignored"
+                item["match_status"] = "unmatched"
+                stats["ignored"] += 1
+                continue
+            subscribe_id = int(matched["matched"]["id"])
+            item["match_status"] = "matched"
+            item["matched_subscribe_id"] = subscribe_id
+            if not queue_full:
+                item["status"] = "queued"
+                item["queued_at"] = int(time.time())
+                to_queue.append(item)
+                stats["queued"] += 1
+                if len(to_queue) >= QUEUE_MAX:
+                    queue_full = True
+                continue
+            item["status"] = "ignored"
+            item["match_status"] = "matched"
+            item["match_reason"] = "转存队列积压（超过上限），本条忽略"[:300]
+            stats["ignored"] += 1
+        return stats, to_queue
 
     # ------------------------------------------------------------------ 查询
     def status(self) -> Dict[str, Any]:
@@ -1356,7 +1470,14 @@ class TgChannelMonitor:
                 for rule in self._channel_rules
             ],
             "item_count": len(items),
-            "new_count": sum(1 for item in items if item.get("status") == "new"),
+            "new_count": sum(
+                1 for item in items
+                if item.get("status") in ("queued", "new", "pending")
+            ),
+            "queued_count": sum(
+                1 for item in items if item.get("status") == "queued"
+            ),
+            "queue_pending": int(self._transfer_queue.qsize()),
             "last_scan_at": self._last_scan_at or int(stored.get("last_scan_at") or 0),
             "last_error": self._last_error,
             "scan_limit": self._scan_limit,
@@ -1386,7 +1507,7 @@ class TgChannelMonitor:
             item["quality"] = fresh
 
     def list_items(self, status: str = "") -> List[dict]:
-        items = list(self._store.load(ITEMS_KEY, []) or [])
+        items = self._load_items()
         # 读接口兜底：升级后即使还没触发扫描，历史卡片也能显示画质。
         self._fill_missing_quality(items)
         if status:
@@ -1397,25 +1518,30 @@ class TgChannelMonitor:
         wanted = {str(item) for item in item_ids if str(item)}
         if not wanted:
             return 0
-        items = list(self._store.load(ITEMS_KEY, []) or [])
-        touched = 0
-        for item in items:
-            if str(item.get("id")) in wanted:
-                item.update(changes)
-                touched += 1
-        if touched:
-            self._store.save(ITEMS_KEY, items)
+        with self._items_lock:
+            items = list(self._store.load(ITEMS_KEY, []) or [])
+            touched = 0
+            for item in items:
+                if str(item.get("id")) in wanted:
+                    item.update(changes)
+                    touched += 1
+            if touched:
+                self._store.save(ITEMS_KEY, items)
         return touched
 
     def delete_items(self, item_ids: Iterable[str]) -> int:
         wanted = {str(item) for item in item_ids if str(item)}
         if not wanted:
             return 0
-        items = list(self._store.load(ITEMS_KEY, []) or [])
-        kept = [item for item in items if str(item.get("id")) not in wanted]
-        if len(kept) != len(items):
-            self._store.save(ITEMS_KEY, kept)
-        return len(items) - len(kept)
+        with self._items_lock:
+            items = list(self._store.load(ITEMS_KEY, []) or [])
+            kept = [item for item in items if str(item.get("id")) not in wanted]
+            if len(kept) != len(items):
+                self._store.save(ITEMS_KEY, kept)
+            removed = len(items) - len(kept)
+        for item_id in wanted:
+            self._queued_ids.discard(item_id)
+        return removed
 
     # ------------------------------------------------------------------ 登录
     def login_send_code(self, phone: str) -> Dict[str, Any]:

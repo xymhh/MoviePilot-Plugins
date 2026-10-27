@@ -41,14 +41,8 @@
           · {{ rule.keywords.length }} 关键词
         </span>
         <span v-if="!rule.enabled" class="ml-1 text-caption">（停用）</span>
-        <span class="ml-1 text-caption">
-          · {{ rule.monitor_mode === 'subscriptions' ? '全部订阅自动转存' : '全部消息' }}
-        </span>
-        <v-icon
-          v-if="rule.monitor_mode === 'subscriptions'"
-          icon="mdi-download"
-          size="13"
-          class="ml-1" />
+        <span class="ml-1 text-caption">· 命中订阅自动转存</span>
+        <v-icon icon="mdi-download" size="13" class="ml-1" />
       </v-chip>
     </div>
     <div v-else class="text-caption text-medium-emphasis">
@@ -135,22 +129,10 @@
                   hide-details
                   class="rule-limit" />
               </div>
-              <div class="auto-row mt-2">
-                <v-btn-toggle
-                  v-model="rule.monitor_mode"
-                  mandatory
-                  divided
-                  density="compact"
-                  variant="outlined"
-                  class="auto-scope">
-                  <v-btn value="messages" size="small">全部消息</v-btn>
-                  <v-btn value="subscriptions" size="small">全部订阅</v-btn>
-                </v-btn-toggle>
-              </div>
               <div class="text-caption text-medium-emphasis mt-1">
-                {{ rule.monitor_mode === 'subscriptions'
-                  ? '收录后按标题在全部订阅内匹配（新增订阅自动生效），只有唯一高置信结果才自动转存；多个相近候选留在列表里手动选择。关键词与订阅范围是「与」的关系。'
-                  : '收录频道内所有带链接消息，不做订阅匹配、不自动转存；关键词和排除词照常生效。' }}
+                按标题与全部订阅匹配（新增订阅自动生效）：唯一高置信命中才转存，
+                缺集优先、其次洗版；没命中的直接忽略，不进待处理列表。
+                关键词与排除词照常生效。
               </div>
             </v-card-text>
           </v-card>
@@ -191,13 +173,6 @@ const emit = defineEmits(["update:modelValue"])
 const dialogVisible = ref(false)
 const draft = ref([])
 let keySeed = 0
-
-function normalizeMode(rule) {
-  const mode = String(rule.monitor_mode || "").toLowerCase()
-  if (mode === "subscriptions" || mode === "all_subscriptions") return "subscriptions"
-  if (mode === "messages" || mode === "all") return "messages"
-  return rule.auto_transfer === true ? "subscriptions" : "messages"
-}
 
 function splitTerms(value) {
   if (Array.isArray(value)) {
@@ -244,7 +219,6 @@ function normalizeRule(row) {
     return {
       channel: row.trim(),
       enabled: true,
-      monitor_mode: "messages",
       keywordsText: "",
       excludeText: "",
       scan_limit: 20,
@@ -254,7 +228,6 @@ function normalizeRule(row) {
   return {
     channel: String(rule.channel || rule.url || rule.name || "").trim(),
     enabled: rule.enabled !== false,
-    monitor_mode: normalizeMode(rule),
     keywordsText: splitTerms(rule.keywords).join("\n"),
     excludeText: splitTerms(rule.exclude_keywords).join("\n"),
     scan_limit: Number(rule.scan_limit || 20) || 20,
@@ -274,7 +247,6 @@ const rules = computed(() => {
       return {
         channel: rule.channel,
         enabled: rule.enabled,
-        monitor_mode: rule.monitor_mode,
         keywords: splitTerms(rule.keywordsText),
         exclude_keywords: splitTerms(rule.excludeText),
         scan_limit: rule.scan_limit,
@@ -295,7 +267,6 @@ function addRule() {
   draft.value.push(withKey({
     channel: "",
     enabled: true,
-    monitor_mode: "messages",
     keywordsText: "",
     excludeText: "",
     scan_limit: 20,
@@ -310,14 +281,9 @@ function save() {
     if (!channel || seen.has(channel)) continue
     seen.add(channel)
     const limit = Math.max(1, Math.min(200, Number(rule.scan_limit || 20) || 20))
-    const mode = normalizeMode(rule)
     rows.push({
       channel,
       enabled: rule.enabled !== false,
-      monitor_mode: mode,
-      auto_transfer: mode === "subscriptions",
-      auto_subscribe_ids: [],
-      auto_subscribe_id: 0,
       keywords: splitTerms(rule.keywordsText),
       exclude_keywords: splitTerms(rule.excludeText),
       scan_limit: limit,

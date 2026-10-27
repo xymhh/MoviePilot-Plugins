@@ -303,8 +303,11 @@ const hasApi = computed(() => Boolean(status.value.has_api))
 // 否则 170 条里 150 多条是这两类，真实待办的几条会被淹没。
 const FILTERS = [
   { value: "active", title: "待办与已转存",
-    test: (item) => item.status === "new" || item.status === "transferred" },
-  { value: "new", title: "待处理", test: (item) => item.status === "new" },
+    test: (item) =>
+      ["queued", "new", "failed", "transferred"].includes(item.status) },
+  { value: "new", title: "待处理",
+    test: (item) => ["queued", "new"].includes(item.status) },
+  { value: "failed", title: "失败", test: (item) => item.status === "failed" },
   { value: "transferred", title: "已转存", test: (item) => item.status === "transferred" },
   { value: "skipped", title: "未转存", test: (item) => item.status === "skipped" },
   { value: "ignored", title: "已忽略", test: (item) => item.status === "ignored" },
@@ -406,15 +409,19 @@ function tagColor(tag) {
 }
 
 const STATUS_TEXT = {
+  queued: "排队中",
   new: "待处理",
   transferred: "已转存",
   skipped: "未转存",
+  failed: "失败",
   ignored: "已忽略",
 }
 const STATUS_COLOR = {
+  queued: "primary",
   new: "primary",
   transferred: "success",
   skipped: "warning",
+  failed: "error",
   ignored: "grey",
 }
 function statusText(value) {

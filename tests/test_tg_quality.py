@@ -2,6 +2,7 @@
 
 import os
 import sys
+import threading
 import unittest
 
 from plugin_env import ensure_package, install_app_mocks, load_module
@@ -122,20 +123,16 @@ class QualitySelectionTest(unittest.TestCase):
         )
         return monitor
 
-    def test_best_quality_first_and_lower_kept_pending(self):
-        calls = []
+    def test_best_quality_queued_lower_ignored(self):
         monitor = self._monitor()
         monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
-            channel_rules=[{"channel": "@a", "monitor_mode": "subscriptions"}],
+            channel_rules=[{"channel": "@a"}],
             subscribe_provider=lambda: [
                 {"id": 7, "name": "测试剧", "season": 1, "type": "电视剧"},
             ],
             quality_preferences={"enabled": True},
-            auto_transfer_handler=lambda item, subscribe_id: (
-                calls.append(item["title"])
-                or {"success": True, "data": {"transferred": 1}}
-            ),
+            auto_transfer_handler=lambda item, subscribe_id: {},
         )
         better = {
             "id": "better", "links": ["https://pan.quark.cn/s/a"],
@@ -147,78 +144,65 @@ class QualitySelectionTest(unittest.TestCase):
             "title": "测试剧 第一季 第1集 1080p AVC",
             "status": "new", "published_at": 100,
         }
-        stats = monitor._run_auto_transfers([(lower, {}), (better, {})])
-        self.assertEqual(calls, [better["title"]])
-        self.assertEqual(better["status"], "transferred")
-        self.assertEqual(lower["status"], "new")
-        self.assertEqual(lower["match_status"], "pending")
+        stats, to_queue = monitor._match_and_enqueue([(lower, {}), (better, {})])
+        self.assertEqual(better["status"], "queued")
+        self.assertEqual(lower["status"], "ignored")
         self.assertIn("更优画质", lower["match_reason"])
-        self.assertEqual(stats["auto_transferred"], 1)
-        self.assertEqual(stats["auto_pending"], 1)
+        self.assertEqual(stats["queued"], 1)
+        self.assertEqual(stats["ignored"], 1)
+        self.assertEqual([row["id"] for row in to_queue], ["better"])
 
-    def test_lower_quality_falls_back_after_best_fails(self):
-        calls = []
-
-        def handler(item, subscribe_id):
-            calls.append(item["title"])
-            if "2160p" in item["title"]:
-                return {"success": False, "message": "最优画质转存失败"}
-            return {"success": True, "data": {"transferred": 1}}
-
+    def test_failed_best_is_reported_not_silently_retried(self):
+        """最优候选失败后状态为 failed，由用户决定是否手动补转。"""
         monitor = self._monitor()
         monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
-            channel_rules=[{"channel": "@a", "monitor_mode": "subscriptions"}],
+            channel_rules=[{"channel": "@a"}],
             subscribe_provider=lambda: [
                 {"id": 7, "name": "测试剧", "season": 1, "type": "电视剧"},
             ],
             quality_preferences={"enabled": True},
-            auto_transfer_handler=handler,
+            auto_transfer_handler=lambda item, subscribe_id: {
+                "success": False, "message": "最优画质转存失败",
+            },
         )
         better = {
-            "id": "better", "links": ["https://pan.quark.cn/s/a"],
+            "id": "better", "status": "queued", "matched_subscribe_id": 7,
+            "links": ["https://pan.quark.cn/s/a"],
             "title": "测试剧 第一季 第1集 2160p HDR10 HEVC",
-            "status": "new", "published_at": 200,
         }
-        lower = {
-            "id": "lower", "links": ["https://pan.quark.cn/s/b"],
-            "title": "测试剧 第一季 第1集 1080p AVC",
-            "status": "new", "published_at": 100,
-        }
-        first = monitor._run_auto_transfers([(lower, {}), (better, {})])
-        self.assertEqual(first["auto_failed"], 1)
-        self.assertEqual(first["auto_pending"], 1)
-        self.assertEqual(lower["status"], "new")
+        class _MemStore:
+            def __init__(self, data):
+                self.data = data
 
-        second = monitor._run_auto_transfers([(lower, {})])
-        self.assertEqual(calls, [better["title"], lower["title"]])
-        self.assertEqual(second["auto_transferred"], 1)
-        self.assertEqual(lower["status"], "transferred")
+            def load(self, key, default=None):
+                return self.data.get(key, default)
+
+            def save(self, key, value):
+                self.data[key] = value
+
+        monitor._store = _MemStore({"items": [better]})
+        monitor._process_transfer_items(["better"], threading.Event())
+        row = monitor.list_items()[0]
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["auto_transfer_error"], "最优画质转存失败")
 
     def test_unknown_quality_passes_without_hold(self):
-        calls = []
         monitor = self._monitor()
         monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
-            channel_rules=[{"channel": "@a", "monitor_mode": "subscriptions"}],
+            channel_rules=[{"channel": "@a"}],
             subscribe_provider=lambda: [
                 {"id": 7, "name": "测试剧", "season": 1, "type": "电视剧"},
             ],
             quality_preferences={"enabled": True},
-            auto_transfer_handler=lambda item, subscribe_id: (
-                calls.append(item["title"])
-                or {"success": True, "data": {"transferred": 1}}
-            ),
+            auto_transfer_handler=lambda item, subscribe_id: {},
         )
         item = {
             "id": "unknown", "links": ["https://pan.quark.cn/s/c"],
             "title": "测试剧 第一季 第1集 中字",
             "status": "new",
         }
-        monitor._run_auto_transfers([(item, {})])
-        self.assertEqual(calls, [item["title"]])
-        self.assertEqual(item["status"], "transferred")
+        monitor._match_and_enqueue([(item, {})])
+        self.assertEqual(item["status"], "queued")
 
-
-if __name__ == "__main__":
-    unittest.main()

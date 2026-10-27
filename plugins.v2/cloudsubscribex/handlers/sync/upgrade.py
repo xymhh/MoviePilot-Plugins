@@ -649,12 +649,18 @@ class UpgradeService(OwnerDelegator):
                             episode for episode in episodes_to_search
                             if episode not in completed_episode_set
                         ]
-                    self._append_tv_transfer_detail(
-                        transfer_details, mediainfo, season, batch_detail_episodes,
-                        notification_kind="upgrade",
-                        size_bytes=batch_detail_size,
-                        source_text=batch_detail_source,
-                    )
+                    try:
+                        self._append_tv_transfer_detail(
+                            transfer_details, mediainfo, season, batch_detail_episodes,
+                            notification_kind="upgrade",
+                            size_bytes=batch_detail_size,
+                            source_text=batch_detail_source,
+                        )
+                    except TypeError as error:
+                        # 插件热更新时新旧模块签名可能不一致（线上 1.7.84 报
+                        # 「got multiple values for argument 'notification_kind'」）。
+                        # 通知详情缺一条不该中断整条洗版流程。
+                        logger.debug(f"洗版通知详情写入失败（已忽略）：{error}")
                     if batch_success_episodes:
                         self._record_download_history(
                             mediainfo=mediainfo,

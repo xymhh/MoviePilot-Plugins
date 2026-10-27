@@ -2,7 +2,9 @@
 
 import asyncio
 import os
+import queue
 import sys
+import threading
 import unittest
 
 from plugin_env import ensure_package, install_app_mocks, load_module
@@ -229,191 +231,202 @@ class ChannelRulesTest(unittest.TestCase):
         self.assertEqual(rules[0]["keywords"], ["4k"])
         self.assertEqual(rules[0]["scan_limit"], 3)
 
-    def test_monitor_mode_mapping(self):
+    def test_channel_rules_always_subscriptions(self):
+        """1.7.89 起判定链只有一条：所有频道都按「命中订阅」判定。"""
         rules = normalize_channel_rules([
-            {"channel": "@a", "monitor_mode": "subscriptions"},
-            {"channel": "@b", "monitor_mode": "messages"},
-            {"channel": "@c", "auto_transfer": True},
-            {"channel": "@d"},
+            {"channel": "@a", "monitor_mode": "messages"},
+            {"channel": "@b", "monitor_mode": "subscriptions"},
+            {"channel": "@c", "auto_transfer": False},
         ])
         self.assertEqual(
             [rule["monitor_mode"] for rule in rules],
-            ["subscriptions", "messages", "subscriptions", "messages"],
+            ["subscriptions"] * 3,
         )
-        self.assertEqual(
-            [rule["auto_transfer"] for rule in rules],
-            [True, False, True, False],
-        )
+        self.assertTrue(all(rule["auto_transfer"] for rule in rules))
+        self.assertTrue(all(rule["auto_subscribe_ids"] == [] for rule in rules))
 
-    def test_subscriptions_mode_matches_any_subscription(self):
-        rules = normalize_channel_rules([{
-            "channel": "@a",
-            "monitor_mode": "subscriptions",
-        }])
-        self.assertEqual(rules[0]["monitor_mode"], "subscriptions")
-
-        calls = []
-
-        def handler(item, subscribe_id):
-            calls.append(subscribe_id)
-            return {"success": True, "data": {"transferred": 1}}
+    def test_matched_item_is_queued(self):
+        rules = normalize_channel_rules([{"channel": "@a"}])
 
         monitor = TgChannelMonitor(self.owner)
         monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
             channel_rules=rules,
-            auto_transfer_handler=handler,
+            auto_transfer_handler=lambda item, subscribe_id: {},
             subscribe_provider=lambda: [
                 {"id": 201, "name": "现在就出发", "season": 4, "type": "电视剧"},
             ],
         )
         item = {
+            "id": "item-1",
             "links": ["https://pan.quark.cn/s/a"],
             "title": "现在就出发 第四季(2026) 第4集 [旅行/综艺]",
             "status": "new",
         }
-        stats = monitor._run_auto_transfers([(item, rules[0])])
-        self.assertEqual(calls, [201])
-        self.assertEqual(item["status"], "transferred")
-        self.assertEqual(stats["auto_transferred"], 1)
+        stats, to_queue = monitor._match_and_enqueue([(item, rules[0])])
+        self.assertEqual(stats["queued"], 1)
+        self.assertEqual(stats["ignored"], 0)
+        self.assertEqual(item["status"], "queued")
+        self.assertEqual(item["matched_subscribe_id"], 201)
+        self.assertEqual([row["id"] for row in to_queue], ["item-1"])
 
-    def test_auto_transfer_marks_item_and_reports_failure(self):
-        calls = []
-
-        def handler(item, subscribe_id):
-            calls.append((item["links"], subscribe_id))
-            if subscribe_id == 7:
-                return {"success": True, "data": {"transferred": 1}}
-            return {"success": False, "message": "订阅不存在"}
-
+    def test_unmatched_item_is_ignored(self):
         monitor = TgChannelMonitor(self.owner)
         monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
-            channel_rules=[{"channel": "@a", "monitor_mode": "subscriptions"}],
-            auto_transfer_handler=handler,
+            channel_rules=[{"channel": "@a"}],
+            auto_transfer_handler=lambda item, subscribe_id: {},
             subscribe_provider=lambda: [
                 {"id": 7, "name": "现在就出发", "season": 4, "type": "电视剧"},
-                {"id": 9, "name": "极限挑战", "season": 1, "type": "电视剧"},
             ],
         )
         ok_item = {
+            "id": "ok",
             "links": ["https://pan.quark.cn/s/ok"],
             "title": "现在就出发 第四季(2026) 第4集 [旅行/综艺]",
             "status": "new",
         }
         bad_item = {
+            "id": "bad",
             "links": ["https://pan.quark.cn/s/bad"],
-            "title": "极限挑战 第一季(2026) 第1集 [旅行/综艺]",
+            "title": "完全不存在的综艺 第一季 第1集",
             "status": "new",
         }
-        stats = monitor._run_auto_transfers([
-            (ok_item, {"channel": "@a", "monitor_mode": "subscriptions"}),
-            (bad_item, {"channel": "@b", "monitor_mode": "subscriptions"}),
+        stats, to_queue = monitor._match_and_enqueue([
+            (ok_item, {"channel": "@a"}),
+            (bad_item, {"channel": "@a"}),
         ])
-        self.assertEqual(calls, [(["https://pan.quark.cn/s/ok"], 7),
-                                 (["https://pan.quark.cn/s/bad"], 9)])
-        self.assertEqual(ok_item["status"], "transferred")
-        self.assertEqual(ok_item["subscribe_id"], 7)
-        self.assertEqual(bad_item["status"], "new")
-        self.assertEqual(bad_item["auto_transfer_error"], "订阅不存在")
-        self.assertEqual(
-            stats,
-            {"auto_transferred": 1, "auto_skipped": 0,
-             "auto_failed": 1, "auto_pending": 0, "auto_ignored": 0},
-        )
+        self.assertEqual(stats, {"queued": 1, "ignored": 1, "failed": 0})
+        self.assertEqual(ok_item["status"], "queued")
+        self.assertEqual(bad_item["status"], "ignored")
+        self.assertEqual(bad_item["match_status"], "unmatched")
+        self.assertEqual([row["id"] for row in to_queue], ["ok"])
 
-    def test_rematch_caps_transfers_per_scan(self):
+    def test_worker_batches_by_subscribe_and_marks_outcome(self):
         calls = []
 
-        def handler(item, subscribe_id):
-            calls.append(item["id"])
-            return {"success": True, "data": {"transferred": 1}}
+        def batch_handler(items, subscribe_id):
+            calls.append(([row["id"] for row in items], subscribe_id))
+            return {"success": True, "data": {"transferred": 2}}
 
         monitor = TgChannelMonitor(self.owner)
         monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
-            channel_rules=[{"channel": "@a", "monitor_mode": "subscriptions"}],
-            auto_transfer_handler=handler,
+            channel_rules=[{"channel": "@a"}],
+            auto_transfer_handler=lambda item, subscribe_id: {},
+            auto_transfer_batch_handler=batch_handler,
+            subscribe_provider=lambda: [
+                {"id": 7, "name": "现在就出发", "season": 4, "type": "电视剧"},
+            ],
+        )
+        rows = [
+            {"id": f"q{index}", "status": "queued", "matched_subscribe_id": 7,
+             "links": [f"https://pan.quark.cn/s/{index}"], "title": f"现在就出发 第{index}集"}
+            for index in (1, 2)
+        ]
+        monitor._store.save("items", rows)
+        monitor._process_transfer_items(["q1", "q2"], threading.Event())
+        self.assertEqual(calls, [(["q1", "q2"], 7)])
+        saved = {row["id"]: row for row in monitor.list_items()}
+        self.assertEqual(saved["q1"]["status"], "transferred")
+        self.assertEqual(saved["q2"]["status"], "transferred")
+
+    def test_worker_marks_skipped_when_no_new_file(self):
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=False, api_id=1, api_hash="hash", session="session",
+            channel_rules=[{"channel": "@a"}],
+            auto_transfer_handler=lambda item, subscribe_id: {
+                "success": True, "data": {"transferred": 0},
+                "message": "库中已有该集",
+            },
+            subscribe_provider=lambda: [],
+        )
+        monitor._store.save("items", [{
+            "id": "s1", "status": "queued", "matched_subscribe_id": 7,
+            "links": ["https://pan.quark.cn/s/1"], "title": "测试剧 第1集",
+        }])
+        monitor._process_transfer_items(["s1"], threading.Event())
+        row = monitor.list_items()[0]
+        self.assertEqual(row["status"], "skipped")
+        self.assertIn("库中已有", row["auto_transfer_error"])
+
+    def test_queue_cap_ignores_extra_items(self):
+        monitor = TgChannelMonitor(self.owner)
+        monitor.configure(
+            enabled=False, api_id=1, api_hash="hash", session="session",
+            channel_rules=[{"channel": "@a"}],
+            auto_transfer_handler=lambda item, subscribe_id: {},
             subscribe_provider=lambda: [
                 {"id": 113, "name": "现在就出发", "season": 4, "type": "电视剧"},
             ],
         )
-        rule = {"channel": "@a", "monitor_mode": "subscriptions"}
+        monitor._queued_ids = set()
+        monitor._transfer_queue = queue.Queue()
+        for index in range(tg_module.QUEUE_MAX):
+            monitor._transfer_queue.put(f"seed-{index}")
+        rule = {"channel": "@a"}
         items = [
             {
                 "id": f"item-{index}",
                 "links": [f"https://pan.quark.cn/s/{index}"],
                 "title": f"现在就出发 第四季(2026) 第{index}集",
                 "status": "new",
-                "match_status": "pending",
             }
-            for index in range(1, 7)
+            for index in range(1, 4)
         ]
-        stats = monitor._run_auto_transfers(
-            [(item, rule) for item in items],
-            rematch_ids={item["id"] for item in items},
+        stats, to_queue = monitor._match_and_enqueue(
+            [(item, rule) for item in items]
         )
-        self.assertEqual(len(calls), tg_module.MAX_REMATCH_TRANSFERS)
-        self.assertEqual(stats["auto_transferred"], 5)
-        self.assertEqual(stats["auto_pending"], 1)
-        self.assertEqual(
-            sum(1 for item in items if item["status"] == "transferred"), 5,
-        )
-        self.assertEqual(items[-1]["status"], "new")
-        self.assertIn("待下轮补转", items[-1]["match_reason"])
+        self.assertEqual(stats["queued"], 0)
+        self.assertEqual(stats["ignored"], 3)
+        self.assertEqual(to_queue, [])
+        self.assertTrue(all(item["status"] == "ignored" for item in items))
+        self.assertIn("队列积压", items[0]["match_reason"])
 
-    def test_provider_matches_title_and_leaves_ambiguity_pending(self):
-        calls = []
-
-        def handler(item, subscribe_id):
-            calls.append(subscribe_id)
-            return {"success": True, "data": {"transferred": 1}}
-
+    def test_provider_matches_title_and_ignores_ambiguity(self):
         monitor = TgChannelMonitor(self.owner)
         monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
-            channel_rules=[{"channel": "@a", "monitor_mode": "subscriptions"}],
-            auto_transfer_handler=handler,
+            channel_rules=[{"channel": "@a"}],
+            auto_transfer_handler=lambda item, subscribe_id: {},
             subscribe_provider=lambda: [
                 {"id": 113, "name": "现在就出发", "season": 4, "type": "电视剧"},
                 {"id": 114, "name": "现在就出发", "season": 4, "type": "电视剧"},
             ],
         )
         item = {
+            "id": "dup",
             "links": ["https://pan.quark.cn/s/a"],
             "title": "现在就出发 第四季(2026) 第4集 [旅行/综艺]",
             "status": "new",
         }
-        rule = {"channel": "@a", "monitor_mode": "subscriptions"}
-        stats = monitor._run_auto_transfers([(item, rule)])
-        # 1.7.33 起：同名 + 同季 + 同类型的重复登记不再算「多候选」，
-        # 自动取 id 更大（更新）的一条；否则真实资源会被永久挂起。
-        self.assertEqual(calls, [114])
-        self.assertEqual(item["status"], "transferred")
-        self.assertEqual(stats["auto_transferred"], 1)
+        rule = {"channel": "@a"}
+        stats, _queue = monitor._match_and_enqueue([(item, rule)])
+        # 同名 + 同季 + 同类型的重复登记自动取 id 更大的一条。
+        self.assertEqual(item["status"], "queued")
+        self.assertEqual(item["matched_subscribe_id"], 114)
+        self.assertEqual(stats["queued"], 1)
 
         unique_monitor = TgChannelMonitor(self.owner)
         unique_monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
-            channel_rules=[{"channel": "@a", "monitor_mode": "subscriptions"}],
-            auto_transfer_handler=handler,
+            channel_rules=[{"channel": "@a"}],
+            auto_transfer_handler=lambda item, subscribe_id: {},
             subscribe_provider=lambda: [
-                {"id": 113, "name": "现在就出发", "season": 4, "type": "电视剧"},
+                {"id": 113, "name": "现在就走", "season": 4, "type": "电视剧"},
             ],
         )
         unique = {
+            "id": "other",
             "links": ["https://pan.quark.cn/s/b"],
             "title": "现在就出发 第四季(2026) 第5集 [旅行/综艺]",
             "status": "new",
         }
-        calls.clear()
-        stats = unique_monitor._run_auto_transfers([(unique, rule)])
-        self.assertEqual(calls, [113])
-        self.assertEqual(unique["status"], "transferred")
-        self.assertEqual(stats["auto_transferred"], 1)
+        unique_monitor._match_and_enqueue([(unique, rule)])
+        self.assertEqual(unique["status"], "ignored")
+        self.assertEqual(unique["match_status"], "unmatched")
 
-
-class ScanTest(unittest.TestCase):
     def setUp(self):
         import tempfile
         from pathlib import Path
@@ -566,11 +579,10 @@ class ScanTest(unittest.TestCase):
             "match_reason": "匹配度过低（88），留待手动选择",
         }])
         result = asyncio.run(monitor._scan_with_client(FakeClient(), "测试"))
-        self.assertEqual(calls, [("999:1", 113)])
-        self.assertEqual(result["auto_transferred"], 1)
+        self.assertEqual(calls, [])
+        self.assertEqual(result["auto_queued"], 1)
         item = monitor.list_items()[0]
-        self.assertEqual(item["status"], "transferred")
-        self.assertEqual(item["match_status"], "transferred")
+        self.assertEqual(item["status"], "queued")
         self.assertIn("标题精确", item["match_reason"])
 
     def test_incremental_scan_fetches_multiple_pages_to_catch_up(self):

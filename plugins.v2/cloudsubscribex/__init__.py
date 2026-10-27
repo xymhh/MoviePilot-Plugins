@@ -178,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.88"
+    plugin_version = "1.7.89"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1347,8 +1347,8 @@ class CloudSubscribeX(_PluginBase):
                 max_items=self._tg_monitor_max_items,
                 quality_preferences=quality_preferences,
                 auto_transfer_handler=self._auto_transfer_tg_item,
+                auto_transfer_batch_handler=self._auto_transfer_tg_batch,
                 subscribe_provider=self._tg_subscribe_rows,
-                keep_unmatched=self._tg_monitor_keep_unmatched,
             )
         except Exception as error:  # noqa: BLE001 - 监控不可用不应拖垮插件
             logger.warning(f"TG 频道监控初始化失败：{error}")
@@ -1384,6 +1384,35 @@ class CloudSubscribeX(_PluginBase):
             # 把频道消息标题带进手动同步，电影单文件兜底不必只靠订阅名
             payload["resource_titles"] = {link: title for link in links}
         # wait=True 才能拿到实际转存文件数；否则「任务已提交」会被误标成已转存
+        return SyncApi(self).api_vue_start_manual_sync(payload, wait=True)
+
+    def _auto_transfer_tg_batch(
+            self, items: List[Dict[str, Any]], subscribe_id: int,
+    ) -> Dict[str, Any]:
+        """同一订阅的多条频道资源合并成一次手动转存。"""
+        from .core.api.sync import SyncApi
+
+        links: List[str] = []
+        titles: Dict[str, str] = {}
+        for item in items or []:
+            title = str((item or {}).get("title") or "").strip()
+            for link in (item or {}).get("links") or []:
+                text = str(link or "").strip()
+                if not text or text in titles:
+                    continue
+                links.append(text)
+                titles[text] = title
+                if len(links) >= 50:
+                    break
+            if len(links) >= 50:
+                break
+        if not links:
+            return {"success": False, "message": "没有可转存的网盘链接"}
+        payload = {
+            "subscribe_id": int(subscribe_id or 0),
+            "resource_links": links,
+            "resource_titles": titles,
+        }
         return SyncApi(self).api_vue_start_manual_sync(payload, wait=True)
 
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:

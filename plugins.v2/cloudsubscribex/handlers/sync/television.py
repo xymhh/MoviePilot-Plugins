@@ -1000,12 +1000,16 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 if episode not in completed_missing_episodes
                             ]
                         for notification_kind, episodes in batch_detail_episodes.items():
-                            self._append_tv_transfer_detail(
-                                transfer_details, mediainfo, season, episodes,
-                                notification_kind=notification_kind,
-                                size_bytes=batch_detail_size.get(notification_kind, 0),
-                                source_text=batch_detail_source.get(notification_kind, ""),
-                            )
+                            try:
+                                self._append_tv_transfer_detail(
+                                    transfer_details, mediainfo, season, episodes,
+                                    notification_kind=notification_kind,
+                                    size_bytes=batch_detail_size.get(notification_kind, 0),
+                                    source_text=batch_detail_source.get(notification_kind, ""),
+                                )
+                            except TypeError as error:
+                                # 同上：模块新旧混用时签名可能不一致，通知失败不中断转存。
+                                logger.debug(f"转存通知详情写入失败（已忽略）：{error}")
 
                         # 记录下载历史
                         if batch_success_episodes:
