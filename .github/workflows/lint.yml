@@ -32,3 +32,6 @@ jobs:
 
       - name: Run lint check
         run: python scripts/lint.py --all
+
+      - name: Check frontend single entry
+        run: python3 scripts/check_frontend_entry.py

@@ -88,6 +88,10 @@
               {{ historyStats.total }}
             </v-chip>
           </v-tab>
+          <v-tab value="tg">
+            <v-icon icon="mdi-television-guide" size="small" class="mr-2" />
+            频道监控
+          </v-tab>
           <v-tab value="organize">
             <v-icon icon="mdi-folder-move-outline" size="small" class="mr-2" />
             网盘整理
@@ -102,6 +106,9 @@
       <div class="workspace-window">
         <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
           <RuntimeCard class="runtime-panel" :runtime="runtime" :active="active" @stop-task="confirmStopTask" />
+        </div>
+        <div v-show="mainTab === 'tg'" class="workspace-pane tg-pane">
+          <TgMonitor :api="api" :active="mainTab === 'tg'" />
         </div>
         <div v-show="mainTab === 'organize'" class="workspace-pane organize-pane">
           <OrganizePanel :api="api" />
@@ -312,12 +319,13 @@ import {useRuntimeData} from "../composables/useRuntimeData.js";
 import {CACHE_CATEGORIES, useCacheActions} from "../composables/useCacheActions.js";
 
 const Config = defineAsyncComponent(() => import("./Config.vue"))
+const TgMonitor = defineAsyncComponent(() => import("./dashboard/TgMonitor.vue"))
 const ConfirmDialog = defineAsyncComponent(() => import("./dialogs/ConfirmDialog.vue"));
 const ManualResourceDialog = defineAsyncComponent(() => import("./dialogs/ManualResourceDialog.vue"))
 const OfflineTasksDialog = defineAsyncComponent(() => import("./dialogs/OfflineTasksDialog.vue"))
 
 const props = defineProps({
-  api: { type: Object, default: () => ({}) },
+  api: { type: [Object, Function], default: () => ({}) },
   pluginId: { type: String, default: "CloudSubscribeX" },
   navKey: { type: String, default: "main" },
 })
