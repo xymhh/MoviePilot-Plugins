@@ -1206,9 +1206,7 @@ class TgChannelMonitor:
         auto_stats, to_queue = self._match_and_enqueue(auto_candidates)
         # 判定会打上 ignored/queued 标记，先落盘再入队：
         # 否则 worker 可能先拿到 id、读到的还是 new，条目就永远停住了。
-        items = self._trim_items(items)
-        self._store.save(ITEMS_KEY, items)
-        self._store.save(STATE_KEY, state)
+        items = self._persist_scan_items(items, state)
         for item in to_queue:
             self._enqueue_item(item)
         self._last_scan_at = time.time()
@@ -1361,6 +1359,48 @@ class TgChannelMonitor:
         merged = active + history + ignored
         merged.sort(key=_ts, reverse=True)
         return merged[:cap]
+
+    # 扫描期间 worker 可能已把条目写成这几态，扫描落盘时不能覆盖回去。
+    _TERMINAL_STATUSES = frozenset({"transferred", "skipped", "failed"})
+
+    def _persist_scan_items(
+            self, items: List[dict], state: Dict[str, Any],
+    ) -> List[dict]:
+        """把扫描结果并入池子：只更新非终态条目，保留 worker 的转存结果。
+
+        扫描全程可能几分钟（抓消息 + 匹配），期间转存 worker 会写
+        transferred/skipped/failed。若这里直接用扫描开始时的快照覆盖，
+        刚转存成功/失败的条目会被打回 queued，再也不会被处理（1.7.89 线上
+        29 条卡在 queued 就是这个原因）。
+        """
+        with self._items_lock:
+            stored = list(self._store.load(ITEMS_KEY, []) or [])
+            by_id = {str(row.get("id")): row for row in stored}
+            merged: List[dict] = []
+            seen: set = set()
+            for item in items:
+                item_id = str(item.get("id") or "")
+                if not item_id or item_id in seen:
+                    continue
+                seen.add(item_id)
+                current = by_id.get(item_id)
+                if current is None:
+                    merged.append(item)
+                    continue
+                if str(current.get("status") or "") in self._TERMINAL_STATUSES:
+                    # worker 已经给出结论：保留它的状态与转存字段。
+                    merged.append(current)
+                    continue
+                current.update(item)
+                merged.append(current)
+            # 扫描期间别处新写入的条目（极少见）也保留，避免被这一次保存吞掉。
+            for item_id, current in by_id.items():
+                if item_id not in seen:
+                    merged.append(current)
+            merged = self._trim_items(merged)
+            self._store.save(ITEMS_KEY, merged)
+            self._store.save(STATE_KEY, state)
+            return merged
 
     def _match_and_enqueue(
             self, candidates: List[Tuple[dict, dict]],

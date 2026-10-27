@@ -863,6 +863,58 @@ class NormalizeChannelTest(unittest.TestCase):
         self.assertEqual(tg_module.normalize_channel("t.me/some"), "@some")
 
 
+class ScanPersistTest(unittest.TestCase):
+    """扫描落盘不能覆盖 worker 的终态（1.7.89 线上 29 条卡 queued 的根因）。"""
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.owner = FakeOwner(Path(self.tempdir.name))
+        self.monitor = tg_module.TgChannelMonitor(self.owner)
+
+    def tearDown(self):
+        self.tempdir.cleanup()
+
+    def _seed(self, rows):
+        self.monitor._store.save(tg_module.ITEMS_KEY, rows)
+
+    def _load(self):
+        return self.monitor._store.load(tg_module.ITEMS_KEY, [])
+
+    def test_keeps_worker_terminal_status(self):
+        self._seed([{"id": "a", "status": "transferred", "title": "旧"}])
+        merged = self.monitor._persist_scan_items(
+            [{"id": "a", "status": "queued", "title": "新"}], {},
+        )
+        self.assertEqual(merged[0]["status"], "transferred")
+        self.assertEqual(merged[0]["title"], "旧")
+        self.assertEqual(self._load()[0]["status"], "transferred")
+
+    def test_updates_non_terminal_status(self):
+        self._seed([{"id": "a", "status": "queued", "title": "旧"}])
+        merged = self.monitor._persist_scan_items(
+            [{"id": "a", "status": "ignored", "title": "新"}], {},
+        )
+        self.assertEqual(merged[0]["status"], "ignored")
+        self.assertEqual(merged[0]["title"], "新")
+
+    def test_appends_new_items_first(self):
+        self._seed([{"id": "a", "status": "transferred"}])
+        merged = self.monitor._persist_scan_items(
+            [{"id": "b", "status": "queued"}, {"id": "a", "status": "queued"}],
+            {},
+        )
+        self.assertEqual([row["id"] for row in merged], ["b", "a"])
+
+    def test_failed_is_also_terminal(self):
+        self._seed([{"id": "a", "status": "failed", "error": "跨盘失败"}])
+        merged = self.monitor._persist_scan_items(
+            [{"id": "a", "status": "queued"}], {},
+        )
+        self.assertEqual(merged[0]["status"], "failed")
+
+
 class CodeDeliveryTest(unittest.TestCase):
     def test_mapping(self):
         class T:
