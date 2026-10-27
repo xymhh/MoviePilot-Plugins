@@ -15,6 +15,7 @@ from app.schemas.types import MediaType, NotificationType
 
 from .. import CloudDriveCapability, OwnerDelegator
 from ..config import UIConfig
+from .season_rules import _season_total_episodes, _select_season_numbers
 from ..media import call_with_supported_kwargs, recognize_media
 from ...drive.scanner import DriverRegistry
 from ...search.matching import is_anime_media
@@ -1144,15 +1145,21 @@ class PageApi(OwnerDelegator):
                             normalized_seasons_dict[new_s] = seasons_dict.get(old_s, set())
                         seasons_dict = normalized_seasons_dict
 
-                all_season_nums = set(seasons_dict.keys())
+                # 以官方季为准：官方有季信息时忽略媒体库里多出来的季
+                # （绝对集号被拆成第 2-5 季这类残留），否则退回媒体库的季。
+                official_season_nums = set()
                 if isinstance(meta_seasons_info, dict):
                     for s_k in meta_seasons_info.keys():
                         try:
                             s_int = int(s_k)
                             if s_int > 0:
-                                all_season_nums.add(s_int)
+                                official_season_nums.add(s_int)
                         except (ValueError, TypeError):
                             pass
+                if official_season_nums:
+                    all_season_nums = official_season_nums
+                else:
+                    all_season_nums = set(seasons_dict.keys())
 
                 # 若未入库且标题带季数，修正单季的季号
                 if title_s_num > 1 and not seasons_dict:
@@ -1560,21 +1567,28 @@ class PageApi(OwnerDelegator):
                         int(item) for item in values if str(item).isdigit() and int(item) > 0
                     )
 
-            season_numbers = set(season_counts) | set(library_episodes)
+            # 季以官方（TMDB 等）季度为准：媒体库里残留的季（例如早期按绝对集号
+            # 拆出来的第 2-5 季）没有官方定义时会凭空多出季和集数，这里一律不展示。
+            # 官方完全没有季信息（识别失败）时才退回媒体库的季。
+            season_numbers = _select_season_numbers(season_counts, library_episodes)
             detail["seasons"] = [
                 {
                     "season_number": season_number,
                     "season_name": f"第 {season_number} 季",
-                    "total_episodes": max(season_counts.get(season_number, 0),
-                                          max(library_episodes.get(season_number, set()), default=0)),
+                    "total_episodes": _season_total_episodes(
+                        season_counts.get(season_number, 0),
+                        library_episodes.get(season_number, set()),
+                    ),
                     "library_episodes_count": len(library_episodes.get(season_number, set())),
                     "episodes": [
                         {
                             "episode": episode,
                             "in_library": episode in library_episodes.get(season_number, set()),
                         }
-                        for episode in range(1, max(season_counts.get(season_number, 0),
-                                                    max(library_episodes.get(season_number, set()), default=0)) + 1)
+                        for episode in range(1, _season_total_episodes(
+                            season_counts.get(season_number, 0),
+                            library_episodes.get(season_number, set()),
+                        ) + 1)
                     ],
                 }
                 for season_number in sorted(season_numbers)
