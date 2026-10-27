@@ -159,5 +159,84 @@ class DeepDeleteCloudFallbackTest(unittest.TestCase):
         self.assertEqual(self.mutations.deleted, [])
 
 
+class DeepDeleteLocalPathGoneTest(unittest.TestCase):
+    """神医深度删除先删本地文件，webhook 到达时本地目录已不存在。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name) / "115网盘"
+        self.root.mkdir(parents=True)
+        self.media_root = "/Alist/影视/moviepilot/媒体库"
+        self.dirs = _FakeDirectories({})
+        self.mutations = _FakeMutations()
+        self.service = HistoryCleanupService.__new__(HistoryCleanupService)
+        object.__setattr__(self.service, "_owner", SimpleNamespace())
+        self.service._local_resource_path = str(self.root)
+        self.service._CLOUD_MEDIA_ROOT = self.media_root
+        self.service._cloud_transfer_path = "/转移"
+        self.service._cloud_transfer_paths = {}
+        self.service._cloud_directories = self.dirs
+        self.service._cloud_mutations = self.mutations
+
+        def _boom(value):
+            raise ValueError(
+                f"媒体服务器条目路径不存在或不可访问：{value}"
+            )
+
+        self.service._configured_media_path = _boom
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _set_mappings(self, raw: str):
+        def _parsed():
+            return [
+                ("/media/strm", str(self.root.parent))
+            ] if raw else []
+
+        object.__setattr__(self.service, "_parsed_media_server_path_mappings", _parsed)
+
+    def test_deletes_cloud_directory_when_local_strm_gone(self):
+        self._set_mappings("/media/strm=/strm")
+        self.dirs.existing[
+            f"{self.media_root}/剧集/国漫/武神主宰 (2020) {{tmdb-110181}}"
+        ] = "dir-1"
+
+        result = self.service._delete_cloud_media_by_server_paths(
+            ["/media/strm/115网盘/剧集/国漫/武神主宰 (2020) {tmdb-110181}"]
+        )
+
+        self.assertEqual(result["matched"], 1)
+        self.assertEqual(result["cloud_directories_deleted"], 1)
+        self.assertEqual(result["strm_deleted"], 0)
+        self.assertEqual(self.mutations.deleted, ["dir-1"])
+
+    def test_skips_when_no_mapping_configured(self):
+        self._set_mappings("")
+        self.dirs.existing[
+            f"{self.media_root}/剧集/国漫/武神主宰 (2020) {{tmdb-110181}}"
+        ] = "dir-1"
+
+        result = self.service._delete_cloud_media_by_server_paths(
+            ["/media/strm/115网盘/剧集/国漫/武神主宰 (2020) {tmdb-110181}"]
+        )
+
+        self.assertEqual(result["matched"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(self.mutations.deleted, [])
+
+    def test_virtual_path_still_rejects_shallow_target(self):
+        self._set_mappings("/media/strm=/strm")
+        self.dirs.existing[f"{self.media_root}/剧集"] = "cat-dir"
+
+        result = self.service._delete_cloud_media_by_server_paths(
+            ["/media/strm/115网盘/剧集"]
+        )
+
+        self.assertEqual(result["matched"], 0)
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(self.mutations.deleted, [])
+
+
 if __name__ == "__main__":
     unittest.main()

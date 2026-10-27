@@ -194,6 +194,38 @@ class HistoryCleanupService(OwnerDelegator):
         result = self.delete_history_records(matched, delete_linked_files=True)
         return {"matched": len(matched), **result}
 
+    def _virtual_media_path(self, value: Any) -> Optional[Path]:
+        """媒体库条目已被删除时，按「媒体服务器路径=本地路径」映射推断本地路径。
+
+        神医深度删除会先删掉本地 STRM 文件，webhook 到达时目标路径通常已不存在，
+        此时无法靠 exists() 校验，只能按显式映射做纯前缀翻译；解出的相对路径仍要
+        在媒体根之下、且层级由调用方继续校验。没有映射就返回 None（不猜）。
+        """
+        if not self._local_resource_path:
+            return None
+        raw_value = str(value or "").strip()
+        if not raw_value:
+            return None
+        try:
+            mappings = list(self._parsed_media_server_path_mappings())
+        except Exception:
+            mappings = []
+        if not mappings:
+            return None
+        root = Path(self._local_resource_path).expanduser().resolve(strict=False)
+        for server_root, local_root in mappings:
+            if raw_value != server_root and not raw_value.startswith(f"{server_root}/"):
+                continue
+            relative = raw_value[len(server_root):].lstrip("/")
+            if not relative:
+                continue
+            translated = f"{local_root}/{relative}"
+            translated_path = Path(translated).expanduser().resolve(strict=False)
+            if translated_path != root and root not in translated_path.parents:
+                continue
+            return translated_path
+        return None
+
     def _delete_cloud_media_by_server_paths(self, targets: List[str]) -> Dict[str, int]:
         """兜底删除：无转存历史时，按媒体服务器路径反推网盘目录并删除。
 
@@ -224,9 +256,15 @@ class HistoryCleanupService(OwnerDelegator):
             try:
                 local_path, _reason = self._configured_media_path(target)
             except Exception as error:
-                logger.info(f"深度删除兜底：无法定位媒体路径，跳过 {target} - {error}")
-                result["skipped"] += 1
-                continue
+                local_path = self._virtual_media_path(target)
+                if local_path is None:
+                    logger.info(f"深度删除兜底：无法定位媒体路径，跳过 {target} - {error}")
+                    result["skipped"] += 1
+                    continue
+                logger.info(
+                    f"深度删除兜底：本地媒体路径已不存在，按路径映射推断 {local_path}"
+                    f"（原路径 {target}；{error}）"
+                )
             resolved = Path(local_path).expanduser().resolve(strict=False)
             try:
                 relative = resolved.relative_to(local_root)
