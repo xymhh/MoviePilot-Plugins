@@ -177,14 +177,18 @@ class HistoryService(OwnerDelegator):
             logger.warning(f"记录下载历史失败：{error}")
             return False
 
-    @staticmethod
-    @staticmethod
-    def _detail_source_text(history_item: Optional[Dict[str, Any]]) -> str:
+    def _detail_source_text(self, history_item: Optional[Dict[str, Any]]) -> str:
         """通知里展示的网盘来源：跨盘写「源 → 目标」，同盘只写目标盘。"""
         item = history_item or {}
         target = str(
             item.get("target_drive_name") or item.get("cloud_drive_name") or ""
         ).strip()
+        if not target:
+            # 部分后处理链路（文件落盘时才发通知）没有历史记录，
+            # 直接用当前挂载的网盘名兜底，避免来源整段消失
+            target = str(
+                getattr(getattr(self, "_cloud_drive", None), "name", "") or ""
+            ).strip()
         source = str(item.get("source_drive_name") or "").strip()
         # 跨盘才写「源 → 目标」；同盘只写目标盘名
         if source and target and source != target:
@@ -1123,6 +1127,8 @@ class HistoryService(OwnerDelegator):
             "year": getattr(target_subscribe, "year", None) or mediainfo.year,
             "image": getattr(mediainfo, "get_poster_image", lambda: None)(),
             "file_name": item.get("file_name"),
+            "size": self._detail_size(history_record, item),
+            "source": self._detail_source_text(history_record or item),
             "notification_kind": (
                 "upgrade"
                 if self._is_upgrade_history(history_record)
@@ -1210,6 +1216,11 @@ class HistoryService(OwnerDelegator):
                     file_names.append(file_name)
             if not current.get("image") and detail.get("image"):
                 current["image"] = detail["image"]
+            current["size"] = int(current.get("size") or 0) + int(
+                detail.get("size") or 0
+            )
+            if not current.get("source") and detail.get("source"):
+                current["source"] = detail["source"]
         for key, detail in tv_index.items():
             detail["episodes"] = sorted(episode_sets[key])
         return aggregated
