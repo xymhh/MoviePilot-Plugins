@@ -2399,6 +2399,8 @@ class HistoryService(OwnerDelegator):
             "year": mediainfo.year,
             "image": mediainfo.get_poster_image(),
             "file_name": notification_name,
+            "size": self._detail_size(record),
+            "source": self._detail_source_text(record),
         }
         if mediainfo.type == MediaType.TV:
             detail["season"] = normalize_season(record.get("season"))
