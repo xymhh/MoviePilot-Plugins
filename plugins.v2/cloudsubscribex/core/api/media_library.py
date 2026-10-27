@@ -15,6 +15,7 @@ from app.log import logger
 from sqlalchemy import func
 
 from .. import OwnerDelegator, render_template, resolve_template
+from ...utils.deep_delete_dedupe import DeepDeleteDeduplicator
 from ..media import media_server_tmdb_filters, tmdb_id_of
 try:
     from ..media_scope import filter_media_rows
@@ -26,11 +27,17 @@ except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过�
 class MediaLibraryApi(OwnerDelegator):
     _SYNC_DEBOUNCE_SECONDS = 2
     _PLATFORM_SYNC_EVENTS = {"library.new", "library.deleted"}
+    _DEEP_DELETE_DEDUPE_SECONDS = 120
 
     def __init__(self, owner):
         super().__init__(owner)
         object.__setattr__(self, "_sync_timer_lock", RLock())
         object.__setattr__(self, "_sync_timers", {})
+        object.__setattr__(
+            self,
+            "_deep_delete_dedup",
+            DeepDeleteDeduplicator(window_seconds=self._DEEP_DELETE_DEDUPE_SECONDS),
+        )
 
     def handle_platform_media_webhook(self, event_info: Any) -> bool:
         """消费已鉴权并标准化的媒体服务器 Webhook 事件。"""
@@ -105,11 +112,18 @@ class MediaLibraryApi(OwnerDelegator):
         if not paths:
             logger.warning("深度删除通知缺少有效媒体路径 (Item Path)，已跳过")
             return False
+        paths, duplicates = self._deep_delete_dedup.claim(paths)
+        if duplicates:
+            logger.info(f"深度删除重复事件已忽略（{self._DEEP_DELETE_DEDUPE_SECONDS}s 内已处理）：{duplicates}")
+        if not paths:
+            logger.info("深度删除事件全部为重复目标，本次不处理也不再发通知")
+            return False
         logger.info(
             f"收到深度删除请求：提取到 {len(paths)} 个目标路径：{paths}，开始匹配插件转存历史..."
         )
         result = self._sync_handler.delete_by_media_server_paths(paths)
         if not result.get("matched"):
+            self._deep_delete_dedup.release(paths)
             logger.warning(
                 f"深度删除未匹配到对应的插件历史记录（目标路径：{paths}）"
             )
