@@ -178,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.86"
+    plugin_version = "1.7.87"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -509,7 +509,9 @@ class CloudSubscribeX(_PluginBase):
             event_info.get("event") if isinstance(event_info, dict) else "") or "")
         channel = str(getattr(event_info, "channel", None) or (
             event_info.get("channel") if isinstance(event_info, dict) else "") or "")
-        logger.info(
+        # 媒体库一次操作会连发多条 webhook（神医约 5 条），INFO 会刷屏；
+        # 真正的处理结果由 media_library 汇总成 2 行打印。
+        logger.debug(
             f"收到平台媒体服务器 WebhookMessage 事件: channel={channel or '未知'}, event={event_name or '未知'}")
         return self._get_component(MediaLibraryApi).handle_platform_media_webhook(
             event_info

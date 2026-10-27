@@ -115,12 +115,15 @@ class MediaLibraryApi(OwnerDelegator):
             return False
         paths, duplicates = self._deep_delete_dedup.claim(paths)
         if duplicates:
-            logger.info(f"深度删除重复事件已忽略（{self._DEEP_DELETE_DEDUPE_SECONDS}s 内已处理）：{duplicates}")
+            logger.debug(
+                f"深度删除重复事件已忽略（{self._DEEP_DELETE_DEDUPE_SECONDS}s 内已处理）：{duplicates}"
+            )
         if not paths:
-            logger.info("深度删除事件全部为重复目标，本次不处理也不再发通知")
+            logger.debug("深度删除事件全部为重复目标，本次不处理也不再发通知")
             return False
         logger.info(
-            f"收到深度删除请求：提取到 {len(paths)} 个目标路径：{paths}，开始匹配插件转存历史..."
+            f"收到深度删除请求：{'、'.join(self._path_leaf(p) or p for p in paths)}"
+            f"（{len(paths)} 个目标），开始匹配转存历史"
         )
         result = self._sync_handler.delete_by_media_server_paths(paths)
         if not result.get("matched"):
@@ -151,7 +154,9 @@ class MediaLibraryApi(OwnerDelegator):
         )
         if result.get("skipped"):
             message += f"，跳过 {result['skipped']} 条"
-        logger.info(f"深度删除联动完成：{message}（{titles or paths}）")
+        logger.info(
+            f"深度删除完成：{'、'.join(lines)}（{'、'.join(titles) or '、'.join(paths)}）"
+        )
         if self._notify:
             try:
                 templates = getattr(self, "_notify_templates", None) or {}

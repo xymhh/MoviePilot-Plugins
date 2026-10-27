@@ -261,8 +261,8 @@ class HistoryCleanupService(OwnerDelegator):
                     logger.info(f"深度删除兜底：无法定位媒体路径，跳过 {target} - {error}")
                     result["skipped"] += 1
                     continue
-                logger.info(
-                    f"深度删除兜底：本地媒体路径已不存在，按路径映射推断 {local_path}"
+                logger.debug(
+                    f"深度删除兜底：本地路径不存在，按路径映射推断 {local_path}"
                     f"（原路径 {target}；{error}）"
                 )
             resolved = Path(local_path).expanduser().resolve(strict=False)
@@ -307,7 +307,7 @@ class HistoryCleanupService(OwnerDelegator):
         if deleted_dirs:
             result["matched"] = len(deleted_dirs)
             result["deleted"] = len(deleted_dirs)
-            logger.info(
+            logger.debug(
                 f"深度删除兜底完成：条目无转存历史，按媒体库路径反查并删除网盘目录 "
                 f"{len(deleted_dirs)} 个：{deleted_dirs}"
             )

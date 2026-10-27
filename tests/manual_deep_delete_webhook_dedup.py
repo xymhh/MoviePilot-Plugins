@@ -147,5 +147,48 @@ class DeepDeleteWebhookDedupTest(unittest.TestCase):
         self.assertEqual(len(self.messages), 0)
 
 
+class _LogRecorder:
+    """记录 logger 调用，用来验证「一次删除只写几行 INFO」。"""
+
+    def __init__(self):
+        self.infos = []
+        self.debugs = []
+        self.warnings = []
+
+    def info(self, msg, *args, **kwargs):
+        self.infos.append(str(msg))
+
+    def debug(self, msg, *args, **kwargs):
+        self.debugs.append(str(msg))
+
+    def warning(self, msg, *args, **kwargs):
+        self.warnings.append(str(msg))
+
+    def error(self, msg, *args, **kwargs):
+        self.warnings.append(str(msg))
+
+
+class DeepDeleteLogNoiseTest(unittest.TestCase):
+    """1.7.87：四条重复 webhook 只应产出 2 行 INFO（收到 / 完成）。"""
+
+    def test_duplicate_events_log_two_info_lines(self):
+        api = DeepDeleteWebhookDedupTest()._build_api()
+        recorder = _LogRecorder()
+        original = media_library.logger
+        media_library.logger = recorder
+        try:
+            for _ in range(4):
+                api.handle_platform_media_webhook(_event())
+        finally:
+            media_library.logger = original
+
+        self.assertEqual(len(recorder.infos), 2, recorder.infos)
+        self.assertTrue(recorder.infos[0].startswith("收到深度删除请求"), recorder.infos)
+        self.assertTrue(recorder.infos[1].startswith("深度删除完成"), recorder.infos)
+        # 重复事件只在 debug 里留痕，且不再出现「全部为重复目标」这种重复长句
+        self.assertTrue(any("重复事件已忽略" in line for line in recorder.debugs), recorder.debugs)
+        self.assertFalse(any("全部为重复目标" in line for line in recorder.infos))
+
+
 if __name__ == "__main__":
     unittest.main()
