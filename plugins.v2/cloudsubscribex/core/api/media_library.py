@@ -117,7 +117,8 @@ class MediaLibraryApi(OwnerDelegator):
         message = (
             f"路径 {len(paths)} 个，匹配 {result['matched']} 条，"
             f"删除历史 {result['deleted']} 条、网盘文件 "
-            f"{result.get('cloud_files_deleted', 0)} 个、STRM "
+            f"{result.get('cloud_files_deleted', 0)} 个、网盘目录 "
+            f"{result.get('cloud_directories_deleted', 0)} 个、STRM "
             f"{result.get('strm_deleted', 0)} 个"
         )
         if result.get("skipped"):

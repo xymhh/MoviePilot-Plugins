@@ -172,6 +172,11 @@ class HistoryCleanupService(OwnerDelegator):
                 matched.append(record)
 
         if not matched:
+            # 兜底：该条目不是本插件转存的（无转存历史），但用户已在媒体服务器整剧删除，
+            # 按媒体库路径反推网盘目录直接删除，避免网盘残留。
+            fallback = self._delete_cloud_media_by_server_paths(normalized_targets)
+            if fallback.get("matched"):
+                return fallback
             samples = []
             for record in (self._get_data("history") or [])[:2000]:
                 cloud_dir = str(record.get("cloud_dir") or "").strip()
@@ -188,6 +193,111 @@ class HistoryCleanupService(OwnerDelegator):
                     "cache_deleted": 0, "skipped": 0}
         result = self.delete_history_records(matched, delete_linked_files=True)
         return {"matched": len(matched), **result}
+
+    def _delete_cloud_media_by_server_paths(self, targets: List[str]) -> Dict[str, int]:
+        """兜底删除：无转存历史时，按媒体服务器路径反推网盘目录并删除。
+
+        只处理「整剧/整部电影目录」：反推出的网盘路径必须落在媒体库根之下且至少两级，
+        目录需在网盘真实存在，删除走网盘回收站（可恢复），并同步清理本地 STRM 目录。
+        """
+        empty = {"matched": 0, "deleted": 0, "linked_deleted": 0,
+                 "cache_deleted": 0, "skipped": 0,
+                 "cloud_files_deleted": 0, "cloud_directories_deleted": 0,
+                 "strm_deleted": 0}
+        if not targets:
+            return dict(empty)
+        if not getattr(self, "_local_resource_path", ""):
+            return dict(empty)
+        if not getattr(self, "_cloud_directories", None) or not getattr(
+                self, "_cloud_mutations", None
+        ):
+            logger.warning("深度删除兜底：网盘目录服务未初始化，已跳过")
+            return dict(empty)
+
+        local_root = Path(self._local_resource_path).expanduser().resolve(strict=False)
+        media_root_text = str(getattr(self, "_CLOUD_MEDIA_ROOT", "/") or "/")
+        media_root = PurePosixPath(media_root_text)
+        result = dict(empty)
+        deleted_dirs: List[str] = []
+
+        for target in targets:
+            try:
+                local_path, _reason = self._configured_media_path(target)
+            except Exception as error:
+                logger.info(f"深度删除兜底：无法定位媒体路径，跳过 {target} - {error}")
+                result["skipped"] += 1
+                continue
+            resolved = Path(local_path).expanduser().resolve(strict=False)
+            try:
+                relative = resolved.relative_to(local_root)
+            except ValueError:
+                logger.warning(f"深度删除兜底：路径越出媒体根，跳过 {resolved}")
+                result["skipped"] += 1
+                continue
+            # 至少保留「分类/媒体」两级边界，绝不删除媒体根或分类目录本身。
+            if len(relative.parts) < 2:
+                logger.warning(f"深度删除兜底：路径层级过浅，拒绝删除 {resolved}")
+                result["skipped"] += 1
+                continue
+            if resolved.is_file():
+                logger.info(f"深度删除兜底：目标是单文件而非媒体目录，跳过 {resolved}")
+                result["skipped"] += 1
+                continue
+            cloud_dir = str(media_root.joinpath(*relative.parts))
+            if self._is_protected_cloud_directory(cloud_dir):
+                logger.warning(f"深度删除兜底：命中共保护目录，拒绝删除 {cloud_dir}")
+                result["skipped"] += 1
+                continue
+            try:
+                lookup = self._cloud_directories.resolve_directory(cloud_dir)
+                if not lookup.checked or not lookup.directory_id:
+                    logger.info(f"深度删除兜底：网盘目录不存在，跳过 {cloud_dir}")
+                    result["skipped"] += 1
+                    continue
+                if not self._cloud_mutations.delete_file(lookup.directory_id):
+                    logger.warning(f"深度删除兜底：网盘目录删除失败 {cloud_dir}")
+                    result["skipped"] += 1
+                    continue
+            except Exception as error:
+                logger.warning(f"深度删除兜底：删除网盘目录失败 {cloud_dir} - {error}")
+                result["skipped"] += 1
+                continue
+            deleted_dirs.append(cloud_dir)
+            result["cloud_directories_deleted"] += 1
+            result["strm_deleted"] += self._purge_local_media_directory(resolved)
+
+        if deleted_dirs:
+            result["matched"] = len(deleted_dirs)
+            result["deleted"] = len(deleted_dirs)
+            logger.info(
+                f"深度删除兜底完成：条目无转存历史，按媒体库路径反查并删除网盘目录 "
+                f"{len(deleted_dirs)} 个：{deleted_dirs}"
+            )
+        return result
+
+    def _purge_local_media_directory(self, directory: Path) -> int:
+        """删除媒体服务器已移除的本地 STRM 目录，返回删除的文件数。"""
+        if not getattr(self, "_local_resource_path", ""):
+            return 0
+        local_root = Path(self._local_resource_path).expanduser().resolve(strict=False)
+        resolved = directory.expanduser().resolve(strict=False)
+        if local_root not in resolved.parents:
+            return 0
+        try:
+            relative = resolved.relative_to(local_root)
+        except ValueError:
+            return 0
+        if len(relative.parts) < 2:
+            return 0
+        if not resolved.is_dir():
+            return 0
+        try:
+            removed = sum(1 for item in resolved.rglob("*") if item.is_file())
+            shutil.rmtree(resolved)
+        except Exception as error:
+            logger.warning(f"深度删除兜底：清理本地媒体目录失败 {resolved} - {error}")
+            return 0
+        return removed
 
     @staticmethod
     def _normalize_media_server_path(path: Any) -> str:
