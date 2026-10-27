@@ -82,6 +82,60 @@ class SyncNotificationService(OwnerDelegator):
             "动画": "动漫",
         }.get(str(type_text or "").strip(), "")
 
+    def _history_record_for_detail(
+            self, detail: Dict[str, Any], records: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """按文件名在同一条历史里找记录，用来补全通知里缺失的大小与来源。"""
+        file_name = str(detail.get("file_name") or "").strip()
+        if not file_name:
+            return None
+        matched = None
+        for record in records or []:
+            if str(record.get("status") or "") != "成功":
+                continue
+            names = {
+                str(record.get("file_name") or "").strip(),
+                str(record.get("source_file_name") or "").strip(),
+            }
+            if file_name in names:
+                matched = record
+        return matched
+
+    def _enrich_transfer_details(
+            self, transfer_details: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """发送前补全大小与网盘来源：详情自带值优先，缺失时回查历史记录。
+
+        转存链路有多条，个别链路拿到 detail 时历史尚未落库或文件对象为空，
+        导致通知只剩「类型」。这里统一兜底，避免模板正确但字段为空。
+        """
+        get_data = getattr(self, "_get_data", None)
+        records: Optional[List[Dict[str, Any]]] = None
+        for detail in transfer_details:
+            try:
+                size = int(detail.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            source = str(detail.get("source") or "").strip()
+            if size > 0 and source:
+                continue
+            if records is None:
+                try:
+                    records = list(get_data("history") or []) if get_data else []
+                except Exception:
+                    records = []
+            record = self._history_record_for_detail(detail, records)
+            if not record:
+                continue
+            if size <= 0:
+                try:
+                    detail["size"] = int(record.get("file_size") or 0)
+                except (TypeError, ValueError):
+                    detail["size"] = 0
+            if not source:
+                detail["source"] = self._detail_source_text(record)
+        return transfer_details
+
     def _flush_transfer_notifications(self) -> None:
         with self._notification_batch_lock:
             timer = self._notification_batch_timer
@@ -107,6 +161,7 @@ class SyncNotificationService(OwnerDelegator):
         if not post_message:
             return
         notification_type = getattr(self, "_notification_type", NotificationType.Plugin)
+        transfer_details = self._enrich_transfer_details(transfer_details)
 
         kind_config = {
             "transfer": ("【网盘订阅助手】转存完成", "转存", "notify_template_transfer"),

@@ -267,5 +267,76 @@ class LegacyUpgradeTest(unittest.TestCase):
         self.assertIn("notify_template_checkin", updated)
 
 
+class EnrichFromHistoryTest(unittest.TestCase):
+    """详情缺 size/source 时按历史记录回查补全（1.7.80）。"""
+
+    def _service_with_history(self, records):
+        service = _service()
+        owner = types.SimpleNamespace(
+            _get_data=lambda key: list(records) if key == "history" else [],
+            _detail_source_text=lambda item: (
+                f"{item.get('source_drive_name')} → {item.get('cloud_drive_name')}"
+                if item.get("source_drive_name")
+                and item.get("source_drive_name") != item.get("cloud_drive_name")
+                else str(item.get("cloud_drive_name") or "")
+            ),
+        )
+        object.__setattr__(service, "_owner", owner)
+        service._post_message = MagicMock()
+        service._notification_type = "Plugin"
+        return service
+
+    def test_missing_fields_are_filled_from_history(self):
+        service = self._service_with_history([{
+            "status": "成功",
+            "file_name": "末世行者 (2026).1080p.mkv",
+            "file_size": 3 * 1024 ** 3,
+            "cloud_drive_name": "115网盘",
+            "source_drive_name": "夸克网盘",
+        }])
+        details = service._enrich_transfer_details([{
+            "type": "电影",
+            "title": "末世行者",
+            "year": "2026",
+            "file_name": "末世行者 (2026).1080p.mkv",
+            "notification_kind": "transfer",
+        }])
+        self.assertEqual(details[0]["size"], 3 * 1024 ** 3)
+        self.assertEqual(details[0]["source"], "夸克网盘 → 115网盘")
+
+    def test_enriched_detail_renders_full_line(self):
+        service = self._service_with_history([{
+            "status": "成功",
+            "file_name": "末世行者 (2026).1080p.mkv",
+            "file_size": 3 * 1024 ** 3,
+            "cloud_drive_name": "115网盘",
+        }])
+        service._send_transfer_notification_now([{
+            "type": "电影",
+            "title": "末世行者",
+            "year": "2026",
+            "file_name": "末世行者 (2026).1080p.mkv",
+            "notification_kind": "transfer",
+        }])
+        text = _sent_text(service)
+        self.assertIn("🎬 末世行者 (2026) · 电影 · 3.0 GB · 115网盘", text)
+
+    def test_existing_values_win_and_no_record_is_safe(self):
+        service = self._service_with_history([])
+        details = service._enrich_transfer_details([{
+            "type": "电影",
+            "title": "A",
+            "size": 100,
+            "source": "115网盘",
+            "file_name": "A.mkv",
+        }])
+        self.assertEqual(details[0]["size"], 100)
+        self.assertEqual(details[0]["source"], "115网盘")
+        details = service._enrich_transfer_details([
+            {"type": "电影", "title": "B", "file_name": "B.mkv"},
+        ])
+        self.assertEqual(details[0].get("source", ""), "")
+
+
 if __name__ == "__main__":
     unittest.main()
