@@ -178,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.87"
+    plugin_version = "1.7.88"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -311,6 +311,11 @@ class CloudSubscribeX(_PluginBase):
     _episode_dedup_enabled: bool = True
     _verify_landed_enabled: bool = True
     _prefer_template_named_version: bool = True
+    # 入库择优：只对新入库生效（分辨率 > 体积 + 阈值）
+    _quality_prefer_enabled: bool = False
+    _quality_min_gain_percent: int = 10
+    _quality_min_gain_mb: int = 200
+    _quality_ignore_rename_template: bool = True
     _local_resource_path: str = ""
     # 媒体库一级目录（按媒体类型分层：电影/剧集），仅作用于网盘媒体库与本地 STRM 目录结构
     _type_folder_enabled: bool = False
@@ -1655,6 +1660,12 @@ class CloudSubscribeX(_PluginBase):
         self._verify_landed_enabled = bool(config.get("verify_landed_enabled", True))
         self._prefer_template_named_version = bool(
             config.get("prefer_template_named_version", True)
+        )
+        self._quality_prefer_enabled = bool(config.get("quality_prefer_enabled", False))
+        self._quality_min_gain_percent = int(config.get("quality_min_gain_percent", 10) or 0)
+        self._quality_min_gain_mb = int(config.get("quality_min_gain_mb", 200) or 0)
+        self._quality_ignore_rename_template = bool(
+            config.get("quality_ignore_rename_template", True)
         )
         self._local_resource_path = str(config.get("local_resource_path", "") or "").strip()
         self._type_folder_enabled = bool(config.get("type_folder_enabled", False))

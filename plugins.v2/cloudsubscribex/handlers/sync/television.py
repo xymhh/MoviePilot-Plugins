@@ -718,6 +718,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                             current_score,
                                             candidate_size,
                                             dedup_versions,
+                                            new_file_name=file_name,
                                         )
                                     )
                                     if dedup_action == "skip":

@@ -14,6 +14,7 @@ from app.schemas import MediaInfo
 from ...core import OwnerDelegator
 from ...utils.cache import normalize_platform_cache_key
 from ...utils.file_parser import MediaFileParser
+from ...utils.quality_compare import compare_quality
 
 
 class EpisodeDedupService(OwnerDelegator):
@@ -307,6 +308,10 @@ class EpisodeDedupService(OwnerDelegator):
     # ------------------------------------------------------------------
     # 决策
     # ------------------------------------------------------------------
+    def _quality_prefer_active(self) -> bool:
+        """按体积/分辨率择优入库是否生效（默认关）。"""
+        return bool(getattr(self, "_quality_prefer_enabled", False)) and self._episode_dedup_active()
+
     def _episode_dedup_decision(
             self,
             subscribe,
@@ -316,6 +321,7 @@ class EpisodeDedupService(OwnerDelegator):
             new_score: int,
             new_size: int,
             existing_versions: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+            new_file_name: str = "",
     ) -> Tuple[str, List[Dict[str, Any]], str]:
         """返回 (action, old_versions, reason)。
 
@@ -329,16 +335,33 @@ class EpisodeDedupService(OwnerDelegator):
         new_score = int(new_score or 0)
         new_size = max(0, int(new_size or 0))
 
-        template_version = self._template_conformant_version(
-            versions, subscribe, mediainfo, season, episode
+        quality_active = self._quality_prefer_active()
+        ignore_template = quality_active and bool(
+            getattr(self, "_quality_ignore_rename_template", True)
         )
-        if template_version:
-            template_name = str(template_version.get("file_name") or "").strip()
-            return (
-                "skip",
-                list(versions),
-                f"现有版本已符合当前重命名模板，保留 {template_name}",
+        if not ignore_template:
+            template_version = self._template_conformant_version(
+                versions, subscribe, mediainfo, season, episode
             )
+            if template_version:
+                template_name = str(template_version.get("file_name") or "").strip()
+                return (
+                    "skip",
+                    list(versions),
+                    f"现有版本已符合当前重命名模板，保留 {template_name}",
+                )
+
+        if quality_active:
+            action, reason = compare_quality(
+                new_file_name,
+                new_size,
+                versions,
+                min_gain_percent=int(getattr(self, "_quality_min_gain_percent", 10) or 0),
+                min_gain_mb=int(getattr(self, "_quality_min_gain_mb", 200) or 0),
+            )
+            if action == "upgrade":
+                return "replace", list(versions), f"按体积择优：{reason}"
+            return "skip", list(versions), f"现有版本更优：{reason}"
 
         best_old_score = max(int(v.get("score") or 0) for v in versions)
         best_old_size = max(int(v.get("file_size") or 0) for v in versions)

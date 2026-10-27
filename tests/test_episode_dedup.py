@@ -112,6 +112,11 @@ _ensure("cloudsubscribex.utils").MediaFileParser = SimpleNamespace(
     is_video=lambda name: str(name).lower().endswith((".mkv", ".mp4", ".avi", ".ts"))
 )
 _ensure("cloudsubscribex.utils.cache").normalize_platform_cache_key = lambda key: key
+# 1.7.88 择优比较器：用真实实现（纯函数，无宿主依赖）
+load_module(
+    "cloudsubscribex.utils.quality_compare",
+    "plugins.v2/cloudsubscribex/utils/quality_compare.py",
+)
 _ensure("cloudsubscribex.drive.common").format_size = lambda n: f"{n}B"
 _ensure("cloudsubscribex.handlers.sync.utils").normalize_season = lambda s: int(s or 1)
 _ensure("cloudsubscribex.handlers.sync.utils").extract_ed2k_filename = MagicMock()
@@ -912,6 +917,122 @@ class SkipMergeDoesNotPoisonHistoryTests(unittest.TestCase):
         source = self._read("plugins.v2/cloudsubscribex/handlers/sync/history.py")
         self.assertIn("_cross_success_needs_repair", source)
         self.assertIn('return True, "重新转存此记录"', source)
+
+class QualityPreferDecisionTests(unittest.TestCase):
+    """组8（1.7.88）：按体积择优入库 —— 分辨率 > 体积 + 阈值，可绕过命名模板拦截。"""
+
+    GB = 1024 * 1024 * 1024
+    MB = 1024 * 1024
+
+    def _handler(self, **overrides):
+        overrides.setdefault("platform_rename_path", TemplateNamedVersionTests._template_aware_rename)
+        handler = _make_handler(**overrides)
+        handler._quality_prefer_enabled = overrides.get("quality_prefer_enabled", True)
+        handler._quality_min_gain_percent = overrides.get("quality_min_gain_percent", 10)
+        handler._quality_min_gain_mb = overrides.get("quality_min_gain_mb", 200)
+        handler._quality_ignore_rename_template = overrides.get(
+            "quality_ignore_rename_template", True
+        )
+        return handler
+
+    def _existing(self, name, size):
+        return {1: [{
+            "file_id": "f1",
+            "file_name": name,
+            "cloud_dir": "/d",
+            "file_size": size,
+            "score": 0,
+        }]}
+
+    def test_resolution_upgrade_replaces(self):
+        handler = self._handler()
+        existing = self._existing("正相反的你与我 - S01E01.720p.mkv", 600 * self.MB)
+        action, old, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1500 * self.MB,
+            existing_versions=existing, new_file_name="正相反的你与我.S01E01.1080p.mkv",
+        )
+        self.assertEqual(action, "replace")
+        self.assertIn("按体积择优", reason)
+        self.assertIn("720p → 1080p", reason)
+        self.assertEqual(len(old), 1)
+
+    def test_resolution_downgrade_keeps(self):
+        handler = self._handler()
+        existing = self._existing("正相反的你与我 - S01E01.2160p.mkv", 3 * self.GB)
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=4 * self.GB,
+            existing_versions=existing, new_file_name="正相反的你与我.S01E01.720p.mkv",
+        )
+        self.assertEqual(action, "skip")
+        self.assertIn("现有版本更优", reason)
+        self.assertIn("低于现有 2160p", reason)
+
+    def test_same_resolution_small_gain_keeps(self):
+        handler = self._handler()
+        existing = self._existing("正相反的你与我 - S01E01.1080p.mkv", 1000 * self.MB)
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1050 * self.MB,
+            existing_versions=existing, new_file_name="正相反的你与我.S01E01.1080p.mkv",
+        )
+        self.assertEqual(action, "skip")
+        self.assertIn("体积增益不足", reason)
+
+    def test_same_resolution_big_gain_replaces(self):
+        handler = self._handler()
+        existing = self._existing("正相反的你与我 - S01E01.1080p.mkv", 1000 * self.MB)
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1400 * self.MB,
+            existing_versions=existing, new_file_name="正相反的你与我.S01E01.1080p.mkv",
+        )
+        self.assertEqual(action, "replace")
+        self.assertIn("+40%", reason)
+
+    def test_template_named_old_version_still_replaced(self):
+        """择优开关要能绕过「已符合重命名模板就保留」，否则本插件转存的文件永远换不掉。"""
+        handler = self._handler(prefer_template_named_version=True)
+        existing = self._existing("正相反的你与我 - S01E01.720p.mkv", 600 * self.MB)
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1500 * self.MB,
+            existing_versions=existing, new_file_name="正相反的你与我.S01E01.1080p.mkv",
+        )
+        self.assertEqual(action, "replace")
+        self.assertIn("720p → 1080p", reason)
+
+    def test_ignore_template_off_keeps_template_version(self):
+        handler = self._handler(
+            quality_ignore_rename_template=False, prefer_template_named_version=True
+        )
+        # 旧文件名正好等于模板渲染结果，才会触发「已符合模板就保留」
+        existing = self._existing("正相反的你与我 - S01E01.mkv", 600 * self.MB)
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1500 * self.MB,
+            existing_versions=existing, new_file_name="正相反的你与我.S01E01.1080p.mkv",
+        )
+        self.assertEqual(action, "skip")
+        self.assertIn("已符合当前重命名模板", reason)
+
+    def test_switch_off_keeps_old_behaviour(self):
+        """开关关闭 → 完全回到 1.7.87：评分相同且体积更大时按 largest 兜底替换。"""
+        handler = self._handler(quality_prefer_enabled=False)
+        existing = self._existing("正相反的你与我 - S01E01.1080p.mkv", 1000 * self.MB)
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1005 * self.MB,
+            existing_versions=existing, new_file_name="正相反的你与我.S01E01.1080p.mkv",
+        )
+        self.assertIn(action, {"replace", "skip"})
+        self.assertNotIn("按体积择优", reason)
+        self.assertNotIn("现有版本更优", reason)
+
+    def test_no_resolution_uses_size_only(self):
+        handler = self._handler()
+        existing = self._existing("正相反的你与我 - S01E01.mkv", 700 * self.MB)
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=2 * self.GB,
+            existing_versions=existing, new_file_name="正相反的你与我.S01E01.mkv",
+        )
+        self.assertEqual(action, "replace")
+        self.assertIn("体积", reason)
+
 
 
 if __name__ == "__main__":
