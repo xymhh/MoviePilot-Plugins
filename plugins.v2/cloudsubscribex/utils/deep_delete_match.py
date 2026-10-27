@@ -2,6 +2,7 @@
 
 抽成独立模块便于单测，不依赖 MoviePilot 运行时。
 """
+import re
 from pathlib import Path
 from typing import Any, List, Set
 
@@ -40,3 +41,22 @@ def match_history_record_to_targets(
         if ms_cf.startswith(target_cf + "/"):
             return True
     return False
+
+
+_TMDB_TAG_RE = re.compile(r"\s*\{tmdb-\d+\}\s*$", re.IGNORECASE)
+
+
+def strip_media_tag(name: str) -> str:
+    """去掉媒体名尾部的 ``{tmdb-123}`` 标签，只用于通知展示，不改真实路径。"""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    return _TMDB_TAG_RE.sub("", text).strip()
+
+
+def media_display_name(path: Any) -> str:
+    """把媒体服务器路径转成通知里给人看的名字（末级目录 + 去掉 tmdb 标签）。"""
+    text = str(path or "").strip().replace("\\", "/").rstrip("/")
+    if not text:
+        return ""
+    return strip_media_tag(text.rsplit("/", 1)[-1])

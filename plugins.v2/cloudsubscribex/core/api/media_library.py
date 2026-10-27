@@ -16,6 +16,7 @@ from sqlalchemy import func
 
 from .. import OwnerDelegator, render_template, resolve_template
 from ...utils.deep_delete_dedupe import DeepDeleteDeduplicator
+from ...utils.deep_delete_match import media_display_name
 from ..media import media_server_tmdb_filters, tmdb_id_of
 try:
     from ..media_scope import filter_media_rows
@@ -173,9 +174,8 @@ class MediaLibraryApi(OwnerDelegator):
 
     @staticmethod
     def _path_leaf(path: Any) -> str:
-        """取路径最后一级（媒体名），用于通知里显示删的是哪部。"""
-        text = str(path or "").strip().replace("\\", "/").rstrip("/")
-        return text.rsplit("/", 1)[-1] if text else ""
+        """取路径最后一级（媒体名，去掉 {tmdb-*} 标签），用于通知展示。"""
+        return media_display_name(path)
 
     @classmethod
     def _deep_delete_paths(cls, event_info: Any) -> list[str]:
