@@ -16,26 +16,23 @@ _ENV = Environment(autoescape=False, keep_trailing_newline=True)
 DEFAULT_TEMPLATES: Dict[str, str] = {
     "notify_template_transfer": (
         "📦 本次{{ action }} {{ count }} 个文件"
-        "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
-        "\n"
-        "{% for label in labels %}{{ label }}\n"
-        "{% endfor %}\n"
+        "{% if total_size %} · 合计 {{ total_size }}{% endif %}"
+        "\n\n"
+        "{% for card in cards %}{{ card }}\n\n{% endfor %}"
         "🕐 {{ time }}"
     ),
     "notify_template_cross_transfer": (
         "🔀 本次{{ action }} {{ count }} 个文件"
-        "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
-        "\n"
-        "{% for label in labels %}{{ label }}\n"
-        "{% endfor %}\n"
+        "{% if total_size %} · 合计 {{ total_size }}{% endif %}"
+        "\n\n"
+        "{% for card in cards %}{{ card }}\n\n{% endfor %}"
         "🕐 {{ time }}"
     ),
     "notify_template_upgrade": (
         "⬆️ 本次{{ action }} {{ count }} 个文件"
-        "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
-        "\n"
-        "{% for label in labels %}{{ label }}\n"
-        "{% endfor %}\n"
+        "{% if total_size %} · 合计 {{ total_size }}{% endif %}"
+        "\n\n"
+        "{% for card in cards %}{{ card }}\n\n{% endfor %}"
         "🕐 {{ time }}"
     ),
     "notify_template_checkin": (
@@ -56,9 +53,10 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
         "🕐 {{ time }}"
     ),
     "notify_template_delete": (
-        "🗑️ 深度联动删除完成\n"
-        "\n"
-        "{{ message }}\n"
+        "🗑️ 深度联动删除完成"
+        "{% if titles %} · {{ titles | join('、') }}{% endif %}"
+        "\n\n"
+        "{% for line in lines %}{{ line }}\n{% endfor %}"
         "\n"
         "🕐 {{ time }}"
     ),
@@ -68,6 +66,15 @@ DEFAULT_TEMPLATES: Dict[str, str] = {
 #: 每代默认值都留档，升级时逐个比对（1.7.72–1.7.74 一代、1.7.75 一代）。
 LEGACY_DEFAULT_TEMPLATES: Dict[str, List[str]] = {
     "notify_template_transfer": [
+        # 1.7.75–1.7.84：单行拼接（类型/大小/来源挤一行）
+        (
+            "📦 {{ action }} {{ count }} 个文件"
+            "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
+            "\n"
+            "{% for label in labels %}{{ label }}\n"
+            "{% endfor %}\n"
+            "🕐 {{ time }}"
+        ),
         # 1.7.72–1.7.74
         (
             "📦 本次{{ action }} {{ count }} 个文件\n"
@@ -88,6 +95,15 @@ LEGACY_DEFAULT_TEMPLATES: Dict[str, List[str]] = {
         ),
     ],
     "notify_template_cross_transfer": [
+        # 1.7.75–1.7.84：单行拼接
+        (
+            "🔀 {{ action }} {{ count }} 个文件"
+            "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
+            "\n"
+            "{% for label in labels %}{{ label }}\n"
+            "{% endfor %}\n"
+            "🕐 {{ time }}"
+        ),
         (
             "📦 本次{{ action }} {{ count }} 个文件\n"
             "\n"
@@ -106,6 +122,15 @@ LEGACY_DEFAULT_TEMPLATES: Dict[str, List[str]] = {
         ),
     ],
     "notify_template_upgrade": [
+        # 1.7.75–1.7.84：单行拼接
+        (
+            "⬆️ {{ action }} {{ count }} 个文件"
+            "{% if total_size %} · 合计 {{ total_size }}{% endif %}\n"
+            "\n"
+            "{% for label in labels %}{{ label }}\n"
+            "{% endfor %}\n"
+            "🕐 {{ time }}"
+        ),
         (
             "🔁 本次{{ action }} {{ count }} 个文件\n"
             "\n"
@@ -163,6 +188,14 @@ LEGACY_DEFAULT_TEMPLATES: Dict[str, List[str]] = {
         ),
     ],
     "notify_template_delete": [
+        # 1.7.75–1.7.84：只有计数，看不到删的是哪部
+        (
+            "🗑️ 深度联动删除完成\n"
+            "\n"
+            "{{ message }}\n"
+            "\n"
+            "🕐 {{ time }}"
+        ),
         (
             "🗑 深度联动删除完成\n"
             "\n"
@@ -183,20 +216,23 @@ LEGACY_DEFAULT_TEMPLATES: Dict[str, List[str]] = {
 #: 模板变量说明，前端 hint 与文档共用
 TEMPLATE_VARIABLES: Dict[str, str] = {
     "notify_template_transfer": (
-        "action 动作名 / count 文件数 / total_size 合计大小 / labels 每行媒体描述"
-        "（含图标、类型、大小、网盘来源）/ items 明细列表 / time 时间"
+        "action 动作名 / count 文件数 / total_size 合计大小 / cards 每项多行卡片"
+        "（标题 + 类型 + 大小 + 来源）/ labels 每项单行描述（旧排版用）/ items 明细列表 / time 时间"
     ),
     "notify_template_cross_transfer": (
-        "action 动作名 / count 文件数 / total_size 合计大小 / labels 每行媒体描述"
-        "（含图标、类型、大小、来源→目标）/ items 明细列表 / time 时间"
+        "action 动作名 / count 文件数 / total_size 合计大小 / cards 每项多行卡片"
+        "（标题 + 类型 + 大小 + 来源→目标）/ labels 每项单行描述（旧排版用）/ items 明细列表 / time 时间"
     ),
     "notify_template_upgrade": (
-        "action 动作名 / count 文件数 / total_size 合计大小 / labels 每行媒体描述"
-        "（含图标、类型、大小、网盘来源）/ items 明细列表 / time 时间"
+        "action 动作名 / count 文件数 / total_size 合计大小 / cards 每项多行卡片"
+        "（标题 + 类型 + 大小 + 来源）/ labels 每项单行描述（旧排版用）/ items 明细列表 / time 时间"
     ),
     "notify_template_checkin": "provider 网盘名 / success 是否成功 / lines 结果行 / time 时间",
     "notify_template_organize": "source 源目录 / groups 分组数 / ready 可执行数 / done 成功数 / skipped 跳过数 / failed 失败数 / removed_dirs 清理空目录数 / time 时间",
-    "notify_template_delete": "message 删除结果描述 / time 时间",
+    "notify_template_delete": (
+        "titles 媒体名列表 / lines 结果行（历史记录、网盘目录、网盘文件、STRM、跳过）"
+        " / message 单行摘要（旧排版用）/ paths 目标路径 / result 明细字典 / time 时间"
+    ),
 }
 
 

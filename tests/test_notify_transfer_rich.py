@@ -93,7 +93,7 @@ class TransferDetailLineTest(unittest.TestCase):
             "source": "115网盘",
         }])
         text = _sent_text(service)
-        self.assertIn("🎬 杀手 (2020) · 电影 · 2.0 GB · 115网盘", text)
+        self.assertIn("🎬 杀手 (2020)\n类型：电影\n大小：2.0 GB\n来源：115网盘", text)
         self.assertIn("合计 2.0 GB", text)
 
     def test_tv_cross_transfer_shows_source_to_target(self):
@@ -108,7 +108,9 @@ class TransferDetailLineTest(unittest.TestCase):
             "source": "夸克 → 115",
         }])
         text = _sent_text(service)
-        self.assertIn("🔀 📺 尚公主 S01 E09, E10 · 剧集 · 1.0 GB · 夸克 → 115", text)
+        self.assertIn(
+            "🔀 📺 尚公主 S01 E09, E10\n类型：剧集\n大小：1.0 GB\n来源：夸克 → 115", text
+        )
 
     def test_upgrade_line_uses_upgrade_icon(self):
         service = _service()
@@ -119,7 +121,7 @@ class TransferDetailLineTest(unittest.TestCase):
             "notification_kind": "upgrade",
         }])
         text = _sent_text(service)
-        self.assertIn("⬆️ 🎬 沙丘 (2021) · 电影", text)
+        self.assertIn("⬆️ 🎬 沙丘 (2021)\n类型：电影", text)
         self.assertNotIn("合计", text)
 
     def test_missing_meta_degrades_gracefully(self):
@@ -132,7 +134,7 @@ class TransferDetailLineTest(unittest.TestCase):
             "notification_kind": "transfer",
         }])
         text = _sent_text(service)
-        self.assertIn("📺 某剧 S01 · 剧集", text)
+        self.assertIn("📺 某剧 S01\n类型：剧集", text)
 
     def test_custom_template_keeps_variables(self):
         service = _service({
@@ -194,6 +196,8 @@ class DefaultTemplateTest(unittest.TestCase):
                 count=2,
                 total_size="3.4 GB",
                 labels=["🎬 A · 电影"],
+                cards=["🎬 A\n类型：电影"],
+                titles=["A"],
                 items=[],
                 lines=["已签到"],
                 provider="115",
@@ -218,6 +222,7 @@ class DefaultTemplateTest(unittest.TestCase):
             count=1,
             total_size="2.0 GB",
             labels=["🎬 杀手 (2020) · 电影 · 2.0 GB · 115网盘"],
+            cards=["🎬 杀手 (2020)\n类型：电影\n大小：2.0 GB\n来源：115网盘"],
         )
         self.assertTrue(text.startswith("📦 本次转存 1 个文件 · 合计 2.0 GB"))
         self.assertIn("🎬 杀手 (2020)", text)
@@ -319,7 +324,7 @@ class EnrichFromHistoryTest(unittest.TestCase):
             "notification_kind": "transfer",
         }])
         text = _sent_text(service)
-        self.assertIn("🎬 末世行者 (2026) · 电影 · 3.0 GB · 115网盘", text)
+        self.assertIn("🎬 末世行者 (2026)\n类型：电影\n大小：3.0 GB\n来源：115网盘", text)
 
     def test_existing_values_win_and_no_record_is_safe(self):
         service = self._service_with_history([])

@@ -180,6 +180,7 @@ class SyncNotificationService(OwnerDelegator):
         }
         for kind, details in grouped.items():
             text_lines = []
+            text_cards = []
             first_image = None
             file_count = 0
             total_size = 0
@@ -218,15 +219,29 @@ class SyncNotificationService(OwnerDelegator):
                         file_count += 1
                         headline = f"{title} S{season:02d}".strip()
                 total_size += max(0, size)
-                line = f"{kind_prefix.get(kind, '')}{icon} {headline}"
+                prefix = kind_prefix.get(kind, "")
+                line = f"{prefix}{icon} {headline}"
                 if meta:
                     line = f"{line} · {' · '.join(meta)}"
                 text_lines.append(line)
+                card_lines = [f"{prefix}{icon} {headline}"]
+                field_values = (
+                    ("类型", self._media_type_name(type_text)),
+                    ("大小", format_size(size) if size > 0 else ""),
+                    ("来源", source),
+                )
+                for field_name, field_value in field_values:
+                    if field_value:
+                        card_lines.append(f"{field_name}：{field_value}")
+                text_cards.append("\n".join(card_lines))
                 if not first_image and detail.get("image"):
                     first_image = detail.get("image")
             if len(text_lines) > 10:
                 text_lines = text_lines[:10]
                 text_lines.append(f"... 等共 {len(details)} 项")
+            if len(text_cards) > 10:
+                text_cards = text_cards[:10]
+                text_cards.append(f"… 等共 {len(details)} 项")
             notification_title, action, template_key = kind_config[kind]
             total_size_text = format_size(total_size) if total_size > 0 else ""
             fallback_text = (
@@ -246,6 +261,7 @@ class SyncNotificationService(OwnerDelegator):
                     count=file_count,
                     total_size=total_size_text,
                     labels=list(text_lines),
+                    cards=list(text_cards),
                     items=list(details),
                 ),
                 image=first_image,

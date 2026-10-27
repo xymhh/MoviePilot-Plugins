@@ -128,6 +128,19 @@ class MediaLibraryApi(OwnerDelegator):
                 f"深度删除未匹配到对应的插件历史记录（目标路径：{paths}）"
             )
             return False
+        titles = [self._path_leaf(path) for path in paths]
+        titles = [title for title in titles if title]
+        lines = [f"历史记录：{result['deleted']} 条"]
+        for field_name, field_key in (
+                ("网盘目录", "cloud_directories_deleted"),
+                ("网盘文件", "cloud_files_deleted"),
+                ("本地 STRM", "strm_deleted"),
+        ):
+            value = int(result.get(field_key) or 0)
+            if value:
+                lines.append(f"{field_name}：{value} 个")
+        if result.get("skipped"):
+            lines.append(f"跳过：{result['skipped']} 条")
         message = (
             f"路径 {len(paths)} 个，匹配 {result['matched']} 条，"
             f"删除历史 {result['deleted']} 条、网盘文件 "
@@ -137,7 +150,7 @@ class MediaLibraryApi(OwnerDelegator):
         )
         if result.get("skipped"):
             message += f"，跳过 {result['skipped']} 条"
-        logger.info(f"深度删除联动完成：{message}")
+        logger.info(f"深度删除联动完成：{message}（{titles or paths}）")
         if self._notify:
             try:
                 templates = getattr(self, "_notify_templates", None) or {}
@@ -148,11 +161,21 @@ class MediaLibraryApi(OwnerDelegator):
                         resolve_template(templates, "notify_template_delete"),
                         message,
                         message=message,
+                        titles=titles,
+                        lines=lines,
+                        paths=list(paths),
+                        result=dict(result),
                     ),
                 )
             except Exception as error:
                 logger.warning(f"深度删除结果通知发送失败：{error}")
         return result["deleted"] > 0
+
+    @staticmethod
+    def _path_leaf(path: Any) -> str:
+        """取路径最后一级（媒体名），用于通知里显示删的是哪部。"""
+        text = str(path or "").strip().replace("\\", "/").rstrip("/")
+        return text.rsplit("/", 1)[-1] if text else ""
 
     @classmethod
     def _deep_delete_paths(cls, event_info: Any) -> list[str]:
