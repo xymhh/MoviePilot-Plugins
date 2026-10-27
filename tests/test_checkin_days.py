@@ -228,7 +228,21 @@ class TestP115ClientCheckin(unittest.TestCase):
         sys.modules.setdefault("cloudsubscribex.drive.p115.share", MagicMock())
         sys.modules.setdefault("cloudsubscribex.drive.p115.offline", MagicMock())
         sys.modules.setdefault("cloudsubscribex.drive.p115.upload", MagicMock())
-        sys.modules.setdefault("cloudsubscribex.drive.common", MagicMock())
+        # 显式桩掉 drive.common：client.py 在类体里就实例化 DriveRateLimiter(
+        # min_interval=0.8)，若落到真实模块/裸 object 会在导入期 TypeError。
+        common_stub = types.ModuleType("cloudsubscribex.drive.common")
+
+        class _StubRateLimiter:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            @classmethod
+            def shared(cls, *args, **kwargs):
+                return cls()
+
+        common_stub.DriveRateLimiter = _StubRateLimiter
+        common_stub.create_directory_path_cache = lambda *args, **kwargs: None
+        sys.modules["cloudsubscribex.drive.common"] = common_stub
         p115_client_path = os.path.join(plugins_v2_path, "cloudsubscribex/drive/p115/client.py")
         spec_115 = importlib.util.spec_from_file_location("cloudsubscribex.drive.p115.client", p115_client_path)
         mod_115 = importlib.util.module_from_spec(spec_115)
