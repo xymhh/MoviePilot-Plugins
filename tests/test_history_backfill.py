@@ -141,6 +141,47 @@ class TestAppendBackfillRecord(unittest.TestCase):
         self.assertEqual(service.save_count, 0)
 
 
+class TestEpisodeLevelDedupe(unittest.TestCase):
+
+    def _existing(self, episode):
+        return {
+            "title": "凡人修仙传",
+            "season": 1,
+            "episode": episode,
+            "status": "成功",
+            "file_name": "01.mp4",
+            "cloud_dir": "/别的目录/Season 1",
+        }
+
+    def test_existing_episode_blocks_backfill_even_from_other_dir(self):
+        service = _BackfillService([self._existing(4)])
+        record = service._append_backfill_history_record(
+            mediainfo=_mediainfo(),
+            subscribe=_subscribe(),
+            season=1,
+            episode=4,
+            file_name="凡人修仙传 - S01E04 - 第4集.mp4",
+            cloud_dir="/媒体库/凡人修仙传/Season 1",
+        )
+        self.assertIsNone(record)
+        self.assertEqual(service.save_count, 0)
+
+    def test_failed_record_does_not_block_backfill(self):
+        failed = self._existing(6)
+        failed["status"] = "失败"
+        service = _BackfillService([failed])
+        record = service._append_backfill_history_record(
+            mediainfo=_mediainfo(),
+            subscribe=_subscribe(),
+            season=1,
+            episode=6,
+            file_name="凡人修仙传 - S01E06 - 第6集.mp4",
+            cloud_dir="/媒体库/凡人修仙传/Season 1",
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(service.save_count, 1)
+
+
 class TestBackfillFromPending(unittest.TestCase):
 
     def test_writes_every_success_episode(self):

@@ -1443,6 +1443,36 @@ class HistoryService(OwnerDelegator):
             self._history_changed()
         return matched_records
 
+    @staticmethod
+    def _history_has_episode(
+            history: List[dict],
+            mediainfo: MediaInfo,
+            season: int,
+            episode: int,
+    ) -> bool:
+        """判断历史里是否已有「同一媒体 + 同一季集」的记录（失败记录不算）。"""
+        present_states = {"成功", "处理中", "下载中", "待确认"}
+        tmdb_id = str(getattr(mediainfo, "tmdb_id", "") or "")
+        title = str(getattr(mediainfo, "title", "") or "").strip()
+        for record in history or []:
+            try:
+                if int(record.get("season") or 0) != int(season):
+                    continue
+                if int(record.get("episode") or 0) != int(episode):
+                    continue
+            except (TypeError, ValueError):
+                continue
+            if str(record.get("status") or "") not in present_states:
+                continue
+            record_tmdb = str(record.get("tmdb_id") or "")
+            if tmdb_id and record_tmdb:
+                if tmdb_id == record_tmdb:
+                    return True
+                continue
+            if title and str(record.get("title") or "").strip() == title:
+                return True
+        return False
+
     def _append_backfill_history_record(
             self,
             mediainfo: MediaInfo,
@@ -1510,6 +1540,14 @@ class HistoryService(OwnerDelegator):
                 for record in history
             }
             if target_key in existing:
+                return None
+            # 1.7.104：补写只填「这一集完全没记录」的空档。既有记录可能来自别的目录/
+            # 别的来源名（例如老的转存记录在媒体库目录、源名带后缀），只比
+            # (目录, 文件名) 会漏判，导致同一集被补成两条（1.7.103 实测 191 条里有
+            # 158 条是重复）。这里按「同一媒体 + 同一季集」判重。
+            if self._history_has_episode(
+                history, mediainfo, season_number, episode_number
+            ):
                 return None
             history.append(record)
             self._save_data("history", history)
