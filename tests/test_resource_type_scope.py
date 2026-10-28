@@ -18,7 +18,6 @@ from unittest.mock import MagicMock
 
 from plugin_env import (
     OwnerDelegator,
-    ensure_package,
     load_module,
     register_mock,
     register_module,

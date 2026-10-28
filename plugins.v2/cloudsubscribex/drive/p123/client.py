@@ -10,7 +10,6 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
 from urllib.parse import urlparse
 
 import requests
-from app.log import logger
 
 from ..common import DriveRateLimiter, format_size, safe_int
 

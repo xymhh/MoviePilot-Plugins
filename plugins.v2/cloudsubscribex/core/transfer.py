@@ -424,9 +424,6 @@ class HttpFileDownloadService:
                     if resume_from > 0 and response.status_code == 200:
                         # 服务端忽略了 Range：只能从头下
                         resume_from = 0
-                    total = int(
-                        response.headers.get("Content-Length") or file_item.size or 0
-                    ) + resume_from
                     if resume_from:
                         gate.seed(resume_from)
                     mode = "ab" if resume_from else "wb"
@@ -444,7 +441,7 @@ class HttpFileDownloadService:
                     return str(target)
             except (_RangeDownloadUnsupported, InterruptedError):
                 raise
-            except (requests.RequestException, OSError, _RetryablePartError) as error:
+            except (requests.RequestException, OSError, _RetryablePartError):
                 if emptied and attempt >= self._max_retries:
                     raise
                 if not emptied:
@@ -1307,7 +1304,7 @@ class CrossTransferTaskManager:
                         ):
                             return
                     except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                        pass
+                        logger.debug("wait_for_range 分支忽略异常", exc_info=True)
                 if download_done.is_set():
                     if download_error:
                         raise download_error[0]
@@ -1518,7 +1515,7 @@ class CrossTransferTaskManager:
                             CloudDriveCapability.FILE_QUERY
                         ).find_file(target_path, file_name)
                     except Exception as error:  # noqa: BLE001 - 查一次失败不代表没传成
-                        logger.debug(f"中继完成后查询目标文件失败：{error}")
+                        logger.debug(f"中继完成后查询目标文件失败：{error}", exc_info=True)
                     if result_file:
                         break
                     time.sleep(3)

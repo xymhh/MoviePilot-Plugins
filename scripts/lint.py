@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import ast
+import subprocess
 import sys
 from pathlib import Path
 from py_compile import PyCompileError, compile
@@ -135,6 +136,106 @@ def _check_indentation(path: Path) -> None:
             _warn(path, lineno, f"缩进 {leading_spaces} 空格，不是 4 的倍数")
 
 
+# ---------------------------------------------------------------- 静态检查项
+# ruff F 级（未定义名/F401/F841 等）在 2026-10-28 之前完全没跑过，靠 CI 兜底缺失，
+# 结果 71 条 F 级问题长期潜伏（其中一处 F401 删掉的是再导出，直接 ImportError）。
+# CI 里装了固定版本 ruff 之后这里就是硬拦截。
+RUFF_VERSION = "0.17.3"
+
+# 静默失败面预算（棘轮）：只允许下降，不允许反弹。
+# 统计口径（AST）：
+#   - except 块体只有一条 pass → 「完全静默」
+#   - except 块体只有 logger.debug(...) 且没带 exc_info → 「只留一句话、没有栈」
+# 新增静默点前先问「失败该不该被看见」；确实要新增，必须同时改这里的数字并说明原因。
+SILENT_PASS_BUDGET = 87
+SILENT_DEBUG_BUDGET = 77
+PLUGIN_SOURCES = Path("plugins.v2")
+
+
+# 检查范围：本仓库自己维护的 Python。plugins.v3/p115strmhelper 是另一个插件的历史目录，
+# 有大量自带的 stub 噪声，不在本脚本射程内。
+RUFF_TARGETS = ("plugins.v2", "tests", "scripts", ".github/scripts")
+
+
+def _check_ruff(ruff_root: Path) -> None:
+    """跑 ruff F 级（+E9 语法级），把每条命中记成 ERROR。"""
+    targets = [str(ruff_root / name) for name in RUFF_TARGETS if (ruff_root / name).exists()]
+    if not targets:
+        return
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable, "-m", "ruff", "check", *targets,
+                "--select", "F,E9", "--output-format", "concise", "--quiet",
+            ],
+            capture_output=True, text=True,
+        )
+    except OSError as e:
+        _warn(ruff_root, 0, f"ruff 无法执行（{e}），跳过 F 级检查")
+        return
+    if proc.returncode == 0:
+        return
+    if "No module named" in (proc.stderr or ""):
+        _warn(ruff_root, 0, f"ruff 未安装（CI 会装 ruff=={RUFF_VERSION}），本地跳过 F 级检查")
+        return
+    for line in (proc.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        _error(Path("<ruff>"), 0, line.strip())
+
+
+def _count_silent_points(plugin_root: Path) -> Tuple[int, int]:
+    """按 AST 口径统计静默失败点数量，返回 (except:pass, debug-only 无 exc_info)。"""
+    silent_pass = 0
+    debug_only = 0
+    for py in sorted(plugin_root.rglob("*.py")):
+        if "__pycache__" in py.parts:
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ExceptHandler):
+                continue
+            body = node.body
+            if len(body) == 1 and isinstance(body[0], ast.Pass):
+                silent_pass += 1
+                continue
+            if body and all(
+                isinstance(item, ast.Expr)
+                and isinstance(item.value, ast.Call)
+                and isinstance(item.value.func, ast.Attribute)
+                and item.value.func.attr == "debug"
+                and not any(kw.arg == "exc_info" for kw in item.value.keywords)
+                for item in body
+            ):
+                debug_only += 1
+    return silent_pass, debug_only
+
+
+def _check_silent_budget(plugin_root: Path) -> None:
+    if not plugin_root.exists():
+        return
+    silent_pass, debug_only = _count_silent_points(plugin_root)
+    print(
+        f"  静默失败面：except:pass={silent_pass}（预算 {SILENT_PASS_BUDGET}），"
+        f"debug-only 无栈={debug_only}（预算 {SILENT_DEBUG_BUDGET}）"
+    )
+    if silent_pass > SILENT_PASS_BUDGET:
+        _error(
+            plugin_root, 0,
+            f"except: pass 数量 {silent_pass} 超过预算 {SILENT_PASS_BUDGET}："
+            "新增静默点必须改成 logger.debug(..., exc_info=True)，或同步提高预算并说明原因",
+        )
+    if debug_only > SILENT_DEBUG_BUDGET:
+        _error(
+            plugin_root, 0,
+            f"只记 debug 不带栈的 except 数量 {debug_only} 超过预算 {SILENT_DEBUG_BUDGET}："
+            "给 logger.debug 补 exc_info=True",
+        )
+
+
 def lint_file(path: Path) -> bool:
     print(f"Checking {path}")
     ok = _check_syntax(path)
@@ -172,6 +273,12 @@ def main() -> int:
         repo_root = Path(__file__).resolve().parent.parent
         files = _get_python_files(repo_root)
         errors, warnings = lint_files(files)
+        _check_ruff(repo_root)
+        _check_silent_budget(repo_root / PLUGIN_SOURCES)
+        print(
+            f"合计 {_error_count} error(s), {_warning_count} warning(s)（含 ruff 与静默面预算）"
+        )
+        return 1 if _error_count > 0 else 0
     else:
         files = [Path(p) for p in sys.argv[1:]]
         errors, warnings = lint_files(files)

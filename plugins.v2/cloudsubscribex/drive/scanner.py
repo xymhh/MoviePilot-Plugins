@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Type
 
 from app.log import logger
 
-from ..core.definitions import DriverDefinition, FieldSpec, GroupSpec
+from ..core.definitions import DriverDefinition
 
 
 class DriverRegistry:

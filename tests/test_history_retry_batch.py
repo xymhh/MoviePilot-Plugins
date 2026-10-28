@@ -7,16 +7,13 @@
 import sys
 import threading
 import time
-import types
 import unittest
 from unittest.mock import MagicMock
 
 from plugin_env import (
     OwnerDelegator,
-    ensure_package,
     install_app_mocks,
     load_module,
-    register_package,
     set_media_type,
 )
 

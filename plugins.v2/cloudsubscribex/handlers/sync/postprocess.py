@@ -168,7 +168,7 @@ class PostprocessService(OwnerDelegator):
                 if algorithms:
                     return frozenset(str(a).lower() for a in algorithms)
             except Exception:
-                pass
+                logger.debug("_supported_hash_algorithms 分支忽略异常", exc_info=True)
         return frozenset({"sha1", "md5"})
 
     def _cloud_directory_snapshot(
@@ -451,7 +451,7 @@ class PostprocessService(OwnerDelegator):
                 strm_path.unlink()
                 logger.debug(f"洗版清理旧 STRM：{strm_path}")
         except (OSError, ValueError) as error:
-            logger.debug(f"洗版清理旧 STRM 失败：{old_dir}/{old_name}，{error}")
+            logger.debug(f"洗版清理旧 STRM 失败：{old_dir}/{old_name}，{error}", exc_info=True)
 
     def _dedupe_moved_duplicate(
             self,
@@ -694,7 +694,7 @@ class PostprocessService(OwnerDelegator):
                 for subscribe_id in subscribe_ids - set(subscribe_cache):
                     subscribe_cache[subscribe_id] = None
             except Exception as error:
-                logger.debug(f"批量读取后处理订阅失败，将按需查询：{error}")
+                logger.debug(f"批量读取后处理订阅失败，将按需查询：{error}", exc_info=True)
 
         needs_offline = any(
             str((pending.get(key) or {}).get("task_type") or "share")
@@ -847,7 +847,7 @@ class PostprocessService(OwnerDelegator):
                         if found:
                             return found
                 except (ValueError, TypeError):
-                    pass
+                    logger.debug("_locate_cloud_file 分支忽略异常", exc_info=True)
 
         return None
 
@@ -955,7 +955,7 @@ class PostprocessService(OwnerDelegator):
                         stored[field] = copy.deepcopy(item[field])
                 self._save_offline_pending(current)
         except Exception as error:
-            logger.debug(f"持久化历史重排队计数失败：{error}")
+            logger.debug(f"持久化历史重排队计数失败：{error}", exc_info=True)
 
     def _settle_offline_pending_item(
             self, pending_key: str, item: Dict[str, Any]
@@ -976,7 +976,7 @@ class PostprocessService(OwnerDelegator):
                 current.pop(pending_key, None)
                 self._save_offline_pending(current)
         except Exception as error:
-            logger.debug(f"结算历史重排队任务失败：{error}")
+            logger.debug(f"结算历史重排队任务失败：{error}", exc_info=True)
 
     def _commit_single_item(
             self,
@@ -1468,7 +1468,7 @@ class PostprocessService(OwnerDelegator):
                             item["file_name"] = dyn_name
                             file_name = dyn_name
                 except Exception as dyn_err:
-                    logger.debug(f"动态计算离线文件目标媒体路径异常：{dyn_err}")
+                    logger.debug(f"动态计算离线文件目标媒体路径异常：{dyn_err}", exc_info=True)
 
         target_file = ctx.moved_files.get(pending_key) or ctx.prepared_files.get(pending_key)
         target_hash = self._extract_item_hash(item)
@@ -1639,7 +1639,7 @@ class PostprocessService(OwnerDelegator):
                         try:
                             self._cloud_mutations.delete_file(target_file.id)
                         except Exception as clean_err:
-                            logger.debug(f"清理暂存区多余副本失败：{clean_err}")
+                            logger.debug(f"清理暂存区多余副本失败：{clean_err}", exc_info=True)
                     moved_file = existing_in_final
                 else:
                     moved_file = self._cloud_mutations.move_file(
@@ -1980,7 +1980,7 @@ class PostprocessService(OwnerDelegator):
             try:
                 files = task_files_func(offline_task, item.get("staging_dir") or item.get("cloud_dir") or "/")
             except Exception as e:
-                logger.debug(f"精准定位离线任务文件异常，回退扫描：{e}")
+                logger.debug(f"精准定位离线任务文件异常，回退扫描：{e}", exc_info=True)
         if not files:
             staging_path = item.get("staging_dir") or "/"
             files = self._cloud_query.list_files_recursive(staging_path, max_depth=6)
@@ -2092,7 +2092,6 @@ class PostprocessService(OwnerDelegator):
             if source_suffix and not target_name.endswith(source_suffix):
                 target_name = f"{Path(target_name).stem}{source_suffix}"
             mode = str(item.get("upgrade_mode") or self._upgrade_mode)
-            organize_enabled = getattr(self, "_organize_after_transfer", True)
             if is_upgrade and mode == "coexist":
                 target_name = self._coexist_target_name(
                     target_name, source_name, source_size, source_file.get("sha1") or ""
@@ -2488,4 +2487,4 @@ class PostprocessService(OwnerDelegator):
                 ),
             )
         except Exception as error:
-            logger.debug(f"后处理失败通知发送异常：{error}")
+            logger.debug(f"后处理失败通知发送异常：{error}", exc_info=True)

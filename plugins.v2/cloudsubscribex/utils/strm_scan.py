@@ -74,7 +74,7 @@ def _clear_scan_state(state_path: Optional[Path]) -> None:
     try:
         state_path.unlink(missing_ok=True)
     except OSError:
-        pass
+        logger.debug("_clear_scan_state 分支忽略异常", exc_info=True)
 
 
 def rebuild_strm_tree(

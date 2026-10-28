@@ -11,9 +11,10 @@ from typing import Any, Callable, Dict, Optional
 
 from app.log import logger
 
+# 再导出：search 子包内的模块统一从这里取代理工具函数。冗余别名用于通过 ruff F401。
 from ..utils.http_client import (
-    normalize_proxies,
-    normalize_proxy_address,
+    normalize_proxies as normalize_proxies,
+    normalize_proxy_address as normalize_proxy_address,
     request_error_summary,
     requests,
 )

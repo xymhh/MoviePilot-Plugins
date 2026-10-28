@@ -337,7 +337,6 @@ class PlatformHistoryService(OwnerDelegator):
         save_data = getattr(self, "_save_data", None)
         if not get_data:
             return 0
-        pending_lock = getattr(self, "_offline_pending_lock", None)
         history = get_data("history") or []
         image_cache: Dict[Tuple[Any, ...], Optional[str]] = {}
         restored = 0

@@ -8,9 +8,7 @@ from threading import Lock, Thread
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from app.core.context import MediaInfo
 from app.core.metainfo import MetaInfo
-from app.db import SessionFactory
 from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 from app.schemas.types import MediaType

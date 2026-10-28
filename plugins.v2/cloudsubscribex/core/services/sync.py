@@ -309,7 +309,7 @@ class SyncExecutionService(OwnerDelegator):
             if plugin is not None:
                 plugin._duplicate_subscribe_groups = groups_for_ui
         except Exception:  # noqa: BLE001
-            pass
+            logger.debug("_deduplicate_subscribes 分支忽略异常", exc_info=True)
         return canonical, duplicate_count
 
     def queue_subscribe_search(
@@ -567,7 +567,7 @@ class SyncExecutionService(OwnerDelegator):
                     self._search_handler.reset_point_budgets()
                 self._search_handler.reset_search_metrics()
         except Exception:
-            pass
+            logger.debug("_do_sync 分支忽略异常", exc_info=True)
         if self._sync_handler:
             self._sync_handler.reset_sync_metrics()
 
@@ -929,7 +929,7 @@ class SyncExecutionService(OwnerDelegator):
                             except Exception as finalize_err:
                                 logger.debug(
                                     f"订阅组完成后执行文件后处理异常：{finalize_err}"
-                                )
+                                , exc_info=True)
                     # 只完成了前几个任务却因整批收尾未执行而漏发通知。
                     completed_details = result.get("transfer_details") or []
                     if completed_details:
@@ -1229,9 +1229,9 @@ class SyncExecutionService(OwnerDelegator):
                 try:
                     marker.write_text(today, encoding="utf-8")
                 except OSError:
-                    pass
+                    logger.debug("_write_candidate_ledger 分支忽略异常", exc_info=True)
         except Exception as error:  # noqa: BLE001
-            logger.debug(f"写入候选账本失败：{error}")
+            logger.debug(f"写入候选账本失败：{error}", exc_info=True)
 
     def _notify_sync_completed(
             self,

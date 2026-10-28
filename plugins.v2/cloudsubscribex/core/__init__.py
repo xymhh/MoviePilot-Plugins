@@ -33,6 +33,8 @@ from .definitions import DriverDefinition, FieldSpec, GroupSpec, SearchSourceDef
 from .transfer import CrossDriveTransfer, CrossTransferTaskManager, LocalRapidUploadAdapter
 
 __all__ = [
+    "render_template",
+    "resolve_template",
     "DriverDefinition",
     "FieldSpec",
     "GroupSpec",

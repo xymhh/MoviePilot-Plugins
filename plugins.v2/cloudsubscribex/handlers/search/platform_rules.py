@@ -132,13 +132,6 @@ class PlatformRuleService(OwnerDelegator):
             )
         try:
             try:
-                from app.chain.subscribe import SubscribeChain
-            except ImportError:
-                try:
-                    from app.chain.subscribe.query import SubscribeQueryChain as SubscribeChain
-                except ImportError:
-                    SubscribeChain = None
-            try:
                 from app.application.torrent.download import TorrentHelper
             except ImportError:
                 try:
@@ -255,13 +248,6 @@ class PlatformRuleService(OwnerDelegator):
                 reverse=True,
             )
 
-        try:
-            from app.chain.subscribe import SubscribeChain
-        except ImportError:
-            try:
-                from app.chain.subscribe.query import SubscribeQueryChain as SubscribeChain
-            except ImportError:
-                SubscribeChain = None
         try:
             from app.application.torrent.download import TorrentHelper
         except ImportError:

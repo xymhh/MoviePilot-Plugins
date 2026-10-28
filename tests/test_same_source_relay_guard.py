@@ -27,13 +27,10 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 from plugin_env import (
     install_app_mocks,
     load_module,
-    register_mock,
-    register_module,
     set_media_type,
 )
 

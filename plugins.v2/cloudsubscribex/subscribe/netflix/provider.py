@@ -42,7 +42,6 @@ class NetflixSubscribeProvider(SubscribeProvider):
 
     def fetch(self, options: dict, context: SubscribeContext) -> Iterator[MediaCandidate]:
         proxy = context.proxy_for(options.get("proxy"))
-        limit = max(1, min(int(options.get("limit") or 10), 100))
         scan_limit = ranking_scan_limit(options)
         base_url = str(options.get("base_url") or NetflixClient.BASE_URL).strip()
         client = self.client if base_url.rstrip("/") == self.client.base_url else NetflixClient(base_url)

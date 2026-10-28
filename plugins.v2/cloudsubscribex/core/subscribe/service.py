@@ -1043,12 +1043,12 @@ class AutoSubscribeService:
             if source and media_id:
                 row_ids.add((str(source).lower(), str(media_id).strip()))
             legacy = legacy_media_ids(subscribe)
-            for source_name, field in (
+            for source_name, field_name in (
                     ("themoviedb", "tmdbid"),
                     ("douban", "doubanid"),
                     ("bangumi", "bangumiid"),
             ):
-                value = legacy.get(field)
+                value = legacy.get(field_name)
                 if value not in (None, ""):
                     row_ids.add((source_name, str(value).strip()))
             if wanted_ids.intersection(row_ids):

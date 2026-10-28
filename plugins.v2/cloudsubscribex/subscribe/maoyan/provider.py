@@ -30,7 +30,6 @@ class MaoyanSubscribeProvider(SubscribeProvider):
         return bool(options.get("movie_box", True) or options.get("web_platform_map"))
 
     def fetch(self, options: dict, context: SubscribeContext) -> Iterator[MediaCandidate]:
-        limit = max(1, min(int(options.get("limit") or 10), 100))
         scan_limit = ranking_scan_limit(options)
         proxy = context.proxy_for(options.get("proxy"))
         base_url = str(options.get("base_url") or MaoyanClient.BASE_URL).strip()

@@ -6,14 +6,11 @@ import re
 from concurrent.futures import Future
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.core.config import settings
 from app.core.context import MediaInfo
 from app.core.metainfo import MetaInfo
-from app.db import SessionFactory
 from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 from app.schemas.types import MediaType
-from app.utils.http import RequestUtils
 
 from .utils import normalize_season
 from ...core import OwnerDelegator
@@ -265,7 +262,7 @@ class SyncMetadataService(OwnerDelegator):
                 logger.debug(
                     f"订阅 TMDB ID 自动修复的 {source_name} 映射失败："
                     f"{getattr(subscribe, 'name', '')} - {error}"
-                )
+                , exc_info=True)
             if tmdb_id:
                 break
 
@@ -302,7 +299,7 @@ class SyncMetadataService(OwnerDelegator):
                 logger.debug(
                     f"订阅 TMDB ID 自动修复的标题查询失败："
                     f"{getattr(subscribe, 'name', '')} - {error}"
-                )
+                , exc_info=True)
 
         # 同步准备阶段可能早于平台搜索缓存建立；识别链是同一套平台
         # 能力，但会按标题/年份直接返回唯一 MediaInfo，作为最后兜底。
@@ -326,7 +323,7 @@ class SyncMetadataService(OwnerDelegator):
                 logger.debug(
                     f"订阅 TMDB ID 自动修复的媒体识别失败："
                     f"{getattr(subscribe, 'name', '')} - {error}"
-                )
+                , exc_info=True)
 
         if not tmdb_id:
             logger.debug(
@@ -456,7 +453,7 @@ class SyncMetadataService(OwnerDelegator):
                     try:
                         setattr(mediainfo, media_field, value)
                     except (AttributeError, TypeError, ValueError):
-                        pass
+                        logger.debug("_subscribe_mediainfo 分支忽略异常", exc_info=True)
                 logger.debug(
                     f"复用订阅卡片媒体信息：{title}（TMDB={tmdb_id}，分类={media_category}）"
                 )
@@ -464,7 +461,7 @@ class SyncMetadataService(OwnerDelegator):
             except (TypeError, ValueError) as error:
                 logger.debug(
                     f"订阅卡片媒体信息无效，回退平台识别：{title} - {error}"
-                )
+                , exc_info=True)
 
         meta = MetaInfo(title)
         meta.year = getattr(subscribe, "year", None)
@@ -494,7 +491,7 @@ class SyncMetadataService(OwnerDelegator):
             try:
                 recognized.episode_group = getattr(subscribe, "episode_group")
             except (AttributeError, TypeError, ValueError):
-                pass
+                logger.debug("_subscribe_mediainfo 分支忽略异常", exc_info=True)
         return recognized
 
     def _recognize_media_once(self, key: Tuple[Any, ...], **kwargs: Any):

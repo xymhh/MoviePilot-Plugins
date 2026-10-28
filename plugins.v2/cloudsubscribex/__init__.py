@@ -178,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.92"
+    plugin_version = "1.7.93"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -836,7 +836,7 @@ class CloudSubscribeX(_PluginBase):
                 if getattr(defn, "credential_keys", None):
                     service_config_keys.update(defn.credential_keys)
         except Exception as error:
-            logger.debug(f"动态收集服务签到配置键异常: {error}")
+            logger.debug(f"动态收集服务签到配置键异常: {error}", exc_info=True)
         if reset_runtime or changed_keys & service_config_keys:
             self._refresh_platform_services()
         self._install_subscribe_search_takeover()
@@ -1818,7 +1818,7 @@ class CloudSubscribeX(_PluginBase):
         try:
             client._cross_transfer_upload_concurrency = self._cross_transfer_upload_concurrency
         except Exception as error:  # noqa: BLE001 - 注入失败不影响主流程
-            logger.debug(f"注入 115 上传并发度失败：{error}")
+            logger.debug(f"注入 115 上传并发度失败：{error}", exc_info=True)
 
     def register_provider(self, key: str) -> bool:
         """根据网盘标识动态注册驱动。"""
@@ -1915,44 +1915,44 @@ class CloudSubscribeX(_PluginBase):
             if message_hook:
                 message_hook.close()
         except Exception as error:
-            logger.debug(f"恢复平台消息路由失败：{error}")
+            logger.debug(f"恢复平台消息路由失败：{error}", exc_info=True)
         try:
             components = self.__dict__.get("_plugin_components", {})
             search_api = components.get(SearchApi)
             if search_api:
                 search_api.close()
         except Exception as error:
-            logger.debug(f"关闭搜索测试连接失败：{error}")
+            logger.debug(f"关闭搜索测试连接失败：{error}", exc_info=True)
         try:
             components = self.__dict__.get("_plugin_components", {})
             media_library_api = components.get(MediaLibraryApi)
             if media_library_api:
                 media_library_api.close()
         except Exception as error:
-            logger.debug(f"关闭媒体库 Webhook 同步调度器失败：{error}")
+            logger.debug(f"关闭媒体库 Webhook 同步调度器失败：{error}", exc_info=True)
         try:
             if self._sync_handler:
                 self._sync_handler.close()
         except Exception as error:
-            logger.debug(f"关闭媒体服务器入库通知器失败：{error}")
+            logger.debug(f"关闭媒体服务器入库通知器失败：{error}", exc_info=True)
         try:
             if self._search_handler:
                 self._search_handler.close(release_cache=True)
         except Exception as error:
-            logger.debug(f"关闭搜索客户端失败：{error}")
+            logger.debug(f"关闭搜索客户端失败：{error}", exc_info=True)
         try:
             if self._drive_manager:
                 self._drive_manager.close()
                 self._drive_manager = None
         except Exception as error:
-            logger.debug(f"关闭网盘客户端失败：{error}")
+            logger.debug(f"关闭网盘客户端失败：{error}", exc_info=True)
         try:
             components = self.__dict__.get("_plugin_components", {})
             platform_service = components.pop(PlatformIntegrationService, None)
             if platform_service:
                 platform_service.close()
         except Exception as error:
-            logger.debug(f"关闭平台缓存失败：{error}")
+            logger.debug(f"关闭平台缓存失败：{error}", exc_info=True)
         try:
             if self._scheduler:
                 self._scheduler.remove_all_jobs()
@@ -1960,7 +1960,7 @@ class CloudSubscribeX(_PluginBase):
                     self._scheduler.shutdown()
                 self._scheduler = None
         except Exception:
-            pass
+            logger.debug("stop_service 分支忽略异常", exc_info=True)
 
         try:
             if self._offline_scheduler:
@@ -1969,7 +1969,7 @@ class CloudSubscribeX(_PluginBase):
                     self._offline_scheduler.shutdown()
                 self._offline_scheduler = None
         except Exception:
-            pass
+            logger.debug("stop_service 分支忽略异常", exc_info=True)
 
         try:
             if self._residue_scheduler:
@@ -1978,7 +1978,7 @@ class CloudSubscribeX(_PluginBase):
                     self._residue_scheduler.shutdown()
                 self._residue_scheduler = None
         except Exception:
-            pass
+            logger.debug("stop_service 分支忽略异常", exc_info=True)
 
         try:
             if self._strm_full_scan_scheduler:
@@ -1987,7 +1987,7 @@ class CloudSubscribeX(_PluginBase):
                     self._strm_full_scan_scheduler.shutdown()
                 self._strm_full_scan_scheduler = None
         except Exception:
-            pass
+            logger.debug("stop_service 分支忽略异常", exc_info=True)
 
         try:
             if self._strm_increment_scheduler:
@@ -1996,14 +1996,14 @@ class CloudSubscribeX(_PluginBase):
                     self._strm_increment_scheduler.shutdown()
                 self._strm_increment_scheduler = None
         except Exception:
-            pass
+            logger.debug("stop_service 分支忽略异常", exc_info=True)
 
         try:
             store = self.__dict__.get("_cloudsubscribe_data_store")
             if store:
                 store.close()
         except Exception as error:
-            logger.debug(f"关闭插件独立数据库失败：{error}")
+            logger.debug(f"关闭插件独立数据库失败：{error}", exc_info=True)
 
     @eventmanager.register(EventType.PluginReload)
     def reload_plugin_api(self, event: Event):

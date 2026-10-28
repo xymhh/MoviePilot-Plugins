@@ -1500,7 +1500,7 @@ class SyncRuntimeService(OwnerDelegator):
                 "message": (
                         f"已删除 {count} 个离线任务"
                         + (f"、{removed_pending} 个后处理任务" if removed_pending else "")
-                        + (f"，已删除网盘原文件" if delete_source_file else "，已下载文件保留")
+                        + ("，已删除网盘原文件" if delete_source_file else "，已下载文件保留")
                 ),
                 "data": {
                     "deleted": count,

@@ -253,7 +253,6 @@ class TianyiShareService:
         normalized = [str(value) for value in file_ids]
         if not normalized:
             return [], []
-        rename_items = kwargs.get("rename_items") or {}
         succeeded, failed = [], []
         for batch in iter_transfer_batches(
                 normalized, kwargs.get("batch_size", 20),

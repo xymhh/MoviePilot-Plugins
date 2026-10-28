@@ -316,18 +316,18 @@ class DriverDefinition:
     def get_transfer_path_key(cls) -> str:
         """返回该驱动「网盘转存路径」的表单键名；未声明时返回空串。"""
         for group in cls.get_config_groups():
-            for field in group.fields:
-                if field.key.endswith("_transfer_path"):
-                    return field.key
+            for field_item in group.fields:
+                if field_item.key.endswith("_transfer_path"):
+                    return field_item.key
         return ""
 
     @classmethod
     def get_media_path_key(cls) -> str:
         """返回该驱动「媒体库目录」的表单键名；未声明时返回空串。"""
         for group in cls.get_config_groups():
-            for field in group.fields:
-                if field.key.endswith("_media_path"):
-                    return field.key
+            for field_item in group.fields:
+                if field_item.key.endswith("_media_path"):
+                    return field_item.key
         return ""
 
     @classmethod

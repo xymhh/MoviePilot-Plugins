@@ -43,7 +43,6 @@ class TmdbSubscribeProvider(SubscribeProvider):
 
         min_vote = float(options.get("min_vote") or 0.0)
         min_year = int(options.get("min_year") or 0)
-        limit = int(options.get("limit") or 20)
         scan_limit = ranking_scan_limit(options)
         limit_type = str(options.get("media_type") or "").strip().lower()
         raw_types = options.get("media_types")

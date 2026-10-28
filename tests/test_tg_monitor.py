@@ -153,10 +153,11 @@ class NormalizeChannelTest(unittest.TestCase):
         self.assertEqual(normalize_channel("@abc"), "@abc")
         self.assertEqual(normalize_channel("abc"), "@abc")
         self.assertEqual(normalize_channel("https://t.me/abc"), "@abc")
-        self.assertEqual(normalize_channel("t.me/abc"), "t.me/abc")
+        self.assertEqual(normalize_channel("t.me/abc"), "@abc")
         self.assertEqual(normalize_channel("-1001234567890"), "-1001234567890")
         self.assertEqual(normalize_channel("https://t.me/+AbCdEf"), "https://t.me/+AbCdEf")
-        self.assertEqual(normalize_channel("https://t.me/c/123456/789"), "c/123456/789")
+        # 私有频道链接按 Telegram 规则折算成 -100<内部 id>（与 TgChannelMonitor 内部口径一致）
+        self.assertEqual(normalize_channel("https://t.me/c/123456/789"), "-100123456")
 
 
 class FakeOwner:
@@ -426,15 +427,6 @@ class ChannelRulesTest(unittest.TestCase):
         unique_monitor._match_and_enqueue([(unique, rule)])
         self.assertEqual(unique["status"], "ignored")
         self.assertEqual(unique["match_status"], "unmatched")
-
-    def setUp(self):
-        import tempfile
-        from pathlib import Path
-        self.tempdir = tempfile.TemporaryDirectory()
-        self.owner = FakeOwner(Path(self.tempdir.name))
-
-    def tearDown(self):
-        self.tempdir.cleanup()
 
     def _monitor(self):
         monitor = TgChannelMonitor(self.owner)
@@ -835,7 +827,7 @@ class ChannelRulesTest(unittest.TestCase):
         self.assertFalse(result["ok"])
 
 
-class NormalizeChannelTest(unittest.TestCase):
+class NormalizeChannelInviteLinkTest(unittest.TestCase):
     def test_invite_link_and_list_repr(self):
         self.assertEqual(
             tg_module.normalize_channel("https://t.me/+Jc37JCr1diEzNDMx"),

@@ -2,7 +2,6 @@
 
 import datetime
 from typing import Any, Dict, List
-from urllib.parse import urlsplit, urlunsplit
 
 from app.db import SessionFactory
 from app.db.site_oper import SiteOper
@@ -60,8 +59,6 @@ class UIConfig:
             "auto_subscribe_media_types": ["all"],
             "auto_subscribe_douban_enabled": False,
             "auto_subscribe_douban_ranks": ["movie-showing", "movie-hot"],
-            "auto_subscribe_douban_rsshub_base": "https://rsshub.app",
-            "auto_subscribe_douban_rss_urls": [],
             "auto_subscribe_douban_proxy": False,
             "auto_subscribe_douban_limit": 30,
             "auto_subscribe_douban_min_vote": 6,
@@ -91,7 +88,6 @@ class UIConfig:
             "auto_subscribe_maoyan_movie_box": True,
             "auto_subscribe_maoyan_web_platform_map": {"all": ["tv"]},
             "auto_subscribe_maoyan_platforms": ["all"],
-            "auto_subscribe_maoyan_categories": ["tv"],
             "auto_subscribe_maoyan_limit": 10,
             "auto_subscribe_maoyan_proxy": False,
             "auto_subscribe_maoyan_min_vote": 6,
@@ -381,36 +377,6 @@ class UIConfig:
             config[key] = month if 1 <= month <= 12 else current_month
 
     @staticmethod
-    def _normalize_rsshub_instance_url(value: Any) -> str:
-        """规范公告中的实例地址，拒绝维护者主页、查询参数和本地地址。"""
-        try:
-            parsed = urlsplit(str(value or "").strip())
-            if parsed.scheme.lower() not in {"http", "https"}:
-                return ""
-            if (
-                    not parsed.hostname
-                    or parsed.username is not None
-                    or parsed.password is not None
-                    or parsed.query
-                    or parsed.fragment
-            ):
-                return ""
-            port = parsed.port
-        except ValueError:
-            return ""
-        hostname = parsed.hostname.rstrip(".").lower()
-        if (
-                "." not in hostname
-                or hostname == "localhost"
-                or hostname.endswith(".local")
-                or any(character.isspace() for character in parsed.path)
-        ):
-            return ""
-        netloc = hostname if port is None else f"{hostname}:{port}"
-        path = parsed.path.rstrip("/")
-        return urlunsplit((parsed.scheme.lower(), netloc, path, "", ""))
-
-    @staticmethod
     def _subscribes() -> list:
         try:
             with SessionFactory() as db:
@@ -520,14 +486,6 @@ class UIConfig:
                 val = 0
             if not 1 <= val <= 12:
                 target[key] = current_month
-
-        rss_urls = target.get("auto_subscribe_douban_rss_urls")
-        if isinstance(rss_urls, str):
-            target["auto_subscribe_douban_rss_urls"] = [
-                u.strip() for u in re.split(r"[\n,，]+", rss_urls) if u.strip()
-            ]
-        elif not isinstance(rss_urls, list):
-            target["auto_subscribe_douban_rss_urls"] = []
 
         mikan_urls = target.get("auto_subscribe_mikan_base_urls")
         if isinstance(mikan_urls, str):

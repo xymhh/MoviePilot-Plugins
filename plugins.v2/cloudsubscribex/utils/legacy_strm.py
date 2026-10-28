@@ -4,7 +4,7 @@
 原样保留，因为两边的换链语义一致。
 """
 from pathlib import Path
-from typing import Dict, Iterable, Optional
+from typing import Iterable, Optional
 
 LEGACY_MARKER = "P115StrmHelper/redirect_url"
 TARGET_PATH = "CloudSubscribeX/redirect"

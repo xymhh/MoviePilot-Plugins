@@ -883,7 +883,6 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         # 处理结果
                         for index, transfer_result in enumerate(transfer_results):
                             item = transfer_result["item"]
-                            file_id = transfer_result["file_id"]
                             episode = item["episode"]
                             file_name = item["file"]["name"]
                             current_score = item["score"]
@@ -1009,7 +1008,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 )
                             except TypeError as error:
                                 # 同上：模块新旧混用时签名可能不一致，通知失败不中断转存。
-                                logger.debug(f"转存通知详情写入失败（已忽略）：{error}")
+                                logger.debug(f"转存通知详情写入失败（已忽略）：{error}", exc_info=True)
 
                         # 记录下载历史
                         if batch_success_episodes:

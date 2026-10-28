@@ -803,7 +803,6 @@ class ShareService(OwnerDelegator):
             "is_check": 0,
         }
 
-        last_error = None
         for attempt in range(max_retries + 1):
             try:
                 resp = self._rate_limited_call(
@@ -845,7 +844,6 @@ class ShareService(OwnerDelegator):
                     return False
 
             except DRIVE_RETRY_EXCEPTIONS as e:
-                last_error = e
                 if attempt < max_retries:
                     wait_time = min(30.0, 0.75 * (2 ** attempt))
                     logger.debug(f"转存异常: {e}, {wait_time:.1f}秒后重试 (尝试 {attempt + 1}/{max_retries + 1})")

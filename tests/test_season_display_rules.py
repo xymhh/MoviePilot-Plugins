@@ -5,7 +5,6 @@
 而旧实现把「官方季」与「媒体库季」并集后全部展示。
 """
 
-import sys
 import unittest
 
 from plugin_env import load_module

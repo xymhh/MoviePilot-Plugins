@@ -33,7 +33,6 @@ class MikanSubscribeProvider(SubscribeProvider):
     def fetch(self, options: dict, context: SubscribeContext) -> Iterator[MediaCandidate]:
         year = int(options.get("year") or datetime.now().year)
         season = self._season(options.get("season"))
-        limit = int(options.get("limit") or 100)
         scan_limit = ranking_scan_limit(options)
         proxy = context.proxy_for(options.get("proxy"))
         base_urls = options.get("base_urls")

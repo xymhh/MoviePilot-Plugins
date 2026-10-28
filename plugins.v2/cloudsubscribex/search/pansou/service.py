@@ -11,7 +11,6 @@ from app.schemas.types import MediaType
 from ..magnet import clear_cache, normalize_magnets
 from ..matching import normalize_season
 from ..types import (
-    PANSOU_RESOURCE_TYPES,
     configured_resource_types,
     normalize_resource_type,
     resource_type_name,

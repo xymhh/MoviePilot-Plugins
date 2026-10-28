@@ -1,6 +1,5 @@
 """搜索源测试与平台媒体候选查询 API。"""
 
-import ast
 import ipaddress
 import re
 import time

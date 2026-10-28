@@ -11,7 +11,6 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from app.chain.mediaserver import MediaServerChain
 from app.core.context import MediaInfo
-from app.core.metainfo import MetaInfo
 from app.db import SessionFactory
 from app.db.downloadhistory_oper import DownloadHistoryOper
 from app.db.models.downloadhistory import DownloadHistory
@@ -1060,7 +1059,7 @@ class HistoryService(OwnerDelegator):
                 try:
                     subscribe = SubscribeOper().get(subscribe_id)
                 except Exception as error:
-                    logger.debug(f"读取后处理订阅失败：{subscribe_id}，{error}")
+                    logger.debug(f"读取后处理订阅失败：{subscribe_id}，{error}", exc_info=True)
         sub_title = getattr(subscribe, "name", None) or item.get("name") or item.get("title")
         target_subscribe = subscribe or SimpleNamespace(
             name=sub_title or (mediainfo.title if mediainfo else ""),
@@ -2180,12 +2179,6 @@ class HistoryService(OwnerDelegator):
             for identity in identities
             if (identity_key := self._history_record_identity(identity))
         }
-        target_pairs = {
-            (str(identity.get("share_url") or ""), str(identity.get("file_name") or ""))
-            for identity in identities
-            if str(identity.get("share_url") or "").strip()
-            and str(identity.get("file_name") or "").strip()
-        }
         if not target_ids and not target_identities:
             raise ValueError("未提供有效的历史记录标识")
 
@@ -2372,7 +2365,6 @@ class HistoryService(OwnerDelegator):
         context = self._resolve_history_retry_context(record, source_name)
         target_subscribe = context["target_subscribe"]
         mediainfo = context["mediainfo"]
-        cloud_dir = str(record.get("cloud_dir") or context["cloud_dir"])
         file_name = str(record.get("file_name") or context["target_name"])
         if not self._local_resource_path:
             raise RuntimeError("未配置本地STRM或媒体根目录，无法确定入库通知路径")

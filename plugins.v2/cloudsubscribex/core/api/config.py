@@ -248,7 +248,6 @@ class ConfigApi(OwnerDelegator):
             payload[limit_key] = limit
         UIConfig.normalize_auto_subscribe_dates(payload)
         service_urls = {
-            "auto_subscribe_douban_rsshub_base": "https://rsshub.app",
             "auto_subscribe_maoyan_base_url": "https://piaofang.maoyan.com",
             "auto_subscribe_netflix_base_url": "https://www.netflix.com",
         }
@@ -257,19 +256,6 @@ class ConfigApi(OwnerDelegator):
             if not value.startswith(("http://", "https://")):
                 return f"{key} 必须是 http(s) 服务地址"
             payload[key] = value
-        rss_urls = payload.get("auto_subscribe_douban_rss_urls") or []
-        if isinstance(rss_urls, str):
-            rss_urls = rss_urls.splitlines()
-        normalized_rss_urls = []
-        for value in rss_urls:
-            value = str(value or "").strip()
-            if not value:
-                continue
-            if not value.startswith(("http://", "https://")):
-                return "豆瓣自定义 RSS 地址必须以 http:// 或 https:// 开头"
-            if value not in normalized_rss_urls:
-                normalized_rss_urls.append(value)
-        payload["auto_subscribe_douban_rss_urls"] = normalized_rss_urls
         mikan_urls = (
                 payload.get("auto_subscribe_mikan_base_urls")
                 or existing_config.get("auto_subscribe_mikan_base_urls")

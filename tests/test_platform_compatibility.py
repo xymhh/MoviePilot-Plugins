@@ -249,7 +249,6 @@ class TestPlatformCompatibility(unittest.TestCase):
         """
         import re
         from pathlib import Path
-        from types import SimpleNamespace
 
         history_file = Path("plugins.v2/cloudsubscribex/handlers/sync/history.py")
         text = history_file.read_text(encoding="utf-8")

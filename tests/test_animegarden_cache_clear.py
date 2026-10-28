@@ -15,14 +15,13 @@
 """
 
 import unittest
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from unittest.mock import MagicMock
 
 from plugin_env import (
     install_app_mocks,
     load_module,
     register_mock,
-    register_module,
 )
 
 # ---- app.* 占位依赖（service.py 只用 app.log.logger） ----

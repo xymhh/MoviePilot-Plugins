@@ -432,10 +432,6 @@ def normalize_channel_rules(
             rule_keywords: Any = []
             rule_exclude: Any = []
             rule_limit = scan_limit
-            rule_auto_transfer = False
-            rule_auto_subscribe_id = 0
-            rule_auto_subscribe_ids: Any = []
-            rule_monitor_mode = ""
         elif isinstance(row, dict):
             channel = (
                 row.get("channel") or row.get("url")
@@ -448,13 +444,6 @@ def normalize_channel_rules(
                 rule_limit = int(row.get("scan_limit", scan_limit) or scan_limit)
             except (TypeError, ValueError):
                 rule_limit = scan_limit
-            rule_auto_transfer = bool(row.get("auto_transfer", False))
-            try:
-                rule_auto_subscribe_id = int(row.get("auto_subscribe_id", 0) or 0)
-            except (TypeError, ValueError):
-                rule_auto_subscribe_id = 0
-            rule_auto_subscribe_ids = row.get("auto_subscribe_ids", [])
-            rule_monitor_mode = str(row.get("monitor_mode") or "").strip().lower()
         else:
             continue
         normalized = normalize_channel(str(channel or ""))
@@ -528,7 +517,7 @@ class _JsonStore:
                     try:
                         temp.unlink()
                     except OSError:
-                        pass
+                        logger.debug("save 分支忽略异常", exc_info=True)
 
 
 class TgChannelMonitor:
@@ -635,7 +624,7 @@ class TgChannelMonitor:
             try:
                 other.stop()
             except Exception:  # noqa: BLE001 - 旧实例清理失败不阻塞
-                pass
+                logger.debug("start 分支忽略异常", exc_info=True)
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
@@ -962,7 +951,7 @@ class TgChannelMonitor:
             try:
                 await client.disconnect()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("_scan_async 分支忽略异常", exc_info=True)
 
     async def _scan_with_client(
             self, client, trigger: str, full: bool = False,
@@ -1616,7 +1605,7 @@ class TgChannelMonitor:
             try:
                 await client.disconnect()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("_login_send_code_async 分支忽略异常", exc_info=True)
         self._login_delivery = delivery
         logger.info(f"TG 登录验证码请求已提交：号码={_mask_phone(phone)}，发送方式={delivery}")
         hint = {
@@ -1647,7 +1636,7 @@ class TgChannelMonitor:
             try:
                 await client.disconnect()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("_login_submit_code_async 分支忽略异常", exc_info=True)
         return self._finish_login(client)
 
     def login_submit_password(self, password: str) -> Dict[str, Any]:
@@ -1664,7 +1653,7 @@ class TgChannelMonitor:
             try:
                 await client.disconnect()
             except Exception:  # noqa: BLE001
-                pass
+                logger.debug("_login_submit_password_async 分支忽略异常", exc_info=True)
         return self._finish_login(client)
 
     def _finish_login(self, client) -> Dict[str, Any]:

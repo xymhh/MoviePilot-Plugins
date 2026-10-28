@@ -5,7 +5,7 @@
 """
 
 import re
-from typing import Any, Iterable, Optional, Sequence, Tuple
+from typing import Any, Iterable, Sequence, Tuple
 
 # 分辨率提升时允许新文件比旧文件小的比例（防止「4K 片段」把正片换掉）
 RES_UPGRADE_MIN_SIZE_RATIO = 0.6

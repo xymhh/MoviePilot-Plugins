@@ -14,7 +14,6 @@ from typing import List, Dict, Any, Set, Optional, Callable, Tuple, Mapping, Ite
 
 from app.core.config import global_vars
 from app.core.context import MediaInfo
-from app.core.metainfo import MetaInfo
 from app.db import SessionFactory
 from app.db.subscribe_oper import SubscribeOper
 
@@ -27,8 +26,6 @@ except Exception:
         DirectoryHelper = None
 
 from app.log import logger
-from app.modules.filemanager import FileManagerModule
-from app.modules.filemanager.transhandler import TransHandler
 from app.schemas.types import MediaType, NotificationType
 
 try:
@@ -1824,7 +1821,7 @@ class SyncHandler:
                     return False
                 return True
         except (ValueError, TypeError):
-            pass
+            logger.debug("_is_same_media_target 分支忽略异常", exc_info=True)
 
         # 2. 比对豆瓣 ID
         item_douban_id = (
@@ -2158,7 +2155,7 @@ class SyncHandler:
                         display_name
                     )
             except Exception as target_err:
-                logger.debug(f"计算离线任务目标路径失败，将保留原始目录：{target_err}")
+                logger.debug(f"计算离线任务目标路径失败，将保留原始目录：{target_err}", exc_info=True)
         if target_name:
             source_suffix = Path(display_name).suffix
             if source_suffix and not target_name.endswith(source_suffix):
@@ -2261,7 +2258,7 @@ class SyncHandler:
             if hasattr(mediainfo, "dict"):
                 return mediainfo.dict()
         except Exception as error:
-            logger.debug(f"序列化媒体信息失败，将仅生成 STRM：{error}")
+            logger.debug(f"序列化媒体信息失败，将仅生成 STRM：{error}", exc_info=True)
         return {}
 
     @staticmethod
@@ -2283,7 +2280,7 @@ class SyncHandler:
             if self._offline_pending_changed:
                 self._offline_pending_changed(max(0, int(pending_count or 0)))
         except Exception as error:
-            logger.debug(f"更新网盘文件后处理监控状态失败：{error}")
+            logger.debug(f"更新网盘文件后处理监控状态失败：{error}", exc_info=True)
 
     @staticmethod
     def _finalize_source_identity(
@@ -2843,7 +2840,7 @@ class SyncHandler:
             try:
                 mediainfo = self._deserialize_mediainfo(media_data)
             except Exception as error:
-                logger.debug(f"后处理订阅进度媒体信息恢复失败：{error}")
+                logger.debug(f"后处理订阅进度媒体信息恢复失败：{error}", exc_info=True)
         if not mediainfo or not success_episodes:
             logger.debug(
                 f"跳过后处理订阅进度更新：媒体信息={'有' if mediainfo else '无'}，"
@@ -3015,7 +3012,7 @@ class SyncHandler:
                 mutation.delete_file(item.id)
                 logger.debug(f"已清理源盘跨盘临时文件：{getattr(item, 'name', '')} ({item.id})")
             except Exception as error:
-                logger.debug(f"清理源盘跨盘临时文件失败：{error}")
+                logger.debug(f"清理源盘跨盘临时文件失败：{error}", exc_info=True)
 
     def _transfer_file(
             self, share_url: str, file_item: Dict[str, Any], save_path: str,
@@ -3488,7 +3485,7 @@ class SyncHandler:
                     completed_count += 1
 
             except Exception as e:
-                logger.debug(f"订阅完结检查异常 {getattr(subscribe, 'name', '?')}：{e}")
-                logger.debug(traceback.format_exc())
+                logger.debug(f"订阅完结检查异常 {getattr(subscribe, 'name', '?')}：{e}", exc_info=True)
+                logger.debug(traceback.format_exc(), exc_info=True)
 
         return completed_count

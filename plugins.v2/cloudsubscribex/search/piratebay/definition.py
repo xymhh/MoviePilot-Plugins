@@ -97,7 +97,6 @@ class PirateBaySourceDefinition(SearchSourceDefinition):
     def create_provider(
             cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
     ) -> Any:
-        ctx = context or {}
         if not client:
             return None
         limit = int(cls.config_value(config, "piratebay_result_limit", 20) or 20)

@@ -4,7 +4,6 @@ import base64
 import time
 from typing import Any, Optional
 
-from app.log import logger
 
 from ..cloudflare import (
     BrowserPageSession,

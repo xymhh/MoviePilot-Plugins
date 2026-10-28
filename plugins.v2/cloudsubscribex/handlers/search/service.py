@@ -872,10 +872,6 @@ class SearchHandler:
                 c for c in channels_state.values()
                 if c["status"] in {"success", "failed", "timeout", "circuit_break", "skipped"}
             ]
-            searching_channels = [
-                c for c in channels_state.values()
-                if c["status"] == "searching"
-            ]
             total = len(ordered_sources)
             completed = len(completed_channels)
             total_results = sum(c["count"] for c in channels_state.values())

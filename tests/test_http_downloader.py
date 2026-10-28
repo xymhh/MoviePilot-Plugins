@@ -15,7 +15,6 @@ import json
 import os
 import sys
 import threading
-import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path

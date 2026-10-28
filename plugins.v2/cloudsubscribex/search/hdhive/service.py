@@ -438,7 +438,6 @@ class HDHiveSearchService(OwnerDelegator):
             return []
 
         try:
-            started = time.monotonic()
             media_page_url = self._hdhive_media_page_url(
                 hdhive_media_type, tmdb_id
             )

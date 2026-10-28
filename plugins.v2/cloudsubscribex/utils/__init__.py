@@ -15,8 +15,7 @@ from .magnet import (
 from .strm import (
     StrmGenerator,
     StrmTemplateError,
-    build_share_strm_url,
-    plan_share_strm_files,
+    plan_share_strm_files as plan_share_strm_files,
 )
 from .strm_scan import rebuild_strm_tree
 from .strm_export import rebuild_strm_by_export_tree
@@ -27,6 +26,7 @@ __all__ = [
     "MediaFileParser",
     "StrmGenerator",
     "StrmTemplateError",
+    "plan_share_strm_files",
     "rebuild_strm_tree",
     "rebuild_strm_by_export_tree",
     "parse_magnet_metadata",

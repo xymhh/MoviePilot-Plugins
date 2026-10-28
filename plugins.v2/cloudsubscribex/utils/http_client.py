@@ -3,7 +3,10 @@
 from typing import Any, Dict, Optional
 from urllib.parse import quote, unquote, urlsplit, urlunsplit
 
-from curl_cffi import requests
+# 供其它模块 `from ...utils.http_client import requests` 复用同一套 curl_cffi 会话实现，
+# 冗余别名是为了让 ruff 的 F401 认出这是「再导出」而不是漏删。
+from curl_cffi import requests as requests
+
 
 _PROXY_SCHEMES = frozenset({"http", "https", "socks4", "socks5", "socks5h"})
 

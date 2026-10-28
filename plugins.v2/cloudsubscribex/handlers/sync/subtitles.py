@@ -124,7 +124,7 @@ class SubtitleService(OwnerDelegator):
                 if detected:
                     encodings.append(str(detected))
             except Exception:
-                pass
+                logger.debug("_decode_subtitle_text 分支忽略异常", exc_info=True)
         encodings.extend(("gb18030", "big5", "utf-16"))
         seen = set()
         for encoding in encodings:
@@ -158,7 +158,7 @@ class SubtitleService(OwnerDelegator):
                 path.write_text(converted, encoding="utf-8")
                 return True
         except Exception as error:
-            logger.debug(f"字幕繁转简转换异常：{path.name}，{error}")
+            logger.debug(f"字幕繁转简转换异常：{path.name}，{error}", exc_info=True)
         return False
 
     @staticmethod
@@ -406,7 +406,7 @@ class SubtitleService(OwnerDelegator):
                     if subtitle.get("staging_name"):
                         record["staging_name"] = str(subtitle["staging_name"])
                 except Exception as error:
-                    logger.debug(f"字幕转存暂未完成，将由后处理重试：{source_name}，{error}")
+                    logger.debug(f"字幕转存暂未完成，将由后处理重试：{source_name}，{error}", exc_info=True)
             if record["transferred"]:
                 logger.debug(
                     f"字幕已登记网盘内整理，待最终命名：{source_name} -> {target_name}"
@@ -481,7 +481,7 @@ class SubtitleService(OwnerDelegator):
                     if retry_item.get("staging_name"):
                         subtitle["staging_name"] = retry_item["staging_name"]
                 except Exception as error:
-                    logger.debug(f"字幕后处理重试转存失败：{source_name}，{error}")
+                    logger.debug(f"字幕后处理重试转存失败：{source_name}，{error}", exc_info=True)
                 if not subtitle.get("transferred"):
                     return False
                 _, staging_index = directory_snapshot(staging_dir)

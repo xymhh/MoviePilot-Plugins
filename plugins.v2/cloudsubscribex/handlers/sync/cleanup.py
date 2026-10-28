@@ -6,7 +6,6 @@ import shutil
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.db import SessionFactory
 from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 from app.schemas.types import MediaType
@@ -90,14 +89,6 @@ class HistoryCleanupService(OwnerDelegator):
         if not targets:
             return
         for (tmdb_id, season), deleted_episodes in targets.items():
-            remaining_episodes = {
-                episode
-                for record in remaining_history
-                if str(record.get("tmdb_id") or "").strip() == tmdb_id
-                   and int(record.get("season") or 0) == season
-                   and str(record.get("status") or "") == "成功"
-                for episode in self._history_episodes(record)
-            }
             for subscribe in list_subscribes_by_tmdb_id(
                     SubscribeOper(), int(tmdb_id), season):
                 if str(getattr(subscribe, "type", "")) != MediaType.TV.value:
@@ -163,7 +154,7 @@ class HistoryCleanupService(OwnerDelegator):
                         self._media_server_notifier.media_server_path(local_path)
                     )
                 except Exception as error:
-                    logger.debug(f"计算深度删除匹配路径失败：{file_name} - {error}")
+                    logger.debug(f"计算深度删除匹配路径失败：{file_name} - {error}", exc_info=True)
 
             if match_history_record_to_targets(
                     file_name, record_ms_path, target_filenames,
@@ -598,7 +589,7 @@ class HistoryCleanupService(OwnerDelegator):
                 prot.relative_to(candidate)
                 return True
             except ValueError:
-                pass
+                logger.debug("_is_protected_cloud_directory 分支忽略异常", exc_info=True)
         return False
 
     def _delete_cloud_directory_direct(self, cloud_dir: str) -> bool:
@@ -732,7 +723,6 @@ class HistoryCleanupService(OwnerDelegator):
             self, record: Dict[str, Any]
     ) -> Dict[str, Any]:
         """尽力删除115目标文件及本地STRM，任何失败均不阻止历史删除。"""
-        file_name = str(record.get("file_name") or "").strip()
         result = self._delete_history_linked_files_batch([record])
         cloud_deleted = (
                 result["cloud_files_deleted"] > 0

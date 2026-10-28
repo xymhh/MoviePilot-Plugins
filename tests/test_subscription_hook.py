@@ -85,7 +85,7 @@ class TestSubscriptionHook(unittest.TestCase):
 
         # 传入 scheduled_interval 和其他未知 kwargs，不应抛出 TypeError
         res = self.hook._dispatch_subscribe_search(state="R", scheduled_interval=300, extra_param=123)
-        self.assertEqual(res, {"sid": None, "state": state_value} if False else {"sid": None, "state": "R"})
+        self.assertEqual(res, {"sid": None, "state": "R"})
 
     def test_dispatch_subscribe_refresh_with_kwargs(self):
         """测试 _dispatch_subscribe_refresh 接收未知 kwargs 不报错"""

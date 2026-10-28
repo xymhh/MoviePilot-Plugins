@@ -679,13 +679,8 @@ class SyncApi(OwnerDelegator):
             if "manual_upgrade" not in (payload or {}):
                 payload = {**(payload or {}), "manual_upgrade": True}
 
-        share_transfer = None
         offline_download = None
         if self._cloud_drive:
-            if self._cloud_drive.supports(CloudDriveCapability.SHARE_TRANSFER):
-                share_transfer = self._cloud_drive.require(
-                    CloudDriveCapability.SHARE_TRANSFER
-                )
             if self._cloud_drive.supports(CloudDriveCapability.OFFLINE_DOWNLOAD):
                 offline_download = self._cloud_drive.require(
                     CloudDriveCapability.OFFLINE_DOWNLOAD

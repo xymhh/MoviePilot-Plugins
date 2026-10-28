@@ -61,7 +61,7 @@ def _directory_ops(provider):
         try:
             return require(CloudDriveCapability.DIRECTORY_READ)
         except Exception as error:  # noqa: BLE001 - 能力缺失时退回原对象
-            logger.debug(f"取目录读取服务失败，按原对象调用：{error}")
+            logger.debug(f"取目录读取服务失败，按原对象调用：{error}", exc_info=True)
     return provider
 
 

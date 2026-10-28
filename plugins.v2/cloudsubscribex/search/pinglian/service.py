@@ -167,7 +167,6 @@ class PinglianSearchService:
         expected_year = extract_year(year)
         prefix = str(log_prefix or "[PINGLIAN]")
         video = None
-        selected_keyword = ""
 
         # 1. 搜索影视条目
         for keyword in titles:
@@ -204,7 +203,6 @@ class PinglianSearchService:
             logger.debug(f"{prefix} 检索作品：关键词={keyword}，条目={len(rows)}")
             video = self._select_video(rows, titles, expected_year)
             if video:
-                selected_keyword = keyword
                 break
 
         if not video:

@@ -314,7 +314,6 @@ class QuarkShareService:
         normalized = [str(value) for value in file_ids]
         if not normalized:
             return [], []
-        rename_items = kwargs.get("rename_items") or {}
         batch_size = max(1, min(int(kwargs.get("batch_size", 5) or 5), 20))
         interval = max(0.0, min(float(kwargs.get("batch_interval", 3) or 0), 60.0))
         self.client.risk_cooldown = max(

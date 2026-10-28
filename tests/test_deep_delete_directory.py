@@ -10,7 +10,7 @@ plugins_v2_path = os.path.join(project_root, "plugins.v2")
 if plugins_v2_path not in sys.path:
     sys.path.insert(0, plugins_v2_path)
 
-from plugin_env import ensure_package, load_module  # noqa: E402
+from plugin_env import load_module  # noqa: E402
 
 match_module = load_module(
     "cloudsubscribex.utils.deep_delete_match",

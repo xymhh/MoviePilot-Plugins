@@ -7,7 +7,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from app.core.metainfo import MetaInfo
@@ -16,7 +16,6 @@ from app.schemas.types import MediaType
 
 from ...core import CloudDriveCapability, OwnerDelegator, render_template, resolve_template
 from ...utils.organize_plan import (
-    OrganizeEntry,
     PackagePlan,
     build_packages,
     safe_join,
@@ -675,7 +674,7 @@ class OrganizeService(OwnerDelegator):
             if callable(refresh):
                 refresh()
         except Exception as error:  # noqa: BLE001
-            logger.debug(f"整理台刷新目录缓存失败：{error}")
+            logger.debug(f"整理台刷新目录缓存失败：{error}", exc_info=True)
         protected = {
             str(target.target_dir).rstrip("/")
             for plan in (self._plans or {}).values()
@@ -1092,4 +1091,4 @@ class OrganizeService(OwnerDelegator):
                     ),
                 )
             except Exception as error:  # noqa: BLE001
-                logger.debug(f"整理台通知发送失败：{error}")
+                logger.debug(f"整理台通知发送失败：{error}", exc_info=True)
