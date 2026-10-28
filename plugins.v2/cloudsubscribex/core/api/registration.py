@@ -522,6 +522,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "批量把待确认/待处理历史标记为成功",
             },
             {
+                "path": "/history/backfill",
+                "endpoint": self.api_vue_backfill_history,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "按季目录实测文件补写缺失的历史记录",
+            },
+            {
                 "path": "/cache/clear",
                 "endpoint": self.api_vue_clear_cache,
                 "methods": ["POST"],

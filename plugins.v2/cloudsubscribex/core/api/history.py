@@ -183,6 +183,29 @@ class HistoryApi(OwnerDelegator):
             message += f"，跳过 {result['skipped']} 条（状态已变化或不可标记）"
         return {"success": True, "message": message, "data": result}
 
+    def api_backfill_history(self, apikey: str, keyword: str = "") -> dict:
+        """按季目录实测文件补写缺失的历史记录（只补「网盘有、历史无」，不碰已有记录）。"""
+        if apikey != settings.API_TOKEN:
+            return {"success": False, "message": "API密钥错误"}
+        if not self._sync_handler:
+            return {"success": False, "message": "同步处理器未初始化"}
+        backfill = getattr(self._sync_handler, "backfill_history_from_cloud", None)
+        if not callable(backfill):
+            return {"success": False, "message": "当前版本不支持历史补写"}
+        if not sync_lock.acquire(blocking=False):
+            return {
+                "success": False,
+                "message": "订阅任务正在合并转存记录，请稍后再操作",
+            }
+        try:
+            result = backfill(keyword=keyword)
+        except Exception as error:
+            logger.warning(f"补写历史记录失败：{error}")
+            return {"success": False, "message": str(error)}
+        finally:
+            sync_lock.release()
+        return result
+
     def api_notify_history(self, apikey: str, identity: Dict[str, Any]) -> dict:
         if apikey != settings.API_TOKEN:
             return {"success": False, "message": "API密钥错误"}

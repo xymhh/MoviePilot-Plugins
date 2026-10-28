@@ -1443,6 +1443,214 @@ class HistoryService(OwnerDelegator):
             self._history_changed()
         return matched_records
 
+    def _append_backfill_history_record(
+            self,
+            mediainfo: MediaInfo,
+            subscribe,
+            season: int,
+            episode: int,
+            file_name: str,
+            cloud_dir: str,
+            file_size: int = 0,
+            share_url: str = "",
+            status: str = "成功",
+            reason: str = "历史记录缺失补写",
+            history: Optional[List[dict]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """按已知的落盘事实补写一条历史记录，返回新记录（重复或数据不足时返回 None）。
+
+        转存链路偶发「文件已落盘、历史记录却从未写入」：1.7.101 及之前后处理遇到
+        这种情况只会打「历史记录长时间缺失，放弃写入终态」然后丢弃终态，导致
+        历史页缺口、判重基线缺体积、深度联动删除匹配不到来源。补写比丢弃安全。
+        """
+        if not self._save_data or not mediainfo or not subscribe:
+            return None
+        file_name = str(file_name or "").strip()
+        cloud_dir = str(cloud_dir or "").strip()
+        try:
+            episode_number = int(episode or 0)
+            season_number = max(1, int(season or 1))
+        except (TypeError, ValueError):
+            return None
+        if not file_name or not cloud_dir or episode_number <= 0:
+            return None
+        history = history if history is not None else (self._get_data("history") or [])
+        existing = {
+            (
+                str(record.get("cloud_dir") or "").strip(),
+                str(record.get("file_name") or "").strip(),
+                int(record.get("season") or 0),
+                int(record.get("episode") or 0),
+            )
+            for record in history
+        }
+        target_key = (cloud_dir, file_name, season_number, episode_number)
+        if target_key in existing:
+            return None
+        now_text = time.strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            record = self._build_transfer_history_item(
+                mediainfo=mediainfo,
+                subscribe=subscribe,
+                status=status,
+                share_url=str(share_url or ""),
+                file_name=file_name,
+                source_file_name=file_name,
+                cloud_dir=cloud_dir,
+                season=season_number,
+                episode=episode_number,
+                file_size=int(file_size or 0),
+                landed=status == "成功",
+                landed_reason=reason,
+                verified_at=now_text,
+                backfilled=True,
+            )
+        except Exception as error:
+            logger.warning(f"补写历史记录失败：{error}", exc_info=True)
+            return None
+        history.append(record)
+        self._save_data("history", history)
+        logger.info(
+            f"历史记录缺失已补写：{record.get('title') or mediainfo.title} "
+            f"S{season_number:02d}E{episode_number:02d} {file_name}（{reason}）"
+        )
+        if self._history_changed:
+            try:
+                self._history_changed()
+            except Exception as error:
+                logger.debug(f"补写历史记录后刷新前端失败：{error}", exc_info=True)
+        return record
+
+    def _backfill_history_from_pending(self, item: Dict[str, Any]) -> int:
+        """用后处理项自身携带的数据补写缺失的历史记录，返回补写条数。"""
+        if not isinstance(item, dict):
+            return 0
+        media_data = item.get("mediainfo") or {}
+        if not media_data:
+            return 0
+        try:
+            mediainfo = self._deserialize_mediainfo(dict(media_data))
+        except Exception as error:
+            logger.debug(f"补写历史记录时解析媒体信息失败：{error}", exc_info=True)
+            return 0
+        if not mediainfo:
+            return 0
+        subscribe = None
+        subscribe_id = item.get("subscribe_id")
+        if subscribe_id:
+            try:
+                subscribe = SubscribeOper().get(int(subscribe_id))
+            except Exception as error:
+                logger.debug(f"补写历史记录时读取订阅失败：{error}", exc_info=True)
+        if not subscribe:
+            subscribe = SimpleNamespace(
+                id=int(subscribe_id or 0),
+                name=str(getattr(mediainfo, "title", "") or ""),
+                season=int(item.get("season") or 1),
+                start_episode=1,
+                total_episode=0,
+                custom_words=None,
+            )
+        episodes = []
+        for value in (item.get("success_episodes") or []) + [item.get("episode")]:
+            try:
+                episode = int(value or 0)
+            except (TypeError, ValueError):
+                continue
+            if episode > 0:
+                episodes.append(episode)
+        if not episodes:
+            return 0
+        history = self._get_data("history") or []
+        written = 0
+        for episode in sorted(set(episodes)):
+            record = self._append_backfill_history_record(
+                mediainfo=mediainfo,
+                subscribe=subscribe,
+                season=int(item.get("season") or 1),
+                episode=episode,
+                file_name=str(item.get("file_name") or ""),
+                cloud_dir=str(item.get("cloud_dir") or ""),
+                file_size=int(item.get("file_size") or 0),
+                share_url=str(item.get("share_url") or ""),
+                reason="后处理补写（终态找不到历史记录）",
+                history=history,
+            )
+            if record:
+                written += 1
+        return written
+
+    def backfill_history_from_cloud(self, keyword: str = "") -> Dict[str, Any]:
+        """扫订阅季目录，把「网盘有、历史无」的集补写成成功记录。"""
+        from app.schemas.types import MediaType as _MediaType
+
+        if not self._save_data:
+            return {"success": False, "message": "数据通道未就绪"}
+        try:
+            subscribes = SubscribeOper().list("N,R") or []
+        except Exception as error:
+            return {"success": False, "message": f"读取订阅失败：{error}"}
+        keyword = str(keyword or "").strip()
+        scanned = 0
+        written = 0
+        details: List[Dict[str, Any]] = []
+        for subscribe in subscribes:
+            name = str(getattr(subscribe, "name", "") or "")
+            if keyword and keyword not in name:
+                continue
+            if getattr(subscribe, "type", None) != _MediaType.TV.value:
+                continue
+            mediainfo = self._subscribe_mediainfo(subscribe, _MediaType.TV)
+            if not mediainfo:
+                continue
+            season = max(1, int(getattr(subscribe, "season", 1) or 1))
+            try:
+                valid, cloud_files, cloud_dir = self._scan_cloud_resource_episode_files(
+                    subscribe=subscribe,
+                    mediainfo=mediainfo,
+                    season=season,
+                    start_episode=max(1, int(getattr(subscribe, "start_episode", 1) or 1)),
+                    total_episode=max(0, int(getattr(subscribe, "total_episode", 0) or 0)),
+                )
+            except Exception as error:
+                logger.debug(f"补写历史记录时列目录失败：{name}，{error}", exc_info=True)
+                continue
+            if not valid or not cloud_files:
+                continue
+            scanned += 1
+            title_written = 0
+            history = self._get_data("history") or []
+            for episode, cloud_file in sorted(cloud_files.items()):
+                record = self._append_backfill_history_record(
+                    mediainfo=mediainfo,
+                    subscribe=subscribe,
+                    season=season,
+                    episode=int(episode),
+                    file_name=str(getattr(cloud_file, "name", "") or ""),
+                    cloud_dir=str(cloud_dir or ""),
+                    file_size=int(getattr(cloud_file, "size", 0) or 0),
+                    reason="季目录实测补写",
+                    history=history,
+                )
+                if record:
+                    title_written += 1
+            if title_written:
+                written += title_written
+                details.append({
+                    "title": getattr(mediainfo, "title", name),
+                    "season": season,
+                    "written": title_written,
+                })
+        return {
+            "success": True,
+            "message": (
+                f"扫描 {scanned} 个订阅季目录，补写 {written} 条历史记录"
+                if written else
+                f"扫描 {scanned} 个订阅季目录，没有需要补写的历史记录"
+            ),
+            "data": {"scanned": scanned, "written": written, "details": details},
+        }
+
     def get_pending_finalize_tasks(self) -> List[Dict[str, Any]]:
         """返回等待115文件就绪、重命名或生成STRM的持久任务。"""
         if not self._get_data:

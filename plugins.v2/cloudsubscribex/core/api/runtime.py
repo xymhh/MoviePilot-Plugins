@@ -182,6 +182,12 @@ class RuntimeApi(OwnerDelegator):
             identities=(payload or {}).get("records") or [],
         )
 
+    def api_vue_backfill_history(self, payload: Dict[str, Any]) -> dict:
+        return self.api_backfill_history(
+            settings.API_TOKEN,
+            keyword=str((payload or {}).get("keyword") or ""),
+        )
+
     _CACHE_CATEGORIES = frozenset({
         "search", "cloud", "sync", "interface", "platform",
     })

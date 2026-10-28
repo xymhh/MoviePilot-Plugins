@@ -922,6 +922,17 @@ class PostprocessService(OwnerDelegator):
                 item["history_resync_warned"] = True
                 logger.warning(message)
             return False
+        # 1.7.102：终态找不到历史记录时不再丢弃——用后处理项自身的落盘事实补写一条。
+        backfilled = 0
+        try:
+            backfill = getattr(self, "_backfill_history_from_pending", None)
+            if callable(backfill):
+                backfilled = int(backfill(item) or 0)
+        except Exception as error:
+            logger.debug(f"补写历史记录失败：{error}", exc_info=True)
+        if backfilled:
+            self._settle_offline_pending_item(pending_key, item)
+            return True
         logger.warning(
             f"历史记录长时间缺失，放弃写入终态（{status}）："
             f"{item.get('file_name') or pending_key}"
