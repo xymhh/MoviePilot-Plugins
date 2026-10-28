@@ -158,5 +158,71 @@ class TestHistoryGroupDisplay(unittest.TestCase):
         self.assertEqual(prepared["failed_count"], 0)
 
 
+class TestCrossFlagFollowsLatestTransfer(unittest.TestCase):
+    """同盘覆盖跨盘记录后，不能再显示「跨盘区」；洗版回写不能污染快照。"""
+
+    def test_same_drive_overwrite_drops_stale_cross_flag(self):
+        current = _record(
+            "ep27", "成功", "玉簟秋 - S01E27 - 第27集.mkv",
+            file_size=1_500_000_000,
+        )
+        incoming = _record(
+            "ep27", "成功", "玉簟秋 - S01E27 - 第27集.mkv",
+            share_url="https://115cdn.com/s/shs2onq3wtw?password=t58d",
+            file_size=2_650_000_000,
+        )
+        incoming.pop("transfer_mode", None)
+        incoming.pop("task_types", None)
+        service = _HistoryStore([current])
+
+        service.append_history_records([dict(incoming)])
+
+        record = service._store["history"][0]
+        self.assertNotIn("transfer_mode", record)
+        self.assertNotIn("cross_transfer", record["task_types"])
+        self.assertEqual(record["share_url"], incoming["share_url"])
+        self.assertEqual(record["file_size"], 2_650_000_000)
+
+    def test_upgrade_progress_write_keeps_previous_snapshot(self):
+        current = _record(
+            "ep09", "处理中", "尚公主 - S01E09 - 第9集.mkv",
+            upgrade=True, upgrade_count=1,
+            previous_file_name="尚公主 - S01E09 - 第9集.mkv",
+            previous_file_size=1_500_000_000,
+            file_size=5_245_047_492,
+        )
+        incoming = _record(
+            "ep09", "成功", "尚公主 - S01E09 - 第9集.mkv",
+            upgrade=True, file_size=5_245_047_492,
+        )
+        service = _HistoryStore([current])
+
+        service.append_history_records([dict(incoming)])
+
+        record = service._store["history"][0]
+        self.assertEqual(record["status"], "成功")
+        self.assertEqual(record["upgrade_count"], 1)
+        self.assertEqual(record["previous_file_size"], 1_500_000_000)
+
+    def test_upgrade_with_new_file_increments_count(self):
+        current = _record(
+            "ep09", "成功", "尚公主 - S01E09 - 第9集.mkv",
+            upgrade=True, upgrade_count=1,
+            previous_file_size=1_500_000_000,
+            file_size=1_500_000_000,
+        )
+        incoming = _record(
+            "ep09", "成功", "尚公主 - S01E09 - 第9集.mkv",
+            upgrade=True, file_size=5_245_047_492,
+        )
+        service = _HistoryStore([current])
+
+        service.append_history_records([dict(incoming)])
+
+        record = service._store["history"][0]
+        self.assertEqual(record["upgrade_count"], 2)
+        self.assertEqual(record["previous_file_size"], 1_500_000_000)
+
+
 if __name__ == "__main__":
     unittest.main()

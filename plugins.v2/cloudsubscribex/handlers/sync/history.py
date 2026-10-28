@@ -420,20 +420,56 @@ class HistoryService(OwnerDelegator):
                 current_status = str(current.get("status") or "")
                 incoming_status = str(incoming.get("status") or "")
                 merged = {**current, **incoming}
-                merged["task_types"] = sorted(
-                    set(self._history_task_types(current))
-                    | set(self._history_task_types(incoming))
+                incoming_is_cross = (
+                    str(incoming.get("transfer_mode") or "") == "cross"
                 )
+                if not incoming_is_cross:
+                    # 同盘转存覆盖跨盘记录时，跨盘标记必须跟着失效，
+                    # 否则「115 来源 + 跨盘区」这种自相矛盾的标签会一直粘着。
+                    for stale_key in (
+                            "transfer_mode",
+                            "source_drive_key",
+                            "source_drive_name",
+                            "target_drive_key",
+                            "target_drive_name",
+                    ):
+                        merged.pop(stale_key, None)
+                merged["task_types"] = sorted(
+                    (set(self._history_task_types(current))
+                     | set(self._history_task_types(incoming)))
+                    - {"cross_transfer"}
+                )
+                merged["task_types"] = self._history_task_types(merged)
                 if self._is_upgrade_history(incoming):
                     merged["upgrade"] = True
-                    merged["upgrade_count"] = max(
-                        1, int(current.get("upgrade_count") or 0) + 1
+                    same_file = (
+                        str(current.get("file_name") or "").strip()
+                        == str(incoming.get("file_name") or "").strip()
+                        and (current.get("file_size") or 0)
+                        == (incoming.get("file_size") or 0)
                     )
-                    merged["previous_file_name"] = str(
-                        current.get("file_name") or ""
-                    )
-                    merged["previous_file_size"] = current.get("file_size")
-                    merged["previous_rule_score"] = current.get("rule_score")
+                    if same_file and self._is_upgrade_history(current):
+                        # 同一次洗版的后续状态回写（处理中→成功）：沿用原快照，
+                        # 否则 previous_file_size 会被写成新版体积、计数也会翻倍。
+                        for snapshot_key in (
+                                "previous_file_name",
+                                "previous_file_size",
+                                "previous_rule_score",
+                        ):
+                            if snapshot_key in current:
+                                merged[snapshot_key] = current[snapshot_key]
+                        merged["upgrade_count"] = max(
+                            1, int(current.get("upgrade_count") or 1)
+                        )
+                    else:
+                        merged["upgrade_count"] = max(
+                            1, int(current.get("upgrade_count") or 0) + 1
+                        )
+                        merged["previous_file_name"] = str(
+                            current.get("file_name") or ""
+                        )
+                        merged["previous_file_size"] = current.get("file_size")
+                        merged["previous_rule_score"] = current.get("rule_score")
                 if (
                         current_status in {"成功", "失败", "跳过"}
                         and incoming_status not in {"成功", "失败"}
