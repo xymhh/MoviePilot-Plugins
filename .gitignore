@@ -65,3 +65,4 @@ htmlcov/
 
 # 会话级便签（仅根级，不要用 *_TODO.md 以免误伤 docs/）
 /*_TODO.md
+CS_OPT_TODO.md

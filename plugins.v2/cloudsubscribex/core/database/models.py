@@ -304,6 +304,17 @@ class SourceSha1Cache(CloudSubscribeBase):
     updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
+class SourceMissCache(CloudSubscribeBase):
+    """秒传未命中负缓存：同一哈希在 TTL 内不再下载整份文件去重试。"""
+
+    __tablename__ = "source_miss_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    target_key: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    sha1: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    missed_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class AuthSession(CloudSubscribeBase):
     __tablename__ = "auth_sessions"
 

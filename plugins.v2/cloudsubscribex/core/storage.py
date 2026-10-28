@@ -329,6 +329,24 @@ class CloudSubscribeDataStore:
             key, sha1, size=size, name=name, limit=limit
         )
 
+    def get_source_miss(
+            self, target_key: str, sha1: str, ttl_seconds: int = 0
+    ) -> int:
+        """取秒传未命中时间戳（0=没有记录或已过期）。"""
+        self.initialize()
+        return self.repositories.source_miss.get(
+            target_key, sha1, ttl_seconds=ttl_seconds
+        )
+
+    def put_source_miss(
+            self, target_key: str, sha1: str, limit: int = 0
+    ) -> bool:
+        """记录一次秒传未命中，超出上限按时间淘汰最旧。"""
+        self.initialize()
+        return self.repositories.source_miss.put(
+            target_key, sha1, limit=limit
+        )
+
     def runtime_store(self, namespace: str) -> RuntimeStateStore:
         """按命名空间取运行期状态存储。"""
         self.initialize()

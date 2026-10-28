@@ -77,6 +77,13 @@ class CloudDriveManager:
             hash_cache_put=getattr(
                 self._plugin, "put_cached_source_sha1", None
             ),
+            # 秒传未命中负缓存：同一 (目标盘, SHA1) 24h 内不再下载重试
+            miss_cache_get=getattr(
+                self._plugin, "get_cached_rapid_miss", None
+            ),
+            miss_cache_put=getattr(
+                self._plugin, "put_cached_rapid_miss", None
+            ),
         )
 
         cloud_key = getattr(self._plugin, "_cloud_drive_key", "115")

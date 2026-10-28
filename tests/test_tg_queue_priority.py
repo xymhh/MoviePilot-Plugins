@@ -109,6 +109,57 @@ class QueuePriorityTest(unittest.TestCase):
         )
         self.assertIn("仅洗版", by_id["u1"]["queue_priority_reason"])
 
+    def test_same_subscribe_season_keeps_only_best_score(self):
+        """同一订阅同一季在一批扫描里只入队一条，保留分高的那条。"""
+        self.monitor.configure(
+            enabled=False, api_id=1, api_hash="hash", session="session",
+            channel_rules=[{"channel": "@a"}],
+            auto_transfer_handler=lambda item, subscribe_id: {},
+            subscribe_provider=lambda: [
+                {"id": 7, "name": "尚公主", "season": 1, "type": "电视剧",
+                 "lack": 0},
+            ],
+        )
+        rule = {"channel": "@a"}
+        low = {"id": "low", "links": ["https://pan.quark.cn/s/1"],
+               "title": "尚公主 第5集 720p", "status": "new"}
+        high = {"id": "high", "links": ["https://pan.quark.cn/s/2"],
+                "title": "尚公主 第5集 2160p", "status": "new"}
+        stats, to_queue = self.monitor._match_and_enqueue(
+            [(low, rule), (high, rule)]
+        )
+        self.assertEqual([item["id"] for item in to_queue], ["high"])
+        self.assertEqual(stats["queued"], 1)
+        self.assertEqual(low["status"], "ignored")
+        self.assertIn("更优", low["match_reason"])
+
+    def test_candidate_skipped_when_same_season_already_queued(self):
+        """跨批次去重：同订阅同季已有条目排队时，新候选不再入队。"""
+        # 单测里不走 SQLite：直接替换台账读取，验证跨批次去重判定
+        self.monitor._load_items = lambda: [
+            {"id": "queued-1", "status": "queued",
+             "matched_subscribe_id": 7,
+             "matched_dedupe_key": [7, "episode", 1, 5]},
+        ]
+        self.monitor.configure(
+            enabled=False, api_id=1, api_hash="hash", session="session",
+            channel_rules=[{"channel": "@a"}],
+            auto_transfer_handler=lambda item, subscribe_id: {},
+            subscribe_provider=lambda: [
+                {"id": 7, "name": "尚公主", "season": 1, "type": "电视剧",
+                 "lack": 0},
+            ],
+        )
+        item = {"id": "dup", "links": ["https://pan.quark.cn/s/3"],
+                "title": "尚公主 第5集 2160p", "status": "new"}
+        stats, to_queue = self.monitor._match_and_enqueue(
+            [(item, {"channel": "@a"})]
+        )
+        self.assertEqual(to_queue, [])
+        self.assertEqual(stats["queued"], 0)
+        self.assertEqual(item["status"], "ignored")
+        self.assertIn("队列中", item["match_reason"])
+
     def test_recovery_keeps_persisted_priority(self):
         persisted = [
             {"id": "old-upgrade", "status": "queued",

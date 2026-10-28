@@ -718,6 +718,121 @@ class SourceHashCacheRetryTests(RapidMissAbortTests):
         self.assertEqual(entry["sha1"], SHA1.upper())
 
 
+class RapidMissNegativeCacheTests(unittest.TestCase):
+    """1.7.101 负缓存：同一 (目标盘, SHA1) 24h 内不再下载整份文件重试。"""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.source = FakeSourceProvider()
+
+    def make_manager(self, upload, hash_store=None, miss_store=None, action="abort"):
+        base = RapidMissAbortTests.__new__(RapidMissAbortTests)
+        base.tempdir = self.tempdir
+        base.source = self.source
+        manager, files_service = base.make_manager(upload, rapid_miss_action=action)
+        manager._hash_cache_get = (hash_store or _DictStore({})).get
+        manager._hash_cache_put = (hash_store or _DictStore({})).put
+        manager._miss_cache_get = (miss_store or _DictMissStore()).get
+        manager._miss_cache_put = (miss_store or _DictMissStore()).put
+        return manager, files_service
+
+    def _wait_terminal(self, manager, task_id, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with manager._lock:
+                task = manager._tasks.get(task_id)
+                status = task["status"] if task else None
+            if task and status not in manager.ACTIVE:
+                return task
+            time.sleep(0.05)
+        self.fail("任务未在期限内进入终态")
+
+    def test_loose_size_key_still_hits_zero_traffic_probe(self):
+        """文件名换了个马甲（洗版/重试来源名不同）也能靠体积命中哈希缓存。"""
+        upload = FakeRapidUploadService(probe_outcomes=[True])
+        store = _DictStore({"quark|%d" % len(PAYLOAD): {"sha1": SHA1}})
+        manager, _ = self.make_manager(upload, hash_store=store)
+        file_item = make_file_item(with_checksums=False, name="any-other-name.mkv")
+
+        public = manager.create(
+            source_key="quark", source_file=file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+        )
+        task = self._wait_terminal(manager, public["id"])
+
+        self.assertEqual(task["status"], "success")
+        self.assertEqual(task["method"], "rapid")
+        self.assertEqual(self.source.download_calls, [], "命中体积兜底键时不得下载")
+
+    def test_second_attempt_skipped_by_negative_cache(self):
+        """首次下载→未命中→记负缓存；同哈希第二次直接跳过，不再下载也不再探测。"""
+        upload = FakeRapidUploadService(probe_outcomes=[False])
+        hash_store = _DictStore({})
+        miss_store = _DictMissStore()
+        manager, _ = self.make_manager(
+            upload, hash_store=hash_store, miss_store=miss_store
+        )
+        file_item = make_file_item(with_checksums=False)
+
+        first = manager.create(
+            source_key="quark", source_file=file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+        )
+        task = self._wait_terminal(manager, first["id"])
+        self.assertEqual(task.get("abort_reason"), "rapid_miss")
+        self.assertEqual(len(self.source.download_calls), 1, "首次允许下载一次")
+        self.assertTrue(miss_store.data, "未命中后必须写负缓存")
+        rapid_after_first = len(upload.rapid_calls)
+        self.assertEqual(rapid_after_first, 1, "首次下载后应做一次带文件秒传")
+
+        second = manager.create(
+            source_key="quark", source_file=file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+        )
+        task2 = self._wait_terminal(manager, second["id"])
+        self.assertEqual(task2["status"], "failed")
+        self.assertEqual(task2.get("abort_reason"), "rapid_miss")
+        self.assertEqual(len(self.source.download_calls), 1, "第二次不得再下载")
+        self.assertEqual(
+            len(upload.rapid_calls), rapid_after_first, "第二次不得再秒传探测"
+        )
+
+    def test_expired_negative_cache_allows_retry(self):
+        """负缓存过期（get 返回 0）后必须重新走探测。"""
+        upload = FakeRapidUploadService(probe_outcomes=[True])
+        miss_store = _DictMissStore({("115|" + SHA1.upper()): 1})
+        miss_store.ttl_zero = True
+        manager, _ = self.make_manager(
+            upload, hash_store=_DictStore({}), miss_store=miss_store
+        )
+        file_item = make_file_item()
+
+        public = manager.create(
+            source_key="quark", source_file=file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+            algorithm="sha1", checksum=SHA1,
+        )
+        task = self._wait_terminal(manager, public["id"])
+
+        self.assertEqual(task["status"], "success")
+        self.assertEqual(len(upload.probe_calls), 1, "过期后必须重新探测")
+
+
+class _DictMissStore:
+    def __init__(self, data=None):
+        self.data = dict(data or {})
+        self.ttl_zero = False
+
+    def get(self, target_key, sha1):
+        if self.ttl_zero:
+            return 0
+        return int(self.data.get(f"{target_key}|{str(sha1).upper()}", 0) or 0)
+
+    def put(self, target_key, sha1):
+        self.data[f"{target_key}|{str(sha1).upper()}"] = int(time.time())
+
+
 class _DictStore:
     def __init__(self, data):
         self.data = dict(data)

@@ -26,6 +26,7 @@ from .models import (
     PointBudgetRecord,
     RuntimeRecord,
     SourceSha1Cache,
+    SourceMissCache,
 )
 from .sync_jobs import SyncJobRepository
 from ..history import history_group_key
@@ -1210,6 +1211,98 @@ class SourceSha1CacheRepository(DbOper):
             )
 
 
+class SourceMissCacheRepository(DbOper):
+    """秒传未命中负缓存：TTL 内同一 (目标盘, SHA1) 不再重复下载整份文件。"""
+
+    @staticmethod
+    def normalize_key(target_key: Any, sha1: Any) -> str:
+        target = str(target_key or "").strip().lower()
+        digest = str(sha1 or "").strip().upper()
+        if not target or not digest:
+            return ""
+        return f"{target}|{digest}"
+
+    @db_query
+    def get(
+            self, target_key: str, sha1: str, ttl_seconds: int = 0,
+            db: Session = None,
+    ) -> int:
+        """返回未命中时间戳；无记录或已过期返回 0。"""
+        cache_key = self.normalize_key(target_key, sha1)
+        if not cache_key:
+            return 0
+        row = db.get(SourceMissCache, cache_key)
+        if row is None:
+            return 0
+        missed_at = int(row.missed_at or 0)
+        if ttl_seconds > 0 and missed_at and time.time() - missed_at > ttl_seconds:
+            return 0
+        return missed_at
+
+    @db_update
+    def put(
+            self,
+            target_key: str,
+            sha1: str,
+            missed_at: int = 0,
+            limit: int = 0,
+            db: Session = None,
+    ) -> bool:
+        cache_key = self.normalize_key(target_key, sha1)
+        if not cache_key:
+            return False
+        now = int(missed_at or 0) or int(time.time())
+        row = db.get(SourceMissCache, cache_key)
+        if row is None:
+            SourceMissCache(
+                cache_key=cache_key,
+                target_key=str(target_key or "").strip().lower(),
+                sha1=str(sha1 or "").strip().upper(),
+                missed_at=now,
+            ).create(db)
+        else:
+            row.update(db, {"missed_at": now})
+        if limit > 0:
+            self._prune(limit, db=db)
+        return True
+
+    @db_update
+    def purge_expired(self, ttl_seconds: int, db: Session = None) -> int:
+        if ttl_seconds <= 0:
+            return 0
+        deadline = int(time.time()) - int(ttl_seconds)
+        rows = db.scalars(
+            select(SourceMissCache.cache_key).where(
+                SourceMissCache.missed_at < deadline
+            )
+        ).all()
+        if not rows:
+            return 0
+        db.execute(
+            delete(SourceMissCache).where(
+                SourceMissCache.cache_key.in_(list(rows))
+            )
+        )
+        return len(rows)
+
+    def _prune(self, limit: int, db: Session) -> None:
+        db.flush()
+        stale = db.scalars(
+            select(SourceMissCache.cache_key)
+            .order_by(
+                SourceMissCache.missed_at.desc(),
+                SourceMissCache.cache_key.desc(),
+            )
+            .offset(max(0, int(limit)))
+        ).all()
+        if stale:
+            db.execute(
+                delete(SourceMissCache).where(
+                    SourceMissCache.cache_key.in_(list(stale))
+                )
+            )
+
+
 class CloudSubscribeRepositories:
     def __init__(
             self,
@@ -1225,5 +1318,6 @@ class CloudSubscribeRepositories:
         self.account = AccountSnapshotRepository(manager, db)
         self.auth = AuthSessionRepository(manager, db)
         self.source_sha1 = SourceSha1CacheRepository(manager, db)
+        self.source_miss = SourceMissCacheRepository(manager, db)
         self.runtime = RuntimeRecordRepository(manager, db)
         self.ledger = CandidateLedgerRepository(manager, db)

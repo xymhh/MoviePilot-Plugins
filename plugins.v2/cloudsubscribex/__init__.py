@@ -1022,6 +1022,23 @@ class CloudSubscribeX(_PluginBase):
             limit=self._SOURCE_SHA1_CACHE_LIMIT,
         )
 
+    # 秒传未命中负缓存：24 小时内同一哈希不再下载整份文件重试
+    _SOURCE_MISS_CACHE_TTL_HOURS = 24
+    _SOURCE_MISS_CACHE_LIMIT = 4000
+
+    def get_cached_rapid_miss(self, target_key: str, sha1: str) -> int:
+        """返回同一 (目标盘, SHA1) 的秒传未命中时间戳，0=没有或已过期。"""
+        return self._get_data_store().get_source_miss(
+            target_key, sha1,
+            ttl_seconds=self._SOURCE_MISS_CACHE_TTL_HOURS * 3600,
+        )
+
+    def put_cached_rapid_miss(self, target_key: str, sha1: str) -> None:
+        """记录一次秒传未命中，供后续同哈希任务直接跳过下载。"""
+        self._get_data_store().put_source_miss(
+            target_key, sha1, limit=self._SOURCE_MISS_CACHE_LIMIT
+        )
+
     def run_strm_full_scan(self, reason: str = "手动") -> dict:
         """后台按目录 CID 全量遍历媒体库，补齐/校准 STRM。"""
         sync_handler = getattr(self, "_sync_handler", None)

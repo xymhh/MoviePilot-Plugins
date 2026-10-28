@@ -1461,6 +1461,10 @@ class TgChannelMonitor:
             if sub_id > 0:
                 lack_by_subscribe[sub_id] = max(0, lack)
         queue_full = self._transfer_queue.qsize() >= QUEUE_MAX
+        # 同订阅同季只留一条：队列里已有的、本批更高分的都算占位，
+        # 避免 19 条排队里 4 条都是同一个订阅同一季。
+        occupied = self._queued_dedupe_keys()
+        best_in_batch: Dict[Tuple, Tuple[float, dict, str]] = {}
         to_queue: List[dict] = []
         for item, _rule in candidates:
             item_id = str(item.get("id") or "")
@@ -1495,6 +1499,39 @@ class TgChannelMonitor:
             subscribe_id = int(matched["matched"]["id"])
             item["match_status"] = "matched"
             item["matched_subscribe_id"] = subscribe_id
+            dedupe_key = self._quality_candidate_key(item, matched)
+            score = self._candidate_quality_score(item)
+            if dedupe_key:
+                item["matched_dedupe_key"] = list(dedupe_key)
+                if dedupe_key in occupied:
+                    item["status"] = "ignored"
+                    item["match_reason"] = (
+                        "同订阅同集已有条目在队列中，本条不再重复转存"
+                    )[:300]
+                    stats["ignored"] += 1
+                    continue
+                previous = best_in_batch.get(dedupe_key)
+                if previous is not None and previous[0] >= score:
+                    item["status"] = "ignored"
+                    item["match_reason"] = (
+                        f"同集已有更优候选（{previous[2]}），本条不再转存"
+                    )[:300]
+                    stats["ignored"] += 1
+                    continue
+                if previous is not None:
+                    # 本批出现更优候选：把先前那条退回忽略，队列里只留更好的
+                    previous_item = previous[1]
+                    previous_item["status"] = "ignored"
+                    previous_item["match_reason"] = (
+                        f"同集出现更优候选（{item.get('title') or ''}）"
+                    )[:300]
+                    if previous_item in to_queue:
+                        to_queue.remove(previous_item)
+                    stats["queued"] = max(0, stats["queued"] - 1)
+                    stats["ignored"] += 1
+                best_in_batch[dedupe_key] = (
+                    score, item, str(item.get("title") or "")[:48]
+                )
             lack = lack_by_subscribe.get(subscribe_id, 0)
             item["queue_priority"] = (
                 QUEUE_PRIORITY_MISSING if lack > 0 else QUEUE_PRIORITY_UPGRADE
@@ -1516,6 +1553,41 @@ class TgChannelMonitor:
             item["match_reason"] = "转存队列积压（超过上限），本条忽略"[:300]
             stats["ignored"] += 1
         return stats, to_queue
+
+    def _queued_dedupe_keys(self) -> set:
+        """已在队列/待转存条目的「同订阅同季同集」键，用于跨批次去重。"""
+        try:
+            items = self._load_items()
+        except Exception as error:  # noqa: BLE001 - 读台账失败只失去去重，不影响入队
+            logger.debug(f"读取待转存条目失败，跳过去重：{error}", exc_info=True)
+            return set()
+        keys = set()
+        for item in items or []:
+            if item.get("status") not in ("queued", "transferring", "processing"):
+                continue
+            raw = item.get("matched_dedupe_key")
+            if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+                continue
+            try:
+                keys.add((
+                    int(raw[0]), str(raw[1]), int(raw[2]), int(raw[3]),
+                ))
+            except (TypeError, ValueError):
+                continue
+        return keys
+
+    @staticmethod
+    def _candidate_quality_score(item: Dict[str, Any]) -> float:
+        """同集内比较用的画质分：识别不到分辨率时按 0 分，先到先得。"""
+        quality = item.get("quality") or {}
+        rank_key = quality.get("rank_key") or []
+        score = 0.0
+        for value in rank_key:
+            try:
+                score = score * 10 - float(value)
+            except (TypeError, ValueError):
+                continue
+        return score
 
     # ------------------------------------------------------------------ 查询
     def status(self) -> Dict[str, Any]:

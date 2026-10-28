@@ -13,6 +13,7 @@
 import os
 import sys
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -100,6 +101,8 @@ CloudSubscribeDatabaseManager = manager_module.CloudSubscribeDatabaseManager
 SourceSha1CacheRepository = repositories_module.SourceSha1CacheRepository
 CloudSubscribeDataStore = storage_module.CloudSubscribeDataStore
 SourceSha1Cache = models_module.SourceSha1Cache
+SourceMissCacheRepository = repositories_module.SourceMissCacheRepository
+SourceMissCache = models_module.SourceMissCache
 
 SHA1_A = "A" * 40
 SHA1_B = "B" * 40
@@ -204,6 +207,62 @@ class SourceSha1CacheTableTest(unittest.TestCase):
         self.assertIsNone(self.repo.get("quark|301|drop.mkv"))
 
 
+class SourceMissCacheTableTest(unittest.TestCase):
+    """1.7.101 负缓存表：同一 (目标盘, SHA1) 24h 内不再下载重试。"""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.db_path = Path(tmp.name) / "cloudsubscribe.db"
+        self.manager = CloudSubscribeDatabaseManager(self.db_path)
+        self.manager.open()
+        self.manager.init_db()
+        self.addCleanup(self.manager.close)
+        self.repo = SourceMissCacheRepository(self.manager)
+
+    def test_table_created_by_init_db(self):
+        from sqlalchemy import text
+
+        with self.manager.session() as db:
+            names = {
+                row[0]
+                for row in db.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                ).all()
+            }
+        self.assertIn("source_miss_cache", names)
+
+    def test_put_then_get_roundtrip(self):
+        self.assertTrue(self.repo.put("115", SHA1_A))
+        missed_at = self.repo.get("115", SHA1_A.lower(), ttl_seconds=86400)
+        self.assertGreater(missed_at, 0)
+        # 换目标盘/换哈希都不得串味
+        self.assertEqual(self.repo.get("quark", SHA1_A, ttl_seconds=86400), 0)
+        self.assertEqual(self.repo.get("115", SHA1_B, ttl_seconds=86400), 0)
+
+    def test_repeat_miss_updates_timestamp(self):
+        self.repo.put("115", SHA1_A, missed_at=1000)
+        self.repo.put("115", SHA1_A, missed_at=2000)
+        self.assertEqual(self.repo.get("115", SHA1_A), 2000)
+        with self.manager.session() as db:
+            from sqlalchemy import func, select
+
+            total = db.scalar(select(func.count()).select_from(SourceMissCache))
+        self.assertEqual(total, 1)
+
+    def test_ttl_expiry_and_purge(self):
+        self.repo.put("115", SHA1_A, missed_at=int(time.time()) - 90000)
+        self.assertEqual(self.repo.get("115", SHA1_A, ttl_seconds=86400), 0)
+        self.assertGreater(self.repo.get("115", SHA1_A), 0, "未带 TTL 时仍可取到")
+        self.assertEqual(self.repo.purge_expired(86400), 1)
+
+    def test_invalid_input_ignored(self):
+        self.assertFalse(self.repo.put("", SHA1_A))
+        self.assertFalse(self.repo.put("115", ""))
+        self.assertEqual(self.repo.get("", SHA1_A), 0)
+        self.assertEqual(self.repo.get("115", ""), 0)
+
+
 class DataStoreSha1Test(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -220,6 +279,14 @@ class DataStoreSha1Test(unittest.TestCase):
         self.assertEqual(entry["sha1"], SHA1_A)
         self.assertEqual(entry["size"], 1024)
         self.assertIsNone(self.store.get_source_sha1("115|2048|missing.mkv"))
+
+    def test_datastore_miss_roundtrip(self):
+        self.assertEqual(self.store.get_source_miss("115", SHA1_A), 0)
+        self.assertTrue(self.store.put_source_miss("115", SHA1_A))
+        self.assertGreater(self.store.get_source_miss("115", SHA1_A), 0)
+        self.assertEqual(
+            self.store.get_source_miss("115", SHA1_B, ttl_seconds=86400), 0
+        )
 
     def test_legacy_json_migrated_then_renamed(self):
         """1.7.97 的 JSON 缓存升级后自动并入表，原文件改名不重复迁移。"""

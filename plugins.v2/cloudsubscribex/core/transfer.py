@@ -794,7 +794,9 @@ class CrossTransferTaskManager:
                  relay_always: bool = False,
                  on_change: Optional[Callable[[], None]] = None,
                  hash_cache_get: Optional[Callable[[str], Optional[dict]]] = None,
-                 hash_cache_put: Optional[Callable[[str, dict], None]] = None):
+                 hash_cache_put: Optional[Callable[[str, dict], None]] = None,
+                 miss_cache_get: Optional[Callable[[str, str], int]] = None,
+                 miss_cache_put: Optional[Callable[[str, str], None]] = None):
         self._provider_resolver = provider_resolver
         self._target_writer = TargetWriter(provider_resolver)
         self._download_path = str(download_path or "").strip()
@@ -828,6 +830,10 @@ class CrossTransferTaskManager:
         # 下次重试可以只走「零流量秒传探测」，不再重复下 5GB。
         self._hash_cache_get = hash_cache_get
         self._hash_cache_put = hash_cache_put
+        # 秒传未命中负缓存：同一 (目标盘, SHA1) 在 TTL 内不再下载整份文件重试。
+        self._miss_cache_get = miss_cache_get
+        self._miss_cache_put = miss_cache_put
+        self._miss_cache_ttl_seconds = 24 * 3600
 
     def _notify_change(self) -> None:
         if self._on_change:
@@ -848,16 +854,51 @@ class CrossTransferTaskManager:
             return ""
         return f"{provider}|{size}|{name}"
 
+    @staticmethod
+    def _hash_cache_loose_key(task: Mapping) -> str:
+        """体积兜底键：同一文件在不同分享里文件名可能不同，靠体积仍能命中。"""
+        provider = str(task.get("source_provider") or "").strip().lower()
+        size = int(getattr(task.get("source_file"), "size", 0) or task.get("total") or 0)
+        if not provider or size <= 0:
+            return ""
+        return f"{provider}|{size}"
+
+    def _hash_cache_keys(self, task: Mapping) -> list[str]:
+        keys = [self._hash_cache_key(task), self._hash_cache_loose_key(task)]
+        return [key for key in dict.fromkeys(keys) if key]
+
     def _cached_source_sha1(self, task: Mapping) -> str:
-        key = self._hash_cache_key(task)
-        if not key or not self._hash_cache_get:
+        keys = self._hash_cache_keys(task)
+        if not keys or not self._hash_cache_get:
             return ""
+        for key in keys:
+            try:
+                entry = self._hash_cache_get(key) or {}
+            except Exception as error:  # noqa: BLE001 - 缓存异常不影响正常传输
+                logger.debug(f"读取源哈希缓存失败：{error}")
+                return ""
+            digest = str(entry.get("sha1") or "").strip().upper()
+            if digest:
+                return digest
+        return ""
+
+    def _rapid_miss_at(self, target_key: str, sha1: str) -> int:
+        """同一 (目标盘, SHA1) 的秒传未命中时间；0 表示没有记录或已过期。"""
+        if not self._miss_cache_get or not sha1:
+            return 0
         try:
-            entry = self._hash_cache_get(key) or {}
-        except Exception as error:  # noqa: BLE001 - 缓存异常不影响正常传输
-            logger.debug(f"读取源哈希缓存失败：{error}")
-            return ""
-        return str(entry.get("sha1") or "").strip().upper()
+            return int(self._miss_cache_get(target_key, sha1) or 0)
+        except Exception as error:  # noqa: BLE001 - 负缓存异常不影响正常传输
+            logger.debug(f"读取秒传未命中缓存失败：{error}", exc_info=True)
+            return 0
+
+    def _remember_rapid_miss(self, target_key: str, sha1: str) -> None:
+        if not self._miss_cache_put or not sha1:
+            return
+        try:
+            self._miss_cache_put(target_key, sha1)
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"写入秒传未命中缓存失败：{error}", exc_info=True)
 
     def _remember_source_hash(self, task: Mapping, path: str) -> None:
         """下载完成后把 SHA1 存档，供后续秒传重试复用（本地文件随后可删）。"""
@@ -873,18 +914,20 @@ class CrossTransferTaskManager:
         except Exception as error:  # noqa: BLE001 - 只影响后续重试效率
             logger.debug(f"计算源文件 SHA1 失败，跳过缓存：{error}")
             return
+        payload = {
+            "sha1": sha1,
+            "size": int(
+                getattr(task.get("source_file"), "size", 0)
+                or task.get("total") or 0
+            ),
+            "name": str(
+                getattr(task.get("source_file"), "name", "")
+                or task.get("title") or ""
+            ),
+        }
         try:
-            self._hash_cache_put(key, {
-                "sha1": sha1,
-                "size": int(
-                    getattr(task.get("source_file"), "size", 0)
-                    or task.get("total") or 0
-                ),
-                "name": str(
-                    getattr(task.get("source_file"), "name", "")
-                    or task.get("title") or ""
-                ),
-            })
+            for cache_key in self._hash_cache_keys(task) or [key]:
+                self._hash_cache_put(cache_key, payload)
         except Exception as error:  # noqa: BLE001
             logger.debug(f"写入源哈希缓存失败：{error}")
             return
@@ -1665,6 +1708,8 @@ class CrossTransferTaskManager:
                     "命中源文件 SHA1 缓存，改为零流量秒传探测："
                     f"{target_name}"
                 )
+        observed_sha1 = str(checksum or "").strip().upper() \
+            if str(algorithm or "").strip().lower() == "sha1" else ""
         started = time.time()
         self._update(
             task_id, status="running",
@@ -1676,6 +1721,23 @@ class CrossTransferTaskManager:
         try:
             if stop_event.is_set():
                 raise InterruptedError
+            # 同一 (目标盘, SHA1) 24 小时内已确认秒传未命中：不再下载整份文件重试。
+            # 线上 19 小时里同一个文件被下了 2 次、白费 25GiB，就卡在这一步。
+            known_sha1 = (
+                str(checksum or "").strip().upper()
+                if str(algorithm or "").strip().lower() == "sha1" else ""
+            )
+            if known_sha1 and target_name and not source_path:
+                missed_at = self._rapid_miss_at(target_key, known_sha1)
+                if missed_at:
+                    age_minutes = max(0, int((time.time() - missed_at) / 60))
+                    logger.info(
+                        f"跳过：{target_name} 的秒传 {age_minutes} 分钟前已确认未命中"
+                        f"（{target_key}），{self._miss_cache_ttl_seconds // 3600} 小时内不再下载"
+                    )
+                    raise RapidMissAborted(
+                        f"{target_key} 已确认无此哈希，跳过下载"
+                    )
             target = self._provider_resolver(target_key)
             target_name_text = str(
                 getattr(target, "name", "") or target_key or "目标网盘"
@@ -2199,6 +2261,8 @@ class CrossTransferTaskManager:
                     transfer_checksum = file_checksum(
                         source_path, transfer_algorithm
                     )
+                    if transfer_algorithm == "sha1":
+                        observed_sha1 = str(transfer_checksum or "").upper()
             local_method = {"value": ""}
 
             def write_local():
@@ -2286,6 +2350,13 @@ class CrossTransferTaskManager:
             if 'temporary_path' in locals() and temporary_path:
                 self._delete_cache_path_for_task(task, Path(temporary_path))
             message = "未命中秒传，已按设置中止（未上传任何数据）"
+            miss_sha1 = observed_sha1 or (
+                str(checksum or "").strip().upper()
+                if str(algorithm or "").strip().lower() == "sha1" else ""
+            )
+            if miss_sha1:
+                # 记负缓存：下次同一哈希 24 小时内直接跳过，不再下 5GB 验一遍
+                self._remember_rapid_miss(target_key, miss_sha1)
             self._update(task_id, status="failed", phase="aborted",
                          message=message, error=message,
                          abort_reason="rapid_miss",
