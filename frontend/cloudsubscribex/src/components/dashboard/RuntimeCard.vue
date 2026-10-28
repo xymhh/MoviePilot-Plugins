@@ -633,13 +633,18 @@ function isProgressIndeterminate(task) {
 
 function taskProgress(task) {
   if (!task) return 0;
-  if (
-    (task.transfer_active || ["pt_upgrade", "cross_transfer"].includes(task.task_kind)) &&
-    displayTotal(task) > 0
-  ) {
-    const total = displayTotal(task);
-    const transferred = displayTransferred(task);
-    return Math.max(0, Math.min(100, (transferred / total) * 100));
+  if (task.transfer_active || ["pt_upgrade", "cross_transfer"].includes(task.task_kind)) {
+    // 跨盘转存：后端 progress 是「下载 0-49 / 上传 52-99」的分阶段百分比，全程单调
+    const percent = Number(task.progress);
+    if (Number.isFinite(percent) && percent > 0) {
+      return Math.max(0, Math.min(100, percent));
+    }
+    // 兜底：拿不到百分比时才退回当前阶段字节比（该比值每阶段从 0 开始，会回跳）
+    if (displayTotal(task) > 0) {
+      const total = displayTotal(task);
+      const transferred = displayTransferred(task);
+      return Math.max(0, Math.min(100, (transferred / total) * 100));
+    }
   }
   if (["downloading", "transferring", "postprocessing"].includes(task.status)) {
     const postProgress = Number(task.postprocess_progress || 0);

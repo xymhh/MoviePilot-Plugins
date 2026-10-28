@@ -1247,9 +1247,21 @@ class CrossTransferTaskManager:
         return canceled
 
     def _update(self, task_id: str, **values) -> None:
+        """更新任务字段。
+
+        progress 只增不减：一个任务就是一份文件，中途回退（边下边传失败回退
+        本地缓存、分片重下从 0 记数、聚合基线切换）只会让界面进度条来回蹦。
+        需要真正归零的阶段用新建任务表达，不要复用同一个 task_id。
+        """
         changed = False
         with self._lock:
             task = self._tasks.get(task_id)
+            if task and "progress" in values:
+                try:
+                    requested = int(values["progress"])
+                except (TypeError, ValueError):
+                    requested = int(task.get("progress") or 0)
+                values["progress"] = max(int(task.get("progress") or 0), requested)
             if task and any(task.get(key) != value for key, value in values.items()):
                 task.update(values)
                 task["updated_at"] = time.time()
@@ -2150,7 +2162,8 @@ class CrossTransferTaskManager:
                 if stop_event.is_set():
                     raise InterruptedError
                 raw_percent = min(99, int(done * 100 / total)) if total else 0
-                percent = 50 + min(49, raw_percent // 2) if had_download else raw_percent
+                # 基准 52 与上面 rapid_upload 阶段对齐：50 会让进度条先跳回 50
+                percent = 52 + min(47, raw_percent // 2) if had_download else raw_percent
                 display_total = int(task["total"] or total or 0)
                 display_done = (
                     int(display_total * percent / 100) if had_download else done

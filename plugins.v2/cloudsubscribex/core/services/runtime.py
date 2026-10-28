@@ -820,6 +820,10 @@ class SyncRuntimeService(OwnerDelegator):
                 transferred += int(item.get("transferred") or 0)
                 speed += float(item.get("speed_bytes_per_second") or 0)
                 progress_value = int(item.get("progress") or 0)
+                # 已成功的子任务按 100% 计入，否则「前一个文件传完、下一个刚开始」
+                # 时加权平均会从 100 掉到 50，进度条跟着回跳
+                if item.get("status") == "success":
+                    progress_value = 100
                 weighted_progress += progress_value * item_total
                 unweighted_progress += progress_value
                 if (
