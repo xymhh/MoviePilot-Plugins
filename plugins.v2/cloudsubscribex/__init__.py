@@ -1424,49 +1424,54 @@ class CloudSubscribeX(_PluginBase):
         return rows
 
     def _auto_transfer_tg_item(self, item: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
-        """频道规则命中自动转存时，复用页面「转存」同一条手动转存链路。"""
-        from .core.api.sync import SyncApi
+        """频道规则命中自动转存：统一走 ``submit_candidate`` 入口。"""
+        from .core.services.discovery import Candidate, submit_candidate
 
-        links = list((item or {}).get("links") or [])
-        title = str((item or {}).get("title") or "").strip()
-        payload = {
-            "subscribe_id": int(subscribe_id or 0),
-            "resource_links": links,
-        }
-        if title and links:
-            # 把频道消息标题带进手动同步，电影单文件兜底不必只靠订阅名
-            payload["resource_titles"] = {link: title for link in links}
-        # wait=True 才能拿到实际转存文件数；否则「任务已提交」会被误标成已转存
-        return SyncApi(self).api_vue_start_manual_sync(payload, wait=True)
+        candidate = Candidate(
+            links=list((item or {}).get("links") or []),
+            title=str((item or {}).get("title") or "").strip(),
+            subscribe_id=int(subscribe_id or 0),
+            channel=str((item or {}).get("channel") or ""),
+            message_id=int((item or {}).get("message_id") or 0),
+            run_id=str((item or {}).get("run_id") or ""),
+        )
+        return submit_candidate(self, candidate, wait=True).to_payload()
 
     def _auto_transfer_tg_batch(
             self, items: List[Dict[str, Any]], subscribe_id: int,
     ) -> Dict[str, Any]:
-        """同一订阅的多条频道资源合并成一次手动转存。"""
-        from .core.api.sync import SyncApi
+        """同一订阅的多条频道资源合并成一次手动转存（同样走 submit_candidate）。"""
+        from .core.services.discovery import MAX_LINKS as MAX_BATCH_LINKS
+        from .core.services.discovery import Candidate, submit_candidate
 
         links: List[str] = []
         titles: Dict[str, str] = {}
+        channel = ""
         for item in items or []:
             title = str((item or {}).get("title") or "").strip()
+            channel = channel or str((item or {}).get("channel") or "")
             for link in (item or {}).get("links") or []:
                 text = str(link or "").strip()
                 if not text or text in titles:
                     continue
                 links.append(text)
                 titles[text] = title
-                if len(links) >= 50:
+                if len(links) >= MAX_BATCH_LINKS:
                     break
-            if len(links) >= 50:
+            if len(links) >= MAX_BATCH_LINKS:
                 break
         if not links:
             return {"success": False, "message": "没有可转存的网盘链接"}
-        payload = {
-            "subscribe_id": int(subscribe_id or 0),
-            "resource_links": links,
-            "resource_titles": titles,
-        }
-        return SyncApi(self).api_vue_start_manual_sync(payload, wait=True)
+        candidate = Candidate(
+            links=links,
+            title=" / ".join(dict.fromkeys(t for t in titles.values() if t))[:200],
+            subscribe_id=int(subscribe_id or 0),
+            channel=channel,
+        )
+        # 批量里每条消息标题不同，逐链接标题由 extra_payload 精确透传
+        return submit_candidate(
+            self, candidate, wait=True, extra_payload={"resource_titles": titles},
+        ).to_payload()
 
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:
         self._notify = bool(config.get("notify", False))
