@@ -26,7 +26,6 @@ from .cloud import (
     CloudFile,
     RapidUploadResult,
 )
-from .relay import RelayClient, RelayError
 from .target_writer import (
     TargetConflictError,
     TargetPlan,
@@ -786,12 +785,6 @@ class CrossTransferTaskManager:
                  max_concurrent: int = 2,
                  direct_stream: bool = True,
                  rapid_miss_action: str = "fallback",
-                 relay_client: Optional[RelayClient] = None,
-                 relay_max_bytes: int = 0,
-                 relay_timeout_seconds: int = 0,
-                 relay_fallback_local: bool = True,
-                 relay_connections: int = 0,
-                 relay_always: bool = False,
                  on_change: Optional[Callable[[], None]] = None,
                  hash_cache_get: Optional[Callable[[str], Optional[dict]]] = None,
                  hash_cache_put: Optional[Callable[[str, dict], None]] = None,
@@ -807,16 +800,6 @@ class CrossTransferTaskManager:
         self._rapid_miss_action = (
             "abort" if str(rapid_miss_action or "").strip().lower() == "abort" else "fallback"
         )
-        # 深圳中继：只在「115 秒传确认未命中」时接管这一个文件的下载+上传；
-        # 传完后由插件继续整理。地址/令牌缺失即视为关闭。
-        self._relay_client = relay_client if getattr(relay_client, "enabled", False) else None
-        self._relay_max_bytes = max(0, int(relay_max_bytes or 0))
-        self._relay_timeout_seconds = max(60, int(relay_timeout_seconds or 0))
-        self._relay_fallback_local = bool(relay_fallback_local)
-        # 中继下载腿线程数：0=用中继自己的配置（GOPEED_CONNECTIONS，默认 64）
-        self._relay_connections = max(0, min(int(relay_connections or 0), 128))
-        # 一律走中继：跳过 115 秒传探测与本机下载，夸克跨盘文件直接交深圳中继
-        self._relay_always = bool(relay_always)
         self._transfer_slots = Semaphore(max(1, min(int(max_concurrent or 2), 10)))
         self._tasks: dict[str, dict] = {}
         self._lock = Lock()
@@ -1503,171 +1486,6 @@ class CrossTransferTaskManager:
             md5=str(checksum or "") if algorithm == "md5" else source_md5,
         )
 
-    def _relay_transfer(
-            self, task: dict, task_id: str, target: CloudDriveProvider,
-            target_path: str, target_name: str, target_name_text: str,
-            checksum: str, total: int, stop_event: Event,
-    ) -> bool:
-        """通过 TargetWriter 查目标、串行化、提交中继并回填真实文件。"""
-        plan = TargetPlan(
-            provider_key=str(task["target_provider"]),
-            path=target_path,
-            name=target_name,
-            size=int(total or 0),
-            sha1=str(checksum or ""),
-        )
-        result = self._target_writer.commit(
-            plan,
-            write=lambda: self._relay_transfer_locked(
-                task, task_id, target, target_path, target_name,
-                target_name_text, checksum, total, stop_event,
-            ),
-        )
-        if result.status == "not_written":
-            return False
-        if result.status not in {"reused", "written"} or result.file is None:
-            raise TargetUnknownError(f"中继目标写入状态异常：{result.status}")
-        file = result.file
-        reused = result.status == "reused"
-        self._update(
-            task_id, status="success", phase="done", progress=100,
-            transferred=int(result.actual_size or getattr(file, "size", 0) or total or 0),
-            speed_bytes_per_second=0.0,
-            stage_transferred=0, stage_total=0,
-            message=(
-                f"目标已存在相同文件，跳过重复上传：{result.actual_name}"
-                if reused else f"已由深圳中继上传到{target_name_text}"
-            ),
-            method="relay-reuse" if reused else "relay",
-            result_file_id=str(getattr(file, "id", "") or ""),
-            result_file_name=str(
-                getattr(file, "name", "") or result.actual_name or target_name
-            ),
-            result_file_size=int(getattr(file, "size", 0) or result.actual_size or 0),
-            result_sha1=str(getattr(file, "sha1", "") or ""),
-            result_md5=str(getattr(file, "md5", "") or ""),
-            finished_at=time.time(),
-        )
-        return True
-
-    def _relay_transfer_locked(
-            self, task: dict, task_id: str, target: CloudDriveProvider,
-            target_path: str, target_name: str, target_name_text: str,
-            checksum: str, total: int, stop_event: Event,
-    ) -> CloudFile | bool:
-        """把「秒传确认未命中」的单个文件交给深圳中继。
-
-        CloudFile → 已由中继上传并在网盘里找到真实文件，交给 TargetWriter 核验；
-        False     → 中继未完成且允许回落，调用方继续本机原链路。
-        """
-        client = self._relay_client
-        if client is None:
-            return False
-        source = task.get("source_file")
-        source_name = str(getattr(source, "name", "") or task.get("title") or "")
-        payload = {
-            "provider": str(task.get("source_provider") or "quark"),
-            "file_id": str(getattr(source, "id", "") or ""),
-            "file_name": source_name,
-            "size": int(total or 0),
-            "sha1": str(checksum or getattr(source, "sha1", "") or "").upper(),
-            "target": {"path": str(target_path), "name": str(target_name)},
-            "connections": int(self._relay_connections or 0),
-        }
-        try:
-            job = client.submit(payload)
-        except RelayError as error:
-            logger.warning(f"深圳中继提交失败，按配置决定是否回落：{error}")
-            if self._relay_fallback_local:
-                self._update(
-                    task_id, phase="fallback",
-                    message=f"深圳中继不可用，回落本机：{error}",
-                )
-                return False
-            raise RuntimeError(f"深圳中继不可用：{error}") from error
-        job_id = str(job.get("id") or "")
-        if not job_id:
-            if self._relay_fallback_local:
-                return False
-            raise RuntimeError("深圳中继未返回任务 ID")
-        logger.info(
-            f"115 秒传未命中，已交给深圳中继：{target_name} -> "
-            f"{target_path}（job={job_id}）"
-        )
-        self._update(
-            task_id, phase="relay", progress=6,
-            message=f"115 秒传未命中，深圳中继处理中（{job_id}）",
-        )
-        deadline = time.time() + max(60, self._relay_timeout_seconds)
-        last_message = ""
-        while time.time() < deadline:
-            if stop_event.is_set():
-                client.cancel(job_id)
-                raise InterruptedError
-            try:
-                current = client.get(job_id)
-            except RelayError as error:
-                logger.warning(f"深圳中继状态查询失败，稍后重试：{error}")
-                time.sleep(5)
-                continue
-            status = str(current.get("status") or "")
-            phase = str(current.get("phase") or "")
-            message = str(current.get("message") or "")
-            if message and message != last_message:
-                last_message = message
-                logger.info(f"深圳中继 {job_id}：{phase} {message}")
-            percent = int(current.get("progress") or 0)
-            transferred = int(current.get("transferred") or 0)
-            speed = float(current.get("speed") or 0)
-            if status == "running":
-                self._update(
-                    task_id, phase="relay", progress=max(6, min(98, percent)),
-                    transferred=min(int(total or 0), transferred),
-                    speed_bytes_per_second=speed,
-                    message=f"深圳中继：{message or phase}",
-                )
-            if status == "success":
-                result = current.get("result") or {}
-                file_name = str(result.get("file_name") or target_name)
-                result_file = None
-                for _ in range(20):
-                    try:
-                        result_file = target.require(
-                            CloudDriveCapability.FILE_QUERY
-                        ).find_file(target_path, file_name)
-                    except Exception as error:  # noqa: BLE001 - 查一次失败不代表没传成
-                        logger.debug(f"中继完成后查询目标文件失败：{error}", exc_info=True)
-                    if result_file:
-                        break
-                    time.sleep(3)
-                if not result_file:
-                    raise RuntimeError("深圳中继已上传，但目标网盘未找到文件")
-                logger.info(
-                    f"深圳中继完成：{target_name} -> {target_path}/{file_name}"
-                )
-                return result_file
-            if status in {"failed", "cancelled"}:
-                error = str(current.get("error") or status)
-                if self._relay_fallback_local:
-                    logger.warning(f"深圳中继失败，回落本机链路：{error}")
-                    self._update(
-                        task_id, phase="fallback",
-                        message=f"深圳中继失败，回落本机：{error}",
-                        error="", progress=6,
-                    )
-                    return False
-                raise RuntimeError(f"深圳中继失败：{error}")
-            time.sleep(3)
-        client.cancel(job_id)
-        if self._relay_fallback_local:
-            logger.warning("深圳中继超时，回落本机链路")
-            self._update(
-                task_id, phase="fallback", message="深圳中继超时，回落本机",
-                error="", progress=6,
-            )
-            return False
-        raise RuntimeError("深圳中继超时")
-
     def _run(self, task_id: str, checksum: str) -> None:
         # 同一 cache_key 的任务严格串行：第二个任务排在第一个之后，
         # 兄弟任务先完成时由引用计数保留完整缓存供其复用（1.6.47 同源并发互删）。
@@ -1743,47 +1561,7 @@ class CrossTransferTaskManager:
                 getattr(target, "name", "") or target_key or "目标网盘"
             )
             rapid_miss_abort = self._rapid_miss_action == "abort"
-            relay_active = bool(
-                self._relay_client
-                and not source_path
-                and str(task.get("source_provider") or "") == "quark"
-                and int(task["total"] or 0) > 0
-                and self._relay_max_bytes
-                and int(task["total"] or 0) <= self._relay_max_bytes
-                and target.supports(CloudDriveCapability.FILE_QUERY)
-            )
-            if relay_active:
-                logger.info(
-                    f"中继接管条件满足：{target_name}（{int(task['total'] or 0)} 字节，"
-                    f"{'一律走中继' if self._relay_always else '秒传未命中时接管'}）"
-                )
-            elif not source_path and str(task.get("source_provider") or "") == "quark":
-                logger.info(
-                    "中继未接管："
-                    f"client={'有' if self._relay_client else '无'} "
-                    f"大小={int(task['total'] or 0)} 上限={self._relay_max_bytes} "
-                    f"目标可查={target.supports(CloudDriveCapability.FILE_QUERY)}"
-                    f" 源={task.get('source_provider') or '-'}"
-                )
-            relay_tried = False
             remote_rapid_attempted = False
-            if relay_active and self._relay_always:
-                # 「跨盘任务一律走中继」：不探秒传、不本机下载，直接交深圳中继。
-                # 中继失败仍按 relay_fallback_local 决定回落本机还是记失败。
-                self._update(
-                    task_id, phase="relay", progress=6,
-                    message="交由国内中继接管（一律走中继）",
-                )
-                logger.info(
-                    f"一律走中继：{target_name}（{int(task['total'] or 0)} 字节）"
-                )
-                relay_tried = True
-                if self._relay_transfer(
-                        task, task_id, target, target_path, target_name,
-                        target_name_text, checksum,
-                        int(task["total"] or 0), stop_event,
-                ):
-                    return
             if (
                     not source_path and algorithm and checksum
                     and target.supports(CloudDriveCapability.RAPID_UPLOAD)
@@ -1816,17 +1594,7 @@ class CrossTransferTaskManager:
                         )
                         return
                     if rapid_miss_abort:
-                        # abort 模式：下载前探测未命中即中止（不下载、不上传）；
-                        # 但中止前先给中继一次机会——中止本来就意味着这条文件没救，
-                        # 中继接管只会更好（不下载、不走跨境上传）
-                        if relay_active and not relay_tried:
-                            relay_tried = True
-                            if self._relay_transfer(
-                                    task, task_id, target, target_path, target_name,
-                                    target_name_text, checksum,
-                                    int(task["total"] or 0), stop_event,
-                            ):
-                                return
+                        # abort 模式：下载前探测未命中即中止（不下载、不上传）
                         raise RapidMissAborted()
             source_provider = None
             source_name = ""
@@ -1837,7 +1605,7 @@ class CrossTransferTaskManager:
                     or task["source_provider"] or "源网盘"
                 )
             if (
-                    (rapid_miss_abort or relay_active) and not source_path
+                    rapid_miss_abort and not source_path
                     and not remote_rapid_attempted
                     and algorithm and checksum
                     and target.supports(CloudDriveCapability.RAPID_UPLOAD)
@@ -1902,31 +1670,10 @@ class CrossTransferTaskManager:
                         )
                         return
                     if probe_result is not None and not probe_result.reused:
-                        if relay_active:
-                            relay_tried = True
-                        if relay_active and self._relay_transfer(
-                                task, task_id, target, target_path, target_name,
-                                target_name_text, checksum, expected_size, stop_event,
-                        ):
-                            return
                         if rapid_miss_abort:
                             raise RapidMissAborted()
-                    if probe_result is None:
-                        # 无法零流量探测（缺校验和/取链失败/接口异常）：abort 模式下
-                        # 结局本来就是中止，先给中继一次机会，失败才走原逻辑
-                        if rapid_miss_abort and relay_active and not relay_tried:
-                            relay_tried = True
-                            self._update(
-                                task_id, phase="rapid_upload",
-                                message="秒传无法判定，改为深圳中继处理",
-                            )
-                            if self._relay_transfer(
-                                    task, task_id, target, target_path, target_name,
-                                    target_name_text, checksum,
-                                    int(task["total"] or 0), stop_event,
-                            ):
-                                return
-                        # 继续下载后再按 abort 处理（与 1.6.55 一致）
+                    # 无法零流量探测（缺校验和/取链失败/接口异常）时不做任何处理：
+                    # 继续下载后再按 abort 处理（与 1.6.55 一致）
             if (
                     not source_path
                     and self._direct_stream
@@ -2285,14 +2032,6 @@ class CrossTransferTaskManager:
             local_result = self._target_writer.commit(local_plan, write_local)
             if local_result.status == "not_written":
                 if rapid_miss_abort:
-                    if relay_active and not relay_tried:
-                        relay_tried = True
-                        if self._relay_transfer(
-                                task, task_id, target, target_path, target_name,
-                                target_name_text, checksum,
-                                int(task["total"] or 0), stop_event,
-                        ):
-                            return
                     raise RapidMissAborted()
                 raise RuntimeError("秒传未命中且普通上传失败" if fallback else "秒传未命中")
             result_file = local_result.file

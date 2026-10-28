@@ -54,7 +54,6 @@ from .core.api import (
     TgMonitorApi,
 )
 from .core.hook import MessageRoutingHook, PluginEventHandler, SubscriptionSearchHook
-from .core.relay import probe_health
 from .core.legacy_migration import LegacyIdMigrator
 from .core.media_scope import configure_media_path_ignores
 from .core.services import (
@@ -178,7 +177,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.105"
+    plugin_version = "1.7.106"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -262,14 +261,6 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_upload_concurrency: int = 4
     _cross_transfer_rapid_miss_action: str = "fallback"
     # 国内中继上传（实验）：默认关闭，未配置地址时强制视为关闭。
-    _cross_transfer_relay_enabled: bool = False
-    _cross_transfer_relay_always: bool = False
-    _cross_transfer_relay_url: str = ""
-    _cross_transfer_relay_token: str = ""
-    _cross_transfer_relay_max_file_gb: int = 25
-    _cross_transfer_relay_timeout_minutes: int = 180
-    _cross_transfer_relay_fallback_local: bool = True
-    _cross_transfer_relay_threads: int = 0
     # TG 频道监控（用户自己的 TG API 会话）：默认关闭，未配置凭据时强制视为关闭。
     _tg_monitor_enabled: bool = False
     _tg_api_id: int = 0
@@ -855,7 +846,6 @@ class CloudSubscribeX(_PluginBase):
             f"洗版模式={self._upgrade_mode}, "
             f"洗版范围={'指定订阅' if self._upgrade_subscribe_ids else '全部'}, "
             f"当前接管态={self._is_takeover_active()}")
-        self._log_relay_state()
         self._start_residue_cleanup()
         self._start_strm_full_scan()
         self._start_strm_increment()
@@ -885,29 +875,6 @@ class CloudSubscribeX(_PluginBase):
             self._persist_config_values(auto_subscribe_onlyonce=False)
             if self._scheduler.get_jobs():
                 self._scheduler.start()
-
-    def _log_relay_state(self) -> None:
-        """配置应用时把中继实际生效状态与连通性写进日志。
-
-        中继是「秒传未命中」的唯一出路，配置错一项就会静默退回本机链路，
-        仅在配置应用时打一行，避免每次任务重复探测。
-        """
-        if not self._cross_transfer_relay_enabled:
-            if self._cross_transfer_relay_url:
-                logger.info("跨盘中继未启用（开关关闭），秒传未命中按本机链路处理")
-            else:
-                logger.info("跨盘中继未启用（开关关闭或中继地址为空），秒传未命中按本机链路处理")
-            return
-        logger.info(
-            f"跨盘中继已启用：地址={self._cross_transfer_relay_url}, "
-            f"令牌={'已配置' if self._cross_transfer_relay_token else '空'}, "
-            f"单文件上限={self._cross_transfer_relay_max_file_gb}GB, "
-            f"单任务超时={self._cross_transfer_relay_timeout_minutes}分钟, "
-            f"下载线程={'中继默认' if not self._cross_transfer_relay_threads else self._cross_transfer_relay_threads}, "
-            f"失败回落本机={'是' if self._cross_transfer_relay_fallback_local else '否'}, "
-            f"接管范围={'全部跨盘任务' if self._cross_transfer_relay_always else '仅秒传未命中'}")
-        logger.info(
-            f"跨盘中继连通性：{probe_health(self._cross_transfer_relay_url)}")
 
     def _strm_scan_time_budget(self) -> int:
         """STRM 全量校准单次时间预算（秒）；读取失败或负数按 0（不限）处理。"""
@@ -1675,40 +1642,6 @@ class CloudSubscribeX(_PluginBase):
         self._cross_transfer_rapid_miss_action = (
             rapid_miss_action if rapid_miss_action in {"fallback", "abort"} else "fallback"
         )
-        # 国内中继上传：开关 + 地址缺一不可，否则保持关闭（避免每个文件白等一次超时）。
-        self._cross_transfer_relay_enabled = bool(
-            config.get("cross_transfer_relay_enabled", False)
-        )
-        self._cross_transfer_relay_url = str(
-            config.get("cross_transfer_relay_url", "") or ""
-        ).strip().rstrip("/")
-        self._cross_transfer_relay_token = str(
-            config.get("cross_transfer_relay_token", "") or ""
-        ).strip()
-        try:
-            relay_max_gb = int(config.get("cross_transfer_relay_max_file_gb", 25) or 0)
-        except (TypeError, ValueError):
-            relay_max_gb = 25
-        self._cross_transfer_relay_max_file_gb = max(0, min(relay_max_gb, 500))
-        try:
-            relay_timeout = int(config.get("cross_transfer_relay_timeout_minutes", 180) or 180)
-        except (TypeError, ValueError):
-            relay_timeout = 180
-        self._cross_transfer_relay_timeout_minutes = max(5, min(relay_timeout, 1440))
-        self._cross_transfer_relay_fallback_local = bool(
-            config.get("cross_transfer_relay_fallback_local", True)
-        )
-        try:
-            relay_threads = int(config.get("cross_transfer_relay_threads", 0) or 0)
-        except (TypeError, ValueError):
-            relay_threads = 0
-        self._cross_transfer_relay_threads = max(0, min(relay_threads, 128))
-        # 一律走中继：跳过 115 秒传与本机下载，夸克跨盘文件全部交深圳中继
-        self._cross_transfer_relay_always = bool(
-            config.get("cross_transfer_relay_always", False)
-        )
-        if self._cross_transfer_relay_enabled and not self._cross_transfer_relay_url:
-            self._cross_transfer_relay_enabled = False
         self._apply_tg_monitor_config(config)
         self._residue_cleanup = bool(
             config.get("cross_transfer_residue_cleanup", True)

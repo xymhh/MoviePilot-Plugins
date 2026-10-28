@@ -53,7 +53,7 @@ CrossTransferTaskManager = transfer_module.CrossTransferTaskManager
 
 def make_manager():
     manager = CrossTransferTaskManager(
-        lambda key: MagicMock(), relay_client=MagicMock(),
+        lambda key: MagicMock(),
     )
     manager._notify_change = lambda: None
     manager._tasks["cross:t1"] = {

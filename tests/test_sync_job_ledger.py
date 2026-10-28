@@ -336,7 +336,7 @@ class SyncJobRepositoryTests(unittest.TestCase):
                 result_file_id="file-1",
                 result_name="第17集.mp4",
                 result_size=1024,
-                result_method="relay",
+                result_method="rapid",
             )
         )
         self.db.commit()

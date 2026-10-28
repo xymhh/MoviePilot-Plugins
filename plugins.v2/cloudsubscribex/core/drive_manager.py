@@ -10,7 +10,6 @@ from .cloud import (
     CloudDriveRegistry,
 )
 from .transfer import CrossTransferTaskManager
-from .relay import RelayClient
 from ..drive.scanner import DriverRegistry
 from ..search.types import normalize_resource_type
 
@@ -35,12 +34,6 @@ class CloudDriveManager:
         for def_cls in DriverRegistry.get_definitions():
             self.register_provider(def_cls.id)
 
-        relay_client = None
-        if getattr(self._plugin, "_cross_transfer_relay_enabled", False):
-            relay_client = RelayClient(
-                getattr(self._plugin, "_cross_transfer_relay_url", ""),
-                getattr(self._plugin, "_cross_transfer_relay_token", ""),
-            )
         self.cross_transfer_manager = CrossTransferTaskManager(
             self.registry.get,
             download_path=getattr(self._plugin, "_cross_transfer_download_path", ""),
@@ -50,26 +43,6 @@ class CloudDriveManager:
             rapid_miss_action=getattr(
                 self._plugin, "_cross_transfer_rapid_miss_action", "fallback"
             ),
-            relay_client=relay_client,
-            relay_max_bytes=(
-                max(0, int(getattr(
-                    self._plugin, "_cross_transfer_relay_max_file_gb", 0
-                ) or 0)) * 1024 ** 3
-            ),
-            relay_timeout_seconds=(
-                max(0, int(getattr(
-                    self._plugin, "_cross_transfer_relay_timeout_minutes", 180
-                ) or 0)) * 60
-            ),
-            relay_fallback_local=bool(getattr(
-                self._plugin, "_cross_transfer_relay_fallback_local", True
-            )),
-            relay_connections=int(getattr(
-                self._plugin, "_cross_transfer_relay_threads", 0
-            ) or 0),
-            relay_always=bool(getattr(
-                self._plugin, "_cross_transfer_relay_always", False
-            )),
             on_change=getattr(self._plugin, "_mark_runtime_changed", None),
             hash_cache_get=getattr(
                 self._plugin, "get_cached_source_sha1", None
