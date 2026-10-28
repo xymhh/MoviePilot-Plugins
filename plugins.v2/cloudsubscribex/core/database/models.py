@@ -263,6 +263,18 @@ class AccountSnapshot(CloudSubscribeBase):
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
+class SourceSha1Cache(CloudSubscribeBase):
+    """源文件 SHA1 缓存：秒传未命中后本地文件删掉，哈希留着供下次零流量探测。"""
+
+    __tablename__ = "source_sha1_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(512), primary_key=True)
+    sha1: Mapped[str] = mapped_column(String(64), nullable=False)
+    size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    name: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class AuthSession(CloudSubscribeBase):
     __tablename__ = "auth_sessions"
 

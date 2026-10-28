@@ -178,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.97"
+    plugin_version = "1.7.98"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -993,77 +993,34 @@ class CloudSubscribeX(_PluginBase):
         }
 
     # ---- 源文件 SHA1 缓存（秒传未命中后零流量重试） ----
-    _SOURCE_SHA1_CACHE_FILE = "source_sha1_cache.json"
     _SOURCE_SHA1_CACHE_TTL_DAYS = 30
     _SOURCE_SHA1_CACHE_LIMIT = 2000
 
-    def _source_sha1_cache_path(self):
-        return self.get_data_path() / self._SOURCE_SHA1_CACHE_FILE
-
-    def _read_source_sha1_cache(self) -> dict:
-        path = self._source_sha1_cache_path()
-        if not path.exists():
-            return {}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as error:  # noqa: BLE001 - 缓存损坏按空处理，不影响传输
-            logger.debug(f"源哈希缓存读取失败，按空处理：{error}")
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    def _write_source_sha1_cache(self, data: dict) -> None:
-        path = self._source_sha1_cache_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        tmp.replace(path)
-
     def get_cached_source_sha1(self, key: str) -> Optional[dict]:
-        """按「来源网盘|体积|文件名」取已记录的源文件 SHA1。"""
+        """按「来源网盘|体积|文件名」取库中记录过的源文件 SHA1。"""
         key = str(key or "").strip()
         if not key:
             return None
-        cache = self._read_source_sha1_cache()
-        entry = cache.get(key)
-        if not isinstance(entry, dict):
+        entry = self._get_data_store().get_source_sha1(
+            key, ttl_seconds=self._SOURCE_SHA1_CACHE_TTL_DAYS * 86400
+        )
+        if not entry:
             return None
-        stamp = str(entry.get("updated_at") or "")
-        try:
-            saved = datetime.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
-        except Exception:  # noqa: BLE001
-            saved = None
-        if saved is not None:
-            saved = pytz.timezone(settings.TZ).localize(saved)
-            if datetime.datetime.now(pytz.timezone(settings.TZ)) - saved > datetime.timedelta(
-                days=self._SOURCE_SHA1_CACHE_TTL_DAYS
-            ):
-                return None
-        return entry
+        return {"sha1": entry.get("sha1") or "", "size": entry.get("size") or 0}
 
     def put_cached_source_sha1(self, key: str, entry: dict) -> None:
         """记录源文件 SHA1，供秒传未命中后的零流量重试使用。"""
         key = str(key or "").strip()
-        sha1 = str((entry or {}).get("sha1") or "").strip().upper()
-        if not key or not sha1:
+        payload = entry or {}
+        if not key or not str(payload.get("sha1") or "").strip():
             return
-        cache = self._read_source_sha1_cache()
-        cache[key] = {
-            "sha1": sha1,
-            "size": int((entry or {}).get("size") or 0),
-            "name": str((entry or {}).get("name") or ""),
-            "updated_at": datetime.datetime.now(
-                pytz.timezone(settings.TZ)
-            ).strftime("%Y-%m-%d %H:%M:%S"),
-        }
-        if len(cache) > self._SOURCE_SHA1_CACHE_LIMIT:
-            ordered = sorted(
-                cache.items(),
-                key=lambda item: str((item[1] or {}).get("updated_at") or ""),
-            )
-            cache = dict(ordered[-self._SOURCE_SHA1_CACHE_LIMIT:])
-        self._write_source_sha1_cache(cache)
+        self._get_data_store().put_source_sha1(
+            key,
+            str(payload.get("sha1") or "").strip().upper(),
+            size=int(payload.get("size") or 0),
+            name=str(payload.get("name") or ""),
+            limit=self._SOURCE_SHA1_CACHE_LIMIT,
+        )
 
     def run_strm_full_scan(self, reason: str = "手动") -> dict:
         """后台按目录 CID 全量遍历媒体库，补齐/校准 STRM。"""

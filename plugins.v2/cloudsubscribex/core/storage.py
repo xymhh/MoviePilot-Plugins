@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import datetime
+import json
 from threading import RLock
 from typing import Any, Dict, List, Optional
 
@@ -75,9 +77,60 @@ class CloudSubscribeDataStore:
             self.manager.init_db()
             self.manager.update_db()
             repaired = self.repositories.history.repair_group_keys()
+            self._migrate_legacy_sha1_cache()
             if repaired:
                 logger.info(f"CloudSubscribe 历史媒体分组已修复：{repaired} 条")
             self._initialized = True
+
+    def _migrate_legacy_sha1_cache(self) -> None:
+        """把 1.7.97 的 source_sha1_cache.json 一次性并入数据库表。"""
+        legacy = self.manager.db_path.parent / "source_sha1_cache.json"
+        if not legacy.exists():
+            return
+        try:
+            raw = json.loads(legacy.read_text(encoding="utf-8"))
+        except Exception as error:  # noqa: BLE001 - 旧缓存损坏按空处理
+            logger.debug(f"旧源哈希缓存读取失败，跳过迁移：{error}")
+            raw = {}
+        migrated = 0
+        if isinstance(raw, dict):
+            for key, entry in raw.items():
+                if not isinstance(entry, dict):
+                    continue
+                sha1 = str(entry.get("sha1") or "").strip()
+                if not str(key or "").strip() or not sha1:
+                    continue
+                ok = self.repositories.source_sha1.put(
+                    key,
+                    sha1,
+                    size=int(entry.get("size") or 0),
+                    name=str(entry.get("name") or ""),
+                    updated_at=self._legacy_timestamp(entry.get("updated_at")),
+                )
+                migrated += 1 if ok else 0
+        try:
+            legacy.replace(legacy.with_suffix(".json.migrated"))
+        except OSError as error:
+            logger.debug(f"旧源哈希缓存改名失败：{error}", exc_info=True)
+        if migrated:
+            logger.info(f"源文件哈希缓存已并入数据库：{migrated} 条")
+
+    @staticmethod
+    def _legacy_timestamp(value: Any) -> int:
+        text = str(value or "").strip()
+        if not text:
+            return 0
+        try:
+            saved = datetime.datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return 0
+        try:
+            from app.core.config import settings
+            from pytz import timezone
+
+            return int(timezone(settings.TZ).localize(saved).timestamp())
+        except Exception:  # noqa: BLE001 - 时区不可用时退回本机时区
+            return int(saved.timestamp())
 
     def _load_database(self, key: str) -> Any:
         if key == self.HISTORY_KEY:
@@ -173,6 +226,27 @@ class CloudSubscribeDataStore:
     def save_account(self, account_key: str, value: Dict[str, Any]) -> None:
         self.initialize()
         self.repositories.account.save_account(account_key, value)
+
+    def get_source_sha1(
+            self, key: str, ttl_seconds: int = 0
+    ) -> Optional[Dict[str, Any]]:
+        """取源文件 SHA1（秒传零流量重试用）。"""
+        self.initialize()
+        return self.repositories.source_sha1.get(key, ttl_seconds=ttl_seconds)
+
+    def put_source_sha1(
+            self,
+            key: str,
+            sha1: str,
+            size: int = 0,
+            name: str = "",
+            limit: int = 0,
+    ) -> bool:
+        """记录源文件 SHA1，超出上限按更新时间淘汰最旧。"""
+        self.initialize()
+        return self.repositories.source_sha1.put(
+            key, sha1, size=size, name=name, limit=limit
+        )
 
     def close(self) -> None:
         with self._lock:

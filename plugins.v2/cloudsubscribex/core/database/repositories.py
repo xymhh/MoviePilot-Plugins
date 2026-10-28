@@ -2,6 +2,7 @@
 
 import copy
 import hashlib
+import time
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from .models import (
     HistoryRecord,
     OfflinePendingTask,
     PointBudgetRecord,
+    SourceSha1Cache,
 )
 from .sync_jobs import SyncJobRepository
 from ..history import history_group_key
@@ -882,6 +884,109 @@ class AuthSessionRepository(DbOper):
         }
 
 
+class SourceSha1CacheRepository(DbOper):
+    """源文件 SHA1 点查/写入，服务于秒传未命中后的零流量重试。"""
+
+    @staticmethod
+    def normalize_key(key: Any) -> str:
+        return str(key or "").strip()
+
+    @db_query
+    def get(
+            self, key: str, ttl_seconds: int = 0, db: Session = None
+    ) -> Optional[Dict[str, Any]]:
+        cache_key = self.normalize_key(key)
+        if not cache_key:
+            return None
+        row = db.get(SourceSha1Cache, cache_key)
+        if row is None:
+            return None
+        if ttl_seconds > 0 and row.updated_at:
+            if time.time() - int(row.updated_at) > ttl_seconds:
+                return None
+        return {
+            "sha1": row.sha1,
+            "size": int(row.size or 0),
+            "name": row.name or "",
+            "updated_at": int(row.updated_at or 0),
+        }
+
+    @db_update
+    def put(
+            self,
+            key: str,
+            sha1: str,
+            size: int = 0,
+            name: str = "",
+            limit: int = 0,
+            updated_at: int = 0,
+            db: Session = None,
+    ) -> bool:
+        cache_key = self.normalize_key(key)
+        digest = str(sha1 or "").strip().upper()
+        if not cache_key or not digest:
+            return False
+        now = int(updated_at or 0) or int(time.time())
+        row = db.get(SourceSha1Cache, cache_key)
+        if row is None:
+            SourceSha1Cache(
+                cache_key=cache_key,
+                sha1=digest,
+                size=max(0, int(size or 0)),
+                name=str(name or ""),
+                updated_at=now,
+            ).create(db)
+        else:
+            row.update(db, {
+                "sha1": digest,
+                "size": max(0, int(size or 0)),
+                "name": str(name or ""),
+                "updated_at": now,
+            })
+        if limit > 0:
+            self._prune(limit, db=db)
+        return True
+
+    @db_update
+    def purge_expired(
+            self, ttl_seconds: int, db: Session = None
+    ) -> int:
+        if ttl_seconds <= 0:
+            return 0
+        deadline = int(time.time()) - int(ttl_seconds)
+        rows = db.scalars(
+            select(SourceSha1Cache.cache_key).where(
+                SourceSha1Cache.updated_at < deadline
+            )
+        ).all()
+        if not rows:
+            return 0
+        db.execute(
+            delete(SourceSha1Cache).where(
+                SourceSha1Cache.cache_key.in_(list(rows))
+            )
+        )
+        return len(rows)
+
+    def _prune(self, limit: int, db: Session) -> None:
+        # 会话关闭了 autoflush，先落盘新增/更新，否则本次写入不在淘汰候选里。
+        db.flush()
+        stale = db.scalars(
+            select(SourceSha1Cache.cache_key)
+            .order_by(
+                SourceSha1Cache.updated_at.desc(),
+                SourceSha1Cache.cache_key.desc(),
+            )
+            .offset(max(0, int(limit)))
+        ).all()
+        if stale:
+            db.execute(
+                delete(SourceSha1Cache).where(
+                    SourceSha1Cache.cache_key.in_(list(stale))
+                )
+            )
+
+
 class CloudSubscribeRepositories:
     def __init__(
             self,
@@ -896,3 +1001,4 @@ class CloudSubscribeRepositories:
         self.budget = PointBudgetRepository(manager, db)
         self.account = AccountSnapshotRepository(manager, db)
         self.auth = AuthSessionRepository(manager, db)
+        self.source_sha1 = SourceSha1CacheRepository(manager, db)
