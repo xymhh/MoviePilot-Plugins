@@ -729,8 +729,9 @@ class TemplateNamedVersionTests(unittest.TestCase):
         self.assertIn("已符合当前重命名模板", reason)
 
     def test_should_upgrade_candidate_accepts_existing_name(self):
-        """25. _should_upgrade_candidate 传现有文件名即命中模板门槛。"""
+        """25. 模板名不再一票否决：评分/体积有收益照样升级，只有无收益时才保留。"""
         handler = self._handler(prefer_template_named_version=True)
+        # 评分提升 + 现有名符合模板 → 仍然升级（旧行为误判为保留，洗版永久失效）
         should_upgrade, reason = handler._should_upgrade_candidate(
             3,
             99,
@@ -742,8 +743,49 @@ class TemplateNamedVersionTests(unittest.TestCase):
             season=1,
             episode=1,
         )
-        self.assertFalse(should_upgrade)
-        self.assertIn("已符合当前重命名模板", reason)
+        self.assertTrue(should_upgrade)
+        self.assertIn("评分提升", reason)
+        # 同评分但体积更大 + 符合模板 → largest 模式仍然升级
+        should_upgrade_size, reason_size = handler._should_upgrade_candidate(
+            99,
+            99,
+            1_500_000_000,
+            4_800_000_000,
+            old_file_name="正相反的你与我 - S01E01.mkv",
+            subscribe=_SUB,
+            mediainfo=_MEDIA,
+            season=1,
+            episode=1,
+        )
+        self.assertTrue(should_upgrade_size)
+        self.assertIn("同评分保留更大文件", reason_size)
+        # 同评分且候选没更大 + 符合模板 → 才走模板保留
+        blocked, blocked_reason = handler._should_upgrade_candidate(
+            99,
+            99,
+            4_800_000_000,
+            4_800_000_000,
+            old_file_name="正相反的你与我 - S01E01.mkv",
+            subscribe=_SUB,
+            mediainfo=_MEDIA,
+            season=1,
+            episode=1,
+        )
+        self.assertFalse(blocked)
+        self.assertIn("已符合当前重命名模板", blocked_reason)
+        # 评分降低 + 符合模板 → 保留
+        blocked_lower, _ = handler._should_upgrade_candidate(
+            99,
+            3,
+            100,
+            9999,
+            old_file_name="正相反的你与我 - S01E01.mkv",
+            subscribe=_SUB,
+            mediainfo=_MEDIA,
+            season=1,
+            episode=1,
+        )
+        self.assertFalse(blocked_lower)
         # 未传文件名时行为不变
         should_upgrade2, reason2 = handler._should_upgrade_candidate(3, 99, 100, 9999)
         self.assertTrue(should_upgrade2)

@@ -38,9 +38,12 @@ class UpgradeRuleScoringService(OwnerDelegator):
         if not has_existing:
             return True, "无现有版本"
         old_file_name = str(old_file_name or "").strip()
-        if old_file_name and self._version_matches_rename_template(
-                subscribe, mediainfo, old_file_name, season, episode):
-            return False, f"现有版本已符合当前重命名模板，保留 {old_file_name}"
+        # 「已符合重命名模板」只用于挡掉无收益的重复转存，不能一票否决体积/评分升级：
+        # 插件自己转存过的文件必然符合模板，若在此处直接 return，洗版会永远失效。
+        template_conformant = bool(
+            old_file_name and self._version_matches_rename_template(
+                subscribe, mediainfo, old_file_name, season, episode)
+        )
         old_score = int(old_score or 0)
         new_score = int(new_score or 0)
         old_size = max(0, int(old_size or 0))
@@ -56,13 +59,19 @@ class UpgradeRuleScoringService(OwnerDelegator):
                 return True, (
                     f"同评分保留更大文件 {format_size(old_size)}→{format_size(new_size)}"
                 )
+            if template_conformant:
+                return False, f"现有版本已符合当前重命名模板，保留 {old_file_name}"
             return False, "同评分且候选文件未更大"
         if mode == "smallest":
             if old_size and new_size and new_size < old_size:
                 return True, (
                     f"同评分保留更小文件 {format_size(old_size)}→{format_size(new_size)}"
                 )
+            if template_conformant:
+                return False, f"现有版本已符合当前重命名模板，保留 {old_file_name}"
             return False, "同评分且候选文件未更小"
+        if template_conformant:
+            return False, f"现有版本已符合当前重命名模板，保留 {old_file_name}"
         return False, "同评分不执行替换"
 
     def _version_matches_rename_template(

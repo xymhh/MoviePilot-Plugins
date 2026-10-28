@@ -54,7 +54,7 @@ export function createUpgradeSection(options) {
             key: "prefer_template_named_version",
             label: "保留符合重命名格式的版本",
             type: "switch",
-            hint: "现有文件名已等于当前「重命名格式」渲染结果时直接保留，不再被评分更高的候选替换（按现有重命名规则优先）；关闭后完全按评分/体积决定替换。",
+            hint: "现有文件名已等于当前「重命名格式」渲染结果时，仅在评分与体积都没有提升的情况下才保留（用于挡掉无收益的重复转存）；评分更高或体积更大仍会替换。关闭后连无收益的情况也完全按评分/体积判定。",
             cols: 4,
           },
         ],
