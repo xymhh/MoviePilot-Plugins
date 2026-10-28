@@ -71,6 +71,12 @@ class CloudDriveManager:
                 self._plugin, "_cross_transfer_relay_always", False
             )),
             on_change=getattr(self._plugin, "_mark_runtime_changed", None),
+            hash_cache_get=getattr(
+                self._plugin, "get_cached_source_sha1", None
+            ),
+            hash_cache_put=getattr(
+                self._plugin, "put_cached_source_sha1", None
+            ),
         )
 
         cloud_key = getattr(self._plugin, "_cloud_drive_key", "115")

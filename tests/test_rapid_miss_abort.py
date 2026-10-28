@@ -651,5 +651,84 @@ class RemoteSha1RangeReaderTests(unittest.TestCase):
             reader.read_range_sha1("abc")
 
 
+class SourceHashCacheRetryTests(RapidMissAbortTests):
+    """秒传未命中后保留 SHA1：下次重试零流量探测，不再重复下载。
+
+    场景对应线上：4K 源 5GB 下载完、115 秒传未命中被 abort；本地文件删掉后
+    哈希留在插件缓存里，之后每次洗版重试只做一次探测。
+    """
+
+    def make_manager_with_cache(self, upload, cache_store, action="abort"):
+        manager, files_service = self.make_manager(upload, rapid_miss_action=action)
+        manager._hash_cache_get = cache_store.get
+        manager._hash_cache_put = cache_store.put
+        return manager, files_service
+
+    def test_cached_sha1_hits_rapid_without_download(self):
+        upload = FakeRapidUploadService(probe_outcomes=[True])
+        store = _DictStore({"quark|%d|movie.mkv" % len(PAYLOAD): {"sha1": SHA1}})
+        manager, _ = self.make_manager_with_cache(upload, store)
+        file_item = make_file_item(with_checksums=False)
+        self.assertEqual(manager._cached_source_sha1({
+            "source_provider": "quark", "source_file": file_item, "title": "movie.mkv",
+        }), SHA1.upper())
+
+        public = manager.create(
+            source_key="quark", source_file=file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+        )
+        task = self._wait_terminal(manager, public["id"])
+
+        self.assertEqual(task["status"], "success")
+        self.assertEqual(task["method"], "rapid")
+        self.assertEqual(self.source.download_calls, [], "有缓存哈希时不得再下载")
+        self.assertEqual(upload.upload_file_calls, [], "命中秒传不得真实上传")
+
+    def test_cached_sha1_miss_aborts_without_download(self):
+        upload = FakeRapidUploadService(probe_outcomes=[False])
+        store = _DictStore({"quark|%d|movie.mkv" % len(PAYLOAD): {"sha1": SHA1}})
+        manager, _ = self.make_manager_with_cache(upload, store)
+        file_item = make_file_item(with_checksums=False)
+
+        public = manager.create(
+            source_key="quark", source_file=file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+        )
+        task = self._wait_terminal(manager, public["id"])
+
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(task.get("abort_reason"), "rapid_miss")
+        self.assertEqual(self.source.download_calls, [], "未命中也不得重复下载")
+        self.assertEqual(upload.upload_file_calls, [])
+
+    def test_download_records_sha1_for_next_retry(self):
+        upload = FakeRapidUploadService(probe_outcomes=[False])
+        store = _DictStore({})
+        manager, _ = self.make_manager_with_cache(upload, store)
+        file_item = make_file_item(with_checksums=False)
+
+        public = manager.create(
+            source_key="quark", source_file=file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+        )
+        self._wait_terminal(manager, public["id"])
+
+        entry = store.get("quark|%d|movie.mkv" % len(PAYLOAD))
+        self.assertIsNotNone(entry, "下载完成后必须记住 SHA1，供下次零流量重试")
+        self.assertEqual(entry["sha1"], SHA1.upper())
+
+
+class _DictStore:
+    def __init__(self, data):
+        self.data = dict(data)
+
+    def get(self, key):
+        entry = self.data.get(key)
+        return dict(entry) if isinstance(entry, dict) else None
+
+    def put(self, key, entry):
+        self.data[key] = dict(entry)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -176,7 +176,7 @@ export function createTransferSection(options) {
               { title: "回落普通上传（默认）", value: "fallback" },
               { title: "中止并清理（不上传）", value: "abort" },
             ],
-            hint: "选「中止并清理」时秒传未命中直接中止该文件的转存：不会产生任何上传流量，也不会真正入库该文件，本地中继缓存一并删除；源文件有校验和时先零流量探测再决定是否下载",
+            hint: "选「中止并清理」时秒传未命中直接中止该文件的转存：不上传、不入库，本地缓存删掉但文件 SHA1 会记下来；下次重试（含每日洗版）只用这个 SHA1 做零流量探测，别人把这文件传上 115 后就能秒传成功，不会重复下载。源文件本来就有校验和时连第一次下载都省掉",
             cols: 4,
             show: enabled("cross_transfer_enabled"),
           },

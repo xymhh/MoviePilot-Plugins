@@ -792,7 +792,9 @@ class CrossTransferTaskManager:
                  relay_fallback_local: bool = True,
                  relay_connections: int = 0,
                  relay_always: bool = False,
-                 on_change: Optional[Callable[[], None]] = None):
+                 on_change: Optional[Callable[[], None]] = None,
+                 hash_cache_get: Optional[Callable[[str], Optional[dict]]] = None,
+                 hash_cache_put: Optional[Callable[[str, dict], None]] = None):
         self._provider_resolver = provider_resolver
         self._target_writer = TargetWriter(provider_resolver)
         self._download_path = str(download_path or "").strip()
@@ -822,10 +824,74 @@ class CrossTransferTaskManager:
         self._cache_key_locks_guard = Lock()
         self._cache_refs: dict[str, int] = {}
         self._cache_refs_lock = Lock()
+        # 源文件 SHA1 缓存：秒传未命中时本地文件会被删掉，但哈希留着，
+        # 下次重试可以只走「零流量秒传探测」，不再重复下 5GB。
+        self._hash_cache_get = hash_cache_get
+        self._hash_cache_put = hash_cache_put
 
     def _notify_change(self) -> None:
         if self._on_change:
             self._on_change()
+
+    @staticmethod
+    def _hash_cache_key(task: Mapping) -> str:
+        """源文件哈希缓存键：来源网盘 + 文件名 + 体积（夸克分享链接会变，链接不进键）。"""
+        source_file = task.get("source_file")
+        name = str(
+            getattr(source_file, "name", None) or task.get("title") or ""
+        ).strip()
+        size = int(
+            getattr(source_file, "size", 0) or task.get("total") or 0
+        )
+        provider = str(task.get("source_provider") or "").strip().lower()
+        if not name or size <= 0:
+            return ""
+        return f"{provider}|{size}|{name}"
+
+    def _cached_source_sha1(self, task: Mapping) -> str:
+        key = self._hash_cache_key(task)
+        if not key or not self._hash_cache_get:
+            return ""
+        try:
+            entry = self._hash_cache_get(key) or {}
+        except Exception as error:  # noqa: BLE001 - 缓存异常不影响正常传输
+            logger.debug(f"读取源哈希缓存失败：{error}")
+            return ""
+        return str(entry.get("sha1") or "").strip().upper()
+
+    def _remember_source_hash(self, task: Mapping, path: str) -> None:
+        """下载完成后把 SHA1 存档，供后续秒传重试复用（本地文件随后可删）。"""
+        if not self._hash_cache_put:
+            return
+        key = self._hash_cache_key(task)
+        if not key or not path:
+            return
+        try:
+            if not Path(path).is_file():
+                return
+            sha1 = file_checksum(path, "sha1").upper()
+        except Exception as error:  # noqa: BLE001 - 只影响后续重试效率
+            logger.debug(f"计算源文件 SHA1 失败，跳过缓存：{error}")
+            return
+        try:
+            self._hash_cache_put(key, {
+                "sha1": sha1,
+                "size": int(
+                    getattr(task.get("source_file"), "size", 0)
+                    or task.get("total") or 0
+                ),
+                "name": str(
+                    getattr(task.get("source_file"), "name", "")
+                    or task.get("title") or ""
+                ),
+            })
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"写入源哈希缓存失败：{error}")
+            return
+        logger.info(
+            "已记录源文件 SHA1，后续重试可零流量秒传："
+            f"{getattr(task.get('source_file'), 'name', '') or task.get('title')}"
+        )
 
     def _cache_root(self) -> Path:
         root = Path(self._download_path) if self._download_path else Path(tempfile.gettempdir())
@@ -1572,6 +1638,21 @@ class CrossTransferTaskManager:
             target_key, target_path = task["target_provider"], task["target_path"]
             target_name, algorithm = task["title"], task["algorithm"]
             fallback = task["fallback"]
+        if not checksum and not algorithm:
+            # 上次下载过但秒传未命中：本地文件已删，哈希还在。
+            # 用缓存的 SHA1 直接做零流量探测，命中就成功、未命中也不重复下载。
+            cached_sha1 = self._cached_source_sha1(task)
+            if cached_sha1:
+                algorithm, checksum = "sha1", cached_sha1
+                with self._lock:
+                    live_task = self._tasks.get(task_id)
+                    if live_task is not None:
+                        live_task["algorithm"] = algorithm
+                        live_task["hash_from_cache"] = True
+                logger.info(
+                    "命中源文件 SHA1 缓存，改为零流量秒传探测："
+                    f"{target_name}"
+                )
         started = time.time()
         self._update(
             task_id, status="running",
@@ -2042,6 +2123,7 @@ class CrossTransferTaskManager:
                         self._mark_complete_cache(
                             Path(source_path), cache_key, source_file
                         )
+                        self._remember_source_hash(task, source_path)
                     cache_complete = True
             if source_path and not Path(source_path).is_file():
                 # 中继文件在传输途中被清理（历史删除联动删缓存/手工清缓存/插件重载）：
