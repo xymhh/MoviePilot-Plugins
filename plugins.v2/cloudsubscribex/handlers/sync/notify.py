@@ -9,6 +9,7 @@ from app.schemas.types import NotificationType
 
 from ...core import OwnerDelegator, render_template, resolve_template
 from ...drive.common import format_size
+from .notify_size import apply_history_size
 
 
 class SyncNotificationService(OwnerDelegator):
@@ -117,13 +118,22 @@ class SyncNotificationService(OwnerDelegator):
             except (TypeError, ValueError):
                 size = 0
             source = str(detail.get("source") or "").strip()
-            if size > 0 and source:
-                continue
             if records is None:
                 try:
                     records = list(get_data("history") or []) if get_data else []
                 except Exception:
                     records = []
+            # 各条转存链路给的 size 可能只覆盖其中一集（线上 13 集洗版通知
+            # 只报 2.87GB，实写 46.75GB），按历史台账逐集重算后再发。
+            record_size = apply_history_size(detail, records)
+            if record_size != size:
+                size = record_size
+                logger.debug(
+                    f"通知体积已按历史校正：{detail.get('title')} "
+                    f"S{detail.get('season')} {size} 字节"
+                )
+            if size > 0 and source:
+                continue
             record = self._history_record_for_detail(detail, records)
             if not record:
                 continue

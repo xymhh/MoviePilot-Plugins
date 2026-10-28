@@ -4,32 +4,52 @@
 不再把「传完但停在 49%」的旧值混进加权平均；仍在跑的文件用自身百分比。
 """
 
+import os
+import sys
 from threading import Lock
 from unittest.mock import MagicMock
 
 from plugin_env import OwnerDelegator, load_module, register_mock, register_module
 
+current_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.dirname(current_dir)
+plugins_v2_path = os.path.join(project_root, "plugins.v2")
+if plugins_v2_path not in sys.path:
+    sys.path.insert(0, plugins_v2_path)
+
+
+def _plugin_dir(*parts):
+    return os.path.join(plugins_v2_path, "cloudsubscribex", *parts)
+
+
+def _register_real_package(name, path):
+    module = register_module(name, package=True)
+    module.__path__ = [path]
+    return module
+
+
 register_module("app", package=True)
-app_core = register_module("app.core", package=True)
-app_core.config = register_mock(
-    "app.core.config", global_vars=MagicMock(), settings=MagicMock()
-)
-register_module("app.db", package=True, SessionFactory=MagicMock())
+register_module("app.core", package=True)
+register_mock("app.core.config", global_vars=MagicMock(), settings=MagicMock())
 register_mock("app.log", logger=MagicMock())
 register_module("app.schemas", package=True)
-register_mock("app.schemas.types")
-register_module("app.utils", package=True)
+register_mock("app.schemas.types", MediaType=MagicMock())
+register_mock("app.utils", package=True)
 register_mock("app.utils.http")
 
-register_module("cloudsubscribex", package=True)
-register_module(
-    "cloudsubscribex.core",
-    package=True,
-    OwnerDelegator=OwnerDelegator,
-    CloudDriveCapability=MagicMock(),
+_register_real_package("cloudsubscribex", _plugin_dir())
+_core_package = _register_real_package("cloudsubscribex.core", _plugin_dir("core"))
+# 用真实能力枚举 / Owners 委托基类：mock 成 MagicMock 会污染后续用例的同名模块
+_core_package.CloudDriveCapability = MagicMock()
+_core_package.OwnerDelegator = OwnerDelegator
+_register_real_package("cloudsubscribex.utils", _plugin_dir("utils"))
+register_mock("cloudsubscribex.utils.cache", create_platform_ttl_cache=MagicMock())
+
+# 真实模块：其它用例会复用 sys.modules 里的同名模块，不能用 MagicMock 顶替
+load_module(
+    "cloudsubscribex.core.media",
+    "plugins.v2/cloudsubscribex/core/media.py",
 )
-register_mock("cloudsubscribex.core.media", media_identity=MagicMock())
-register_module("cloudsubscribex.utils", package=True)
 
 SyncRuntimeService = load_module(
     "cloudsubscribex.core.services.runtime",
