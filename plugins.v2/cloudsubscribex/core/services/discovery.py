@@ -145,6 +145,8 @@ def submit_candidate(
     if title:
         # 频道消息标题比订阅名更贴近真实资源，电影单文件兜底靠它
         payload["resource_titles"] = {link: title for link in links}
+    # 来源标识随请求下沉到同步链，历史记录里可回溯「谁发现的」
+    payload["discovered_via"] = via
     if extra_payload:
         payload.update(extra_payload)
 

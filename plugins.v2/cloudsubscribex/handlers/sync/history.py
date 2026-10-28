@@ -122,6 +122,11 @@ class HistoryService(OwnerDelegator):
                     source_file,
                     verify_checksum=False,
                 ))
+        if not item.get("discovered_via"):
+            fallback_via = str(getattr(subscribe, "_discovered_via", "") or "").strip()
+            if fallback_via:
+                # 频道推送来的候选带 tg:<频道>/<消息id>，搜索来的留空
+                item["discovered_via"] = fallback_via
         item["task_types"] = self._history_task_types(item)
         return item
 

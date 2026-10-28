@@ -505,6 +505,7 @@ class SyncExecutionService(OwnerDelegator):
             history_search_targets: Optional[List[Dict[str, Any]]] = None,
             upgrade_request: Optional[Dict[str, Any]] = None,
             manual_upgrade: bool = False,
+            discovered_via: str = "",
     ) -> bool:
         if self._stop_requested():
             logger.info("同步任务已收到停止请求，取消执行")
@@ -681,6 +682,12 @@ class SyncExecutionService(OwnerDelegator):
         if manual_upgrade:
             for subscribe in subscribes:
                 setattr(subscribe, "_manual_upgrade", True)
+
+        discovered_via = str(discovered_via or "").strip()
+        if discovered_via:
+            # 来源标识随订阅对象下沉，历史记录构建处统一读取，避免穿参十几层
+            for subscribe in subscribes:
+                setattr(subscribe, "_discovered_via", discovered_via)
 
         tv_subscribes = []
         movie_subscribes = []
@@ -1269,6 +1276,7 @@ class SyncExecutionService(OwnerDelegator):
             history_search_targets: Optional[List[Dict[str, Any]]] = None,
             upgrade_request: Optional[Dict[str, Any]] = None,
             manual_upgrade: bool = False,
+            discovered_via: str = "",
             wait_for_slot: bool = False,
             queue_revision: Optional[int] = None,
             result: Optional[Dict[str, Any]] = None,
@@ -1347,6 +1355,7 @@ class SyncExecutionService(OwnerDelegator):
                     history_search_targets=history_search_targets,
                     manual_upgrade=manual_upgrade,
                     upgrade_request=upgrade_request,
+                    discovered_via=discovered_via,
                 )
             except Exception as e:
                 logger.error(f"同步任务异常：{e}")

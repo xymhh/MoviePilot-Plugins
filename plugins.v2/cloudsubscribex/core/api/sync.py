@@ -837,6 +837,8 @@ class SyncApi(OwnerDelegator):
             "manual_resources": resources,
             "manual_target": media_target,
             "manual_upgrade": bool((payload or {}).get("manual_upgrade")),
+            # 候选来源标识（如 tg:@频道/消息 id），用于历史记录回溯「谁发现的」
+            "discovered_via": str((payload or {}).get("discovered_via") or "").strip(),
         }
         queue_media = media_target or {
             "title": getattr(subscribe, "name", "") if subscribe else "",
