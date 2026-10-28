@@ -322,7 +322,7 @@ class SyncNamingService(OwnerDelegator):
                     if val and str(val).strip() and str(val).strip().lower() not in invalid_categories:
                         return str(val).strip()
             except Exception:
-                pass
+                logger.debug("_resolve_classification_category 分支忽略异常", exc_info=True)
 
         if CategoryHelper:
             try:
@@ -343,7 +343,7 @@ class SyncNamingService(OwnerDelegator):
                     if cat and str(cat).strip() and str(cat).strip().lower() not in invalid_categories:
                         return str(cat).strip()
             except Exception:
-                pass
+                logger.debug("_resolve_classification_category 分支忽略异常", exc_info=True)
 
         cat_from_yaml = cls._match_category_from_yaml(mediainfo)
         if cat_from_yaml and cat_from_yaml.lower() not in invalid_categories:
@@ -372,7 +372,7 @@ class SyncNamingService(OwnerDelegator):
                     if getattr(c, "classification", None) is not None:
                         effective_media.classification = c.classification
                 except Exception:
-                    pass
+                    logger.debug("_effective_mediainfo 分支忽略异常", exc_info=True)
         return effective_media
 
     def _resolve_resource_season_dir(
@@ -425,7 +425,7 @@ class SyncNamingService(OwnerDelegator):
             if rename_path:
                 resolved = rename_path.parent
         except Exception as error:
-            logger.debug(f"资源路径解析失败：{mediainfo.title_year}，{error}")
+            logger.debug(f"资源路径解析失败：{mediainfo.title_year}，{error}", exc_info=True)
 
         if season_lock and season_cache:
             with season_lock:

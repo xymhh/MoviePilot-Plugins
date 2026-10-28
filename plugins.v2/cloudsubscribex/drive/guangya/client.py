@@ -314,7 +314,7 @@ class GuangyaClient:
                 self._global_config_cache_time = now
                 return dict(data)
         except Exception as error:
-            logger.debug(f"获取光鸭全局配置异常：{error}")
+            logger.debug(f"获取光鸭全局配置异常：{error}", exc_info=True)
         return dict(self._global_config_cache or {})
 
     def check_login(self) -> bool:

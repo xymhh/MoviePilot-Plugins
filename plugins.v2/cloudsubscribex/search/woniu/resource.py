@@ -52,7 +52,7 @@ class WoniuResourceService:
                 if qs.get(k):
                     return str(qs[k][0]).strip()
         except Exception:
-            pass
+            logger.debug("_extract_password 分支忽略异常", exc_info=True)
 
         match = re.search(r"(?:提取码|密码|访问码|code)\s*[:：]?\s*([A-Za-z0-9]{4,})", text, re.I)
         if match:

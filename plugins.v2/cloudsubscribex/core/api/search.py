@@ -98,7 +98,7 @@ class SearchApi(OwnerDelegator):
             try:
                 definition.close_test_resources()
             except Exception as error:
-                logger.debug(f"关闭 {definition.id} 测试资源失败：{error}")
+                logger.debug(f"关闭 {definition.id} 测试资源失败：{error}", exc_info=True)
 
     def api_vue_test_search_proxy(self, payload: Dict[str, Any]) -> dict:
         """通过 Cloudflare Trace 测试搜索代理出口和请求延迟。"""
@@ -905,7 +905,7 @@ class SearchApi(OwnerDelegator):
                     except Exception as close_error:
                         logger.debug(
                             f"[{source.upper()}] 测试搜索器关闭失败：{close_error}"
-                        )
+                        , exc_info=True)
 
         try:
             results, source_result_limit = run_test()

@@ -6,6 +6,7 @@ from .client import PiankuClient
 from .resource import PiankuResourceService
 from ..magnet import clear_cache
 from ...core.search import SearchQuery
+from app.log import logger
 
 
 class PiankuSearchService:
@@ -30,7 +31,7 @@ class PiankuSearchService:
             try:
                 client.close()
             except Exception:
-                pass
+                logger.debug("close 分支忽略异常", exc_info=True)
 
     def search(self, query: SearchQuery):
         return self._resources.normalize(self._resources.search(query))

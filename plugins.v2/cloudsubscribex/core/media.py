@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import inspect
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from app.log import logger
 
 TMDB_SOURCE = "themoviedb"
 
@@ -73,7 +74,7 @@ def coerce_media_source(value: Any) -> Any:
                 if hasattr(MediaSource, attr_name):
                     return getattr(MediaSource, attr_name)
     except Exception:
-        pass
+        logger.debug("coerce_media_source 分支忽略异常", exc_info=True)
     return normalize_media_source(value)
 
 

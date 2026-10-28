@@ -21,7 +21,7 @@ def create_search_registry(
             try:
                 config = dict(plugin.get_config() or {})
             except Exception:
-                pass
+                logger.debug("create_search_registry 分支忽略异常", exc_info=True)
         if not config and hasattr(plugin, "_applied_config"):
             config = dict(getattr(plugin, "_applied_config", None) or {})
         if not config and hasattr(plugin, "_config"):
@@ -51,7 +51,7 @@ def create_search_registry(
             else:
                 skipped.append(def_cls.id)
         except Exception as _err:
-            logger.debug(f"搜索渠道 [{def_cls.id}] 注册失败：{_err}")
+            logger.debug(f"搜索渠道 [{def_cls.id}] 注册失败：{_err}", exc_info=True)
 
     if skipped:
         logger.debug(f"未配置搜索渠道已跳过：{', '.join(skipped)}")

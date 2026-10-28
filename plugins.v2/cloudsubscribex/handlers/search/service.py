@@ -465,7 +465,7 @@ class SearchHandler:
                 search_total_results=progress_data.get("total_results", 0),
             )
         except Exception as e:
-            logger.debug(f"自动推送搜索运行态失败: {e}")
+            logger.debug(f"自动推送搜索运行态失败: {e}", exc_info=True)
 
     def supports(self, source: str, capability: SearchCapability) -> bool:
         try:
@@ -671,11 +671,11 @@ class SearchHandler:
             if hasattr(self, "_search_source_order") and source in self._search_source_order:
                 self._search_source_order = [s for s in self._search_source_order if s != source]
         except Exception:
-            pass
+            logger.debug("_auto_remove_search_source 分支忽略异常", exc_info=True)
         try:
             SEARCH_CIRCUIT_BREAKER.record_failure(source, reason or "账号被封禁")
         except Exception:
-            pass
+            logger.debug("_auto_remove_search_source 分支忽略异常", exc_info=True)
         try:
             owner = getattr(self, "_owner", None)
             if owner and hasattr(owner, "update_config"):
@@ -689,7 +689,7 @@ class SearchHandler:
                     owner.update_config(cfg)
                     logger.info(f"已持久化更新插件配置：已将 [{source.upper()}] 从搜索渠道优先级列表中自动移除")
         except Exception as err:
-            logger.debug(f"持久化剔除搜索渠道 [{source}] 失败：{err}")
+            logger.debug(f"持久化剔除搜索渠道 [{source}] 失败：{err}", exc_info=True)
 
     def search_single_source(
             self,
@@ -931,7 +931,7 @@ class SearchHandler:
                 try:
                     progress_callback(progress_data)
                 except Exception as cb_err:
-                    logger.debug(f"搜索进度回调执行异常: {cb_err}")
+                    logger.debug(f"搜索进度回调执行异常: {cb_err}", exc_info=True)
             elif subscribe is not None:
                 self._dispatch_default_search_progress(subscribe, progress_data)
 

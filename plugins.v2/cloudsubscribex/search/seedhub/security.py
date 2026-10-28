@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from ..cloudflare import browser_proxy, is_cloudflare_challenge, playwright_snapshot
 from ..http_client import RequestGate, gated_request, requests
+from app.log import logger
 
 
 class SeedHubSecurity:
@@ -142,7 +143,7 @@ class SeedHubSecurity:
                     if response.ok and not self.is_challenge(response):
                         return text
                 except requests.exceptions.RequestException:
-                    pass
+                    logger.debug("_browser_text 分支忽略异常", exc_info=True)
 
             result = playwright_snapshot(
                 url, self._browser_proxy, max(30, self._request_timeout), self._gate

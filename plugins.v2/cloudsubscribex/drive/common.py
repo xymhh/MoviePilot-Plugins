@@ -134,7 +134,7 @@ def format_size(value: Any, default: str = "") -> str:
         try:
             return StringUtils.format_size(max(0, size))
         except Exception:
-            pass
+            logger.debug("format_size 分支忽略异常", exc_info=True)
     amount = float(size)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if amount < 1024 or unit == "TB":

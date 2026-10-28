@@ -147,8 +147,11 @@ RUFF_VERSION = "0.17.3"
 #   - except 块体只有一条 pass → 「完全静默」
 #   - except 块体只有 logger.debug(...) 且没带 exc_info → 「只留一句话、没有栈」
 # 新增静默点前先问「失败该不该被看见」；确实要新增，必须同时改这里的数字并说明原因。
-SILENT_PASS_BUDGET = 87
-SILENT_DEBUG_BUDGET = 77
+# 2026-10-28（1.7.94）已清零：全包 87 处 except:pass + 77 处无栈 debug 全部改成
+# logger.debug(..., exc_info=True)。所以现在的预算是 0 —— 新增即失败。
+# 确有正当理由必须完全静默（如探测性 import），在该 except 行尾写 `# noqa: silent`。
+SILENT_PASS_BUDGET = 0
+SILENT_DEBUG_BUDGET = 0
 PLUGIN_SOURCES = Path("plugins.v2")
 
 
@@ -195,8 +198,12 @@ def _count_silent_points(plugin_root: Path) -> Tuple[int, int]:
             tree = ast.parse(py.read_text(encoding="utf-8"))
         except (SyntaxError, UnicodeDecodeError, OSError):
             continue
+        lines = py.read_text(encoding="utf-8").splitlines()
         for node in ast.walk(tree):
             if not isinstance(node, ast.ExceptHandler):
+                continue
+            header = lines[node.lineno - 1] if node.lineno <= len(lines) else ""
+            if "noqa: silent" in header:
                 continue
             body = node.body
             if len(body) == 1 and isinstance(body[0], ast.Pass):

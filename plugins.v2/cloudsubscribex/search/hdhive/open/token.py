@@ -6,6 +6,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
+from app.log import logger
 
 
 class HDHiveTokenStoreError(Exception):
@@ -51,7 +52,7 @@ class HDHiveTokenStore:
                 self._single_kind = self._guess_single_kind(self._data)
                 return {self._single_kind: self._data.strip()}
         except json.JSONDecodeError:
-            pass
+            logger.debug("load 分支忽略异常", exc_info=True)
 
         parsed = self._load_key_value_text(raw)
         if parsed:
@@ -82,7 +83,7 @@ class HDHiveTokenStore:
             try:
                 os.unlink(temp_path)
             except OSError:
-                pass
+                logger.debug("write 分支忽略异常", exc_info=True)
             raise
 
     def _load_json_dict(self) -> Dict[str, Any]:
@@ -108,7 +109,7 @@ class HDHiveTokenStore:
                 try:
                     result["token_expires_at"] = float(updated[1]) + float(result["expires_in"])
                 except (TypeError, ValueError):
-                    pass
+                    logger.debug("_load_json_dict 分支忽略异常", exc_info=True)
         return result
 
     def _load_key_value_text(self, raw: str) -> Dict[str, Any]:

@@ -411,7 +411,7 @@ class SyncApi(OwnerDelegator):
                 }
             _RECENT_MANUAL_SUBMITS[fingerprint] = True
         except Exception:
-            pass
+            logger.debug("_do_api_vue_start_manual_sync 分支忽略异常", exc_info=True)
 
         try:
             subscribe_id = int((payload or {}).get("subscribe_id") or 0)
@@ -621,7 +621,7 @@ class SyncApi(OwnerDelegator):
                 try:
                     target_drive = self._cloud_drive_registry.get(target_cloud_key)
                 except KeyError:
-                    pass
+                    logger.debug("_do_api_vue_start_manual_sync 分支忽略异常", exc_info=True)
             target_key = getattr(target_drive, "key", "115")
             target_provider = target_key
             cloud_provider = str(

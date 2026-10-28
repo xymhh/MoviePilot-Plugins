@@ -15,7 +15,7 @@ try:
     from p115client import check_response
     from p115client.tool.clouddownload import clouddownload_iter
 except ImportError:
-    pass
+    logger.debug("<module> 分支忽略异常", exc_info=True)
 
 
 class OfflineDownloadService(OwnerDelegator):

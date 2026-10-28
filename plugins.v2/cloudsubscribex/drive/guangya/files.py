@@ -342,7 +342,7 @@ class GuangyaFileService(CloudDriveFileServiceBase):
                 if files:
                     return files
             except Exception as error:
-                logger.debug(f"读取光鸭离线目录文件异常：{error}")
+                logger.debug(f"读取光鸭离线目录文件异常：{error}", exc_info=True)
         return [
             CloudFile(
                 id=file_id,

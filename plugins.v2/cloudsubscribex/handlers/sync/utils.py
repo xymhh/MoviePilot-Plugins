@@ -1,5 +1,6 @@
 from typing import Any, Iterable
 from urllib.parse import unquote
+from app.log import logger
 
 try:
     from app.domain.episode import format_ranges as platform_format_ranges
@@ -30,7 +31,7 @@ def format_episode_ranges(episodes: Iterable[Any]) -> str:
             if result:
                 return result
         except Exception:
-            pass
+            logger.debug("format_episode_ranges 分支忽略异常", exc_info=True)
     ranges = []
     start = previous = numbers[0]
     for number in numbers[1:]:

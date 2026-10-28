@@ -78,7 +78,7 @@ class _RiskCooldownState:
                 ttl=max(1, min(int(duration + 0.999), self._cache_ttl)),
             )
         except Exception as error:
-            logger.debug(f"HDHive 风控冷却持久化失败：{error}")
+            logger.debug(f"HDHive 风控冷却持久化失败：{error}", exc_info=True)
 
     def remaining(self) -> tuple:
         """返回（剩余秒数, 状态码），取内存态与持久化记录中的较晚者。"""
@@ -89,7 +89,7 @@ class _RiskCooldownState:
             wall_remaining = float(persisted.get("until") or 0) - time.time()
             wall_status = int(persisted.get("status") or 0)
         except Exception as error:
-            logger.debug(f"HDHive 风控冷却读取失败：{error}")
+            logger.debug(f"HDHive 风控冷却读取失败：{error}", exc_info=True)
         with self._LOCK:
             monotonic_until, status = self._BY_KEY.get(self._key, (0.0, 0))
             remaining = monotonic_until - time.monotonic()
@@ -105,7 +105,7 @@ class _RiskCooldownState:
         try:
             self._cache.delete("state")
         except Exception:
-            pass
+            logger.debug("clear 分支忽略异常", exc_info=True)
         with self._LOCK:
             self._BY_KEY.pop(self._key, None)
 
@@ -280,7 +280,7 @@ class HDHiveClient:
             if HDHiveCaptchaSolver.is_challenge_response(response):
                 return True
         except Exception:
-            pass
+            logger.debug("_is_challenge_response 分支忽略异常", exc_info=True)
         return False
 
     def _raw_request(self, method: str, path: str, retry_cf: bool = True, **kwargs):
@@ -450,7 +450,7 @@ class HDHiveClient:
                 self._adopt_login_session(response, payload)
                 return True
         except HDHiveWebError as error:
-            logger.debug(f"HDHive WebAPI 刷新登录 Token 失败：{error}")
+            logger.debug(f"HDHive WebAPI 刷新登录 Token 失败：{error}", exc_info=True)
         return False
 
     def _solve_captcha(
@@ -661,7 +661,7 @@ class HDHiveClient:
                 },
             )
         except Exception as error:
-            logger.debug(f"HDHive 持久化登录 Cookie 失败：{error}")
+            logger.debug(f"HDHive 持久化登录 Cookie 失败：{error}", exc_info=True)
 
     def _user_id(self) -> str:
         """取得签名用户 ID。"""
@@ -670,7 +670,7 @@ class HDHiveClient:
             if re.fullmatch(r"[1-9]\d*", cookie_user_id):
                 return cookie_user_id
         except Exception:
-            pass
+            logger.debug("_user_id 分支忽略异常", exc_info=True)
         return self._jwt_user_id() or "0"
 
     def _jwt_user_id(self) -> str:

@@ -15,6 +15,7 @@ from xml.etree import ElementTree
 
 import requests
 from requests import Response, Session
+from app.log import logger
 
 ProgressCallback = Callable[[int, int], None]
 
@@ -317,5 +318,5 @@ class GuangyaOssClient:
                     retry=False,
                 )
             except Exception:
-                pass
+                logger.debug("upload_file 分支忽略异常", exc_info=True)
             raise

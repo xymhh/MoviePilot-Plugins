@@ -43,7 +43,7 @@ class P123ShareService:
             query = parse_qs(urlsplit(value).query)
             password = str((query.get("pwd") or query.get("code") or [""])[0]).strip()
         except ValueError:
-            pass
+            logger.debug("extract_share_info 分支忽略异常", exc_info=True)
         if not password:
             code_match = re.search(
                 r"(?:提取码|密码|pwd|code)\s*[：:=]?\s*([^\s&#]+)", value, re.I

@@ -118,7 +118,7 @@ class PanSouClient:
                 self._token_expires = datetime.fromtimestamp(expires_at)
                 logger.debug("PanSou 已恢复持久化登录状态")
         except Exception as error:
-            logger.debug(f"PanSou 恢复持久化登录状态失败：{error}")
+            logger.debug(f"PanSou 恢复持久化登录状态失败：{error}", exc_info=True)
 
     def _save_token(self) -> None:
         if not self._save_data_func:
@@ -134,7 +134,7 @@ class PanSouClient:
                 } if self._token and self._token_expires else {},
             )
         except Exception as error:
-            logger.debug(f"PanSou 持久化登录状态失败：{error}")
+            logger.debug(f"PanSou 持久化登录状态失败：{error}", exc_info=True)
 
     def _clear_token(self) -> None:
         self._token = None

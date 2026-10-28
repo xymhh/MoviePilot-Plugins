@@ -362,7 +362,7 @@ class GuangyaOfflineService:
                 if info_hash:
                     url = f"magnet:?xt=urn:btih:{info_hash}"
             except Exception as error:
-                logger.debug(f"光鸭种子解析失败：{error}")
+                logger.debug(f"光鸭种子解析失败：{error}", exc_info=True)
 
         lookup = self._files.resolve_directory(save_path, create=True)
         if not lookup.checked or lookup.directory_id is None:

@@ -183,7 +183,7 @@ class MessageRoutingHook(OwnerDelegator):
         try:
             self._pending_store().clear()
         except Exception as error:
-            logger.debug(f"清理片名候选登记表失败：{error}")
+            logger.debug(f"清理片名候选登记表失败：{error}", exc_info=True)
 
     @staticmethod
     def _as_media_type(value: Any) -> Optional[Any]:
@@ -316,7 +316,7 @@ class MessageRoutingHook(OwnerDelegator):
                 name="cloudsubscribe-title-candidate",
             ).start()
         except Exception as error:
-            logger.debug(f"片名候选识别线程启动失败：{text}，{error}")
+            logger.debug(f"片名候选识别线程启动失败：{text}，{error}", exc_info=True)
 
     @staticmethod
     def _tmdb_id_of(media: Any) -> Optional[int]:
@@ -352,7 +352,7 @@ class MessageRoutingHook(OwnerDelegator):
                 tmdbid=self._tmdb_id_of(mediainfo),
             )
         except Exception as error:
-            logger.debug(f"片名候选身份补齐失败：{text}，{error}")
+            logger.debug(f"片名候选身份补齐失败：{text}，{error}", exc_info=True)
 
     def _resolve_selected_media(
             self, identity: Dict[str, Any]

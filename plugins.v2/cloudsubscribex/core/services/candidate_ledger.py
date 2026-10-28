@@ -169,7 +169,7 @@ def read_records(
                             continue
                     collected.append(item)
         except Exception as error:  # noqa: BLE001
-            logger.debug(f"读取账本 {path.name} 失败：{error}")
+            logger.debug(f"读取账本 {path.name} 失败：{error}", exc_info=True)
     # 文件内是追加顺序，最新在后；整体按时间倒序展示。
     collected.reverse()
     total = len(collected)
@@ -208,7 +208,7 @@ def summarize(data_path: Any, *, days: int = 7) -> Dict[str, Any]:
                     provider = str(item.get("provider") or "未知来源")
                     by_provider[provider] = by_provider.get(provider, 0) + 1
         except Exception as error:  # noqa: BLE001
-            logger.debug(f"聚合账本 {path.name} 失败：{error}")
+            logger.debug(f"聚合账本 {path.name} 失败：{error}", exc_info=True)
     return {
         "total": total,
         "by_kind": by_kind,
@@ -233,7 +233,7 @@ def purge_old(data_path: Any, *, keep_days: int = DEFAULT_RETENTION_DAYS) -> int
                 os.remove(path)
                 removed += 1
             except OSError as error:  # noqa: BLE001
-                logger.debug(f"清理账本 {path.name} 失败：{error}")
+                logger.debug(f"清理账本 {path.name} 失败：{error}", exc_info=True)
     except Exception as error:  # noqa: BLE001
-        logger.debug(f"清理账本目录失败：{error}")
+        logger.debug(f"清理账本目录失败：{error}", exc_info=True)
     return removed

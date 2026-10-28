@@ -660,7 +660,7 @@ class UpgradeService(OwnerDelegator):
                         # 插件热更新时新旧模块签名可能不一致（线上 1.7.84 报
                         # 「got multiple values for argument 'notification_kind'」）。
                         # 通知详情缺一条不该中断整条洗版流程。
-                        logger.debug(f"洗版通知详情写入失败（已忽略）：{error}")
+                        logger.debug(f"洗版通知详情写入失败（已忽略）：{error}", exc_info=True)
                     if batch_success_episodes:
                         self._record_download_history(
                             mediainfo=mediainfo,

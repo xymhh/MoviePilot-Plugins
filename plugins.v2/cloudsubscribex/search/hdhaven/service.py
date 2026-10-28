@@ -335,7 +335,7 @@ class HDHavenSearchService(OwnerDelegator):
                     if owner_obj and hasattr(owner_obj, "update_search_account_points"):
                         owner_obj.update_search_account_points("hdhaven", int(new_points))
             except Exception as err:
-                logger.debug(f"HDHaven 解锁后更新账号积分失败：{err}")
+                logger.debug(f"HDHaven 解锁后更新账号积分失败：{err}", exc_info=True)
 
         if url and resource_type and not self._valid_share_value(url, resource_type):
             logger.warning(

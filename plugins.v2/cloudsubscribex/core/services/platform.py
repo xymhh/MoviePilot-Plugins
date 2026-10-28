@@ -1092,7 +1092,7 @@ class PlatformIntegrationService(OwnerDelegator):
             try:
                 del self._link_selection_cache[normalized_selection_id]
             except KeyError:
-                pass
+                logger.debug("submit_platform_links 分支忽略异常", exc_info=True)
         data = dict(result.get("data") or {})
         data.setdefault("media", media)
         result["data"] = data

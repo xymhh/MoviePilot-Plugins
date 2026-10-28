@@ -124,7 +124,7 @@ class HDHavenClient:
                 self.token = data.get("token") or "restored"
                 logger.debug("HDHaven 已恢复持久化登录状态")
         except Exception as error:
-            logger.debug(f"HDHaven 恢复登录状态失败：{error}")
+            logger.debug(f"HDHaven 恢复登录状态失败：{error}", exc_info=True)
 
     def _save_session(self, token: str = "") -> None:
         """将登录 Cookie 和 Token 持久化到数据库。"""
@@ -148,7 +148,7 @@ class HDHavenClient:
                 } if cookies else {},
             )
         except Exception as error:
-            logger.debug(f"HDHaven 持久化登录状态失败：{error}")
+            logger.debug(f"HDHaven 持久化登录状态失败：{error}", exc_info=True)
 
     @property
     def cooldown_remaining(self) -> float:
@@ -175,7 +175,7 @@ class HDHavenClient:
                         (conf.json().get("data") or {}).get("turnstile_site_key") or ""
                     ).strip()
             except Exception as err:
-                logger.debug(f"HDHaven 获取 registration-config 失败：{err}")
+                logger.debug(f"HDHaven 获取 registration-config 失败：{err}", exc_info=True)
 
         if not self._turnstile_site_key:
             raise HDHavenError("HDHaven 无法获取 Cloudflare site key", code="site_key_not_found")
@@ -389,4 +389,4 @@ class HDHavenClient:
         try:
             self._session.close()
         except Exception:
-            pass
+            logger.debug("close 分支忽略异常", exc_info=True)

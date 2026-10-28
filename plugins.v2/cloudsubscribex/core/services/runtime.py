@@ -723,7 +723,7 @@ class SyncRuntimeService(OwnerDelegator):
                         except Exception as finalize_err:
                             logger.debug(
                                 f"单订阅完成后执行文件后处理异常：{finalize_err}"
-                            )
+                            , exc_info=True)
             except Exception as error:
                 logger.error(f"订阅 {getattr(subscribe, 'name', '')} 处理异常：{error}")
                 self._update_sync_task(
@@ -738,11 +738,11 @@ class SyncRuntimeService(OwnerDelegator):
                 try:
                     del self._task_local.stop_event
                 except AttributeError:
-                    pass
+                    logger.debug("_run_subscription_group 分支忽略异常", exc_info=True)
                 try:
                     del self._task_local.task_id
                 except AttributeError:
-                    pass
+                    logger.debug("_run_subscription_group 分支忽略异常", exc_info=True)
 
         return {
             "history": [
@@ -1060,7 +1060,7 @@ class SyncRuntimeService(OwnerDelegator):
                 try:
                     self._sync_handler.finish_notification_batch()
                 except Exception as notify_err:
-                    logger.debug(f"停止后处理时提交通知批次异常：{notify_err}")
+                    logger.debug(f"停止后处理时提交通知批次异常：{notify_err}", exc_info=True)
             with self._sync_tasks_lock:
                 current = self._sync_tasks.get(task_id)
                 if (

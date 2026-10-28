@@ -109,7 +109,7 @@ def park_page(page, timeout: int = 5000) -> None:
             return
         page.goto("about:blank", wait_until="domcontentloaded", timeout=timeout)
     except Exception:
-        pass
+        logger.debug("park_page 分支忽略异常", exc_info=True)
 
 
 def launch_challenge_context(proxy: Any):
@@ -135,16 +135,16 @@ def block_heavy_resources(page) -> None:
                 route.abort()
                 return
         except Exception:
-            pass
+            logger.debug("_route_filter 分支忽略异常", exc_info=True)
         try:
             route.continue_()
         except Exception:
-            pass
+            logger.debug("_route_filter 分支忽略异常", exc_info=True)
 
     try:
         page.route("**/*", _route_filter)
     except Exception:
-        pass
+        logger.debug("block_heavy_resources 分支忽略异常", exc_info=True)
 
 
 #: 本地 Turnstile 挂载页：渠道用它渲染官方组件并换取一次性 token。
@@ -276,7 +276,7 @@ class BrowserPageSession:
         try:
             self._page.set_default_timeout(self.timeout_ms)
         except Exception:
-            pass
+            logger.debug("_ensure_page 分支忽略异常", exc_info=True)
         block_heavy_resources(self._page)
         self._generation += 1
         if self._prepare is not None:
@@ -290,14 +290,14 @@ class BrowserPageSession:
             try:
                 context.close()
             except Exception:
-                pass
+                logger.debug("_close_locked 分支忽略异常", exc_info=True)
 
     def close(self) -> None:
         self._cancel_idle_timer()
         try:
             self._executor.submit(self._close_locked).result(timeout=5)
         except Exception:
-            pass
+            logger.debug("close 分支忽略异常", exc_info=True)
 
     def _cancel_idle_timer(self) -> None:
         with self._lock:
@@ -306,7 +306,7 @@ class BrowserPageSession:
             try:
                 timer.cancel()
             except Exception:
-                pass
+                logger.debug("_cancel_idle_timer 分支忽略异常", exc_info=True)
 
     def _arm_idle_timer(self) -> None:
         """为下一次空闲检查排程，避免常驻会话长期占用内存与 CPU。"""
@@ -320,7 +320,7 @@ class BrowserPageSession:
             try:
                 previous.cancel()
             except Exception:
-                pass
+                logger.debug("_arm_idle_timer 分支忽略异常", exc_info=True)
         timer.start()
 
     def _close_if_idle(self) -> None:
@@ -450,10 +450,10 @@ def is_cloudflare_response(response: Any) -> bool:
                 try:
                     body = str(getattr(response, "text", "") or "")[:4096]
                 except Exception:
-                    pass
+                    logger.debug("is_cloudflare_response 分支忽略异常", exc_info=True)
                 return is_cloudflare_challenge(text=body, status_code=status, headers=headers)
     except Exception:
-        pass
+        logger.debug("is_cloudflare_response 分支忽略异常", exc_info=True)
     return False
 
 
@@ -510,7 +510,7 @@ class CloudflareChallengeSolver:
             try:
                 content = page.content() or ""
             except Exception:
-                pass
+                logger.debug("_flow 分支忽略异常", exc_info=True)
 
             return {
                 "cookies": page.context.cookies(),
@@ -610,7 +610,7 @@ def bypass_cloudflare_session(
                     secure=bool(c.get("secure", True)),
                 )
         except Exception:
-            pass
+            logger.debug("bypass_cloudflare_session 分支忽略异常", exc_info=True)
     return True
 
 

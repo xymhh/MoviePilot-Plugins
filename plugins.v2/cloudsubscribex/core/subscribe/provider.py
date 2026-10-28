@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from threading import Event
 from typing import Any, Iterator, Optional
+from app.log import logger
 
 
 def ranking_scan_limit(options: dict[str, Any]) -> int:
@@ -14,7 +15,7 @@ def ranking_scan_limit(options: dict[str, Any]) -> int:
         try:
             return max(1, min(int(internal_limit), 500))
         except (TypeError, ValueError):
-            pass
+            logger.debug("ranking_scan_limit 分支忽略异常", exc_info=True)
     try:
         limit = max(1, min(int(options.get("limit") or 20), 100))
     except (TypeError, ValueError):

@@ -190,7 +190,7 @@ class PiankuGate:
             try:
                 button.click()
             except Exception:
-                pass
+                logger.debug("ensure_gate 分支忽略异常", exc_info=True)
 
         gate_deadline = time.monotonic() + self.gate_timeout
         stream_deadline = 0.0

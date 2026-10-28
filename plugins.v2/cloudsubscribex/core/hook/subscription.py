@@ -600,7 +600,7 @@ class SubscriptionSearchHook(OwnerDelegator):
                     name="cloudsubscribe-selected-title",
                 ).start()
             except Exception as error:
-                logger.debug(f"选定片名识别线程启动失败：{error}")
+                logger.debug(f"选定片名识别线程启动失败：{error}", exc_info=True)
         return False
 
     @classmethod
@@ -628,7 +628,7 @@ class SubscriptionSearchHook(OwnerDelegator):
                 if _is_media_selection_frame(frame.function):
                     return True
         except Exception as error:
-            logger.debug(f"点选调用栈判定失败：{error}")
+            logger.debug(f"点选调用栈判定失败：{error}", exc_info=True)
         return cls._looks_like_media_selection(kwargs)
 
     def _start_selected_title(
@@ -956,14 +956,14 @@ class SubscriptionSearchHook(OwnerDelegator):
                         scene="search",
                     )
                 except Exception as update_err:
-                    logger.debug(f"更新订阅 last_search 失败（可忽略）：{update_err}")
+                    logger.debug(f"更新订阅 last_search 失败（可忽略）：{update_err}", exc_info=True)
 
         # 2. 如果存在 execution_context，通知当前阶段进入 searching
         if execution_context and hasattr(execution_context, "report_phase"):
             try:
                 execution_context.report_phase("searching")
             except Exception:
-                pass
+                logger.debug("_dispatch_process_search_subscription 分支忽略异常", exc_info=True)
 
         # 3. 投递到网盘订阅助手搜索队列
         subscribe_name = getattr(subscribe, "name", "") or getattr(subscribe, "title", "")

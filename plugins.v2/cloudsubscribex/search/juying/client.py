@@ -87,7 +87,7 @@ class JuyingClient:
         try:
             self._session.close()
         except Exception:
-            pass
+            logger.debug("_reset_transport 分支忽略异常", exc_info=True)
         self._session = self._create_session()
         for name, value in cookies.items():
             self._session.cookies.set(name, value)
@@ -111,7 +111,7 @@ class JuyingClient:
                 self._token = token
                 logger.debug("聚影已恢复持久化登录状态")
         except Exception as error:
-            logger.debug(f"聚影恢复持久化登录状态失败：{error}")
+            logger.debug(f"聚影恢复持久化登录状态失败：{error}", exc_info=True)
 
     def _save_token(self) -> None:
         if not self._save_data_func:
@@ -126,7 +126,7 @@ class JuyingClient:
                 } if self._token else {},
             )
         except Exception as error:
-            logger.debug(f"聚影持久化登录状态失败：{error}")
+            logger.debug(f"聚影持久化登录状态失败：{error}", exc_info=True)
 
     def _set_token(self, token: str = "") -> None:
         self._token = str(token or "").strip()
@@ -285,7 +285,7 @@ class JuyingClient:
                     body = response.json()
                     message = str(body.get("message") or body.get("detail") or "")
                 except ValueError:
-                    pass
+                    logger.debug("_request 分支忽略异常", exc_info=True)
             if response.status_code == 403 and protected_access:
                 logger.warning(
                     "聚影资源 access 返回 HTTP 403："

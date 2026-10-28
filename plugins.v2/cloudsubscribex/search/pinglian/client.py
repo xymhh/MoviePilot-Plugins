@@ -113,7 +113,7 @@ class PinglianClient:
         try:
             self._session.close()
         except Exception:
-            pass
+            logger.debug("_reset_transport 分支忽略异常", exc_info=True)
         self._session = self._create_session()
         for name, value in cookies.items():
             self._session.cookies.set(name, value)
@@ -151,7 +151,7 @@ class PinglianClient:
                 if cookies:
                     logger.debug("盘链已恢复持久化登录状态")
         except Exception as error:
-            logger.debug(f"盘链恢复持久化登录状态失败：{error}")
+            logger.debug(f"盘链恢复持久化登录状态失败：{error}", exc_info=True)
 
     def _save_session(self) -> None:
         if not self._save_data_func:
@@ -167,7 +167,7 @@ class PinglianClient:
                 } if cookies else {},
             )
         except Exception as error:
-            logger.debug(f"盘链持久化登录状态失败：{error}")
+            logger.debug(f"盘链持久化登录状态失败：{error}", exc_info=True)
 
     def _clear_session(self) -> None:
         self._authenticated = False
@@ -199,7 +199,7 @@ class PinglianClient:
                     ):
                         return True
         except Exception as error:
-            logger.debug(f"盘链鉴权状态检查异常：{error}")
+            logger.debug(f"盘链鉴权状态检查异常：{error}", exc_info=True)
         return False
 
     def _login(self, force: bool = False) -> None:
@@ -439,7 +439,7 @@ class PinglianClient:
             quota_payload = self.request_json("/api/videos/link-quota")
             quota = quota_payload.get("data") if isinstance(quota_payload, dict) else {}
         except Exception as error:
-            logger.debug(f"盘链读取配额信息失败：{error}")
+            logger.debug(f"盘链读取配额信息失败：{error}", exc_info=True)
 
         if isinstance(quota, dict) and quota.get("unlimited"):
             remaining_text = "不限次数"

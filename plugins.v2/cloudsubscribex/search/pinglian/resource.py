@@ -62,7 +62,7 @@ class PinglianResourceService:
                     self._quota_cache_time = now
                 return quota
         except Exception as error:
-            logger.debug(f"盘链读取配额信息失败：{error}")
+            logger.debug(f"盘链读取配额信息失败：{error}", exc_info=True)
 
         with self._lock:
             return dict(self._quota_cache or {})

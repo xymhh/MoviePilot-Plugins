@@ -220,7 +220,7 @@ class CheckinService(OwnerDelegator):
             )
             clear_ui_options_cache()
         except Exception as error:
-            logger.debug(f"刷新 {provider.name} 搜索账户积分失败：{error}")
+            logger.debug(f"刷新 {provider.name} 搜索账户积分失败：{error}", exc_info=True)
 
     def _enabled_providers(self) -> List[CheckinDefinition]:
         """配置中已启用的渠道。"""

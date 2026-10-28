@@ -295,7 +295,7 @@ class PageApi(OwnerDelegator):
                     if isinstance(cfg, dict) and cfg:
                         return cfg
                 except Exception:
-                    pass
+                    logger.debug("_get_plugin_config 分支忽略异常", exc_info=True)
             if hasattr(owner, "_applied_config"):
                 cfg = getattr(owner, "_applied_config", None)
                 if isinstance(cfg, dict) and cfg:
@@ -1021,7 +1021,7 @@ class PageApi(OwnerDelegator):
                 [item.get("bangumi_id") for item in media_items if item.get("bangumi_id")]
             )
         except Exception as error:
-            logger.debug(f"读取推荐榜单媒体库状态失败：{error}")
+            logger.debug(f"读取推荐榜单媒体库状态失败：{error}", exc_info=True)
 
         for media_item in media_items:
             matches = library_by_tmdb.get(str(media_item.get("tmdb_id")), [])
@@ -1047,7 +1047,7 @@ class PageApi(OwnerDelegator):
                             try:
                                 meta_seasons_info[int(s_k)] = s_v
                             except Exception:
-                                pass
+                                logger.debug("api_vue_resource_recommend 分支忽略异常", exc_info=True)
                     elif isinstance(raw_seasons, list):
                         for s_item in raw_seasons:
                             if isinstance(s_item, dict):
@@ -1065,11 +1065,11 @@ class PageApi(OwnerDelegator):
                                 try:
                                     meta_seasons_info[int(s_n)] = ep_c
                                 except Exception:
-                                    pass
+                                    logger.debug("api_vue_resource_recommend 分支忽略异常", exc_info=True)
                     if not meta_seasons_info and tot_ep and str(tot_ep).isdigit() and int(tot_ep) > 0:
                         meta_seasons_info[1] = int(tot_ep)
                 except Exception:
-                    pass
+                    logger.debug("api_vue_resource_recommend 分支忽略异常", exc_info=True)
 
                 # 从标题中智能识别季数（如《碧蓝之海 第三季》=> 3）
                 raw_title_for_s = str(media_item.get("title") or media_item.get("name") or "")
@@ -1155,7 +1155,7 @@ class PageApi(OwnerDelegator):
                             if s_int > 0:
                                 official_season_nums.add(s_int)
                         except (ValueError, TypeError):
-                            pass
+                            logger.debug("api_vue_resource_recommend 分支忽略异常", exc_info=True)
                 if official_season_nums:
                     all_season_nums = official_season_nums
                 else:
@@ -1338,7 +1338,7 @@ class PageApi(OwnerDelegator):
                 )
                 season_counts = _recognized_season_counts(recognized)
             except Exception as error:
-                logger.debug(f"缓存详情补全失败 [{source}:{source_id}]：{error}")
+                logger.debug(f"缓存详情补全失败 [{source}:{source_id}]：{error}", exc_info=True)
 
         if recognized:
             for field in (
@@ -1369,7 +1369,7 @@ class PageApi(OwnerDelegator):
                     try:
                         detail["douban_rating"] = float(initial_rating)
                     except (TypeError, ValueError):
-                        pass
+                        logger.debug("api_vue_resource_detail 分支忽略异常", exc_info=True)
 
         # v2 豆瓣/Bangumi 识别接口只返回原生来源身份，不会自动产生 TMDB。
         # 使用平台现有的标题匹配和 TMDB 识别链补齐跨来源 ID，避免前端自行猜测映射。
@@ -1391,7 +1391,7 @@ class PageApi(OwnerDelegator):
                     try:
                         tmdb_info = call_with_supported_kwargs(lookup, lookup_spec[1])
                     except Exception as error:
-                        logger.debug(f"详情媒体来源 ID 映射 TMDB 失败 [{source}:{source_id}]：{error}")
+                        logger.debug(f"详情媒体来源 ID 映射 TMDB 失败 [{source}:{source_id}]：{error}", exc_info=True)
 
             # 直接来源映射缺失时，调用平台已有 TMDB 标题匹配接口，并带上年份与媒体类型。
             if not tmdb_info:
@@ -1407,7 +1407,7 @@ class PageApi(OwnerDelegator):
                             },
                         )
                     except Exception as error:
-                        logger.debug(f"详情媒体标题匹配 TMDB 失败 [{title}]：{error}")
+                        logger.debug(f"详情媒体标题匹配 TMDB 失败 [{title}]：{error}", exc_info=True)
 
             tmdb_id = (
                 tmdb_info.get("id") or tmdb_info.get("tmdb_id")
@@ -1484,7 +1484,7 @@ class PageApi(OwnerDelegator):
                             _merge_media_display(detail, full_tmdb, tmdb=True)
                             break
                     except Exception as error:
-                        logger.debug(f"补全 TMDB 详情失败 [{current_tmdb_id}]：{error}")
+                        logger.debug(f"补全 TMDB 详情失败 [{current_tmdb_id}]：{error}", exc_info=True)
 
         # 若依然缺少简介且具备豆瓣 ID，调用豆瓣详情接口补全
         if douban_id and not str(detail.get("overview") or "").strip():
@@ -1500,7 +1500,7 @@ class PageApi(OwnerDelegator):
                             _merge_media_display(detail, douban_detail)
                             break
                     except Exception as error:
-                        logger.debug(f"通过豆瓣 ID 获取详情失败 [{douban_id}]：{error}")
+                        logger.debug(f"通过豆瓣 ID 获取详情失败 [{douban_id}]：{error}", exc_info=True)
 
         if cached_detail is None:
             season_counts = _recognized_season_counts(recognized)
@@ -1538,7 +1538,7 @@ class PageApi(OwnerDelegator):
                 }])
                 matches = library_map.get(str(tmdb_id), [])
         except Exception as error:
-            logger.debug(f"读取详情媒体库状态失败：{error}")
+            logger.debug(f"读取详情媒体库状态失败：{error}", exc_info=True)
         detail["in_library"] = bool(matches)
         detail["library_items"] = matches
         detail["library_servers"] = sorted({

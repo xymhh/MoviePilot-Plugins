@@ -128,7 +128,7 @@ class MikanSearchService:
                     })
                 return results
         except Exception as e:
-            logger.debug(f"[MIKAN] 拉取番剧 RSS={bangumi_id} 失败，尝试分页展开：{e}")
+            logger.debug(f"[MIKAN] 拉取番剧 RSS={bangumi_id} 失败，尝试分页展开：{e}", exc_info=True)
 
         # 2. 尝试从番剧主页读取各字幕组并调用 ExpandEpisodeTable 展开完整表格
         try:
@@ -158,9 +158,9 @@ class MikanSearchService:
                             "is_pack": is_pack_release(row_title, episodes),
                         })
                 except Exception as ex:
-                    logger.debug(f"[MIKAN] 展开字幕组={sg_id} 失败：{ex}")
+                    logger.debug(f"[MIKAN] 展开字幕组={sg_id} 失败：{ex}", exc_info=True)
         except Exception as err:
-            logger.debug(f"[MIKAN] 获取番剧字幕组失败：{err}")
+            logger.debug(f"[MIKAN] 获取番剧字幕组失败：{err}", exc_info=True)
 
         return results
 
@@ -228,7 +228,7 @@ class MikanSearchService:
                     bgm_episodes = self._search_bangumi_episodes(bgm_id, season_num)
                     results.extend(bgm_episodes)
         except Exception as bgm_error:
-            logger.debug(f"[MIKAN] 探测相关推荐番剧异常：{bgm_error}")
+            logger.debug(f"[MIKAN] 探测相关推荐番剧异常：{bgm_error}", exc_info=True)
 
         # 4. 常规关键词 HTML 搜索作为补充与兜底
         for keyword in search_keyword_candidates(base_titles, aliases):

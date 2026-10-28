@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 import requests
+from app.log import logger
 
 
 class RelayError(RuntimeError):
@@ -43,7 +44,7 @@ class RelayClient:
             try:
                 message = str((response.json() or {}).get("error") or "")
             except ValueError:
-                pass
+                logger.debug("_request 分支忽略异常", exc_info=True)
             raise RelayError(f"中继接口异常：HTTP {response.status_code} {message}".strip())
         try:
             payload = response.json()

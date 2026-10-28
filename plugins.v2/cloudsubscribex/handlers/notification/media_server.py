@@ -99,7 +99,7 @@ class MediaServerResolver:
             try:
                 size = Path(path).stat().st_size
             except OSError:
-                pass
+                logger.debug("_platform_item_media 分支忽略异常", exc_info=True)
         container = str(value("container", "Container", default="") or "").strip() or Path(path).suffix.lstrip(".")
         streams = value("media_streams", "MediaStreams", "mediaStreams", default=[]) or []
         streams = [stream if isinstance(stream, dict) else stream.model_dump()
@@ -691,7 +691,7 @@ class MediaServerNotifier:
                         if items and items[0].get("Id"):
                             return str(items[0]["Id"])
             except Exception as e:
-                logger.debug(f"Emby 按 TMDB ID 查询异常：{tmdb_id} - {e}")
+                logger.debug(f"Emby 按 TMDB ID 查询异常：{tmdb_id} - {e}", exc_info=True)
 
         # 2. 次选按名称查询
         clean_title = str(title or "").strip()
@@ -713,7 +713,7 @@ class MediaServerNotifier:
                         if items and items[0].get("Id"):
                             return str(items[0]["Id"])
             except Exception as e:
-                logger.debug(f"Emby 按标题查询异常：{clean_title} - {e}")
+                logger.debug(f"Emby 按标题查询异常：{clean_title} - {e}", exc_info=True)
 
         return None
 

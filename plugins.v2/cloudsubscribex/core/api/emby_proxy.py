@@ -182,7 +182,7 @@ class EmbyProxyService:
                 if value:
                     return value
         except Exception as error:  # noqa: BLE001
-            logger.debug(f"读取 MP 媒体服务器设置失败：{error}")
+            logger.debug(f"读取 MP 媒体服务器设置失败：{error}", exc_info=True)
         try:
             try:
                 from app.helper.mediaserver import MediaServerHelper
@@ -195,7 +195,7 @@ class EmbyProxyService:
                 if value:
                     return value
         except Exception as error:  # noqa: BLE001
-            logger.debug(f"读取 MP 媒体服务器配置失败：{error}")
+            logger.debug(f"读取 MP 媒体服务器配置失败：{error}", exc_info=True)
         return ""
 
     def _api_key(self) -> str:
@@ -273,7 +273,7 @@ class EmbyProxyService:
                 try:
                     loop.close()
                 except Exception:  # noqa: BLE001
-                    pass
+                    logger.debug("_run 分支忽略异常", exc_info=True)
 
     def stop(self, timeout: float = STOP_TIMEOUT) -> None:
         """通知 uvicorn 退出并等待端口释放。"""
@@ -569,16 +569,16 @@ class EmbyProxyService:
                 pump_client_to_upstream(), pump_upstream_to_client()
             )
         except Exception:
-            pass
+            logger.debug("handle_websocket 分支忽略异常", exc_info=True)
         finally:
             try:
                 await connection.close()
             except Exception:
-                pass
+                logger.debug("handle_websocket 分支忽略异常", exc_info=True)
             try:
                 await send({"type": "websocket.close", "code": 1000})
             except Exception:
-                pass
+                logger.debug("handle_websocket 分支忽略异常", exc_info=True)
 
     @staticmethod
     async def _ws_connect(websockets_module: Any, url: str, headers: Dict[str, str]):

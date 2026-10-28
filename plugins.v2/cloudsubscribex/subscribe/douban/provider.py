@@ -139,7 +139,7 @@ class DoubanSubscribeProvider(SubscribeProvider):
                         if int(year) < min_year:
                             continue
                     except ValueError:
-                        pass
+                        logger.debug("fetch 分支忽略异常", exc_info=True)
 
                 vote = data.get("vote_average") or data.get("vote") or 0.0
                 try:

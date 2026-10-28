@@ -127,6 +127,7 @@ CS 1.7.39 起自带 STRM 全量 / 增量与 Emby 302 播放，**不再需要装�
 ## 文档
 
 - [`docs/README.md`](docs/README.md) — 文档索引（`plan/` 计划、`test/` 证据、`summary/` 结论）
+- [静默失败面清零 + 棘轮归零（1.7.94）](docs/test/2026-10-28-P2静默面清零.md) —— 全包 87 处 `except: pass` + 77 处无栈 debug 改成 `logger.debug(..., exc_info=True)`（60 个文件），`scripts/lint.py` 静默点预算收到 0/0，新增静默点 CI 直接红（逃生口 `# noqa: silent`）；顺带复查：TG 旧键仅用于规则编辑器一次性播种（保留）、根目录 61 个 `*_TODO.md` 均未被 git 跟踪
 - [死配置清理 + 静默失败面 + CI 拦住 ruff F（1.7.93）](docs/test/2026-10-28-P1-A死键与静默面收口.md) —— 删掉三条从未被读取的死配置（`auto_subscribe_maoyan_categories`、`auto_subscribe_douban_rsshub_base`、`auto_subscribe_douban_rss_urls`）；主链路 23 处 `except: pass` 改为带栈的 debug、41 处 debug 补 `exc_info`；`scripts/lint.py` 新增 ruff F 硬拦截 + 静默点棘轮（87/77），CI 固定 `ruff==0.17.3`，顺手修掉 71 条 F 级问题（其中两处 F401 是再导出，删了会 ImportError）
 - [媒体信息提取改走神医任务（1.7.74）](docs/summary/2026-10-26-媒体信息提取根因与修复.md) —— 媒体信息一直空白 = ①`PlaybackInfo` 返回 200 但不跑 ffprobe ②直链缓存 6h 长于 115 直链实测寿命（≤70 分钟即 `request expired`）；改为启动 Emby 计划任务 `Extract MediaInfo`（5 分钟冷却）+ 缓存收敛到 45 分钟 + 修 `with get_res(None)` 吞异常；《宋代足球小将》40 集从 4/40 到 40/40（150 秒）｜[验证](docs/test/2026-10-26-1.7.74媒体信息提取验证.md)
 - [通知补类型/大小/来源 + 六类模板排版（1.7.75）](docs/plan/2026-10-26-通知富信息与排版.md) —— 转存/跨盘/洗版通知每行变成 `🎬 杀手 (2020) · 电影 · 12.4 GB · 115网盘`，跨盘写 `夸克 → 115`，标题行加「合计 X GB」；六类默认模板统一换新图标与紧凑行距；升级时只替换「仍是旧默认值」的模板，用户改过的一律保留

@@ -171,7 +171,7 @@ class CloudSubscribeDatabaseManager:
                             "PRAGMA wal_checkpoint(TRUNCATE);"
                         )
                 except Exception as error:
-                    logger.debug(f"CloudSubscribe WAL checkpoint 失败：{error}")
+                    logger.debug(f"CloudSubscribe WAL checkpoint 失败：{error}", exc_info=True)
                 self._engine.dispose()
             self._engine = None
             self._session_factory = None

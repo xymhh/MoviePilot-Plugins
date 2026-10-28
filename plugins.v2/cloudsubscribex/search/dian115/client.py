@@ -183,20 +183,20 @@ class Dian115Client:
             if val:
                 return str(val)
         except Exception:
-            pass
+            logger.debug("_cookie 分支忽略异常", exc_info=True)
         try:
             val = self._session.cookies.get_dict().get(name)
             if val:
                 return str(val)
         except Exception:
-            pass
+            logger.debug("_cookie 分支忽略异常", exc_info=True)
         try:
             for cookie in self._session.cookies:
                 c_name = getattr(cookie, "name", None)
                 if c_name == name and getattr(cookie, "value", None):
                     return str(cookie.value)
         except Exception:
-            pass
+            logger.debug("_cookie 分支忽略异常", exc_info=True)
         return ""
 
     def _portal_token(self) -> str:
@@ -221,7 +221,7 @@ class Dian115Client:
                 self._saved_token = token
                 self._authenticated = True
         except Exception as error:
-            logger.debug(f"Dian115 恢复登录状态失败：{error}")
+            logger.debug(f"Dian115 恢复登录状态失败：{error}", exc_info=True)
 
     def _save_auth_cookie(self, token: str = "") -> None:
         value = str(token or "")
@@ -239,7 +239,7 @@ class Dian115Client:
             )
             self._saved_token = value
         except Exception as error:
-            logger.debug(f"Dian115 持久化登录状态失败：{error}")
+            logger.debug(f"Dian115 持久化登录状态失败：{error}", exc_info=True)
 
     def _headers(self, current_path: str) -> Dict[str, str]:
         path = current_path if str(current_path).startswith("/") else "/"
@@ -451,7 +451,7 @@ class Dian115Client:
                     try:
                         self._session.cookies.set(cname, str(token), secure=True)
                     except Exception:
-                        pass
+                        logger.debug("_login 分支忽略异常", exc_info=True)
                 self._saved_token = str(token)
 
             if not user or not token:
@@ -459,7 +459,7 @@ class Dian115Client:
                 try:
                     cookie_names = [getattr(c, "name", str(c)) for c in self._session.cookies]
                 except Exception:
-                    pass
+                    logger.debug("_login 分支忽略异常", exc_info=True)
                 logger.warning(
                     f"Dian115 登录响应异常：payload_keys={list(payload.keys())}, data_keys={list(data.keys())}, cookies={cookie_names}"
                 )

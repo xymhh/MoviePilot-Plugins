@@ -731,7 +731,7 @@ class ShareService(OwnerDelegator):
                 try:
                     self._delete_items([alt_parent_id])
                 except Exception:
-                    pass
+                    logger.debug("_transfer_via_alternative_dir 分支忽略异常", exc_info=True)
                 return []
 
             # 获取转存到临时目录中的所有文件并迁移
@@ -751,7 +751,7 @@ class ShareService(OwnerDelegator):
             try:
                 self._delete_items([alt_parent_id])
             except Exception as clean_err:
-                logger.debug(f"清理临时切换转存目录失败: {clean_err}")
+                logger.debug(f"清理临时切换转存目录失败: {clean_err}", exc_info=True)
 
             # 在目标目录复核已迁入的文件
             ready, still_unresolved = self.rename_files_by_sha1_batch(
@@ -769,7 +769,7 @@ class ShareService(OwnerDelegator):
             try:
                 self._delete_items([alt_parent_id])
             except Exception:
-                pass
+                logger.debug("_transfer_via_alternative_dir 分支忽略异常", exc_info=True)
             return []
 
     def _do_transfer(

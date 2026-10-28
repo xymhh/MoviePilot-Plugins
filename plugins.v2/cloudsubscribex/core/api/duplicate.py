@@ -135,4 +135,4 @@ class DuplicateApi(OwnerDelegator):
                 ],
             )
         except Exception as error:  # noqa: BLE001
-            logger.debug(f"写入重复订阅账本失败：{error}")
+            logger.debug(f"写入重复订阅账本失败：{error}", exc_info=True)

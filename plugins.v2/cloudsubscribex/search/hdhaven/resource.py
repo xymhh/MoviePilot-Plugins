@@ -287,7 +287,7 @@ class HDHavenResourceService:
                 raise
             logger.debug(f"HDHaven 请求影视关联资源失败：{err}")
         except Exception as err:
-            logger.debug(f"HDHaven 请求影视关联资源失败：{err}")
+            logger.debug(f"HDHaven 请求影视关联资源失败：{err}", exc_info=True)
 
         results = []
         for item in raw_list:

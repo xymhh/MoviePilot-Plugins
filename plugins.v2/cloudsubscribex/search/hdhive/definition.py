@@ -16,6 +16,7 @@ from ...core.definitions import (
     SearchSourceDefinition,
     build_checkin_definition,
 )
+from app.log import logger
 
 
 def _is_openapi_mode(owner: Any) -> bool:
@@ -170,7 +171,7 @@ class HDHiveSourceDefinition(SearchSourceDefinition):
             try:
                 client.close()
             except Exception:
-                pass
+                logger.debug("close_test_resources 分支忽略异常", exc_info=True)
 
     @classmethod
     def get_config_groups(cls, context: Optional[Dict[str, Any]] = None) -> List[GroupSpec]:

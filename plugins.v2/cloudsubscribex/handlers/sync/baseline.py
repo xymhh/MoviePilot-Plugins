@@ -16,6 +16,7 @@ from ...core.media import (
     tmdb_id_of,
 )
 from ...utils.cache import normalize_platform_cache_key
+from app.log import logger
 
 
 class UpgradeBaselineService(OwnerDelegator):
@@ -52,7 +53,7 @@ class UpgradeBaselineService(OwnerDelegator):
                 decoded = json.loads(value)
                 return decoded if isinstance(decoded, dict) else {}
             except (TypeError, ValueError):
-                pass
+                logger.debug("_decode_file_item 分支忽略异常", exc_info=True)
         return {}
 
     @staticmethod
@@ -232,7 +233,7 @@ class UpgradeBaselineService(OwnerDelegator):
                 try:
                     file_size = media_file.stat().st_size
                 except OSError:
-                    pass
+                    logger.debug("_build_episode_baseline 分支忽略异常", exc_info=True)
             candidates.setdefault(int(episode), []).append({
                 "file_name": media_file.name,
                 "rule_title": str(

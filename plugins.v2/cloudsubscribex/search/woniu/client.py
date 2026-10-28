@@ -103,7 +103,7 @@ class WoniuClient:
                     self._session.cookies.set(name, str(value))
                 logger.debug("蜗牛已恢复本地登录会话")
         except Exception as error:
-            logger.debug(f"蜗牛恢复本地会话失败：{error}")
+            logger.debug(f"蜗牛恢复本地会话失败：{error}", exc_info=True)
 
     def _save_session(self) -> None:
         if not self._save_data_func:
@@ -119,7 +119,7 @@ class WoniuClient:
                 } if cookies else {},
             )
         except Exception as error:
-            logger.debug(f"蜗牛持久化会话失败：{error}")
+            logger.debug(f"蜗牛持久化会话失败：{error}", exc_info=True)
 
     def _session_request(self, *args, **kwargs):
         if self._proxies:
@@ -257,7 +257,7 @@ class WoniuClient:
             elif days_match:
                 signin_days = int(days_match.group(1))
         except Exception as error:
-            logger.debug(f"蜗牛读取签到天数失败：{error}")
+            logger.debug(f"蜗牛读取签到天数失败：{error}", exc_info=True)
 
         return {
             "name": name,
@@ -436,4 +436,4 @@ class WoniuClient:
             try:
                 self._session.close()
             except Exception:
-                pass
+                logger.debug("close 分支忽略异常", exc_info=True)

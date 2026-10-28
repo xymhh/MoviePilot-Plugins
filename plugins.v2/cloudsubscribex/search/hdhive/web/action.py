@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Pattern, Tuple
 from urllib.parse import urljoin, urlsplit
 
 from .parser import decode_embedded_text, response_body, response_text
+from app.log import logger
 
 SCRIPT_SRC_RE = re.compile(
     r'<script\b[^>]*\bsrc=["\']([^"\']+)["\']', re.I
@@ -548,7 +549,7 @@ def server_action_script_paths(
         try:
             preferred_index = result.index(preferred)
         except ValueError:
-            pass
+            logger.debug("server_action_script_paths 分支忽略异常", exc_info=True)
         else:
             # Next.js places route dependencies immediately before the route
             # page chunk. Try those first so action discovery remains bounded.
@@ -570,7 +571,7 @@ def _json_values(text: str) -> Iterable[Any]:
         try:
             yield json.loads(stripped)
         except json.JSONDecodeError:
-            pass
+            logger.debug("_json_values 分支忽略异常", exc_info=True)
     for line in stripped.splitlines():
         match = FLIGHT_LINE_RE.match(line.strip())
         if not match:

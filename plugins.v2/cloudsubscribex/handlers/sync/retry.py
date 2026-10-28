@@ -180,7 +180,7 @@ class HistoryRetryService(OwnerDelegator):
                 self.submit_history_retry(record_time, share_url, file_name)
                 attempted_keys.append(key)
             except Exception as error:
-                logger.debug(f"批量重试提交失败（{file_name}）：{error}")
+                logger.debug(f"批量重试提交失败（{file_name}）：{error}", exc_info=True)
         if self._history_changed:
             self._history_changed()
 

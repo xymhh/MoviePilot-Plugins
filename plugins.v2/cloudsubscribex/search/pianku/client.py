@@ -363,7 +363,7 @@ class PiankuClient:
                     )
                     link = self._extract_resolved_link(response, target)
                 except Exception as error:
-                    logger.debug(f"片库资源解析异常：{error}")
+                    logger.debug(f"片库资源解析异常：{error}", exc_info=True)
                 if not link and not verified:
                     try:
                         protocol.ensure_gate(page, detail_url or None)
@@ -378,7 +378,7 @@ class PiankuClient:
                         )
                         link = self._extract_resolved_link(response, target)
                     except Exception as error:
-                        logger.debug(f"片库资源重试解析异常：{error}")
+                        logger.debug(f"片库资源重试解析异常：{error}", exc_info=True)
                 if link:
                     result[target] = link
             return result

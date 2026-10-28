@@ -86,7 +86,7 @@ class PlatformRuleService(OwnerDelegator):
                 try:
                     setattr(subscribe, attr, None)
                 except Exception:
-                    pass
+                    logger.debug("_safe_subscribe_params 分支忽略异常", exc_info=True)
 
         # 优先类方法/静态方法（v3）
         get_params = getattr(SubscribeChain, "get_params", None)
@@ -99,7 +99,7 @@ class PlatformRuleService(OwnerDelegator):
                     if chain and hasattr(chain, "get_params"):
                         return chain.get_params(subscribe)
                 except Exception:
-                    pass
+                    logger.debug("_safe_subscribe_params 分支忽略异常", exc_info=True)
             except Exception as err:
                 logger.debug(f"SubscribeChain.get_params 读取失败：{err}")
                 return None
@@ -110,7 +110,7 @@ class PlatformRuleService(OwnerDelegator):
             if chain and hasattr(chain, "get_params") and callable(chain.get_params):
                 return chain.get_params(subscribe)
         except Exception:
-            pass
+            logger.debug("_safe_subscribe_params 分支忽略异常", exc_info=True)
 
         return None
 
@@ -225,7 +225,7 @@ class PlatformRuleService(OwnerDelegator):
             if val and not hasattr(val, "_mock_return_value"):
                 return list(val)
         except Exception:
-            pass
+            logger.debug("_platform_rule_groups 分支忽略异常", exc_info=True)
         return []
 
     def rank_file_candidates(

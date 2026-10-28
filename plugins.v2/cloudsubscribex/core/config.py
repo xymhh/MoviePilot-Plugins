@@ -272,7 +272,7 @@ class UIConfig:
             for key, val in dynamic_defaults.items():
                 config.setdefault(key, val)
         except Exception as error:
-            logger.debug(f"合并自描述渠道默认配置异常: {error}")
+            logger.debug(f"合并自描述渠道默认配置异常: {error}", exc_info=True)
         return config
 
     @classmethod
@@ -288,7 +288,7 @@ class UIConfig:
                     for field in group.fields:
                         cls._extract_field_default(defaults, field)
         except Exception as error:
-            logger.debug(f"从网盘驱动提取默认配置异常: {error}")
+            logger.debug(f"从网盘驱动提取默认配置异常: {error}", exc_info=True)
 
         # 2. 扫描搜索渠道声明的字段默认值
         try:
@@ -298,7 +298,7 @@ class UIConfig:
                     for field in group.fields:
                         cls._extract_field_default(defaults, field)
         except Exception as error:
-            logger.debug(f"从搜索渠道提取默认配置异常: {error}")
+            logger.debug(f"从搜索渠道提取默认配置异常: {error}", exc_info=True)
 
         # 3. 扫描签到提供方声明的契约与字段默认值
         try:
@@ -312,7 +312,7 @@ class UIConfig:
                     for field in defn.group.fields:
                         cls._extract_field_default(defaults, field)
         except Exception as error:
-            logger.debug(f"从签到契约提取默认配置异常: {error}")
+            logger.debug(f"从签到契约提取默认配置异常: {error}", exc_info=True)
 
         return defaults
 

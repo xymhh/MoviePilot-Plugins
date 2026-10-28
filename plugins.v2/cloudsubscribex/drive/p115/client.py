@@ -621,14 +621,14 @@ class P115ClientManager:
                             try:
                                 return int(val)
                             except (TypeError, ValueError):
-                                pass
+                                logger.debug("get_points_balance 分支忽略异常", exc_info=True)
                 elif data is not None:
                     try:
                         return int(data)
                     except (TypeError, ValueError):
-                        pass
+                        logger.debug("get_points_balance 分支忽略异常", exc_info=True)
             except Exception as error:
-                logger.debug(f"读取 115 枫叶余额失败: {error}")
+                logger.debug(f"读取 115 枫叶余额失败: {error}", exc_info=True)
 
         # 2. 备选通过 user_points_sign 签到数据读取
         if hasattr(self.client, "user_points_sign"):
@@ -642,9 +642,9 @@ class P115ClientManager:
                             try:
                                 return int(val)
                             except (TypeError, ValueError):
-                                pass
+                                logger.debug("get_points_balance 分支忽略异常", exc_info=True)
             except Exception as error:
-                logger.debug(f"读取 115 枫叶余额失败: {error}")
+                logger.debug(f"读取 115 枫叶余额失败: {error}", exc_info=True)
 
         return None
 
@@ -671,7 +671,7 @@ class P115ClientManager:
                     current_points = int(val)
                     break
                 except (TypeError, ValueError):
-                    pass
+                    logger.debug("checkin 分支忽略异常", exc_info=True)
 
         if already_checked_in:
             if current_points is None:
@@ -709,7 +709,7 @@ class P115ClientManager:
                     after_points = int(val)
                     break
                 except (TypeError, ValueError):
-                    pass
+                    logger.debug("checkin 分支忽略异常", exc_info=True)
 
         if after_points is None:
             after_points = self.get_points_balance()

@@ -73,5 +73,5 @@ class LedgerApi(OwnerDelegator):
             try:
                 return getter()
             except Exception as error:  # noqa: BLE001
-                logger.debug(f"获取插件数据目录失败：{error}")
+                logger.debug(f"获取插件数据目录失败：{error}", exc_info=True)
         return None

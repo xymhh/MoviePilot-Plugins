@@ -129,7 +129,7 @@ class CloudDriveManager:
                         try:
                             old_client.close()
                         except Exception as error:
-                            logger.debug(f"关闭旧驱动 {key} 客户端失败：{error}")
+                            logger.debug(f"关闭旧驱动 {key} 客户端失败：{error}", exc_info=True)
                     if getattr(self._plugin, "_cloud_drive_key", "") == key:
                         self.active_drive = provider
                         self._plugin._cloud_drive = provider
@@ -140,7 +140,7 @@ class CloudDriveManager:
                 try:
                     client.close()
                 except Exception:
-                    pass
+                    logger.debug("register_provider 分支忽略异常", exc_info=True)
 
         return False
 
@@ -152,7 +152,7 @@ class CloudDriveManager:
             if provider.supports(CloudDriveCapability.QRCODE_AUTH):
                 return provider.require(CloudDriveCapability.QRCODE_AUTH)
         except KeyError:
-            pass
+            logger.debug("get_qrcode_service 分支忽略异常", exc_info=True)
         if normalized in self._qrcode_services:
             return self._qrcode_services[normalized]
         definition = next(
@@ -220,7 +220,7 @@ class CloudDriveManager:
                 try:
                     client.close()
                 except Exception as error:
-                    logger.debug(f"关闭驱动 {key} 客户端失败：{error}")
+                    logger.debug(f"关闭驱动 {key} 客户端失败：{error}", exc_info=True)
 
         self._clients.clear()
         for service in self._qrcode_services.values():
@@ -228,6 +228,6 @@ class CloudDriveManager:
                 try:
                     service.close()
                 except Exception:
-                    pass
+                    logger.debug("close 分支忽略异常", exc_info=True)
         self._qrcode_services.clear()
         self.active_drive = None
