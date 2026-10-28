@@ -178,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.100"
+    plugin_version = "1.7.101"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -314,6 +314,7 @@ class CloudSubscribeX(_PluginBase):
     # 入库择优：只对新入库生效（分辨率 > 体积 + 阈值）
     _quality_prefer_enabled: bool = False
     _quality_min_gain_percent: int = 10
+    _upgrade_episode_limit: int = 0
     _quality_min_gain_mb: int = 200
     _quality_ignore_rename_template: bool = True
     _local_resource_path: str = ""
@@ -1744,6 +1745,9 @@ class CloudSubscribeX(_PluginBase):
         )
         self._quality_prefer_enabled = bool(config.get("quality_prefer_enabled", False))
         self._quality_min_gain_percent = int(config.get("quality_min_gain_percent", 10) or 0)
+        self._upgrade_episode_limit = max(
+            0, int(config.get("upgrade_episode_limit", 0) or 0)
+        )
         self._quality_min_gain_mb = int(config.get("quality_min_gain_mb", 200) or 0)
         self._quality_ignore_rename_template = bool(
             config.get("quality_ignore_rename_template", True)

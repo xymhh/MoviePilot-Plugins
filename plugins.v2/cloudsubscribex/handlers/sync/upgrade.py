@@ -1,6 +1,6 @@
 """洗版基线、评分与自动升级。"""
 
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from app.db import SessionFactory
 from app.log import logger
@@ -9,6 +9,44 @@ from app.schemas.types import MediaType
 from app.utils.string import StringUtils
 
 from ...core import OwnerDelegator
+
+
+def plan_upgrade_episode_order(
+        local_episodes: Iterable[int],
+        all_expected_episodes: Set[int],
+        target_episodes: Optional[Set[int]],
+        limit: int = 0,
+) -> Tuple[List[int], Set[int], List[int]]:
+    """按「缺集优先」排本轮待搜索集数。
+
+    补集是功能缺失，洗版只是画质优化：更新中的剧（已入库 30+ 集、缺最新几集）
+    不能把每集几 GB 的洗版排在补集前面，否则新集要等整轮洗完。
+
+    :param local_episodes: 已入库（有本地基线）的集数
+    :param all_expected_episodes: 订阅应覆盖的全部集数；为空表示集数未知
+    :param target_episodes: 手动指定的集数（多为补集请求）；非空时全部按优先处理
+    :param limit: 每轮最多洗版多少集，0 表示不限；只限制洗版部分，不限制缺集
+    :return: (本轮待搜索集数, 缺集集合, 因上限推迟到下一轮的集数)
+    """
+    searched = {int(episode) for episode in local_episodes}
+    missing: Set[int] = set()
+    if target_episodes is not None:
+        # 手动指定集数：只处理这批，整批按优先处理，也不受每轮洗版上限约束
+        searched = {int(episode) for episode in target_episodes}
+        missing = set(searched)
+    elif all_expected_episodes:
+        missing = {int(episode) for episode in all_expected_episodes} - searched
+        searched |= missing
+
+    upgrade_only = searched - missing
+    postponed: List[int] = []
+    if limit and limit > 0 and len(upgrade_only) > limit:
+        ordered_upgrade = sorted(upgrade_only)
+        postponed = ordered_upgrade[limit:]
+        upgrade_only = set(ordered_upgrade[:limit])
+
+    ordered = sorted(missing) + sorted(upgrade_only)
+    return ordered, missing, postponed
 
 
 class UpgradeService(OwnerDelegator):
@@ -161,15 +199,28 @@ class UpgradeService(OwnerDelegator):
             all_expected_episodes = set(range(start_ep, total_ep + 1)) if total_ep > 0 else set()
 
             # pri_order 没有固定满分；所有已有版本均通过候选比较决定是否升级。
-            episodes_to_search = set(local_scores)
-
-            if all_expected_episodes and target_episodes is None:
-                missing_eps = sorted(all_expected_episodes - set(local_scores.keys()))
-                if missing_eps:
-                    logger.debug(f"{upgrade_log_prefix} 缺失 {len(missing_eps)} 集：{missing_eps}")
-                    episodes_to_search |= set(missing_eps)
-
-            episodes_to_search = sorted(episodes_to_search)
+            # 顺序：缺集优先，其次洗版（可按每轮上限截断），见 plan_upgrade_episode_order。
+            episodes_to_search, missing_episode_set, postponed_upgrade = (
+                plan_upgrade_episode_order(
+                    local_episodes=local_scores.keys(),
+                    all_expected_episodes=all_expected_episodes,
+                    target_episodes=target_episodes,
+                    limit=int(getattr(self, "_upgrade_episode_limit", 0) or 0),
+                )
+            )
+            if missing_episode_set:
+                logger.info(
+                    f"{upgrade_log_prefix} 缺集优先：先补 "
+                    f"{self._format_episode_ranges(missing_episode_set)}"
+                    f"（{len(missing_episode_set)} 集）"
+                )
+            if postponed_upgrade:
+                logger.info(
+                    f"{upgrade_log_prefix} 每轮洗版上限 "
+                    f"{int(getattr(self, '_upgrade_episode_limit', 0) or 0)} 集，"
+                    f"本轮暂不洗版 {len(postponed_upgrade)} 集："
+                    f"{postponed_upgrade[:20]}"
+                )
 
             target_episode_air_dates: Dict[int, str] = {}
             if not episodes_to_search:

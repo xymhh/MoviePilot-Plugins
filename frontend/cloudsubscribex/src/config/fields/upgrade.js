@@ -118,6 +118,14 @@ export function createUpgradeSection(options) {
         icon: "mdi-tune-vertical",
         fields: [
           {
+            key: "upgrade_episode_limit",
+            label: "每轮洗版集数上限",
+            type: "number",
+            min: 0,
+            hint: "缺集永远先补；洗版每轮最多处理这么多集，0 表示不限。追更中的剧建议 3-5，避免每集几 GB 的洗版把新集拖到最后。",
+            cols: 4,
+          },
+          {
             key: "self_heal_interval",
             label: "评分自愈间隔（分钟）",
             type: "number",

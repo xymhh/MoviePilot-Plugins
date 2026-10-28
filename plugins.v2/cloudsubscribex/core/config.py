@@ -231,6 +231,8 @@ class UIConfig:
             "prefer_template_named_version": True,
             "quality_prefer_enabled": False,
             "quality_min_gain_percent": 10,
+            # 每轮订阅任务最多洗版多少集（0=不限）；缺集永远排在这些之前
+            "upgrade_episode_limit": 0,
             "quality_min_gain_mb": 200,
             "quality_ignore_rename_template": True,
             "upgrade_subscribe_ids": [],
