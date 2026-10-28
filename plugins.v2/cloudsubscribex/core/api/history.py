@@ -192,18 +192,13 @@ class HistoryApi(OwnerDelegator):
         backfill = getattr(self._sync_handler, "backfill_history_from_cloud", None)
         if not callable(backfill):
             return {"success": False, "message": "当前版本不支持历史补写"}
-        if not sync_lock.acquire(blocking=False):
-            return {
-                "success": False,
-                "message": "订阅任务正在合并转存记录，请稍后再操作",
-            }
+        # 补写自身在 _offline_pending_lock 内读改写历史，可与转存任务并行；
+        # 不再抢任务级 sync_lock（1.7.102 抢锁导致「有任务在跑就补不了」）。
         try:
             result = backfill(keyword=keyword)
         except Exception as error:
             logger.warning(f"补写历史记录失败：{error}")
             return {"success": False, "message": str(error)}
-        finally:
-            sync_lock.release()
         return result
 
     def api_notify_history(self, apikey: str, identity: Dict[str, Any]) -> dict:

@@ -1455,7 +1455,6 @@ class HistoryService(OwnerDelegator):
             share_url: str = "",
             status: str = "成功",
             reason: str = "历史记录缺失补写",
-            history: Optional[List[dict]] = None,
     ) -> Optional[Dict[str, Any]]:
         """按已知的落盘事实补写一条历史记录，返回新记录（重复或数据不足时返回 None）。
 
@@ -1473,19 +1472,6 @@ class HistoryService(OwnerDelegator):
         except (TypeError, ValueError):
             return None
         if not file_name or not cloud_dir or episode_number <= 0:
-            return None
-        history = history if history is not None else (self._get_data("history") or [])
-        existing = {
-            (
-                str(record.get("cloud_dir") or "").strip(),
-                str(record.get("file_name") or "").strip(),
-                int(record.get("season") or 0),
-                int(record.get("episode") or 0),
-            )
-            for record in history
-        }
-        target_key = (cloud_dir, file_name, season_number, episode_number)
-        if target_key in existing:
             return None
         now_text = time.strftime("%Y-%m-%d %H:%M:%S")
         try:
@@ -1508,8 +1494,25 @@ class HistoryService(OwnerDelegator):
         except Exception as error:
             logger.warning(f"补写历史记录失败：{error}", exc_info=True)
             return None
-        history.append(record)
-        self._save_data("history", history)
+        # 历史是「读整份 → 改 → 整份写回」的结构，补写必须与其它写回方共用同一把锁，
+        # 否则会覆盖掉并发任务刚写进去的记录（1.7.102 曾用任务级 sync_lock 挡，
+        # 结果转存任务跑着就补不了历史）。
+        with self._offline_pending_lock:
+            history = self._get_data("history") or []
+            target_key = (cloud_dir, file_name, season_number, episode_number)
+            existing = {
+                (
+                    str(record.get("cloud_dir") or "").strip(),
+                    str(record.get("file_name") or "").strip(),
+                    int(record.get("season") or 0),
+                    int(record.get("episode") or 0),
+                )
+                for record in history
+            }
+            if target_key in existing:
+                return None
+            history.append(record)
+            self._save_data("history", history)
         logger.info(
             f"历史记录缺失已补写：{record.get('title') or mediainfo.title} "
             f"S{season_number:02d}E{episode_number:02d} {file_name}（{reason}）"
@@ -1561,7 +1564,6 @@ class HistoryService(OwnerDelegator):
                 episodes.append(episode)
         if not episodes:
             return 0
-        history = self._get_data("history") or []
         written = 0
         for episode in sorted(set(episodes)):
             record = self._append_backfill_history_record(
@@ -1574,7 +1576,6 @@ class HistoryService(OwnerDelegator):
                 file_size=int(item.get("file_size") or 0),
                 share_url=str(item.get("share_url") or ""),
                 reason="后处理补写（终态找不到历史记录）",
-                history=history,
             )
             if record:
                 written += 1
@@ -1619,7 +1620,6 @@ class HistoryService(OwnerDelegator):
                 continue
             scanned += 1
             title_written = 0
-            history = self._get_data("history") or []
             for episode, cloud_file in sorted(cloud_files.items()):
                 record = self._append_backfill_history_record(
                     mediainfo=mediainfo,
@@ -1630,7 +1630,6 @@ class HistoryService(OwnerDelegator):
                     cloud_dir=str(cloud_dir or ""),
                     file_size=int(getattr(cloud_file, "size", 0) or 0),
                     reason="季目录实测补写",
-                    history=history,
                 )
                 if record:
                     title_written += 1
