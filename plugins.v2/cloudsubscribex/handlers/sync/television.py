@@ -19,10 +19,17 @@ class TelevisionSyncProcessor(OwnerDelegator):
     """处理电视剧订阅同步。"""
 
     @staticmethod
-    def _share_title_mismatch(share_files: Any, mediainfo: Any, resource_title: str) -> bool:
+    def _share_title_mismatch(
+            share_files: Any,
+            mediainfo: Any,
+            resource_title: str,
+            season: Any = None,
+    ) -> bool:
         """分享根目录标题守卫（延迟导入，避免测试环境缺少 utils 包）。"""
         from ...utils import FileMatcher
-        return FileMatcher.share_title_mismatch(share_files, mediainfo, resource_title)
+        return FileMatcher.share_title_mismatch(
+            share_files, mediainfo, resource_title, season
+        )
 
     @staticmethod
     def _season_episode_air_dates(mediainfo: Any, season: int) -> Dict[int, str]:
@@ -594,20 +601,28 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         # 自动搜索源常见“标题写 A、分享里是 B”的挂羊头资源；
                         # 手动资源保留人工判断，不在这里拦。
                         if source != "manual" and self._share_title_mismatch(
-                                share_files, mediainfo, resource_title
+                                share_files, mediainfo, resource_title, season
                         ):
                             reason = "分享根目录与订阅标题不符"
-                            # 把实际根目录名带进原因：账本页据此复盘是「真换片」
-                            # 还是「装饰太多导致误杀」，不必再翻容器日志。
+                            # 只打印「真正导致拦截」的根目录：原先打印
+                            # sorted(roots)[:3] 会把 06.mkv / 基德盘搜安卓app.apk
+                            # 这类无关名字排在前面，凶手常被截掉，排障只能靠猜。
                             try:
                                 from ...utils import FileMatcher as _FM
-                                _roots = sorted(_FM.share_root_names(share_files))
+                                _roots = _FM.mismatch_evidence_roots(
+                                    share_files, mediainfo, resource_title
+                                )
                             except Exception:  # noqa: BLE001
+                                logger.debug(
+                                    "解析拦截根目录失败，回退为全部根目录",
+                                    exc_info=True,
+                                )
                                 _roots = []
                             if _roots:
                                 reason = (
                                     "分享根目录与订阅标题不符（根目录："
                                     + " / ".join(root[:60] for root in _roots[:3])
+                                    + (" 等 %d 个" % len(_roots) if len(_roots) > 3 else "")
                                     + "）"
                                 )
                             # 记下 (链接, 标题)，24h 内不再为它重复读分享目录。

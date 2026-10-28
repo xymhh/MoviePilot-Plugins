@@ -1,0 +1,79 @@
+{
+  "_note": "2026-10-28 真机样本快照（《尚公主》4K 源）：只保留根目录与文件名/大小，不存分享链接。用于标题守卫回归，任何判定逻辑改动必须先过这里。",
+  "media": {"title": "尚公主", "year": "2026", "type": "tv"},
+  "cases": [
+    {
+      "id": "4k_60fps_variant_2026",
+      "why": "4K 60fps 高码源（4.7-4.9GB/集），根目录用「丨」分隔 + 异体字「玊」",
+      "root": "S）尚丨G丨玊（2026）",
+      "resource_title": "尚公主 (2026) 4K 高码率 [DV&HDR] [更新12集]",
+      "files": [
+        {"name": "S01E09.2026.2160p.60fps.WEB-DL.HDR.Vivid.H.265.10bit.DDP5.1.mkv", "_relative_path": "S）尚丨G丨玊（2026）/Season 1（HDR.Vivid.60fps）/S01E09.2026.2160p.60fps.WEB-DL.HDR.Vivid.H.265.10bit.DDP5.1.mkv", "size": 5131673600},
+        {"name": "S01E11.2026.2160p.60fps.WEB-DL.HDR.Vivid.H.265.10bit.DDP5.1.mkv", "_relative_path": "S）尚丨G丨玊（2026）/Season 1（HDR.Vivid.60fps）/S01E11.2026.2160p.60fps.WEB-DL.HDR.Vivid.H.265.10bit.DDP5.1.mkv", "size": 5261333500},
+        {"name": "S01E12.2026.2160p.60fps.WEB-DL.HDR.Vivid.H.265.10bit.AAC.mkv", "_relative_path": "S）尚丨G丨玊（2026）/Season 1（HDR.Vivid.60fps）/S01E12.2026.2160p.60fps.WEB-DL.HDR.Vivid.H.265.10bit.AAC.mkv", "size": 5271175600}
+      ],
+      "expect_mismatch": false,
+      "expect_mismatch_without_season": true
+    },
+    {
+      "id": "4k_variant_chars",
+      "why": "4K 源根目录用异体字「尙伀主」（尙=尚、伀=公、主=主）",
+      "root": "S 尙伀主",
+      "resource_title": "尚公主 (2026) 4K SDR HDR DV杜比视界 高码率 DDP5.1+HiFi 中字 更12集",
+      "files": [
+        {"name": "S01E11_4K_HDR_60fps.mkv", "_relative_path": "S 尙伀主/S01E11_4K_HDR_60fps.mkv", "size": 1781992069}
+      ],
+      "expect_mismatch": false,
+      "expect_mismatch_without_season": true
+    },
+    {
+      "id": "4k_obfuscated_at_hash",
+      "why": "4K 源根目录「S【上@供#住】」用 @ # 反爬",
+      "root": "S【上@供#住】",
+      "resource_title": "尚公主（2026）【4K.HDR.60fps】【内封简中】【更12集】",
+      "files": [
+        {"name": "S01E11_4K_HDR_60fps.mkv", "_relative_path": "S【上@供#住】/S01E11_4K_HDR_60fps.mkv", "size": 1781992069},
+        {"name": "S01E12_4K_HDR_60fps.mkv", "_relative_path": "S【上@供#住】/S01E12_4K_HDR_60fps.mkv", "size": 1983978922}
+      ],
+      "expect_mismatch": false,
+      "expect_mismatch_without_season": true
+    },
+    {
+      "id": "ads_mixed_with_episodes",
+      "why": "3 天内 5 条拦截都因广告文件被当剧名（基德盘搜安卓app.apk / 汁源分享.jpg）",
+      "root": "07.mkv",
+      "resource_title": "【尚公主】更新至第8集",
+      "files": [
+        {"name": "07.mkv", "_relative_path": "07.mkv", "size": 1300000000},
+        {"name": "基德盘搜安卓app.apk", "_relative_path": "基德盘搜安卓app.apk", "size": 12000000},
+        {"name": "汁源分享.jpg", "_relative_path": "汁源分享.jpg", "size": 46000}
+      ],
+      "expect_mismatch": false,
+      "expect_evidence_roots": []
+    },
+    {
+      "id": "code_prefix_episode_names",
+      "why": "代号前缀 + 集数（SGZBRMY-07.mkv）没有作品名，却被当另一部剧",
+      "root": "SGZBRMY-07.mkv",
+      "resource_title": "尚公主",
+      "files": [
+        {"name": "SGZBRMY-07.mkv", "_relative_path": "SGZBRMY-07.mkv", "size": 1400000000},
+        {"name": "SGZBRMY-08.mkv", "_relative_path": "SGZBRMY-08.mkv", "size": 1450000000}
+      ],
+      "expect_mismatch": false,
+      "expect_evidence_roots": []
+    },
+    {
+      "id": "true_other_show_plain",
+      "why": "反例：根目录明确是另一部剧、文件名只有集数 → 必须继续拦",
+      "root": "私.行",
+      "resource_title": "伟大的长征 更新至20集",
+      "files": [
+        {"name": "01.mp4", "_relative_path": "私.行/01.mp4", "size": 900000000},
+        {"name": "02.mp4", "_relative_path": "私.行/02.mp4", "size": 910000000}
+      ],
+      "expect_mismatch": true,
+      "expect_evidence_roots": ["私.行"]
+    }
+  ]
+}

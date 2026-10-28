@@ -292,6 +292,28 @@ class FileMatcher:
         r"(?i)^(?:第\s*)?(?:s\d{1,3})?(?:e|ep)?\d{1,4}"
         r"(?:\s*[-~—至]\s*(?:s\d{1,3})?(?:e|ep)?\d{1,4})?\s*(?:集|话)?$"
     )
+    # 组名/代号 + 集数（SGZBRMY-07.mkv）：同样没有作品名，不能当剧名证据。
+    _CODE_PREFIX_EPISODE_RE = re.compile(
+        r"(?i)^[a-z0-9]{2,20}[-_. ]?(?:s\d{1,3})?(?:e|ep)?\d{1,4}$"
+    )
+    # 非视频文件（广告/说明/字幕）常和影片摊在同一层，
+    # 线上实测「基德盘搜安卓app.apk」「汁源分享.jpg」把整包 4K 源判成另一部剧。
+    _NON_VIDEO_ROOT_SUFFIXES = frozenset({
+        "apk", "ipa", "exe", "msi", "dmg", "bat", "sh",
+        "jpg", "jpeg", "png", "gif", "bmp", "webp", "ico",
+        "txt", "md", "html", "htm", "url", "nfo", "pdf",
+        "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+        "zip", "rar", "7z", "tar", "gz", "torrent",
+        "srt", "ass", "ssa", "vtt", "sub", "sup", "idx", "smi",
+    })
+    # 反爬/变体写法常用的装饰符号（4K 源几乎都用：S【上@供#住】、S）尚丨G丨玊（2026））。
+    _ROOT_DECORATION_RE = re.compile(r"[@#丨｜|¦*·•~＊＃＠]")
+    # 软放行只看「包内有没有本季的集数」：用纯文件名解析，不依赖媒体识别，
+    # 避免把守卫和元数据匹配耦在一起（守卫是便宜的前置检查）。
+    _SXEX_EPISODE_RE = re.compile(
+        r"[Ss](\d{1,3})\s*[._\- ]?\s*[Ee](?:[Pp])?(\d{1,4})"
+    )
+    _CN_EPISODE_RE = re.compile(r"第\s*(\d{1,4})\s*[集话]")
 
     @classmethod
     def share_root_names(cls, files: Any) -> set[str]:
@@ -361,6 +383,8 @@ class FileMatcher:
         cleaned = cleaned.strip(" -_.·[]()（）【】")
         if cls._EPISODE_ONLY_ROOT_RE.match(cleaned):
             return True
+        if cls._CODE_PREFIX_EPISODE_RE.match(cleaned):
+            return True
         normalized_clean = normalize_title(cleaned)
         return not normalized_clean or normalized_clean in cls._GENERIC_SHARE_ROOTS
 
@@ -389,19 +413,28 @@ class FileMatcher:
 
     @classmethod
     def share_title_mismatch(
-            cls, files: Any, mediainfo: Any, resource_title: str = ""
+            cls,
+            files: Any,
+            mediainfo: Any,
+            resource_title: str = "",
+            season: Any = None,
     ) -> bool:
         """分享顶层目录明显是另一部剧时返回 True。
 
-        只拦“根目录能识别出明确剧名、但和目标标题完全不匹配”的资源；
-        ``国剧``、``4K``、``更新至20集`` 这类泛称不拦，避免误伤正常分享。
+        判定改为「正向证据」：只有根目录能证明是**另一部剧**才拦，不再因为
+        「名字里没有本剧标题」就拦。非视频文件（apk/jpg/字幕）与纯集数、
+        代号前缀文件名一律不算标题证据。
+
+        ``season`` 传入时补一条软放行：包内视频文件名能解析出目标季的集数、
+        且根目录与目标标题有汉字交集或带反爬装饰符（``S【上@供#住】``、
+        ``S）尚丨G丨玊（2026）``、``S 尙伀主``）→ 放行，避免 4K 源被整包误杀。
         分享内同时包含多部剧时，只要有一个根目录匹配就放行，后续按文件匹配。
         """
         if mediainfo is None:
             return False
         roots = [
             root for root in cls.share_root_names(files)
-            if not cls._is_generic_share_root(root)
+            if cls._is_title_evidence_root(root)
         ]
         if not roots:
             return False
@@ -420,27 +453,168 @@ class FileMatcher:
                             expected in normalized or normalized in expected
                     ):
                         return False
-            return True
+        elif any(
+                cls._root_matches_title(
+                    root, mediainfo, target_title, expected_title
+                )
+                for root in roots
+        ):
+            return False
 
-        for root in roots:
-            cleaned = cls._SHARE_ROOT_TAG_RE.sub("", root)
-            cleaned = cls._SHARE_ROOT_UPDATE_RE.sub("", cleaned)
-            for candidate in (root, cleaned):
-                if cls.media_name_matches(candidate, mediainfo):
-                    return False
-                normalized = normalize_title(candidate)
-                if expected_title and (
-                        normalized == expected_title
-                        or expected_title in normalized
-                        or normalized in expected_title
-                ):
-                    return False
-            # 最后一道容错：装饰过多导致精确包含失败时，按相似度放行。
-            if cls._title_similar_enough(
-                    cleaned or root, (target_title, expected_title)
-            ):
-                return False
+        # 软放行：根目录只是反爬/变体写法，内容却明确是本季的集数。
+        if season is not None and cls._episode_evidence_passes(
+                files,
+                season,
+                roots,
+                (getattr(mediainfo, "title", "") or "", resource_title),
+        ):
+            return False
         return True
+
+    @classmethod
+    def mismatch_evidence_roots(
+            cls,
+            files: Any,
+            mediainfo: Any,
+            resource_title: str = "",
+    ) -> List[str]:
+        """返回真正导致拦截的根目录（排障用，别再打印前 3 个泛称名）。
+
+        与 :meth:`share_title_mismatch` 的「根目录与标题是否匹配」判定保持一致，
+        便于日志/账本直接写出凶手。
+        """
+        if mediainfo is None:
+            return []
+        expected_title = normalize_title(resource_title)
+        target_title = normalize_title(getattr(mediainfo, "title", "") or "")
+        roots = [
+            root for root in cls.share_root_names(files)
+            if cls._is_title_evidence_root(root)
+        ]
+        offenders = []
+        for root in roots:
+            normalized = normalize_title(root)
+            if any(
+                    expected and (expected in normalized or normalized in expected)
+                    for expected in (target_title, expected_title)
+            ):
+                continue
+            if cls._root_matches_title(
+                    root, mediainfo, target_title, expected_title
+            ):
+                continue
+            offenders.append(root)
+        return sorted(offenders)
+
+    @classmethod
+    def _root_matches_title(
+            cls,
+            root: str,
+            mediainfo: Any,
+            target_title: str,
+            expected_title: str,
+    ) -> bool:
+        """单个根目录是否足以证明「这就是本剧」。"""
+        cleaned = cls._SHARE_ROOT_TAG_RE.sub("", root)
+        cleaned = cls._SHARE_ROOT_UPDATE_RE.sub("", cleaned)
+        for candidate in (root, cleaned):
+            if cls.media_name_matches(candidate, mediainfo):
+                return True
+            normalized = normalize_title(candidate)
+            if expected_title and (
+                    normalized == expected_title
+                    or expected_title in normalized
+                    or normalized in expected_title
+            ):
+                return True
+        # 最后一道容错：装饰过多导致精确包含失败时，按相似度放行。
+        return cls._title_similar_enough(
+            cleaned or root, (target_title, expected_title)
+        )
+
+    @classmethod
+    def _is_title_evidence_root(cls, name: str) -> bool:
+        """该根目录能否当「剧名证据」用：非视频文件与泛称都不算。"""
+        text = str(name or "").strip()
+        if not text:
+            return False
+        suffix = text.rsplit(".", 1)[-1].lower() if "." in text else ""
+        if suffix in cls._NON_VIDEO_ROOT_SUFFIXES:
+            return False
+        return not cls._is_generic_share_root(text)
+
+    @classmethod
+    def _episode_evidence_passes(
+            cls,
+            files: Any,
+            season: Any,
+            roots: List[str],
+            titles: Any,
+    ) -> bool:
+        """包内集数能对上目标季 + 根目录只是变体写法 → 视为本剧。
+
+        两个条件必须同时成立，避免把「另一部剧 + 纯集数文件名」也放进来：
+        根目录要么带反爬装饰符，要么与目标标题含相同汉字。
+        """
+        try:
+            target_season = int(season)
+        except (TypeError, ValueError):
+            return False
+        if target_season <= 0:
+            return False
+        if not any(cls._root_is_variant_name(root, titles) for root in roots):
+            return False
+        return cls._share_has_season_episode(files, target_season)
+
+    @classmethod
+    def _root_is_variant_name(cls, root: str, titles: Any) -> bool:
+        """根目录是否像「本剧标题的反爬/异体写法」。"""
+        if cls._ROOT_DECORATION_RE.search(str(root or "")):
+            return True
+        root_chars = {
+            ch for ch in str(root or "") if "\u4e00" <= ch <= "\u9fff"
+        }
+        if not root_chars:
+            return False
+        for title in titles or ():
+            title_chars = {
+                ch for ch in str(title or "") if "\u4e00" <= ch <= "\u9fff"
+            }
+            if title_chars and (title_chars & root_chars):
+                return True
+        return False
+
+    @classmethod
+    def _share_has_season_episode(cls, files: Any, season: int) -> bool:
+        """分享内是否有视频文件名能解析成目标季的某一集（纯文件名解析）。"""
+
+        def walk(items: Any) -> bool:
+            for item in items or []:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("is_dir"):
+                    if walk(item.get("children") or []):
+                        return True
+                    continue
+                name = str(item.get("name") or "")
+                if not MediaFileParser.is_video(name):
+                    continue
+                stem = name.rsplit("/", 1)[-1]
+                match = cls._SXEX_EPISODE_RE.search(stem)
+                if match:
+                    if (
+                        int(match.group(1)) == int(season)
+                        and int(match.group(2)) > 0
+                    ):
+                        return True
+                    continue
+                if cls._CN_EPISODE_RE.search(stem) or cls._EPISODE_ONLY_ROOT_RE.match(
+                        re.sub(r"\.[A-Za-z0-9]{2,5}$", "", stem)
+                ):
+                    return True
+            return False
+
+        return walk(files)
 
     @classmethod
     def media_matches(cls, item: Any, mediainfo: Any) -> bool:
