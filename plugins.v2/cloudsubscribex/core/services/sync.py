@@ -2,7 +2,6 @@
 
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from pathlib import Path
 from threading import Event as ThreadEvent, RLock, Thread
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -1197,39 +1196,25 @@ class SyncExecutionService(OwnerDelegator):
             return {}
 
     def _write_candidate_ledger(self, snapshot: Dict[str, Any]) -> None:
-        """把本次运行的候选去向落成账本文件，供 /ledger 页面查询。
+        """把本次运行的候选去向写进账本表，供 /ledger 页面查询。
 
         账本是辅助观测数据：任何异常都只记 debug，不影响同步结果，
-        也不改变跳过统计的汇总口径。
+        也不改变跳过统计的汇总口径。清理按天在库里做，不再留 .purged 标记文件。
         """
         try:
             items = snapshot.get("items") if isinstance(snapshot, dict) else None
             if not items:
                 return
             plugin = getattr(self, "_owner", None) or getattr(self, "_plugin", None)
-            data_path = None
-            getter = getattr(plugin, "get_data_path", None)
-            if callable(getter):
-                data_path = getter()
-            if not data_path:
+            getter = getattr(plugin, "_get_data_store", None)
+            if not callable(getter):
                 return
             from .candidate_ledger import append_records, purge_old
 
+            store = getter().ledger_store()
             run_id = time.strftime("%Y%m%d%H%M%S")
-            append_records(data_path, items, run_id=run_id)
-            # 清理节流：每天最多扫一次目录，避免每轮同步都遍历文件。
-            marker = Path(data_path) / "ledger" / ".purged"
-            today = time.strftime("%Y-%m-%d")
-            try:
-                last = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
-            except OSError:
-                last = ""
-            if last != today:
-                purge_old(data_path)
-                try:
-                    marker.write_text(today, encoding="utf-8")
-                except OSError:
-                    logger.debug("_write_candidate_ledger 分支忽略异常", exc_info=True)
+            append_records(store, items, run_id=run_id)
+            purge_old(store)
         except Exception as error:  # noqa: BLE001
             logger.debug(f"写入候选账本失败：{error}", exc_info=True)
 

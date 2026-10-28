@@ -111,9 +111,13 @@ class DuplicateApi(OwnerDelegator):
         if not paused:
             return
         owner = getattr(self, "_owner", None)
-        getter = getattr(owner, "get_data_path", None)
-        data_path = getter() if callable(getter) else None
-        if not data_path:
+        getter = getattr(owner, "_get_data_store", None)
+        if not callable(getter):
+            return
+        try:
+            store = getter().ledger_store()
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"获取候选账本存储失败：{error}", exc_info=True)
             return
         try:
             names = {
@@ -122,7 +126,7 @@ class DuplicateApi(OwnerDelegator):
                 for item in (group.get("duplicates") or [])
             }
             append_records(
-                data_path,
+                store,
                 [
                     {
                         "kind": "duplicate_paused",

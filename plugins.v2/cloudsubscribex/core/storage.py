@@ -13,6 +13,86 @@ from app.log import logger
 from .database import CloudSubscribeDatabaseManager, CloudSubscribeRepositories
 
 
+class RuntimeStateStore:
+    """运行期小状态的门面：TG 监控池、扫盘游标、STRM 续扫断点。
+
+    统一落 ``runtime_records`` 表（namespace + key），调用方只看到
+    ``load`` / ``save`` / ``delete`` 三个方法。
+    """
+
+    def __init__(self, store: "CloudSubscribeDataStore", namespace: str):
+        self._store = store
+        self._namespace = namespace
+
+    @property
+    def namespace(self) -> str:
+        return self._namespace
+
+    def load(self, key: str, default: Any = None) -> Any:
+        return self._store.repositories.runtime.load(
+            self._namespace, key, default
+        )
+
+    def save(self, key: str, value: Any) -> None:
+        self._store.repositories.runtime.save(self._namespace, key, value)
+
+    def delete(self, key: str) -> None:
+        self._store.repositories.runtime.delete(self._namespace, key)
+
+
+class LedgerStore:
+    """候选账本门面：追加、按天读、聚合、按天清理。"""
+
+    def __init__(self, store: "CloudSubscribeDataStore"):
+        self._store = store
+
+    def append(
+            self,
+            records: Any,
+            *,
+            run_id: str = "",
+            day: str = "",
+    ) -> int:
+        return self._store.repositories.ledger.append(
+            records, day=day, run_id=run_id
+        )
+
+    def read(
+            self,
+            *,
+            days: int = 1,
+            kind: str = "",
+            keyword: str = "",
+            limit: int = 200,
+            offset: int = 0,
+    ) -> Dict[str, Any]:
+        return self._store.repositories.ledger.read(
+            ledger_days(days),
+            kind=kind,
+            keyword=keyword,
+            limit=limit,
+            offset=offset,
+        )
+
+    def summary(self, *, days: int = 7) -> Dict[str, Any]:
+        return self._store.repositories.ledger.summary(ledger_days(days))
+
+    def purge(self, *, keep_days: int = 14) -> int:
+        keep = set(ledger_days(keep_days))
+        cutoff = min(keep) if keep else ""
+        return self._store.repositories.ledger.purge_before(cutoff)
+
+
+def ledger_days(days: int) -> List[str]:
+    """最近 N 天的日期串（含今天），用于账本分桶查询。"""
+    total = max(1, int(days or 1))
+    today = datetime.date.today()
+    return [
+        (today - datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
+        for offset in range(total)
+    ]
+
+
 class CloudSubscribeDataStore:
     """业务数据和可恢复运行状态按职责写入独立数据库。"""
 
@@ -78,6 +158,7 @@ class CloudSubscribeDataStore:
             self.manager.update_db()
             repaired = self.repositories.history.repair_group_keys()
             self._migrate_legacy_sha1_cache()
+            self._migrate_legacy_json_state()
             if repaired:
                 logger.info(f"CloudSubscribe 历史媒体分组已修复：{repaired} 条")
             self._initialized = True
@@ -247,6 +328,103 @@ class CloudSubscribeDataStore:
         return self.repositories.source_sha1.put(
             key, sha1, size=size, name=name, limit=limit
         )
+
+    def runtime_store(self, namespace: str) -> RuntimeStateStore:
+        """按命名空间取运行期状态存储。"""
+        self.initialize()
+        return RuntimeStateStore(self, namespace)
+
+    def ledger_store(self) -> LedgerStore:
+        """候选账本存储。"""
+        self.initialize()
+        return LedgerStore(self)
+
+    def load_scan_state(self) -> Optional[Dict[str, Any]]:
+        self.initialize()
+        return self.repositories.runtime.load("strm_scan", "state")
+
+    def save_scan_state(self, payload: Dict[str, Any]) -> bool:
+        self.initialize()
+        return self.repositories.runtime.save("strm_scan", "state", payload)
+
+    def clear_scan_state(self) -> None:
+        self.initialize()
+        self.repositories.runtime.delete("strm_scan", "state")
+
+    def _migrate_legacy_json_state(self) -> None:
+        """把散落的 JSON 状态文件一次性并入数据库，原文件改名留档。"""
+        self._migrate_legacy_tg_monitor()
+        self._migrate_legacy_scan_state()
+        self._migrate_legacy_ledger()
+
+    def _rename_legacy(self, path) -> None:
+        try:
+            path.replace(path.with_name(path.name + ".migrated"))
+        except OSError as error:
+            logger.debug(f"旧状态文件改名失败：{error}", exc_info=True)
+
+    def _migrate_legacy_tg_monitor(self) -> None:
+        directory = self.manager.db_path.parent / "tg_monitor"
+        if not directory.is_dir():
+            return
+        migrated = 0
+        for path in sorted(directory.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as error:  # noqa: BLE001 - 坏文件不阻塞启动
+                logger.debug(f"TG 监控旧文件读取失败（{path.name}）：{error}")
+                self._rename_legacy(path)
+                continue
+            if self.repositories.runtime.save(
+                    "tg_monitor", path.stem, payload
+            ):
+                migrated += 1
+            self._rename_legacy(path)
+        if migrated:
+            logger.info(f"TG 监控状态已并入数据库：{migrated} 个文件")
+
+    def _migrate_legacy_scan_state(self) -> None:
+        legacy = self.manager.db_path.parent / "strm_scan_state.json"
+        if not legacy.is_file():
+            return
+        try:
+            payload = json.loads(legacy.read_text(encoding="utf-8"))
+        except Exception as error:  # noqa: BLE001 - 坏文件按空处理
+            logger.debug(f"STRM 续扫旧状态读取失败：{error}")
+            payload = None
+        if isinstance(payload, dict) and payload:
+            self.repositories.runtime.save("strm_scan", "state", payload)
+            logger.info("STRM 续扫状态已并入数据库")
+        self._rename_legacy(legacy)
+
+    def _migrate_legacy_ledger(self) -> None:
+        directory = self.manager.db_path.parent / "ledger"
+        if not directory.is_dir():
+            return
+        migrated = 0
+        for path in sorted(directory.glob("candidate-ledger-*.jsonl")):
+            day = path.stem[len("candidate-ledger-"):]
+            records: List[Dict[str, Any]] = []
+            try:
+                with path.open("r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            item = json.loads(line)
+                        except ValueError:
+                            continue
+                        if isinstance(item, dict):
+                            records.append(item)
+            except OSError as error:
+                logger.debug(f"候选账本旧文件读取失败（{path.name}）：{error}")
+                continue
+            if records:
+                migrated += self.repositories.ledger.append(records, day=day)
+            self._rename_legacy(path)
+        if migrated:
+            logger.info(f"候选账本已并入数据库：{migrated} 条")
 
     def close(self) -> None:
         with self._lock:

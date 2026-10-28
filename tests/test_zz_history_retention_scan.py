@@ -8,7 +8,6 @@
 运行：``cd <repo> && python -m pytest tests/test_history_retention_scan.py -q``
 """
 
-import json
 import os
 import sys
 import tempfile
@@ -258,12 +257,21 @@ class _Generator:
         ), encoding="utf-8")
 
 
+class _StoreOwner:
+    def __init__(self, path):
+        self._path = path
+
+    def get_data_path(self):
+        return self._path
+
+
 class StrmResumeTest(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
         self.root = Path(self._tmp.name)
-        self.state_path = self.root / "strm_scan_state.json"
+        self.store = CloudSubscribeDataStore(_StoreOwner(self.root))
+        self.addCleanup(self.store.close)
 
     def _run(self, provider, budget):
         return rebuild_strm_tree(
@@ -275,14 +283,14 @@ class StrmResumeTest(unittest.TestCase):
             reference_values=lambda item: {"url": f"http://115/{item.name}"},
             interval_seconds=0.0,
             time_budget_seconds=budget,
-            state_path=self.state_path,
+            state_store=self.store,
         )
 
     def test_time_budget_writes_resume_state(self) -> None:
         stats = self._run(_Provider(), budget=1e-9)
         self.assertEqual(stats.get("interrupted"), 1)
-        self.assertTrue(self.state_path.is_file())
-        payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+        payload = self.store.load_scan_state()
+        self.assertIsNotNone(payload)
         self.assertEqual(payload["cloud_root"], "/媒体")
         self.assertGreaterEqual(len(payload["pending"]), 1)
 
@@ -290,13 +298,12 @@ class StrmResumeTest(unittest.TestCase):
         self._run(_Provider(), budget=1e-9)
         stats = self._run(_Provider(), budget=0)
         self.assertIsNone(stats.get("interrupted"))
-        self.assertFalse(self.state_path.is_file())
+        self.assertIsNone(self.store.load_scan_state())
         self.assertGreaterEqual(stats["directories"], 3)
 
     def test_state_from_other_root_ignored(self) -> None:
-        self.state_path.write_text(
-            json.dumps({"cloud_root": "/别的库", "pending": [["x", "/别的库/x"]]}),
-            encoding="utf-8",
+        self.store.save_scan_state(
+            {"cloud_root": "/别的库", "pending": [["x", "/别的库/x"]]}
         )
         stats = self._run(_Provider(), budget=0)
         self.assertIsNone(stats.get("interrupted"))

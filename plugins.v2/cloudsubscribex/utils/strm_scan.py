@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
@@ -15,16 +14,19 @@ logger = logging.getLogger(__name__)
 
 
 def _load_scan_state(
-        state_path: Optional[Path], cloud_root: str,
+        state_store: Any, cloud_root: str,
 ) -> Optional[Dict[str, Any]]:
-    """读取上次未扫完的续扫状态；根目录不一致则丢弃。"""
-    if state_path is None:
+    """读取上次未扫完的续扫状态；根目录不一致则丢弃。
+
+    ``state_store`` 需提供 ``load_scan_state()``，本插件里就是
+    ``CloudSubscribeDataStore``（状态落在 runtime_records 表）。
+    """
+    if state_store is None:
         return None
     try:
-        if not state_path.is_file():
-            return None
-        payload = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        payload = state_store.load_scan_state()
+    except Exception as error:  # noqa: BLE001 - 状态坏了就从头扫
+        logger.debug(f"STRM 全量校准：续扫状态读取失败：{error}", exc_info=True)
         return None
     if not isinstance(payload, dict) or payload.get("cloud_root") != cloud_root:
         return None
@@ -43,38 +45,33 @@ def _load_scan_state(
 
 
 def _save_scan_state(
-        state_path: Optional[Path],
+        state_store: Any,
         cloud_root: str,
         stack: List[tuple],
         visited: set,
 ) -> bool:
-    """把未扫目录写盘，供下次分批续扫。"""
-    if state_path is None:
+    """把未扫目录写库，供下次分批续扫。"""
+    if state_store is None:
         return False
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
+        return bool(state_store.save_scan_state({
             "cloud_root": cloud_root,
             "pending": [[cid, path] for cid, path in stack],
             "visited": sorted(visited),
             "saved_at": int(time.time()),
-        }
-        state_path.write_text(
-            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-        )
-        return True
-    except OSError as error:  # noqa: BLE001
+        }))
+    except Exception as error:  # noqa: BLE001
         logger.warning(f"STRM 全量校准：续扫状态写入失败：{error}")
         return False
 
 
-def _clear_scan_state(state_path: Optional[Path]) -> None:
-    if state_path is None:
+def _clear_scan_state(state_store: Any) -> None:
+    if state_store is None:
         return
     try:
-        state_path.unlink(missing_ok=True)
-    except OSError:
-        logger.debug("_clear_scan_state 分支忽略异常", exc_info=True)
+        state_store.clear_scan_state()
+    except Exception as error:  # noqa: BLE001
+        logger.debug(f"STRM 全量校准：续扫状态清理失败：{error}", exc_info=True)
 
 
 def rebuild_strm_tree(
@@ -88,7 +85,7 @@ def rebuild_strm_tree(
         progress: Optional[Callable[[Dict[str, int]], None]] = None,
         interval_seconds: float = 0.0,
         time_budget_seconds: float = 0.0,
-        state_path: Optional[Path] = None,
+        state_store: Any = None,
 ) -> Dict[str, int]:
     """从 ``cloud_root`` 起按 cid 递归，为每个视频补齐 STRM。
 
@@ -117,7 +114,7 @@ def rebuild_strm_tree(
         if str(ext or "").strip()
     }
     root_path = "/" + str(cloud_root or "/").replace("\\", "/").strip("/")
-    resumed = _load_scan_state(state_path, root_path)
+    resumed = _load_scan_state(state_store, root_path)
     if resumed:
         stack: List[tuple] = list(resumed["pending"])
         visited = set(resumed["visited"])
@@ -135,7 +132,7 @@ def rebuild_strm_tree(
 
     while stack:
         if deadline is not None and time.monotonic() > deadline:
-            _save_scan_state(state_path, root_path, stack, visited)
+            _save_scan_state(state_store, root_path, stack, visited)
             stats["interrupted"] = 1
             stats["pending_directories"] = len(stack)
             logger.info(
@@ -211,5 +208,5 @@ def rebuild_strm_tree(
             except OSError as error:
                 stats["errors"] += 1
                 logger.debug(f"STRM 全量校准写盘失败：{child_path}：{error}")
-    _clear_scan_state(state_path)
+    _clear_scan_state(state_store)
     return stats

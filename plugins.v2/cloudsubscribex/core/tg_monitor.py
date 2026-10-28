@@ -17,13 +17,11 @@ import ast
 import asyncio
 import hashlib
 import json
-import os
 import queue
 import re
 import sys
 import threading
 import time
-import uuid
 import weakref
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -468,56 +466,47 @@ def normalize_channel_rules(
     return rules
 
 
-class _JsonStore:
-    """频道监控自己的小型 JSON 存储。
+class _MonitorStore:
+    """频道监控自己的小型状态存储（统一落插件私有库 ``runtime_records``）。
 
-    条目是「消息级」数据、更新频繁且不需要关系查询，放进插件私有库要给
-    ``CloudSubscribeDataStore`` 加表迁移；独立 JSON 文件更轻，删掉也不会影响
-    历史记录等核心数据。
+    条目是「消息级」数据、更新频繁且不需要关系查询，放进插件私有库的好处是：
+    一个库、一份事务边界、一次 WAL 提交，不再有散落的 ``tg_monitor/*.json``。
     """
+
+    #: 运行期键值表的命名空间
+    NAMESPACE = "tg_monitor"
 
     def __init__(self, owner):
         self._owner = owner
         self._lock = threading.RLock()
+        self._store = None
 
-    def _path(self, key: str):
-        directory = self._owner.get_data_path() / "tg_monitor"
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory / f"{key}.json"
+    def _target(self):
+        if self._store is None:
+            try:
+                store = self._owner._get_data_store()
+            except Exception:  # noqa: BLE001 - 单测替身只有 get_data_path
+                from .storage import CloudSubscribeDataStore
+
+                store = CloudSubscribeDataStore(self._owner)
+            self._store = store.runtime_store(self.NAMESPACE)
+        return self._store
 
     def load(self, key: str, default: Any = None) -> Any:
-        path = self._path(key)
         with self._lock:
             try:
-                if not path.exists():
-                    return default
-                return json.loads(path.read_text(encoding="utf-8"))
-            except Exception as error:  # noqa: BLE001 - 坏文件不应拖垮插件
+                value = self._target().load(key, default)
+            except Exception as error:  # noqa: BLE001 - 读失败不应拖垮插件
                 logger.warning(f"TG 监控数据读取失败（{key}）：{error}")
                 return default
+            return default if value is None else value
 
     def save(self, key: str, value: Any) -> None:
-        path = self._path(key)
         with self._lock:
-            # 固定 .tmp 名会让并发写者互相抢文件：扫描线程 rename 之后，
-            # 另一个写者（定时任务或热重载残留线程）的 replace 就抛 ENOENT
-            # （线上 10 小时 2 次「TG 监控数据写入失败」）。
-            # 用进程/线程/随机数唯一化的临时文件名，os.replace 保证原子提交。
-            temp = path.with_name(
-                f"{path.name}.{os.getpid()}.{threading.get_ident()}."
-                f"{uuid.uuid4().hex[:8]}.tmp"
-            )
             try:
-                temp.write_text(
-                    json.dumps(value, ensure_ascii=False), encoding="utf-8",
-                )
-                os.replace(temp, path)
-            finally:
-                if temp.exists():
-                    try:
-                        temp.unlink()
-                    except OSError:
-                        logger.debug("save 分支忽略异常", exc_info=True)
+                self._target().save(key, value)
+            except Exception as error:  # noqa: BLE001 - 写失败只记日志
+                logger.warning(f"TG 监控数据写入失败（{key}）：{error}")
 
 
 class TgChannelMonitor:
@@ -526,7 +515,7 @@ class TgChannelMonitor:
     def __init__(self, owner):
         self._owner = owner
         self._lock = threading.RLock()
-        self._store = _JsonStore(owner)
+        self._store = _MonitorStore(owner)
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._client = None
@@ -1695,5 +1684,5 @@ def get_channel_monitor(owner) -> TgChannelMonitor:
             monitor.stop()
             monitor.reset_client()
             monitor._owner = owner
-            monitor._store = _JsonStore(owner)
+            monitor._store = _MonitorStore(owner)
         return monitor

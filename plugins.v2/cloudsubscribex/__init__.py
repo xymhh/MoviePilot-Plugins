@@ -1037,16 +1037,16 @@ class CloudSubscribeX(_PluginBase):
         overwrite = bool(self._strm_full_scan_overwrite)
         budget = self._strm_scan_time_budget()
         try:
-            state_path = self.get_data_path() / "strm_scan_state.json"
+            state_store = self._get_data_store()
         except Exception:  # noqa: BLE001
-            state_path = None
+            state_store = None
 
         def _run():
             try:
                 stats = sync_handler.rebuild_strm_files(
                     overwrite=overwrite,
                     time_budget_seconds=budget,
-                    state_path=state_path,
+                    state_store=state_store,
                 )
                 detail = (
                     f"（{reason}）：目录 {stats.get('directories')}，"
@@ -1123,7 +1123,7 @@ class CloudSubscribeX(_PluginBase):
                     stats = sync_handler.rebuild_strm_files(
                         overwrite=False,
                         time_budget_seconds=budget,
-                        state_path=None,
+                        state_store=None,
                     )
                 created = int(stats.get("created") or 0)
                 errors = int(stats.get("errors") or 0)

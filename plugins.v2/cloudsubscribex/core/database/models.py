@@ -263,6 +263,35 @@ class AccountSnapshot(CloudSubscribeBase):
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
 
 
+class RuntimeRecord(CloudSubscribeBase):
+    """运行期键值对（TG 监控池/游标/状态、STRM 续扫断点等），按命名空间隔离。"""
+
+    __tablename__ = "runtime_records"
+
+    namespace: Mapped[str] = mapped_column(String(64), primary_key=True)
+    record_key: Mapped[str] = mapped_column(String(191), primary_key=True)
+    payload: Mapped[Any] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class CandidateLedgerEntry(CloudSubscribeBase):
+    """候选资源账本：每条候选的去向，按天分桶，可按天清理。"""
+
+    __tablename__ = "candidate_ledger_entries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    day: Mapped[str] = mapped_column(String(10), nullable=False)
+    ts: Mapped[str] = mapped_column(String(19), nullable=False, default="")
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    kind: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    payload: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+    __table_args__ = (
+        Index("ix_candidate_ledger_day", "day"),
+    )
+
+
 class SourceSha1Cache(CloudSubscribeBase):
     """源文件 SHA1 缓存：秒传未命中后本地文件删掉，哈希留着供下次零流量探测。"""
 

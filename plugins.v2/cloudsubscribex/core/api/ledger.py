@@ -1,7 +1,7 @@
 """候选资源账本查询接口。
 
 对应页面：插件「资源账本」页签。数据来自 ``core/services/candidate_ledger``
-落盘的按天 JSONL，不依赖数据库，读失败时返回空结果而不是报错。
+写入的 ``candidate_ledger_entries`` 表，读失败时返回空结果而不是报错。
 """
 
 import datetime
@@ -26,13 +26,13 @@ class LedgerApi(OwnerDelegator):
             offset: int = 0,
     ) -> dict:
         """按天倒序分页返回候选资源去向，可按类型与关键词过滤。"""
-        data_path = self._ledger_data_path()
-        if data_path is None:
+        store = self._ledger_store()
+        if store is None:
             return {"success": True, "data": {"total": 0, "items": [], "days": 0}}
         try:
             today = datetime.datetime.now().strftime("%Y-%m-%d")
             result = read_records(
-                data_path,
+                store,
                 days=max(1, min(int(days or 1), 30)),
                 kind=kind,
                 keyword=keyword,
@@ -47,11 +47,11 @@ class LedgerApi(OwnerDelegator):
 
     def api_ledger_summary(self, days: int = 7) -> dict:
         """最近 N 天的候选去向聚合，用于页面顶部统计卡片。"""
-        data_path = self._ledger_data_path()
-        if data_path is None:
+        store = self._ledger_store()
+        if store is None:
             return {"success": True, "data": {"total": 0, "by_kind": {}, "by_provider": {}, "by_day": {}}}
         try:
-            data: Any = summarize(data_path, days=max(1, min(int(days or 7), 30)))
+            data: Any = summarize(store, days=max(1, min(int(days or 7), 30)))
             return {"success": True, "data": data}
         except Exception as error:  # noqa: BLE001
             logger.error(f"聚合候选账本失败：{error}")
@@ -65,13 +65,13 @@ class LedgerApi(OwnerDelegator):
             logger.error(f"读取缓存健康度失败：{error}")
             return {"success": False, "message": str(error), "data": {}}
 
-    def _ledger_data_path(self):
-        """插件数据目录；拿不到时返回 None，由调用方降级为空结果。"""
+    def _ledger_store(self):
+        """账本存储；插件还没初始化时返回 None，由调用方降级为空结果。"""
         owner = getattr(self, "_owner", None)
-        getter = getattr(owner, "get_data_path", None)
+        getter = getattr(owner, "_get_data_store", None)
         if callable(getter):
             try:
-                return getter()
+                return getter().ledger_store()
             except Exception as error:  # noqa: BLE001
-                logger.debug(f"获取插件数据目录失败：{error}", exc_info=True)
+                logger.debug(f"获取候选账本存储失败：{error}", exc_info=True)
         return None

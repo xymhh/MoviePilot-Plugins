@@ -56,3 +56,18 @@ cloudsubscribex_v<version>.zip
   迁移结果会记在数据键 `legacy_id_migration` 里，日志关键字：`已从旧插件 CloudSubscribe 迁移到独立 ID CloudSubscribeX`。
 - 迁移只做一次；之后清空配置属于用户主动重置，不会回灌旧插件配置。
 - 旧 ID 插件的数据目录是 `config/plugins/CloudSubscribe/`，本插件是 `config/plugins/CloudSubscribeX/`。
+
+## 数据存储（1.7.98 起统一入库）
+
+插件所有跨重启状态都在私有库 `cloudsubscribe.db`，不再写 JSON 状态文件：
+
+| 数据 | 表 |
+| --- | --- |
+| 订阅登记、转存历史、签到、积分预算、认证会话 | 既有各表 |
+| 源文件 SHA1（秒传未命中后零流量重试） | `source_sha1_cache` |
+| TG 频道监控池 / 游标 / 运行状态、STRM 分批续扫断点 | `runtime_records`（按 `namespace` 隔离） |
+| 候选资源账本（`/ledger` 页面） | `candidate_ledger_entries`（按 `day` 分桶，默认留 14 天） |
+
+老版本留下的 `source_sha1_cache.json`、`tg_monitor/*.json`、`strm_scan_state.json`、
+`ledger/candidate-ledger-*.jsonl` 会在升级后第一次启动时自动导入，并原地改名为 `*.migrated`
+（不删除，可回溯）。`*.parts.json`（下载分片续传标记）仍与被下载文件放在一起，属于临时工作文件。

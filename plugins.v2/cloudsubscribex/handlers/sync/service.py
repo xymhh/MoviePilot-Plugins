@@ -1508,12 +1508,12 @@ class SyncHandler:
             self,
             overwrite: bool = False,
             time_budget_seconds: float = 0.0,
-            state_path: Optional[Path] = None,
+            state_store: Any = None,
     ) -> Dict[str, int]:
         """按目录 CID 全量遍历媒体库，补齐（可选校准）STRM 文件。
 
         ``time_budget_seconds`` 大于 0 时到达上限即保存断点退出，
-        下次运行从断点续扫，把一次长扫描摊到多天。
+        下次运行从断点续扫（断点落插件私有库，不再写 strm_scan_state.json）。
         """
         if not (self._strm_generate_enabled and self._strm_generator
                 and self._local_resource_path and self._cloud_drive):
@@ -1521,14 +1521,14 @@ class SyncHandler:
                 "directories": 0, "files": 0, "created": 0,
                 "updated": 0, "skipped": 0, "errors": 0,
             }
-        if state_path is None:
+        if state_store is None:
             plugin = getattr(self, "_plugin", None)
-            data_path = getattr(plugin, "get_data_path", None)
-            if callable(data_path):
+            getter = getattr(plugin, "_get_data_store", None)
+            if callable(getter):
                 try:
-                    state_path = Path(data_path()) / "strm_scan_state.json"
+                    state_store = getter()
                 except Exception:  # noqa: BLE001
-                    state_path = None
+                    state_store = None
         return rebuild_strm_tree(
             provider=self._cloud_drive,
             generator=self._strm_generator,
@@ -1539,7 +1539,7 @@ class SyncHandler:
             overwrite=overwrite,
             interval_seconds=1.0,
             time_budget_seconds=time_budget_seconds,
-            state_path=state_path,
+            state_store=state_store,
             progress=lambda stats: logger.info(
                 f"STRM 全量校准进度：目录 {stats['directories']}，"
                 f"文件 {stats['files']}，新增 {stats['created']}，"

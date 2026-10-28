@@ -22,7 +22,9 @@ from .models import (
     CheckinScheduleState,
     HistoryRecord,
     OfflinePendingTask,
+    CandidateLedgerEntry,
     PointBudgetRecord,
+    RuntimeRecord,
     SourceSha1Cache,
 )
 from .sync_jobs import SyncJobRepository
@@ -884,6 +886,227 @@ class AuthSessionRepository(DbOper):
         }
 
 
+class RuntimeRecordRepository(DbOper):
+    """运行期键值对：TG 监控池、扫盘游标、STRM 续扫断点等小状态。"""
+
+    @staticmethod
+    def normalize(namespace: Any, key: Any) -> tuple[str, str]:
+        return (
+            str(namespace or "").strip()[:64],
+            str(key or "").strip()[:191],
+        )
+
+    @db_query
+    def load(
+            self,
+            namespace: str,
+            key: str,
+            default: Any = None,
+            db: Session = None,
+    ) -> Any:
+        space, name = self.normalize(namespace, key)
+        if not space or not name:
+            return default
+        row = db.get(RuntimeRecord, (space, name))
+        if row is None:
+            return default
+        return copy.deepcopy(row.payload)
+
+    @db_update
+    def save(
+            self,
+            namespace: str,
+            key: str,
+            payload: Any,
+            db: Session = None,
+    ) -> bool:
+        space, name = self.normalize(namespace, key)
+        if not space or not name:
+            return False
+        now = int(time.time())
+        row = db.get(RuntimeRecord, (space, name))
+        data = copy.deepcopy(payload)
+        if row is None:
+            RuntimeRecord(
+                namespace=space,
+                record_key=name,
+                payload=data,
+                updated_at=now,
+            ).create(db)
+        else:
+            row.update(db, {"payload": data, "updated_at": now})
+        return True
+
+    @db_update
+    def delete(self, namespace: str, key: str, db: Session = None) -> bool:
+        space, name = self.normalize(namespace, key)
+        if not space or not name:
+            return False
+        row = db.get(RuntimeRecord, (space, name))
+        if row is None:
+            return False
+        db.delete(row)
+        return True
+
+    @db_query
+    def keys(self, namespace: str, db: Session = None) -> List[str]:
+        space, _ = self.normalize(namespace, "_")
+        if not space:
+            return []
+        return list(
+            db.scalars(
+                select(RuntimeRecord.record_key).where(
+                    RuntimeRecord.namespace == space
+                )
+            ).all()
+        )
+
+
+class CandidateLedgerRepository(DbOper):
+    """候选账本：追加写入、按天读、按天清理。"""
+
+    @db_update
+    def append(
+            self,
+            records: Iterable[Dict[str, Any]],
+            *,
+            day: str = "",
+            ts: str = "",
+            run_id: str = "",
+            db: Session = None,
+    ) -> int:
+        day_text = str(day or "") or time.strftime("%Y-%m-%d")
+        stamp = str(ts or "") or time.strftime("%Y-%m-%dT%H:%M:%S")
+        written = 0
+        for item in records or []:
+            if not isinstance(item, dict) or not item:
+                continue
+            payload = copy.deepcopy(item)
+            payload.setdefault("ts", stamp)
+            if run_id:
+                payload.setdefault("run_id", run_id)
+            CandidateLedgerEntry(
+                day=day_text,
+                ts=str(payload.get("ts") or stamp)[:19],
+                run_id=str(payload.get("run_id") or "")[:32],
+                kind=str(payload.get("kind") or "")[:32],
+                provider=str(payload.get("provider") or "")[:64],
+                payload=payload,
+            ).create(db)
+            written += 1
+        return written
+
+    @db_query
+    def read(
+            self,
+            days: List[str],
+            *,
+            kind: str = "",
+            keyword: str = "",
+            limit: int = 200,
+            offset: int = 0,
+            db: Session = None,
+    ) -> Dict[str, Any]:
+        wanted = [str(day) for day in days or [] if str(day)]
+        if not wanted:
+            return {"total": 0, "items": [], "days": 0}
+        query = select(CandidateLedgerEntry).where(
+            CandidateLedgerEntry.day.in_(wanted)
+        )
+        wanted_kind = str(kind or "").strip()
+        if wanted_kind:
+            query = query.where(CandidateLedgerEntry.kind == wanted_kind)
+        rows = list(db.scalars(
+            query.order_by(
+                CandidateLedgerEntry.day.desc(), CandidateLedgerEntry.id.desc()
+            )
+        ).all())
+        needle = str(keyword or "").strip().lower()
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            payload = copy.deepcopy(row.payload) or {}
+            if needle:
+                haystack = " ".join(
+                    str(payload.get(name) or "")
+                    for name in ("reason", "resource_title", "reference", "provider")
+                ).lower()
+                if needle not in haystack:
+                    continue
+            items.append(payload)
+        total = len(items)
+        start = max(0, int(offset or 0))
+        size = max(1, int(limit or 200))
+        present = {
+            row for row in db.scalars(
+                select(CandidateLedgerEntry.day)
+                .where(CandidateLedgerEntry.day.in_(wanted))
+                .distinct()
+            ).all()
+        }
+        return {
+            "total": total,
+            "items": items[start:start + size],
+            "days": len(present),
+        }
+
+    @db_query
+    def summary(self, days: List[str], db: Session = None) -> Dict[str, Any]:
+        wanted = [str(day) for day in days or [] if str(day)]
+        if not wanted:
+            return {"total": 0, "by_kind": {}, "by_provider": {}, "by_day": {}}
+        by_kind: Dict[str, int] = {}
+        by_provider: Dict[str, int] = {}
+        by_day: Dict[str, int] = {}
+        total = 0
+        rows = db.execute(
+            select(
+                CandidateLedgerEntry.day,
+                CandidateLedgerEntry.kind,
+                CandidateLedgerEntry.provider,
+                func.count().label("count"),
+            )
+            .where(CandidateLedgerEntry.day.in_(wanted))
+            .group_by(
+                CandidateLedgerEntry.day,
+                CandidateLedgerEntry.kind,
+                CandidateLedgerEntry.provider,
+            )
+        ).all()
+        for day, kind, provider, count in rows:
+            count = int(count or 0)
+            total += count
+            by_day[str(day)] = by_day.get(str(day), 0) + count
+            kind_key = str(kind or "unknown")
+            by_kind[kind_key] = by_kind.get(kind_key, 0) + count
+            provider_key = str(provider or "未知来源")
+            by_provider[provider_key] = by_provider.get(provider_key, 0) + count
+        return {
+            "total": total,
+            "by_kind": by_kind,
+            "by_provider": by_provider,
+            "by_day": by_day,
+        }
+
+    @db_update
+    def purge_before(self, day: str, db: Session = None) -> int:
+        cutoff = str(day or "").strip()
+        if not cutoff:
+            return 0
+        rows = db.scalars(
+            select(CandidateLedgerEntry.id).where(
+                CandidateLedgerEntry.day < cutoff
+            )
+        ).all()
+        if not rows:
+            return 0
+        db.execute(
+            delete(CandidateLedgerEntry).where(
+                CandidateLedgerEntry.day < cutoff
+            )
+        )
+        return len(rows)
+
+
 class SourceSha1CacheRepository(DbOper):
     """源文件 SHA1 点查/写入，服务于秒传未命中后的零流量重试。"""
 
@@ -1002,3 +1225,5 @@ class CloudSubscribeRepositories:
         self.account = AccountSnapshotRepository(manager, db)
         self.auth = AuthSessionRepository(manager, db)
         self.source_sha1 = SourceSha1CacheRepository(manager, db)
+        self.runtime = RuntimeRecordRepository(manager, db)
+        self.ledger = CandidateLedgerRepository(manager, db)
