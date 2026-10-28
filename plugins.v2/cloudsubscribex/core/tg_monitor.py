@@ -59,6 +59,9 @@ SCAN_CATCHUP_MAX = 500
 UNMATCHED_KEEP = 20
 # 转存队列上限：超过就忽略（reason=队列积压），避免一次性把 115 打满。
 QUEUE_MAX = 200
+# 队列优先级：订阅仍缺集 → 先补集；订阅已齐 → 只可能洗版，排在后面。
+QUEUE_PRIORITY_MISSING = 0
+QUEUE_PRIORITY_UPGRADE = 1
 # 同一订阅一次合并提交的最大链接数（手动转存接口上限是 50）。
 BATCH_LINK_LIMIT = 20
 # skipped/transferred 只是历史记录，最多占池子的 12%（500 条时约 60 条）；
@@ -532,7 +535,9 @@ class TgChannelMonitor:
         self._subscribe_provider = None
         # 扫描与转存 worker 都会改池子：读写一律走这把锁，避免互相覆盖。
         self._items_lock = threading.RLock()
-        self._transfer_queue: "queue.Queue[str]" = queue.Queue()
+        # 优先级队列：(priority, seq, item_id)；同优先级按入队顺序先进先出。
+        self._transfer_queue: "queue.PriorityQueue" = queue.PriorityQueue()
+        self._queue_seq = 0
         self._transfer_thread: Optional[threading.Thread] = None
         self._transfer_stop = threading.Event()
         self._queued_ids: set = set()
@@ -706,19 +711,44 @@ class TgChannelMonitor:
         with self._items_lock:
             self._store.save(ITEMS_KEY, items)
 
+    @staticmethod
+    def _queue_priority(item: Dict[str, Any]) -> int:
+        """缺集补全优先于洗版：订阅还缺集时排前面。"""
+        raw = (item or {}).get("queue_priority")
+        if raw is None:
+            # 老条目（升级前入队）没有优先级字段：按「只会洗版」排后面更安全，
+            # 缺集条目在下一轮扫描会重新写入正确优先级。
+            return QUEUE_PRIORITY_UPGRADE
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return QUEUE_PRIORITY_UPGRADE
+        return value if value in (QUEUE_PRIORITY_MISSING, QUEUE_PRIORITY_UPGRADE) \
+            else QUEUE_PRIORITY_UPGRADE
+
     def _enqueue_item(self, item: Dict[str, Any]) -> bool:
         """把已判定为 queued 的条目放进转存队列（同一 id 只入一次）。"""
         item_id = str((item or {}).get("id") or "")
         if not item_id:
             return False
+        priority = self._queue_priority(item)
         with self._items_lock:
             if item_id in self._queued_ids:
                 return False
             if self._transfer_queue.qsize() >= QUEUE_MAX:
                 return False
             self._queued_ids.add(item_id)
-        self._transfer_queue.put(item_id)
+            self._queue_seq += 1
+            seq = self._queue_seq
+        self._transfer_queue.put((priority, seq, item_id))
         return True
+
+    @staticmethod
+    def _queue_entry_id(entry: Any) -> str:
+        """兼容 (priority, seq, id) 元组与旧的纯 id 队列条目。"""
+        if isinstance(entry, tuple) and len(entry) == 3:
+            return str(entry[2] or "")
+        return str(entry or "")
 
     def _mark_items(
             self, item_ids: Iterable[str], status: str, **changes: Any,
@@ -742,14 +772,16 @@ class TgChannelMonitor:
     def _transfer_loop(self, stop_event: threading.Event) -> None:
         while not stop_event.is_set():
             try:
-                first = self._transfer_queue.get(timeout=1.0)
+                first = self._queue_entry_id(self._transfer_queue.get(timeout=1.0))
             except queue.Empty:
                 continue
             batch_ids = [first]
             # 一次最多捞 100 个 id，再按订阅分组，避免批次过大。
             while len(batch_ids) < 100:
                 try:
-                    batch_ids.append(self._transfer_queue.get_nowait())
+                    batch_ids.append(
+                        self._queue_entry_id(self._transfer_queue.get_nowait())
+                    )
                 except queue.Empty:
                     break
             try:
@@ -1419,6 +1451,15 @@ class TgChannelMonitor:
             return stats, []
 
         selections = self._select_quality_candidates(candidates, subscriptions)
+        lack_by_subscribe: Dict[int, int] = {}
+        for sub in subscriptions or []:
+            try:
+                sub_id = int(sub.get("id") or sub.get("subscribe_id") or 0)
+                lack = int(sub.get("lack") or 0)
+            except (TypeError, ValueError):
+                continue
+            if sub_id > 0:
+                lack_by_subscribe[sub_id] = max(0, lack)
         queue_full = self._transfer_queue.qsize() >= QUEUE_MAX
         to_queue: List[dict] = []
         for item, _rule in candidates:
@@ -1454,6 +1495,14 @@ class TgChannelMonitor:
             subscribe_id = int(matched["matched"]["id"])
             item["match_status"] = "matched"
             item["matched_subscribe_id"] = subscribe_id
+            lack = lack_by_subscribe.get(subscribe_id, 0)
+            item["queue_priority"] = (
+                QUEUE_PRIORITY_MISSING if lack > 0 else QUEUE_PRIORITY_UPGRADE
+            )
+            item["queue_priority_reason"] = (
+                f"订阅还缺 {lack} 集，优先补集" if lack > 0
+                else "订阅已齐，仅洗版"
+            )
             if not queue_full:
                 item["status"] = "queued"
                 item["queued_at"] = int(time.time())

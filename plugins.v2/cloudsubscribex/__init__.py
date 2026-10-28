@@ -178,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.99"
+    plugin_version = "1.7.100"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1400,6 +1400,8 @@ class CloudSubscribeX(_PluginBase):
                 "season": int(getattr(sub, "season", 0) or 0),
                 "type": str(media_type or ""),
                 "year": str(getattr(sub, "year", "") or ""),
+                # 还缺几集：TG 队列靠它决定「先补集还是先洗版」
+                "lack": int(getattr(sub, "lack", 0) or 0),
             })
         return rows
 
