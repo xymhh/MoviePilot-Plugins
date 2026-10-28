@@ -434,6 +434,10 @@ class UpgradeService(OwnerDelegator):
                         target_file_names=selected_file_names,
                     )
                     if not share_files:
+                        logger.info(
+                            f"{upgrade_log_prefix} 候选分享无可用文件，跳过："
+                            f"{resource_title or self._resource_log_reference(share_url)}"
+                        )
                         continue
 
                     if manual_resources:
@@ -451,6 +455,7 @@ class UpgradeService(OwnerDelegator):
                     # 匹配需要升级的集数
                     self._set_upgrade_phase(subscribe, "比较版本", 65)
                     matched_items = []
+                    skip_reasons: List[str] = []
                     matched_files = self._match_episode_files(
                         share_files,
                         mediainfo,
@@ -459,6 +464,13 @@ class UpgradeService(OwnerDelegator):
                         pending_episodes,
                         require_media_match=is_cross_batch,
                     )
+                    if not matched_files:
+                        logger.info(
+                            f"{upgrade_log_prefix} 候选未匹配到目标集数："
+                            f"分享文件 {len(share_files)} 个，目标集数 "
+                            f"{self._format_episode_ranges(set(pending_episodes))}，"
+                            f"资源={resource_title or self._resource_log_reference(share_url)}"
+                        )
                     for episode in pending_episodes:
                         matched_file, cand_pri = matched_files.get(
                             episode, (None, 0)
@@ -496,6 +508,7 @@ class UpgradeService(OwnerDelegator):
                             logger.debug(
                                 f"{upgrade_log_prefix} E{episode:02d} 洗版候选跳过：{reason}"
                             )
+                            skip_reasons.append(f"E{episode:02d}:{reason}")
                             continue
 
                         logger.debug(
@@ -568,6 +581,12 @@ class UpgradeService(OwnerDelegator):
                         })
 
                     if not matched_items:
+                        if skip_reasons:
+                            logger.info(
+                                f"{upgrade_log_prefix} 候选匹配 {len(matched_files)} 集但均未达升级条件："
+                                f"{'; '.join(skip_reasons[:12])}，资源="
+                                f"{resource_title or self._resource_log_reference(share_url)}"
+                            )
                         continue
 
                     self._set_upgrade_phase(subscribe, "提交替换", 80, clear_search=True)
