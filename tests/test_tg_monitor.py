@@ -680,8 +680,11 @@ class ChannelRulesTest(unittest.TestCase):
         self.assertTrue(second["ok"])
         self.assertNotIn("https://t.me/+abc", calls)
         self.assertNotIn("dialogs", calls)
+        # 装了 telethon 时用 InputPeerChannel（channel_id=4242）；
+        # 没装时退化成 int peer，两种都算命中缓存，关键是没再走邀请链接。
         self.assertTrue(any(
-            getattr(item, "channel_id", None) == 4242 for item in calls
+            getattr(item, "channel_id", None) == 4242 or item == 4242
+            for item in calls
         ))
 
     def test_resolve_failure_backs_off_instead_of_retrying_every_scan(self):

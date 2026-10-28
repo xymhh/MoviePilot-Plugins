@@ -469,6 +469,72 @@ def normalize_channel_rules(
     return rules
 
 
+class _JsonFallbackStore:
+    """状态库不可用时的本地 JSON 兜底（单测/极端环境）。
+
+    生产走 ``runtime_records``；只有 ``initialize()`` 抛错（没有 sqlalchemy、
+    数据库被锁死）时才退到这里，保证扫描游标与 access_hash 不会每轮丢失，
+    否则会反复调用 CheckChatInvite 触发 Telegram 限流。
+    """
+
+    FILE_NAME = "tg_monitor_fallback.json"
+
+    def __init__(self, owner):
+        self._lock = threading.RLock()
+        try:
+            self._path = str(owner.get_data_path() / self.FILE_NAME)
+        except Exception:  # noqa: BLE001 - 连路径都拿不到就纯内存
+            self._path = ""
+        self._rows: Dict[str, Any] = {}
+        self._loaded = False
+
+    def _load_all(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        if not self._path:
+            return
+        try:
+            with open(self._path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            if isinstance(data, dict):
+                self._rows = data
+        except FileNotFoundError:
+            return
+        except Exception as error:  # noqa: BLE001 - 坏文件不阻塞扫描
+            logger.warning(f"TG 监控兜底状态文件读取失败：{error}")
+
+    def _flush(self) -> None:
+        if not self._path:
+            return
+        try:
+            import os
+
+            tmp = f"{self._path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(self._rows, handle, ensure_ascii=False)
+            os.replace(tmp, self._path)
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"TG 监控兜底状态文件写入失败：{error}")
+
+    def load(self, key: str, default: Any = None) -> Any:
+        with self._lock:
+            self._load_all()
+            return self._rows.get(key, default)
+
+    def save(self, key: str, value: Any) -> None:
+        with self._lock:
+            self._load_all()
+            self._rows[key] = value
+            self._flush()
+
+    def delete(self, key: str) -> None:
+        with self._lock:
+            self._load_all()
+            self._rows.pop(key, None)
+            self._flush()
+
+
 class _MonitorStore:
     """频道监控自己的小型状态存储（统一落插件私有库 ``runtime_records``）。
 
@@ -486,13 +552,25 @@ class _MonitorStore:
 
     def _target(self):
         if self._store is None:
+            store = None
             try:
                 store = self._owner._get_data_store()
             except Exception:  # noqa: BLE001 - 单测替身只有 get_data_path
-                from .storage import CloudSubscribeDataStore
+                try:
+                    from .storage import CloudSubscribeDataStore
 
-                store = CloudSubscribeDataStore(self._owner)
-            self._store = store.runtime_store(self.NAMESPACE)
+                    store = CloudSubscribeDataStore(self._owner)
+                except Exception:  # noqa: BLE001
+                    store = None
+            if store is not None:
+                try:
+                    self._store = store.runtime_store(self.NAMESPACE)
+                    return self._store
+                except Exception as error:  # noqa: BLE001 - 库不可用就兜底
+                    logger.warning(
+                        f"TG 监控状态库不可用，改用本地 JSON 兜底：{error}"
+                    )
+            self._store = _JsonFallbackStore(self._owner)
         return self._store
 
     def load(self, key: str, default: Any = None) -> Any:
