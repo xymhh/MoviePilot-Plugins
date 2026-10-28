@@ -42,6 +42,11 @@ def create_search_registry(
 
     skipped = []
     for def_cls in SearchSourceRegistry.get_definitions():
+        has_capability = getattr(def_cls, "has_capability", None)
+        if callable(has_capability) and not has_capability("query"):
+            # 推送型渠道（如频道监控）只走侧车，不参与搜索组装与超时预算。
+            skipped.append(def_cls.id)
+            continue
         try:
             client = def_cls.create_client(config, context)
             service = def_cls.create_service(client, config, context)

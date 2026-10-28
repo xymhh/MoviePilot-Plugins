@@ -400,6 +400,14 @@ class SearchSourceDefinition:
     #: 渠道在界面上的配色，由后端下发给前端直接渲染。
     color: str = "grey"
     order: int = 100
+    #: 渠道能力位：``query`` 按关键词拉取、``push`` 由侧车推送候选、``notify`` 只发通知。
+    #: 搜索组装只收 ``query`` 渠道，监控类渠道不参与搜索预算与超时。
+    capabilities: FrozenSet[str] = frozenset({"query"})
+
+    @classmethod
+    def has_capability(cls, capability: str) -> bool:
+        """判断渠道是否具备某项能力（query / push / notify）。"""
+        return capability in (cls.capabilities or frozenset())
 
     @staticmethod
     def config_value(config: Mapping[str, Any], key: str, default: Any = None) -> Any:

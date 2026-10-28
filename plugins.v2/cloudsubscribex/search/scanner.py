@@ -77,6 +77,8 @@ class SearchSourceRegistry:
                 "name": def_cls.name,
                 "icon": def_cls.icon,
                 "color": def_cls.color,
+                # 能力位：query 可按关键词搜索；push 由侧车推送候选；notify 只发通知。
+                "capabilities": sorted(def_cls.capabilities or ()),
             }
             for def_cls in cls.get_definitions()
         ]
