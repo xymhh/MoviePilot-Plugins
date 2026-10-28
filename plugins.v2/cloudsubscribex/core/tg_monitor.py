@@ -400,8 +400,19 @@ def normalize_channel_rules(
 
     if not rows:
         # 兼容 1.6.64 及更早的配置：频道列表 + 全局关键词/回溯条数
-        default_keywords = list(keywords)
-        default_exclude = list(exclude_keywords)
+        default_keywords = _split_terms(keywords)
+        default_exclude = _split_terms(exclude_keywords)
+        fallback_channels = [
+            str(channel).strip() for channel in channels if str(channel).strip()
+        ]
+        if fallback_channels:
+            # 这四条旧键已无界面入口：静默回退会让人以为监控已停用/已改配置。
+            logger.warning(
+                "TG 频道规则（tg_channel_rules）为空，已回退到旧版全局配置："
+                f"频道 {len(fallback_channels)} 个、包含关键词 {len(default_keywords)} 个、"
+                f"排除关键词 {len(default_exclude)} 个、回溯条数 {scan_limit}；"
+                "要停用监控请清空旧版全局频道，要改关键词请在「频道规则」里逐频道填写"
+            )
         rows = [
             {
                 "channel": channel,
@@ -409,8 +420,7 @@ def normalize_channel_rules(
                 "exclude_keywords": default_exclude,
                 "scan_limit": scan_limit,
             }
-            for channel in channels
-            if str(channel).strip()
+            for channel in fallback_channels
         ]
 
     rules: List[Dict[str, Any]] = []

@@ -133,12 +133,12 @@ class UIConfig:
             "subtitle_extensions": [
                 ".srt", ".ass", ".ssa", ".vtt", ".sub", ".sup", ".idx", ".smi", ".mks",
             ],
-            "anime_pack_preferred": True,
-            "offline_timeout": 30,
-            "strm_generate_enabled": True,
-            "strm_full_scan_enabled": True,
+            # 写盘类副作用一律默认关：避免新装即与 P115StrmHelper 等外部工具双写，
+            # 也避免未填播放地址前缀时写出坏链接。
+            "strm_generate_enabled": False,
+            "strm_full_scan_enabled": False,
             "strm_full_scan_overwrite": False,
-            "strm_increment_enabled": True,
+            "strm_increment_enabled": False,
             "strm_increment_minutes": 10,
             "strm_increment_budget": 180,
             "organize_source_path": "",
@@ -152,8 +152,13 @@ class UIConfig:
             "organize_schedule_notify": True,
             "nfo_scrape_enabled": False,
             "image_scrape_enabled": False,
-            "strm_base_url": "http://172.17.0.1:9527",
-            "strm_url_template": "{base_url}/d/{pickcode}?/{file_name}",
+            # 只填「主机:端口」；端点由 TEMPLATE 补齐（内置 302 反代）。
+            # 默认留空 = 未配置，开启生成时会明确报错而不是写出坏链接。
+            "strm_base_url": "",
+            "strm_url_template": (
+                "{base_url}/api/v1/plugin/CloudSubscribeX/redirect"
+                "?pickcode={pickcode}&file_name={file_name}"
+            ),
             "media_server_refresh_enabled": False,
             "media_servers": [],
             "media_server_ignore_paths": "",

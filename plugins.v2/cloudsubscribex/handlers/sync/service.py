@@ -503,16 +503,27 @@ class SyncHandler:
                 )
                 self._strm_generate_enabled = False
             else:
-                try:
-                    s_base_url = _get_val("strm_base_url", StrmGenerator.DEFAULT_BASE_URL)
-                    s_template = _get_val("strm_url_template", StrmGenerator.DEFAULT_TEMPLATE)
-                    self._strm_generator = StrmGenerator(
-                        s_base_url,
-                        s_template,
-                        provider_variables=self._playback_reference.template_variables,
+                s_base_url = str(
+                    _get_val("strm_base_url", StrmGenerator.DEFAULT_BASE_URL) or ""
+                ).strip()
+                s_template = str(
+                    _get_val("strm_url_template", StrmGenerator.DEFAULT_TEMPLATE) or ""
+                ).strip()
+                if not s_base_url:
+                    logger.warning(
+                        "已开启「转存后生成 STRM」，但未填写播放地址前缀（STRM base_url），"
+                        "本次不生成 STRM；请到「STRM 与播放」填 http://<主机>:<端口>"
                     )
-                except StrmTemplateError as error:
-                    logger.error(f"STRM 生成配置无效，已停止直接生成：{error}")
+                    self._strm_generate_enabled = False
+                else:
+                    try:
+                        self._strm_generator = StrmGenerator(
+                            s_base_url,
+                            s_template,
+                            provider_variables=self._playback_reference.template_variables,
+                        )
+                    except StrmTemplateError as error:
+                        logger.error(f"STRM 生成配置无效，已停止直接生成：{error}")
 
         media_server_refresh_enabled = bool(_get_val("media_server_refresh_enabled", False))
         media_servers = _get_val("media_servers", None)

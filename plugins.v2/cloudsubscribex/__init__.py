@@ -178,7 +178,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.91"
+    plugin_version = "1.7.92"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -321,15 +321,18 @@ class CloudSubscribeX(_PluginBase):
     _type_folder_enabled: bool = False
     _type_folder_movie: str = "电影"
     _type_folder_tv: str = "剧集"
-    _strm_generate_enabled: bool = True
+    _strm_generate_enabled: bool = False
     _nfo_scrape_enabled: bool = False
     _image_scrape_enabled: bool = False
-    _strm_base_url: str = "http://172.17.0.1:9527"
-    _strm_url_template: str = "{base_url}/d/{pickcode}?/{file_name}"
-    _strm_full_scan_enabled: bool = True
+    _strm_base_url: str = ""
+    _strm_url_template: str = (
+        "{base_url}/api/v1/plugin/CloudSubscribeX/redirect"
+        "?pickcode={pickcode}&file_name={file_name}"
+    )
+    _strm_full_scan_enabled: bool = False
     _strm_full_scan_overwrite: bool = False
     _strm_full_scan_scheduler: Optional[BackgroundScheduler] = None
-    _strm_increment_enabled: bool = True
+    _strm_increment_enabled: bool = False
     _strm_increment_minutes: int = 10
     _strm_increment_budget: int = 180
     _strm_increment_scheduler: Optional[BackgroundScheduler] = None
@@ -1745,8 +1748,12 @@ class CloudSubscribeX(_PluginBase):
         self._organize_schedule_notify = bool(config.get("organize_schedule_notify", True))
         self._nfo_scrape_enabled = bool(config.get("nfo_scrape_enabled", False))
         self._image_scrape_enabled = bool(config.get("image_scrape_enabled", False))
-        self._strm_base_url = str(config.get("strm_base_url", "http://172.17.0.1:9527")).strip().rstrip("/")
-        self._strm_url_template = str(config.get("strm_url_template", "{base_url}/d/{pickcode}?/{file_name}")).strip()
+        self._strm_base_url = str(config.get("strm_base_url", "")).strip().rstrip("/")
+        self._strm_url_template = str(config.get(
+            "strm_url_template",
+            "{base_url}/api/v1/plugin/CloudSubscribeX/redirect"
+            "?pickcode={pickcode}&file_name={file_name}",
+        )).strip()
 
         self._timeout_enabled = bool(config.get("timeout_enabled", True))
         for key, default in (
