@@ -58,18 +58,31 @@
                 </button>
               </div>
             </template>
-            <!-- 手机端：平铺横向流畅滑动 -->
+            <!-- 手机端：第一行分组、第二行当前分组的子项（两行固定高度，层级与 PC 一致） -->
             <template v-else>
-              <button
-                v-for="section in flatSections"
-                :key="section.value"
-                type="button"
-                class="sidebar-nav-item"
-                :class="{ 'sidebar-nav-item--active': activeTab === section.value }"
-                @click="onNavClick(section.value, $event)">
-                <v-icon :icon="section.icon" size="16" class="sidebar-nav-icon" />
-                <span class="sidebar-nav-title">{{ section.title }}</span>
-              </button>
+              <div class="mobile-nav-groups">
+                <button
+                  v-for="group in navGroups"
+                  :key="group.name"
+                  type="button"
+                  class="mobile-group-tab"
+                  :class="{ 'mobile-group-tab--active': mobileGroupName === group.name }"
+                  @click="onMobileGroupClick(group)">
+                  {{ group.name }}
+                </button>
+              </div>
+              <div class="mobile-nav-items">
+                <button
+                  v-for="section in mobileGroupItems"
+                  :key="section.value"
+                  type="button"
+                  class="sidebar-nav-item sidebar-nav-item--mobile"
+                  :class="{ 'sidebar-nav-item--active': activeTab === section.value }"
+                  @click="onNavClick(section.value, $event)">
+                  <v-icon :icon="section.icon" size="16" class="sidebar-nav-icon" />
+                  <span class="sidebar-nav-title">{{ section.title }}</span>
+                </button>
+              </div>
             </template>
           </nav>
           <!-- 电脑端左下角全高状态看板卡片（排版饱满高级，不显空旷） -->
@@ -921,9 +934,23 @@ const navGroups = computed(() => {
 });
 // 移动端与 PC 端共用同一份顺序：先按分组次序展开，再平铺渲染，
 // 避免两端出现「选项不同、顺序不同」的问题。
-const flatSections = computed(() =>
-  (navGroups.value || []).flatMap((group) => group.items)
-);
+// 手机端导航（1.7.108）：第一行分组、第二行只显示当前分组的子项。
+const mobileGroupName = computed(() => {
+  const group = (navGroups.value || []).find((row) =>
+    row.items.some((section) => section.value === activeTab.value)
+  );
+  return group?.name || navGroups.value?.[0]?.name || "";
+});
+const mobileGroupItems = computed(() => {
+  const group = (navGroups.value || []).find((row) => row.name === mobileGroupName.value);
+  return group?.items || [];
+});
+function onMobileGroupClick(group) {
+  // 当前页已经属于该分组时只切换高亮，不跳转；否则进入该分组第一项，避免点空。
+  if (group.items.some((section) => section.value === activeTab.value)) return;
+  const first = group.items[0];
+  if (first) onNavClick(first.value);
+}
 const currentSection = computed(() => {
   return sections.value.find((s) => s.value === activeTab.value) || sections.value[0];
 });
@@ -2991,13 +3018,13 @@ watch(
     border-radius: 6px !important;
   }
 
-  /* 移动端：原先是横滑单行，后面的「频道设置/网盘整理」滑不到；
-     改成自适应网格，一屏内全部可见，顺序与 PC 完全一致。 */
+  /* 1.7.108：两行导航。第一行 4 个分组（互斥高亮），第二行只渲染当前分组的 1~5 个子项，
+     总高度固定 ≈ 88px，把横向滑不到、标题被截断、层级丢失三个问题一起解掉。 */
   .sidebar-nav {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
-    padding: 2px 10px 8px;
+    display: flex;
+    flex-direction: column;
     gap: 6px;
+    padding: 2px 10px 8px;
     overflow: visible;
     white-space: normal;
   }
@@ -3006,15 +3033,66 @@ watch(
     display: none;
   }
 
+  .mobile-nav-groups {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .mobile-nav-groups::-webkit-scrollbar {
+    display: none;
+  }
+
+  .mobile-group-tab {
+    flex: 0 0 auto;
+    height: 34px;
+    padding: 0 14px;
+    border-radius: 999px;
+    border: 1px solid rgba(var(--v-border-color), 0.16);
+    background: transparent;
+    color: rgba(var(--v-theme-on-surface), 0.7);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background-color 0.18s ease, color 0.18s ease, border-color 0.18s ease;
+  }
+
+  .mobile-group-tab--active {
+    background: rgba(var(--v-theme-primary), 0.14);
+    border-color: rgba(var(--v-theme-primary), 0.4);
+    color: rgb(var(--v-theme-primary));
+    font-weight: 600;
+  }
+
+  .mobile-nav-items {
+    display: flex;
+    gap: 6px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .mobile-nav-items::-webkit-scrollbar {
+    display: none;
+  }
+
   .sidebar-nav-item {
     width: 100%;
-    height: 34px;
-    padding: 0 8px;
-    gap: 5px;
+    height: 44px;
+    padding: 0 14px;
+    gap: 6px;
     justify-content: center;
-    font-size: 0.75rem;
-    border-radius: 6px;
+    font-size: 0.8125rem;
+    border-radius: 8px;
     text-align: center;
+  }
+
+  .sidebar-nav-item--mobile {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: 76px;
+    max-width: 46vw;
+    white-space: nowrap;
   }
 
   .sidebar-nav-title {
