@@ -177,7 +177,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.106"
+    plugin_version = "1.7.107"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -274,7 +274,7 @@ class CloudSubscribeX(_PluginBase):
     _tg_monitor_interval_minutes: int = 10
     _tg_monitor_max_items: int = 500
     _tg_monitor_keep_unmatched: bool = False
-    # 跨盘中继残留清理（历史 Gopeed 中间文件与内置下载器的半截文件共用同一套扫描）
+    # 跨盘缓存残留清理（历史 Gopeed 中间文件与内置下载器的半截文件共用同一套扫描）
     _residue_cleanup: bool = True
     #: STRM 全量校准单次时间预算（秒），0 表示不限；到达上限后断点续扫。
     _strm_full_scan_budget: int = 900
@@ -307,7 +307,6 @@ class CloudSubscribeX(_PluginBase):
     _quality_min_gain_percent: int = 10
     _upgrade_episode_limit: int = 0
     _quality_min_gain_mb: int = 200
-    _quality_ignore_rename_template: bool = True
     _local_resource_path: str = ""
     # 媒体库一级目录（按媒体类型分层：电影/剧集），仅作用于网盘媒体库与本地 STRM 目录结构
     _type_folder_enabled: bool = False
@@ -1183,7 +1182,7 @@ class CloudSubscribeX(_PluginBase):
             logger.warning(f"115 网盘整理定时任务启动失败：{error}")
 
     def cleanup_transfer_residue(self, reason: str = "手动") -> dict:
-        """删除跨盘中继残留（cloud-transfer-*），返回统计。
+        """删除跨盘缓存残留（cloud-transfer-*），返回统计。
 
         判定见 :mod:`core.residue`：仅删超过保留期（默认 24 小时）的文件 ——
         运行中的下载会持续刷新 mtime，所以不需要额外的任务列表兜底
@@ -1195,12 +1194,12 @@ class CloudSubscribeX(_PluginBase):
         result = scan_residue(root)
         freed_mb = int(result.get("freed_bytes") or 0) / (1024 * 1024)
         logger.info(
-            f"跨盘中继残留清理（{reason}）：删除 {result.get('deleted_files')} 个文件、"
+            f"跨盘缓存残留清理（{reason}）：删除 {result.get('deleted_files')} 个文件、"
             f"释放 {freed_mb:.1f} MB；跳过未过期 {result.get('skipped_recent')} 组、"
             f"任务中 {result.get('skipped_active')} 组"
         )
         for error in result.get("errors") or []:
-            logger.warning(f"跨盘中继残留清理：{error}")
+            logger.warning(f"跨盘缓存残留清理：{error}")
         return result
 
     def _start_residue_cleanup(self) -> None:
@@ -1220,13 +1219,13 @@ class CloudSubscribeX(_PluginBase):
             scheduler.start()
             self._residue_scheduler = scheduler
         except Exception as error:  # noqa: BLE001
-            logger.warning(f"跨盘中继残留定时清理启动失败：{error}")
+            logger.warning(f"跨盘缓存残留定时清理启动失败：{error}")
 
         def _run_once():
             try:
                 self.cleanup_transfer_residue("启动")
             except Exception as error:  # noqa: BLE001
-                logger.warning(f"跨盘中继残留清理失败：{error}")
+                logger.warning(f"跨盘缓存残留清理失败：{error}")
 
         Thread(target=_run_once, daemon=True).start()
 
@@ -1312,6 +1311,32 @@ class CloudSubscribeX(_PluginBase):
         except (TypeError, ValueError):
             scan_limit = 20
         self._tg_monitor_scan_limit = max(1, min(scan_limit, 200))
+        # 1.6.64 前的「全局频道 + 全局关键词」：一次性展开成逐频道规则并写回配置，
+        # 之后只保留 tg_channel_rules 一个来源（旧键读一次即清空，避免两套配置互相覆盖）。
+        if not self._tg_channel_rules and self._tg_channels:
+            from .core.tg_monitor import migrate_legacy_channel_rules
+            migrated_rules = migrate_legacy_channel_rules(
+                [],
+                channels=self._tg_channels,
+                keywords=self._tg_monitor_keywords,
+                exclude_keywords=self._tg_monitor_exclude_keywords,
+                scan_limit=self._tg_monitor_scan_limit,
+            )
+            self._tg_channel_rules = migrated_rules
+            logger.info(
+                f"TG 频道规则为空，已把旧版全局配置迁移为逐频道规则："
+                f"{len(migrated_rules)} 个频道；旧键 tg_channels / "
+                "tg_monitor_keywords / tg_monitor_exclude_keywords 已清空"
+            )
+            self._tg_channels = []
+            self._tg_monitor_keywords = []
+            self._tg_monitor_exclude_keywords = []
+            self._persist_config_values(
+                tg_channel_rules=migrated_rules,
+                tg_channels="",
+                tg_monitor_keywords="",
+                tg_monitor_exclude_keywords="",
+            )
         try:
             interval = int(config.get("tg_monitor_interval_minutes", 10) or 10)
         except (TypeError, ValueError):
@@ -1682,14 +1707,17 @@ class CloudSubscribeX(_PluginBase):
             config.get("prefer_template_named_version", True)
         )
         self._quality_prefer_enabled = bool(config.get("quality_prefer_enabled", False))
+        if self._upgrade_mode == "coexist" and (
+                self._episode_dedup_enabled or self._quality_prefer_enabled):
+            logger.warning(
+                "洗版模式为「新旧共存」：按季集判重与入库择优都不生效，"
+                "需要替换请改成「保留最大文件 / 保留最小文件 / 直接替换」"
+            )
         self._quality_min_gain_percent = int(config.get("quality_min_gain_percent", 10) or 0)
         self._upgrade_episode_limit = max(
             0, int(config.get("upgrade_episode_limit", 0) or 0)
         )
         self._quality_min_gain_mb = int(config.get("quality_min_gain_mb", 200) or 0)
-        self._quality_ignore_rename_template = bool(
-            config.get("quality_ignore_rename_template", True)
-        )
         self._local_resource_path = str(config.get("local_resource_path", "") or "").strip()
         self._type_folder_enabled = bool(config.get("type_folder_enabled", False))
         self._type_folder_movie = (

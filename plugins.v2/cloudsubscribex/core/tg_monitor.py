@@ -384,12 +384,40 @@ def _parse_rules_payload(value: Any) -> Any:
     return value
 
 
+def migrate_legacy_channel_rules(
+        raw_rules: Any, *, channels: Iterable[str] = (),
+        keywords: Iterable[str] = (), exclude_keywords: Iterable[str] = (),
+        scan_limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """把 1.6.64 前的「全局频道 + 全局关键词」一次性展开成逐频道规则。
+
+    返回待写入 ``tg_channel_rules`` 的规则列表；已有规则时返回空列表
+    （不覆盖用户当前配置）。迁移后旧键由调用方清空，只保留一个配置来源。
+    """
+    if normalize_channel_rules(raw_rules):
+        return []
+    default_keywords = _split_terms(keywords)
+    default_exclude = _split_terms(exclude_keywords)
+    rows = [
+        {
+            "channel": str(channel).strip(),
+            "enabled": True,
+            "keywords": list(default_keywords),
+            "exclude_keywords": list(default_exclude),
+            "scan_limit": scan_limit,
+        }
+        for channel in channels
+        if str(channel).strip()
+    ]
+    return normalize_channel_rules(rows)
+
+
 def normalize_channel_rules(
         raw_rules: Any, *, channels: Iterable[str] = (),
         keywords: Iterable[str] = (), exclude_keywords: Iterable[str] = (),
         scan_limit: int = 20,
 ) -> List[Dict[str, Any]]:
-    """归一化每频道规则；旧版的全局频道/关键词会自动展开成每频道一份。"""
+    """归一化每频道规则：``tg_channel_rules`` 是唯一来源，不再回退旧全局配置。"""
     payload = _parse_rules_payload(raw_rules)
     rows: List[Any] = []
     if isinstance(payload, dict):
@@ -398,31 +426,6 @@ def normalize_channel_rules(
         rows = list(payload)
     elif isinstance(payload, str) and payload.strip():
         rows = [payload]
-
-    if not rows:
-        # 兼容 1.6.64 及更早的配置：频道列表 + 全局关键词/回溯条数
-        default_keywords = _split_terms(keywords)
-        default_exclude = _split_terms(exclude_keywords)
-        fallback_channels = [
-            str(channel).strip() for channel in channels if str(channel).strip()
-        ]
-        if fallback_channels:
-            # 这四条旧键已无界面入口：静默回退会让人以为监控已停用/已改配置。
-            logger.warning(
-                "TG 频道规则（tg_channel_rules）为空，已回退到旧版全局配置："
-                f"频道 {len(fallback_channels)} 个、包含关键词 {len(default_keywords)} 个、"
-                f"排除关键词 {len(default_exclude)} 个、回溯条数 {scan_limit}；"
-                "要停用监控请清空旧版全局频道，要改关键词请在「频道规则」里逐频道填写"
-            )
-        rows = [
-            {
-                "channel": channel,
-                "keywords": default_keywords,
-                "exclude_keywords": default_exclude,
-                "scan_limit": scan_limit,
-            }
-            for channel in fallback_channels
-        ]
 
     rules: List[Dict[str, Any]] = []
     seen: set = set()

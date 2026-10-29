@@ -50,7 +50,7 @@ export function createTransferSection(options) {
             key: "cross_transfer_enabled",
             label: "跨盘资源自动转存",
             type: "switch",
-            hint: "目标网盘不一致时尝试秒传或中继转存",
+            hint: "目标网盘不一致时尝试秒传，失败再下载到本地缓存后上传",
             cols: 4,
           },
           {
@@ -164,8 +164,9 @@ export function createTransferSection(options) {
             key: "cross_transfer_direct_stream",
             label: "跨盘直传（边下边传）",
             type: "switch",
-            hint: "开启后从源盘 Range 直传目标盘，不落本地盘；源盘单连接慢时请关闭，改为多线程下载到本地缓存再上传",
+            hint: "开启后从源盘 Range 直传目标盘，不落本地盘；源盘单连接慢时请关闭，改为多线程下载到本地缓存再上传。「秒传未命中处理」选「中止并清理」时本项不生效",
             cols: 4,
+            disabled: (config) => config.cross_transfer_rapid_miss_action === "abort",
             show: enabled("cross_transfer_enabled"),
           },
           {
@@ -222,7 +223,7 @@ export function createTransferSection(options) {
           },
           {
             key: "cross_transfer_residue_cleanup",
-            label: "自动清理中继残留",
+            label: "自动清理跨盘缓存残留",
             type: "switch",
             default: true,
             hint: "插件启动时清理一次，之后每天 03:40 清理：只删超过 24 小时的 cloud-transfer-* 及其伴随文件（运行中的下载会持续刷新修改时间）",
@@ -350,7 +351,7 @@ export function createTransferSection(options) {
           },
           {
             key: "cross_transfer_download_path",
-            label: "跨盘中继缓存目录",
+            label: "跨盘缓存目录",
             type: "local-directory",
             placeholder: "/tmp",
             default: "/tmp",

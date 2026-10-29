@@ -1,4 +1,4 @@
-"""跨盘中继残留清理。
+"""跨盘缓存残留清理。
 
 只处理 ``cloud-transfer-<32位hash>.bin`` 及其自动改名副本
 ``… (1).bin``、伴随文件 ``.meta.json`` / ``.parts.json``（含 ``.tmp``），

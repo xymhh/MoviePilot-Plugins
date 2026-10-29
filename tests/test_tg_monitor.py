@@ -34,6 +34,7 @@ extract_share_links = tg_module.extract_share_links
 extract_message_links = tg_module.extract_message_links
 normalize_channel = tg_module.normalize_channel
 normalize_channel_rules = tg_module.normalize_channel_rules
+migrate_legacy_channel_rules = tg_module.migrate_legacy_channel_rules
 TgChannelMonitor = tg_module.TgChannelMonitor
 
 
@@ -204,16 +205,29 @@ class ChannelRulesTest(unittest.TestCase):
         self.assertEqual(rule["exclude_keywords"], ["广告", "拉群"])
         self.assertEqual(rule["scan_limit"], 200)
 
-    def test_legacy_config_expands_to_each_channel(self):
+    def test_empty_rules_ignores_legacy_global_config(self):
+        # 1.7.107：tg_channel_rules 是唯一来源，不再静默回退旧全局配置
         rules = normalize_channel_rules(
             [], channels=["@a", "https://t.me/b"], keywords=["4K"],
             exclude_keywords=["广告"], scan_limit=15,
         )
-        self.assertEqual([rule["channel"] for rule in rules], ["@a", "@b"])
-        for rule in rules:
+        self.assertEqual(rules, [])
+
+    def test_legacy_config_migrates_once(self):
+        migrated = migrate_legacy_channel_rules(
+            [], channels=["@a", "https://t.me/b"], keywords=["4K"],
+            exclude_keywords=["广告"], scan_limit=15,
+        )
+        self.assertEqual([rule["channel"] for rule in migrated], ["@a", "@b"])
+        for rule in migrated:
             self.assertEqual(rule["keywords"], ["4k"])
             self.assertEqual(rule["exclude_keywords"], ["广告"])
             self.assertEqual(rule["scan_limit"], 15)
+            self.assertTrue(rule["enabled"])
+        # 已有规则时不迁移（不覆盖用户当前配置）
+        self.assertEqual(
+            migrate_legacy_channel_rules([{"channel": "@x"}], channels=["@a"]), []
+        )
 
     def test_channel_wrapped_in_list_or_double_quotes(self):
         rules = normalize_channel_rules([
@@ -432,7 +446,7 @@ class ChannelRulesTest(unittest.TestCase):
         monitor = TgChannelMonitor(self.owner)
         monitor.configure(
             enabled=True, api_id=1, api_hash="hash", session="session",
-            channels=["@demo"], keywords=[], exclude_keywords=[],
+            channel_rules=[{"channel": "@demo"}],
             scan_limit=10, interval_minutes=10, max_items=100,
         )
         monitor.stop()  # 不走后台线程，测试里手动调用 scan
@@ -606,7 +620,7 @@ class ChannelRulesTest(unittest.TestCase):
         monitor = TgChannelMonitor(self.owner)
         monitor.configure(
             enabled=True, api_id=1, api_hash="hash", session="session",
-            channels=["@demo"], keywords=[], exclude_keywords=[],
+            channel_rules=[{"channel": "@demo"}],
             scan_limit=2, interval_minutes=10, max_items=100,
         )
         monitor.stop()
@@ -631,7 +645,7 @@ class ChannelRulesTest(unittest.TestCase):
         monitor = TgChannelMonitor(self.owner)
         monitor.configure(
             enabled=True, api_id=1, api_hash="hash", session="session",
-            channels=channels, keywords=[], exclude_keywords=[],
+            channel_rules=[{"channel": channel} for channel in channels],
             scan_limit=10, interval_minutes=10, max_items=100,
         )
         monitor.stop()

@@ -40,7 +40,8 @@ export function createUpgradeSection(options) {
             key: "episode_dedup_enabled",
             label: "按季集判重替换",
             type: "switch",
-            hint: "转存前按「季集」判重（不再依赖文件名）：新版本不差于已有版本时删旧写新，更差则跳过；旧文件含手动入库/老模板遗留也会删除。关闭后回退为仅按目标文件名判重。",
+            hint: "转存前按「季集」判重（不再依赖文件名）：新版本不差于已有版本时删旧写新，更差则跳过；旧文件含手动入库/老模板遗留也会删除。关闭后回退为仅按目标文件名判重。洗版模式为「新旧共存」时本项不生效。",
+            disabled: (config) => config.upgrade_mode === "coexist",
             cols: 4,
           },
           {
@@ -68,7 +69,10 @@ export function createUpgradeSection(options) {
             key: "quality_prefer_enabled",
             label: "入库时按体积择优",
             type: "switch",
-            hint: "打开后：新候选分辨率更高（体积不低于旧版 60%）或同分辨率体积多出阈值，就删旧写新；否则跳过并记「现有版本更优」。",
+            hint: "打开后：新候选分辨率更高（体积不低于旧版 60%）或同分辨率体积多出阈值，就删旧写新；否则跳过并记「现有版本更优」。洗版模式为「新旧共存」或关闭「按季集判重替换」时本项不生效。",
+            disabled: (config) =>
+              (config.upgrade_mode === "coexist") ||
+              (config.episode_dedup_enabled === false),
             cols: 4,
           },
           {
@@ -85,13 +89,6 @@ export function createUpgradeSection(options) {
             type: "number",
             min: 0,
             hint: "同分辨率时，新文件至少比旧文件多这么多 MB（与百分比同时满足），默认 200。",
-            cols: 4,
-          },
-          {
-            key: "quality_ignore_rename_template",
-            label: "择优时忽略命名模板拦截",
-            type: "switch",
-            hint: "本插件转存的文件名都符合重命名模板，不忽略的话「已符合模板就保留」会挡住所有替换；默认打开。",
             cols: 4,
           },
         ],

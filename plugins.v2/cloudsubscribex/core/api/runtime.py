@@ -246,7 +246,7 @@ class RuntimeApi(OwnerDelegator):
     def api_vue_cleanup_residue(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:
-        """手动清理 cloud-transfer-* 残留（跨盘中继半截文件）。"""
+        """手动清理 cloud-transfer-* 残留（跨盘传输半截文件）。"""
         del payload
         try:
             result = self._owner.cleanup_transfer_residue("手动")
@@ -264,7 +264,7 @@ class RuntimeApi(OwnerDelegator):
                 )
             return {"success": True, "message": message, "data": result}
         except Exception as error:  # noqa: BLE001
-            logger.error(f"清理跨盘中继残留失败：{error}")
+            logger.error(f"清理跨盘缓存残留失败：{error}")
             return {"success": False, "message": str(error)}
 
     def api_vue_clear_cache(

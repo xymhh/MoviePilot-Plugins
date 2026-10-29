@@ -52,6 +52,7 @@ tg_module = load_module(
 
 get_default_config = config_module.UIConfig.get_default_config
 normalize_channel_rules = tg_module.normalize_channel_rules
+migrate_legacy_channel_rules = tg_module.migrate_legacy_channel_rules
 
 
 class _RecordingLogger:
@@ -91,42 +92,37 @@ class StrmDefaultsTest(unittest.TestCase):
         self.assertIn("offline_timeout", defaults)
 
 
-class TgFallbackWarningTest(unittest.TestCase):
-    def test_empty_rules_falling_back_warns(self):
-        original = tg_module.logger
-        recorder = _RecordingLogger()
-        tg_module.logger = recorder
-        try:
-            rules = normalize_channel_rules(
-                [],
-                channels=["https://t.me/aaa"],
-                keywords=["现在就出发"],
-                exclude_keywords=[],
-                scan_limit=20,
-            )
-        finally:
-            tg_module.logger = original
-        self.assertEqual(len(rules), 1)
-        self.assertEqual(rules[0]["keywords"], ["现在就出发"])
-        self.assertTrue(recorder.warnings)
-        self.assertIn("回退到旧版全局配置", recorder.warnings[0])
-        self.assertIn("1 个", recorder.warnings[0])
+class TgSingleSourceTest(unittest.TestCase):
+    """1.7.107：tg_channel_rules 是唯一配置来源，旧全局配置只做一次性迁移。"""
 
-    def test_rules_present_does_not_warn(self):
-        original = tg_module.logger
-        recorder = _RecordingLogger()
-        tg_module.logger = recorder
-        try:
-            rules = normalize_channel_rules(
-                [{"channel": "https://t.me/bbb", "keywords": ["abc"]}],
-                channels=["https://t.me/aaa"],
-                keywords=["现在就出发"],
-            )
-        finally:
-            tg_module.logger = original
-        self.assertEqual(len(rules), 1)
-        self.assertEqual(rules[0]["channel"], "@bbb")
-        self.assertEqual(recorder.warnings, [])
+    def test_empty_rules_no_longer_falls_back(self):
+        rules = normalize_channel_rules(
+            [],
+            channels=["https://t.me/aaa"],
+            keywords=["现在就出发"],
+        )
+        self.assertEqual(rules, [])
+
+    def test_legacy_config_migrates_to_rules(self):
+        migrated = migrate_legacy_channel_rules(
+            [],
+            channels=["https://t.me/aaa"],
+            keywords=["现在就出发"],
+            exclude_keywords=["广告"],
+            scan_limit=20,
+        )
+        self.assertEqual(len(migrated), 1)
+        self.assertEqual(migrated[0]["channel"], "@aaa")
+        self.assertEqual(migrated[0]["keywords"], ["现在就出发"])
+        self.assertEqual(migrated[0]["exclude_keywords"], ["广告"])
+
+    def test_rules_present_prevents_migration(self):
+        migrated = migrate_legacy_channel_rules(
+            [{"channel": "https://t.me/bbb", "keywords": ["abc"]}],
+            channels=["https://t.me/aaa"],
+            keywords=["现在就出发"],
+        )
+        self.assertEqual(migrated, [])
 
 
 if __name__ == "__main__":

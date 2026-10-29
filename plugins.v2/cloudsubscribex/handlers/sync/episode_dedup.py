@@ -336,20 +336,25 @@ class EpisodeDedupService(OwnerDelegator):
         new_size = max(0, int(new_size or 0))
 
         quality_active = self._quality_prefer_active()
-        ignore_template = quality_active and bool(
-            getattr(self, "_quality_ignore_rename_template", True)
+        prefer_template = bool(
+            getattr(self, "_prefer_template_named_version", True)
         )
-        if not ignore_template:
+
+        def _keep_template_version(reason: str) -> Tuple[str, List[Dict[str, Any]], str]:
+            """无增益时按模板命名保留旧版本（与洗版判定同一优先级）。"""
+            if not prefer_template:
+                return "skip", list(versions), reason
             template_version = self._template_conformant_version(
                 versions, subscribe, mediainfo, season, episode
             )
-            if template_version:
-                template_name = str(template_version.get("file_name") or "").strip()
-                return (
-                    "skip",
-                    list(versions),
-                    f"现有版本已符合当前重命名模板，保留 {template_name}",
-                )
+            if not template_version:
+                return "skip", list(versions), reason
+            template_name = str(template_version.get("file_name") or "").strip()
+            return (
+                "skip",
+                list(versions),
+                f"现有版本已符合当前重命名模板，保留 {template_name}",
+            )
 
         if quality_active:
             action, reason = compare_quality(
@@ -361,7 +366,7 @@ class EpisodeDedupService(OwnerDelegator):
             )
             if action == "upgrade":
                 return "replace", list(versions), f"按体积择优：{reason}"
-            return "skip", list(versions), f"现有版本更优：{reason}"
+            return _keep_template_version(f"现有版本更优：{reason}")
 
         best_old_score = max(int(v.get("score") or 0) for v in versions)
         best_old_size = max(int(v.get("file_size") or 0) for v in versions)
@@ -374,7 +379,7 @@ class EpisodeDedupService(OwnerDelegator):
         )
         if should_upgrade:
             return "replace", list(versions), reason
-        return "skip", list(versions), reason
+        return _keep_template_version(reason)
 
     # ------------------------------------------------------------------
     # 删除
@@ -509,16 +514,6 @@ class EpisodeDedupService(OwnerDelegator):
                     0,
                     mediainfo,
                 )
-        template_version = self._template_conformant_version(
-            versions, subscribe, mediainfo
-        )
-        if template_version:
-            template_name = str(template_version.get("file_name") or "").strip()
-            return (
-                "skip",
-                list(versions),
-                f"现有版本已符合当前重命名模板，保留 {template_name}",
-            )
         best_old_score = max(int(v.get("score") or 0) for v in versions)
         best_old_size = max(int(v.get("file_size") or 0) for v in versions)
         should_upgrade, reason = self._should_upgrade_candidate(
@@ -530,4 +525,15 @@ class EpisodeDedupService(OwnerDelegator):
         )
         if should_upgrade:
             return "replace", versions, reason
+        if bool(getattr(self, "_prefer_template_named_version", True)):
+            template_version = self._template_conformant_version(
+                versions, subscribe, mediainfo
+            )
+            if template_version:
+                template_name = str(template_version.get("file_name") or "").strip()
+                return (
+                    "skip",
+                    list(versions),
+                    f"现有版本已符合当前重命名模板，保留 {template_name}",
+                )
         return "skip", versions, reason

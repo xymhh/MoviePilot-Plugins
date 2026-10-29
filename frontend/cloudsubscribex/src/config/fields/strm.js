@@ -15,7 +15,7 @@ export function createStrmSection() {
             key: "strm_generate_enabled",
             label: "转存后生成 STRM",
             type: "switch",
-            hint: "转存成功后为视频文件写同名 .strm，内容是一条指向播放地址的 URL",
+            hint: "转存成功后为视频文件写同名 .strm，内容是一条指向播放地址的 URL；下面的「播放地址前缀」留空时本项会被自动关闭（不写任何 .strm）",
             cols: 4,
           },
           {
@@ -23,7 +23,7 @@ export function createStrmSection() {
             label: "播放地址前缀",
             type: "text",
             placeholder: "http://192.168.1.10:3000",
-            hint: "只填「协议://主机:端口」，插件自动补 /api/v1/plugin/CloudSubscribeX/redirect（内置 302 反代）；留空则不会生成 STRM",
+            hint: "必填。只填「协议://主机:端口」，插件自动补 /api/v1/plugin/CloudSubscribeX/redirect（内置 302 反代）；留空会关闭 STRM 生成，增量补齐与全量校准也随之停摆",
             cols: 8,
             show: enabled("strm_generate_enabled"),
           },
@@ -46,8 +46,9 @@ export function createStrmSection() {
             label: "定时补齐缺失 STRM",
             type: "switch",
             default: false,
-            hint: "按固定间隔比对网盘目录树，只写缺失的 .strm，不改写已有文件",
+            hint: "按固定间隔比对网盘目录树，只写缺失的 .strm，不改写已有文件；与「每天全量校准」互补（高频补缺 vs 每天兜底+可比对内容），依赖上面的「转存后生成 STRM」开启",
             cols: 4,
+            show: enabled("strm_generate_enabled"),
           },
           {
             key: "strm_increment_minutes",
@@ -57,7 +58,9 @@ export function createStrmSection() {
             max: 1440,
             default: 10,
             cols: 4,
-            show: enabled("strm_increment_enabled"),
+            show: (config) =>
+              Boolean(config.strm_generate_enabled) &&
+              Boolean(config.strm_increment_enabled),
           },
           {
             key: "strm_increment_budget",
@@ -68,7 +71,9 @@ export function createStrmSection() {
             default: 180,
             hint: "超时即停，下一轮继续，避免长时间占锁",
             cols: 4,
-            show: enabled("strm_increment_enabled"),
+            show: (config) =>
+              Boolean(config.strm_generate_enabled) &&
+              Boolean(config.strm_increment_enabled),
           },
         ],
       },
@@ -81,7 +86,7 @@ export function createStrmSection() {
             label: "每天全量校准",
             type: "switch",
             default: false,
-            hint: "每天 05:10 按目录 CID 遍历媒体库，补齐缺失的 STRM；不删除任何网盘文件",
+            hint: "每天 05:10 按目录 CID 遍历媒体库，补齐缺失的 STRM（+可选覆盖内容不一致的旧文件）；不删除任何网盘文件。与增量补齐同时开启时互不冲突：两者都只写缺失文件",
             cols: 4,
             show: enabled("strm_generate_enabled"),
           },

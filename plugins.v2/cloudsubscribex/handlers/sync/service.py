@@ -405,9 +405,6 @@ class SyncHandler:
         self._quality_prefer_enabled = bool(_get_val("quality_prefer_enabled", False))
         self._quality_min_gain_percent = int(_get_val("quality_min_gain_percent", 10) or 0)
         self._quality_min_gain_mb = int(_get_val("quality_min_gain_mb", 200) or 0)
-        self._quality_ignore_rename_template = bool(
-            _get_val("quality_ignore_rename_template", True)
-        )
         self._local_resource_path = str(_get_val("local_resource_path", "") or "").strip()
         # 媒体库一级目录：在网盘媒体库目录/本地媒体根路径下先建 电影/剧集 目录，再放二级分类
         self._type_folder_enabled = bool(_get_val("type_folder_enabled", False))

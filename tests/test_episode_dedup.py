@@ -641,8 +641,8 @@ class TemplateNamedVersionTests(unittest.TestCase):
         overrides.setdefault("platform_rename_path", self._template_aware_rename)
         return _make_handler(**overrides)
 
-    def test_keep_when_existing_matches_template(self):
-        """20. 现有版本名 == 模板渲染结果 → skip，即使候选评分更高。"""
+    def test_template_name_does_not_block_real_upgrade(self):
+        """20. 模板命名只挡「无提升」：候选评分更高时照样 replace（与洗版同一优先级）。"""
         handler = self._handler(prefer_template_named_version=True)
         existing = {1: [{
             "file_id": "f1",
@@ -653,6 +653,23 @@ class TemplateNamedVersionTests(unittest.TestCase):
         }]}
         action, old, reason = handler._episode_dedup_decision(
             _SUB, _MEDIA, 1, 1, new_score=99, new_size=9999, existing_versions=existing
+        )
+        self.assertEqual(action, "replace")
+        self.assertEqual(len(old), 1)
+        self.assertNotIn("已符合当前重命名模板", reason)
+
+    def test_keep_template_name_when_no_gain(self):
+        """20b. 无提升时按模板命名保留旧版本。"""
+        handler = self._handler(prefer_template_named_version=True)
+        existing = {1: [{
+            "file_id": "f1",
+            "file_name": "正相反的你与我 - S01E01.mkv",
+            "cloud_dir": "/d",
+            "file_size": 100,
+            "score": 3,
+        }]}
+        action, old, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=3, new_size=100, existing_versions=existing
         )
         self.assertEqual(action, "skip")
         self.assertEqual(len(old), 1)
@@ -714,7 +731,7 @@ class TemplateNamedVersionTests(unittest.TestCase):
         self.assertIn("评分提升", reason)
 
     def test_movie_keep_when_matches_template(self):
-        """24. 电影侧同规则：现有网盘电影名已符合模板 → skip。"""
+        """24. 电影侧同规则：无增益时模板命名保留，有增益仍替换。"""
         files = [_FakeCloudFile(id="m1", name="正相反的你与我 (2024).mkv", size=100)]
         dirs = _FakeDirectories(files=files)
         handler = self._handler(
@@ -723,10 +740,15 @@ class TemplateNamedVersionTests(unittest.TestCase):
         versions = handler._find_cloud_movie_versions(_SUB, _MEDIA)
         versions[0]["score"] = 3
         action, _, reason = handler._movie_dedup_decision(
-            _SUB, _MEDIA, new_score=99, new_size=9999, existing_versions=versions
+            _SUB, _MEDIA, new_score=3, new_size=100, existing_versions=versions
         )
         self.assertEqual(action, "skip")
         self.assertIn("已符合当前重命名模板", reason)
+        action, _, reason = handler._movie_dedup_decision(
+            _SUB, _MEDIA, new_score=99, new_size=9999, existing_versions=versions
+        )
+        self.assertEqual(action, "replace")
+        self.assertNotIn("已符合当前重命名模板", reason)
 
     def test_should_upgrade_candidate_accepts_existing_name(self):
         """25. 模板名不再一票否决：评分/体积有收益照样升级，只有无收益时才保留。"""
@@ -1040,18 +1062,23 @@ class QualityPreferDecisionTests(unittest.TestCase):
         self.assertEqual(action, "replace")
         self.assertIn("720p → 1080p", reason)
 
-    def test_ignore_template_off_keeps_template_version(self):
-        handler = self._handler(
-            quality_ignore_rename_template=False, prefer_template_named_version=True
-        )
-        # 旧文件名正好等于模板渲染结果，才会触发「已符合模板就保留」
-        existing = self._existing("正相反的你与我 - S01E01.mkv", 600 * self.MB)
+    def test_template_switch_keeps_version_only_without_gain(self):
+        """quality_ignore_rename_template 已删除：模板命名只在无增益时保留。"""
+        handler = self._handler(prefer_template_named_version=True)
+        same_size = self._existing("正相反的你与我 - S01E01.mkv", 1000 * self.MB)
         action, _, reason = handler._episode_dedup_decision(
-            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1500 * self.MB,
-            existing_versions=existing, new_file_name="正相反的你与我.S01E01.1080p.mkv",
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1000 * self.MB,
+            existing_versions=same_size, new_file_name="正相反的你与我.S01E01.mkv",
         )
         self.assertEqual(action, "skip")
         self.assertIn("已符合当前重命名模板", reason)
+        bigger = self._existing("正相反的你与我 - S01E01.mkv", 600 * self.MB)
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1500 * self.MB,
+            existing_versions=bigger, new_file_name="正相反的你与我.S01E01.mkv",
+        )
+        self.assertEqual(action, "replace")
+        self.assertNotIn("已符合当前重命名模板", reason)
 
     def test_switch_off_keeps_old_behaviour(self):
         """开关关闭 → 完全回到 1.7.87：评分相同且体积更大时按 largest 兜底替换。"""

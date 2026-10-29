@@ -1018,7 +1018,7 @@ class CrossTransferTaskManager:
         """任务级中继清理：仍有兄弟任务使用时保留文件（连同 meta/parts），供其复用。"""
         if self._cache_retained_for_others(task):
             logger.debug(
-                f"中继缓存仍被其它任务使用，保留不删：{path.name}"
+                f"跨盘缓存仍被其它任务使用，保留不删：{path.name}"
                 f"（在用引用 {self._cache_ref_count(self._task_cache_key(task))}）"
             )
             return 0
@@ -1031,7 +1031,7 @@ class CrossTransferTaskManager:
         in_use = self._cache_ref_count(normalized)
         if in_use > 0:
             logger.debug(
-                f"中继缓存正在使用中，跳过清理：{normalized}（在用引用 {in_use}）"
+                f"跨盘缓存正在使用中，跳过清理：{normalized}（在用引用 {in_use}）"
             )
             return 0
         return self._delete_cache_path(self._cache_path(normalized))
@@ -1164,10 +1164,10 @@ class CrossTransferTaskManager:
         try:
             free_bytes = int(shutil.disk_usage(cache_root).free)
         except OSError as error:
-            raise RuntimeError(f"无法检查中继磁盘空间：{error}") from error
+            raise RuntimeError(f"无法检查跨盘缓存磁盘空间：{error}") from error
         if free_bytes < required:
             raise RuntimeError(
-                f"中继磁盘可用空间不足：剩余 {free_bytes} 字节，"
+                f"跨盘缓存磁盘可用空间不足：剩余 {free_bytes} 字节，"
                 f"至少需要 {required} 字节"
             )
         task = {
@@ -1950,7 +1950,7 @@ class CrossTransferTaskManager:
                 # 中继文件在传输途中被清理（历史删除联动删缓存/手工清缓存/插件重载）：
                 # 明确报错并让下一次重试重新下载，避免抛出裸 Errno 2 让用户无从下手
                 raise RuntimeError(
-                    "本地中继缓存文件已被清理（可能来自历史删除联动清缓存或手工清理），"
+                    "本地跨盘缓存文件已被清理（可能来自历史删除联动清缓存或手工清理），"
                     "请重新点击重试，插件会重新下载"
                 )
             had_download = bool(temporary_path)
@@ -2075,10 +2075,10 @@ class CrossTransferTaskManager:
             if 'temporary_path' in locals() and temporary_path and not retained:
                 self._delete_cache_path(Path(temporary_path))
             if retained:
-                logger.debug("任务取消：中继缓存仍有其它任务使用，保留文件")
+                logger.debug("任务取消：跨盘缓存仍有其它任务使用，保留文件")
             self._update(
                 task_id, status="canceled", phase="canceled",
-                message=("任务已取消，中继缓存保留（其它任务使用中）"
+                message=("任务已取消，跨盘缓存保留（其它任务使用中）"
                          if retained else "任务已取消并已清理中继缓存"),
                 speed_bytes_per_second=0.0, finished_at=time.time(),
             )

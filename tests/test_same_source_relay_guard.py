@@ -430,7 +430,7 @@ class CacheRefRetentionTests(_RelayHarnessBase):
 
         self.assertEqual(task["status"], "canceled")
         self.assertTrue(cache_path.is_file(), "兄弟在飞时取消不得删除中继缓存")
-        self.assertIn("中继缓存保留", task["message"])
+        self.assertIn("跨盘缓存保留", task["message"])
         self.assertNotIn("已清理中继缓存", task["message"])
 
         manager._release_cache_ref(cache_key)

@@ -596,7 +596,7 @@ class MoviePilotRegistration(OwnerDelegator):
                 "endpoint": self.api_vue_cleanup_residue,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "清理跨盘中继残留文件",
+                "summary": "清理跨盘缓存残留文件",
             },
             {
                 "path": "/qrcode",
