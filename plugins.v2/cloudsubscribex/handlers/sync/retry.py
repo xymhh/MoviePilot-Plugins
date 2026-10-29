@@ -14,6 +14,11 @@ from app.log import logger
 from app.schemas.types import MediaType
 
 from ...core import CloudDriveCapability, CloudFile, OwnerDelegator
+from ...core.failure import (
+    KIND_SHARE_INVALID,
+    apply_failure,
+    clear_failure,
+)
 from ...core.media import (
     list_subscribes_by_tmdb_id,
     recognize_media,
@@ -82,7 +87,7 @@ class HistoryRetryService(OwnerDelegator):
                 if self._is_ed2k_url(str(processing.get("share_url") or ""))
                 else "处理中"
             )
-            processing.pop("failure_reason", None)
+            clear_failure(processing)
             self.append_history_records([processing], reopen_terminal=True)
             if self._history_changed:
                 self._history_changed()
@@ -218,8 +223,7 @@ class HistoryRetryService(OwnerDelegator):
         )
         if not record or str(record.get("status") or "") == "成功":
             return
-        record["status"] = "失败"
-        record["failure_reason"] = reason
+        apply_failure(record, reason)
         record.pop("retrying", None)
         record.pop("finalize_key", None)
         if self._save_data:
@@ -466,7 +470,7 @@ class HistoryRetryService(OwnerDelegator):
                     record.update(self._cross_transfer_manager.cache_info(
                         source_key, cached_source, verify_checksum=False,
                     ))
-                    record["failure_reason"] = "缓存恢复上传失败"
+                    apply_failure(record, "缓存恢复上传失败")
                     self._save_data("history", history)
                     raise RuntimeError("缓存完整，但恢复上传到目标网盘失败")
             if not success:
@@ -487,7 +491,11 @@ class HistoryRetryService(OwnerDelegator):
                 status = share_transfer.check_share_status(canonical_url)
                 if not status.is_valid:
                     provider_name = cross_source.name if cross_source else "网盘"
-                    raise ValueError(f"{provider_name}分享链接无效：{status.status_text}")
+                    reason = f"{provider_name}分享链接无效：{status.status_text}"
+                    apply_failure(record, reason, KIND_SHARE_INVALID)
+                    if self._save_data:
+                        self._save_data("history", history)
+                    raise ValueError(reason)
                 share_files = share_transfer.list_share_files(canonical_url)
                 source_file = self._find_share_file_for_history(
                     share_files, source_sha1, source_name
@@ -532,9 +540,10 @@ class HistoryRetryService(OwnerDelegator):
                     cached_source,
                     verify_checksum=False,
                 ))
-            record["failure_reason"] = "重试转存失败"
+            reason = str(record.get("failure_reason") or "").strip() or "重试转存失败"
+            apply_failure(record, reason)
             self._save_data("history", history)
-            raise RuntimeError("重试转存失败")
+            raise RuntimeError(reason)
 
         strm_path, pending_key = self._generate_or_queue_strm(
             canonical_url,
@@ -555,8 +564,7 @@ class HistoryRetryService(OwnerDelegator):
             staging_name=retry_staging_name,
         )
         if not strm_path and not pending_key:
-            record["status"] = "失败"
-            record["failure_reason"] = "文件已转存但后处理任务登记失败"
+            apply_failure(record, "文件已转存但后处理任务登记失败")
             self._save_data("history", history)
             raise RuntimeError("文件已转存，但无法登记后处理任务")
         record["file_name"] = target_name

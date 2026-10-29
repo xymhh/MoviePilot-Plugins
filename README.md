@@ -127,6 +127,7 @@ CS 1.7.39 起自带 STRM 全量 / 增量与 Emby 302 播放，**不再需要装�
 ## 文档
 
 - [`docs/README.md`](docs/README.md) — 文档索引（`plan/` 计划、`test/` 证据、`summary/` 结论）
+- [历史记录失败原因分类（1.7.109）](docs/plan/2026-10-29-失败原因分类.md) —— 失败记录新增 `failure_kind` / `failure_retryable`：分享链接失效、分享内无目标文件判为永久性失败，重试按钮置灰并提示「原分享已失效，需重新搜源」，批量重试自动跳过；夸克分享校验补齐「已过期 / 已取消 / 文件已删除」与 `error_code`；老记录按文本回溯、无需迁移｜[验证](docs/test/2026-10-29-失败原因分类.md)
 - [状态持久化统一入库（1.7.98）](docs/test/2026-10-28-状态持久化统一入库.md) —— SHA1 缓存 / TG 监控池 / STRM 断点 / 候选账本四类状态从 JSON 文件全部迁到 `cloudsubscribe.db`（`source_sha1_cache`、`runtime_records`、`candidate_ledger_entries` 三张表），旧文件首次启动自动导入并改名 `*.migrated`；`ledger/.purged` 标记文件删除；`*.parts.json` 续传标记评估后保留
 - [静默失败面清零 + 棘轮归零（1.7.94）](docs/test/2026-10-28-P2静默面清零.md) —— 全包 87 处 `except: pass` + 77 处无栈 debug 改成 `logger.debug(..., exc_info=True)`（60 个文件），`scripts/lint.py` 静默点预算收到 0/0，新增静默点 CI 直接红（逃生口 `# noqa: silent`）；顺带复查：TG 旧键仅用于规则编辑器一次性播种（保留）、根目录 61 个 `*_TODO.md` 均未被 git 跟踪
 - [死配置清理 + 静默失败面 + CI 拦住 ruff F（1.7.93）](docs/test/2026-10-28-P1-A死键与静默面收口.md) —— 删掉三条从未被读取的死配置（`auto_subscribe_maoyan_categories`、`auto_subscribe_douban_rsshub_base`、`auto_subscribe_douban_rss_urls`）；主链路 23 处 `except: pass` 改为带栈的 debug、41 处 debug 补 `exc_info`；`scripts/lint.py` 新增 ruff F 硬拦截 + 静默点棘轮（87/77），CI 固定 `ruff==0.17.3`，顺手修掉 71 条 F 级问题（其中两处 F401 是再导出，删了会 ImportError）

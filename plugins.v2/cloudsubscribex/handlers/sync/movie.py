@@ -9,6 +9,7 @@ from app.schemas import MediaInfo
 from app.schemas.types import MediaType
 
 from ...core import OwnerDelegator
+from ...core.failure import apply_failure
 from ...core.media import tmdb_id_of
 from ...core.services.skip_stats import SkipStatsCollector
 from ...drive.common import format_size
@@ -688,9 +689,9 @@ class MovieSyncProcessor(OwnerDelegator):
                                 subtitles=subtitles,
                             )
                             if not strm_path and not pending_key:
-                                history_item["status"] = "失败"
-                                history_item["failure_reason"] = (
-                                    "文件已转存但后处理任务登记失败"
+                                apply_failure(
+                                    history_item,
+                                    "文件已转存但后处理任务登记失败",
                                 )
                                 transferred_count = max(0, transferred_count - 1)
                                 movie_transferred = False

@@ -26,6 +26,14 @@ from app.schemas.types import MediaType
 from sqlalchemy import func, or_
 from ...core import CloudFile, OwnerDelegator
 from .utils import normalize_season
+from ...core.failure import (
+    KIND_FILE_MISSING,
+    KIND_SHARE_INVALID,
+    clear_failure,
+    failure_kind_of,
+    failure_label,
+    failure_retryable_of,
+)
 from ...core.history import history_group_key
 from ...drive.common import format_size, positive_int
 from ...core.media import (
@@ -481,13 +489,16 @@ class HistoryService(OwnerDelegator):
                         and not reopen_terminal
                 ):
                     merged["status"] = current_status
-                    for state_key in ("finalize_key", "failure_reason"):
+                    for state_key in (
+                            "finalize_key", "failure_reason",
+                            "failure_kind", "failure_retryable",
+                    ):
                         if state_key in current:
                             merged[state_key] = current[state_key]
                         else:
                             merged.pop(state_key, None)
                 if incoming_status != "失败":
-                    merged.pop("failure_reason", None)
+                    clear_failure(merged)
                 skip_onto_success = (
                     incoming_status == "跳过" and current_status == "成功"
                 )
@@ -735,6 +746,13 @@ class HistoryService(OwnerDelegator):
         if not str(record.get("share_url") or "").strip():
             return False, "历史记录缺少资源链接，无法重试"
         if status == "失败":
+            if not failure_retryable_of(record):
+                kind = failure_kind_of(record)
+                if kind == KIND_SHARE_INVALID:
+                    return False, "原分享已失效，需重新搜源"
+                if kind == KIND_FILE_MISSING:
+                    return False, "分享内已找不到该文件，需重新搜源"
+                return False, f"{failure_label(kind)}，重试无法恢复，需重新搜源"
             if is_cross:
                 cache_status = str(record.get("cache_status") or "")
                 title = (
@@ -792,6 +810,11 @@ class HistoryService(OwnerDelegator):
                 record["cross_transfer_title"] = (
                     f"{source_name} → {target_name} · {cache_label}"
                 )
+            if str(record.get("status") or "") == "失败":
+                failure_kind = failure_kind_of(record)
+                record["failure_kind"] = failure_kind
+                record["failure_retryable"] = failure_retryable_of(record)
+                record["failure_label"] = failure_label(failure_kind)
             can_retry, retry_title = self._history_retry_state(record)
             record["can_retry"] = can_retry
             record["retry_title"] = retry_title
@@ -1008,7 +1031,7 @@ class HistoryService(OwnerDelegator):
                     continue
                 record["status"] = "成功"
                 record.pop("finalize_key", None)
-                record.pop("failure_reason", None)
+                clear_failure(record)
                 repaired_records.append(copy.deepcopy(record))
                 repaired += 1
             if repaired:

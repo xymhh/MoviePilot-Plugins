@@ -56,6 +56,26 @@ def install_app_mocks(*extra_packages: str) -> None:
         ensure_package(name)
     for name in extra_packages:
         ensure_package(name)
+    install_core_failure()
+
+
+def install_core_failure():
+    """加载真实的 ``core.failure``。
+
+    ``handlers.sync.history`` / ``retry`` / ``movie`` / ``television`` 都会
+    相对导入这个模块；测试只给 ``cloudsubscribex.core`` 注册了空占位包，
+    子模块不存在时这些模块加载即 ImportError。这里统一补上，避免每个用例
+    文件重复声明（与 ``core.media`` 等显式占位不同，它没有任何外部依赖）。
+    """
+    existing = sys.modules.get("cloudsubscribex.core.failure")
+    if existing is not None:
+        return existing
+    ensure_package("cloudsubscribex")
+    ensure_package("cloudsubscribex.core")
+    return load_module(
+        "cloudsubscribex.core.failure",
+        "plugins.v2/cloudsubscribex/core/failure.py",
+    )
 
 
 class OwnerDelegator:

@@ -15,6 +15,14 @@ from ...core.cloud import ShareLinkStatus
 from ...utils.cache import create_platform_ttl_cache
 
 
+class QuarkShareError(RuntimeError):
+    """夸克分享接口错误；保留原始 code，便于判定失效细分状态。"""
+
+    def __init__(self, message: str, code: int = 0):
+        super().__init__(message)
+        self.code = int(code or 0)
+
+
 class QuarkShareService:
     """封装夸克分享接口、文件遍历和转存。"""
 
@@ -134,10 +142,33 @@ class QuarkShareService:
         response = self._get_share_token(info["share_id"], info["password"])
         token = str((self.client.data(response) or {}).get("stoken") or "")
         if not self.client.is_success(response) or not token:
-            raise RuntimeError(response.get("message") or "获取夸克分享令牌失败")
+            raise QuarkShareError(
+                str(response.get("message") or "获取夸克分享令牌失败"),
+                safe_int(response.get("code") or 0),
+            )
         with self._share_items_lock:
             self._share_tokens.set(cache_key, token)
         return info, token
+
+    @staticmethod
+    def _mark_share_reason(status: ShareLinkStatus, message: str) -> None:
+        """按接口返回的文案判定失效细分状态。
+
+        夸克分享接口的 ``code`` 取值不稳定（不同分享类型/失效原因都会落到
+        同一批码上），所以以 ``message`` 关键词判定为主，``error_code`` 只
+        保留下来便于排查；判定口径与 115 / 123 / 天翼保持一致。
+        """
+        text = str(message or "").strip()
+        if not text:
+            return
+        lowered = text.casefold()
+        status.error_message = text
+        if "过期" in text or "expired" in lowered:
+            status.is_expired = True
+        if "取消" in text or "cancel" in lowered:
+            status.is_cancelled = True
+        if "删除" in text or "不存在" in text or "delete" in lowered:
+            status.is_deleted = True
 
     def check_share_status(self, share_url: str) -> ShareLinkStatus:
         status = ShareLinkStatus()
@@ -145,7 +176,14 @@ class QuarkShareService:
             info, token = self._share_access(share_url)
             response = self._get_share_files(info["share_id"], token, size=1)
             if not self.client.is_success(response):
-                status.error_message = response.get("message") or "分享不可用"
+                status.error_code = safe_int(
+                    response.get("code") or response.get("status") or 0
+                )
+                self._mark_share_reason(
+                    status,
+                    str(response.get("message") or response.get("msg") or "")
+                    or "分享不可用",
+                )
                 return status
             status.is_valid = True
             data = self.client.data(response)
@@ -155,7 +193,11 @@ class QuarkShareService:
                 if isinstance(data, dict) else ""
             }
         except Exception as error:
-            status.error_message = str(error)
+            # 取 stoken 失败时异常文案就是分享的失效原因（已失效 / 已取消 / 已删除）。
+            status.error_code = safe_int(getattr(error, "code", 0) or 0)
+            self._mark_share_reason(status, str(error))
+            if not status.error_message:
+                status.error_message = "检查分享状态异常"
         return status
 
     def list_share_files(self, share_url: str, **kwargs: Any) -> list:

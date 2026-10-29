@@ -12,6 +12,7 @@ from .candidate_filter import remember_mismatch
 from .utils import normalize_season
 from ..notification import MediaServerResolver
 from ...core import OwnerDelegator
+from ...core.failure import apply_failure
 from ...core.services.skip_stats import SkipStatsCollector
 
 
@@ -1078,7 +1079,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         }
                         for item in history:
                             if str(item.get("finalize_key") or "") in failed_keys:
-                                item["status"] = "失败"
+                                apply_failure(item, "提交离线下载失败")
                                 item["error"] = "提交离线下载失败"
                                 item.pop("finalize_key", None)
                         restored_episodes = {
