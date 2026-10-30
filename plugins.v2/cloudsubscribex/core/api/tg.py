@@ -78,14 +78,19 @@ class TgMonitorApi(OwnerDelegator):
         rows.sort(key=lambda row: row["id"], reverse=True)
         return {"success": True, "data": {"subscribes": rows}}
 
+    @staticmethod
+    def _subscribe_id_of(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
     def api_vue_tg_transfer(self, payload: Dict[str, Any]) -> dict:
         payload = payload or {}
         item_id = str(payload.get("id") or "")
-        subscribe_id = int(payload.get("subscribe_id") or 0)
+        subscribe_id = self._subscribe_id_of(payload.get("subscribe_id"))
         if not item_id:
             return {"success": False, "message": "缺少资源 ID"}
-        if subscribe_id <= 0:
-            return {"success": False, "message": "请选择要转存到的订阅"}
         monitor = self._monitor()
         item = next(
             (row for row in monitor.list_items() if str(row.get("id")) == item_id),
@@ -93,6 +98,12 @@ class TgMonitorApi(OwnerDelegator):
         )
         if not item:
             return {"success": False, "message": "资源不存在，可能已被清理"}
+        # 1.7.113：扫描阶段已经把匹配结果写在条目上（matched_subscribe_id），
+        # 手动转存没传订阅时直接沿用，不再让用户重选一遍。
+        if subscribe_id <= 0:
+            subscribe_id = self._subscribe_id_of(item.get("matched_subscribe_id"))
+        if subscribe_id <= 0:
+            return {"success": False, "message": "请选择要转存到的订阅"}
         links = list(item.get("links") or [])
         if not links:
             return {"success": False, "message": "该消息没有可转存的网盘链接"}

@@ -464,19 +464,31 @@ async function scan() {
   }
 }
 
+async function ensureSubscribes() {
+  if (subscribes.value.length) return
+  loadingSubscribes.value = true
+  try {
+    const result = await props.api.get(`plugin/${PLUGIN}/tg/subscribes`)
+    if (result?.success) subscribes.value = result.data?.subscribes || []
+  } finally {
+    loadingSubscribes.value = false
+  }
+}
+
 async function openTransfer(item) {
   currentItem.value = item
-  targetSubscribeId.value = null
-  transferVisible.value = true
-  if (!subscribes.value.length) {
-    loadingSubscribes.value = true
-    try {
-      const result = await props.api.get(`plugin/${PLUGIN}/tg/subscribes`)
-      if (result?.success) subscribes.value = result.data?.subscribes || []
-    } finally {
-      loadingSubscribes.value = false
-    }
+  await ensureSubscribes()
+  const matchedId = Number(item?.matched_subscribe_id || 0)
+  // 1.7.113：扫描阶段已经把订阅匹配好（matched_subscribe_id），订阅还在就
+  // 直接用匹配结果转存，不再让人重新挑一遍；订阅被删/没匹配才弹窗手选。
+  const matchedExists =
+    matchedId > 0 && subscribes.value.some((row) => Number(row.id) === matchedId)
+  targetSubscribeId.value = matchedExists ? matchedId : null
+  if (matchedExists) {
+    await submitTransfer()
+    return
   }
+  transferVisible.value = true
 }
 
 async function submitTransfer() {
