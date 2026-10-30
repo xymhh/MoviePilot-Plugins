@@ -311,7 +311,9 @@ class ChannelRulesTest(unittest.TestCase):
             (ok_item, {"channel": "@a"}),
             (bad_item, {"channel": "@a"}),
         ])
-        self.assertEqual(stats, {"queued": 1, "ignored": 1, "failed": 0})
+        self.assertEqual(
+            stats, {"queued": 1, "ignored": 1, "failed": 0, "merged": 0}
+        )
         self.assertEqual(ok_item["status"], "queued")
         self.assertEqual(bad_item["status"], "ignored")
         self.assertEqual(bad_item["match_status"], "unmatched")

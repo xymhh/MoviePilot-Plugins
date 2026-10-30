@@ -177,7 +177,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.109"
+    plugin_version = "1.7.110"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1410,10 +1410,30 @@ class CloudSubscribeX(_PluginBase):
                 "season": int(getattr(sub, "season", 0) or 0),
                 "type": str(media_type or ""),
                 "year": str(getattr(sub, "year", "") or ""),
-                # 还缺几集：TG 队列靠它决定「先补集还是先洗版」
-                "lack": int(getattr(sub, "lack", 0) or 0),
+                # 还缺几集：TG 队列靠它决定「先补集还是先洗版」。
+                # 订阅模型字段是 lack_episode；旧代码读 lack 恒为 0，
+                # 结果队列 100% 按洗版排（1.7.110 修正）。
+                "lack_episode": int(getattr(sub, "lack_episode", 0) or 0),
             })
         return rows
+
+    @staticmethod
+    def _tg_target_episodes(items: Any) -> List[int]:
+        """合并多条频道消息的目标集；任一条不限集则整体不限（返回空）。"""
+        rows = list(items) if isinstance(items, (list, tuple)) else [items]
+        merged: set = set()
+        for row in rows:
+            values = (row or {}).get("target_episodes") or []
+            if not values:
+                return []
+            for value in values:
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if number > 0:
+                    merged.add(number)
+        return sorted(merged)
 
     def _auto_transfer_tg_item(self, item: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
         """频道规则命中自动转存：统一走 ``submit_candidate`` 入口。"""
@@ -1427,7 +1447,12 @@ class CloudSubscribeX(_PluginBase):
             message_id=int((item or {}).get("message_id") or 0),
             run_id=str((item or {}).get("run_id") or ""),
         )
-        return submit_candidate(self, candidate, wait=True).to_payload()
+        # 1.7.110：把「这条消息只覆盖哪几集」带到同步链，避免单集消息触发整季洗版
+        targets = self._tg_target_episodes(item)
+        extra = {"target_episodes": targets} if targets else None
+        return submit_candidate(
+            self, candidate, wait=True, extra_payload=extra,
+        ).to_payload()
 
     def _auto_transfer_tg_batch(
             self, items: List[Dict[str, Any]], subscribe_id: int,
@@ -1460,9 +1485,14 @@ class CloudSubscribeX(_PluginBase):
             subscribe_id=int(subscribe_id or 0),
             channel=channel,
         )
-        # 批量里每条消息标题不同，逐链接标题由 extra_payload 精确透传
+        # 批量里每条消息标题不同，逐链接标题由 extra_payload 精确透传；
+        # 目标集取并集，让这次同步只覆盖这些消息实际包含的集数。
+        extra_payload: Dict[str, Any] = {"resource_titles": titles}
+        targets = self._tg_target_episodes(items)
+        if targets:
+            extra_payload["target_episodes"] = targets
         return submit_candidate(
-            self, candidate, wait=True, extra_payload={"resource_titles": titles},
+            self, candidate, wait=True, extra_payload=extra_payload,
         ).to_payload()
 
     def _apply_notification_config(self, config: Dict[str, Any]) -> None:

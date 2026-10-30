@@ -28,7 +28,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from app.log import logger
 
 from ..search.types import TYPE_HOSTS
-from .tg_match import match_item
+from .tg_match import match_item, parse_message_episode_scope
 from .tg_quality import normalize_quality_preferences, parse_quality
 
 try:  # Telethon 是可选的：未安装时插件其余功能照常工作
@@ -64,6 +64,8 @@ QUEUE_PRIORITY_MISSING = 0
 QUEUE_PRIORITY_UPGRADE = 1
 # 同一订阅一次合并提交的最大链接数（手动转存接口上限是 50）。
 BATCH_LINK_LIMIT = 20
+# 合并后的单条队列单元最多保留多少链接/来源 id：再多也没收益，只涨请求体积。
+MAX_ITEM_LINKS = 50
 # skipped/transferred 只是历史记录，最多占池子的 12%（500 条时约 60 条）；
 # 其余名额留给待处理条目。线上实测 104 条 skipped 会把列表淹掉。
 HISTORY_QUOTA_RATIO = 0.12
@@ -774,14 +776,18 @@ class TgChannelMonitor:
             thread.join(timeout=2)
 
     def _recover_queued_items(self) -> None:
-        """插件重启后把残留 queued 条目重新入队。"""
+        """插件重启后把残留 queued / transferring 条目重新入队。"""
         try:
             items = self._load_items()
         except Exception as error:  # noqa: BLE001
             logger.debug(f"TG 转存队列恢复失败：{error}")
             return
         for item in items:
-            if str(item.get("status") or "") == "queued":
+            if str(item.get("status") or "") in self._IN_FLIGHT_STATUSES | {"queued"}:
+                # 上次进程在处理中途退出：状态写回 queued，避免永久卡在 transferring
+                if str(item.get("status") or "") != "queued":
+                    self._mark_items([str(item.get("id") or "")], "queued")
+                    item = {**item, "status": "queued"}
                 self._enqueue_item(item)
 
     def _load_items(self) -> List[dict]:
@@ -901,8 +907,26 @@ class TgChannelMonitor:
                 )
                 continue
             groups.setdefault(subscribe_id, []).append(item)
-        for subscribe_id, rows in groups.items():
+        # 取走的条目立刻标成 transferring：状态与内存队列不再自相矛盾，
+        # 同季新消息也不会被合并进已经开始跑的作业（1.7.110）。
+        if groups:
+            self._mark_items(
+                [str(row.get("id") or "") for rows in groups.values() for row in rows],
+                "transferring",
+                transferring_at=int(time.time()),
+            )
+        remaining = list(groups.items())
+        for index, (subscribe_id, rows) in enumerate(remaining):
             if stop_event.is_set():
+                # 停机：本轮没跑到的条目退回 queued 并重新入队，别卡在 transferring
+                pending = [
+                    str(row.get("id") or "")
+                    for _sid, group_rows in remaining[index:]
+                    for row in group_rows
+                ]
+                self._mark_items(pending, "queued")
+                for row in (r for _sid, rs in remaining[index:] for r in rs):
+                    self._enqueue_item({**row, "status": "queued"})
                 return
             self._transfer_group(subscribe_id, rows)
 
@@ -1323,6 +1347,7 @@ class TgChannelMonitor:
             "errors": errors,
             "debug": rule_debug,
             "auto_queued": auto_stats["queued"],
+            "auto_merged": auto_stats.get("merged", 0),
             "auto_ignored": auto_stats["ignored"],
             "auto_failed": auto_stats["failed"],
         }
@@ -1342,7 +1367,13 @@ class TgChannelMonitor:
     def _quality_candidate_key(
             self, item: Dict[str, Any], matched: Dict[str, Any],
     ) -> Optional[Tuple[int, str, int, int]]:
-        """同一订阅、同季同集的候选才互相比较画质。"""
+        """同一订阅同一季只保留**一个**队列单元。
+
+        1.7.109 及以前按「同订阅同季同集」比较画质，整季包没有集号就返回
+        ``None``：同一部剧的十几条分享互不相认，各自排队，每条都要跑一遍整季
+        同步（线上 2026-10-30 观测：小城良方 14 条、玉簟秋 19 条）。
+        现在改为按订阅+季归并，后来的消息把链接与目标集合并进同一条。
+        """
         parsed = matched.get("parsed") or {}
         sub = matched.get("matched") or {}
         try:
@@ -1351,21 +1382,17 @@ class TgChannelMonitor:
             return None
         if subscribe_id <= 0:
             return None
-        episode = parsed.get("episode")
-        if episode is not None:
-            try:
-                season = int(
-                    parsed.get("season")
-                    or sub.get("season")
-                    or 1
-                )
-                return (subscribe_id, "episode", season, int(episode))
-            except (TypeError, ValueError):
-                return None
-        if str(parsed.get("media_type") or "") == "movie":
+        sub_type = str(sub.get("type") or "")
+        if (
+                str(parsed.get("media_type") or "") == "movie"
+                or sub_type in ("电影", "movie")
+        ):
             return (subscribe_id, "movie", 0, 0)
-        # 剧集整包没有集号时不参与同集比较，避免把整季包和单集混在一起。
-        return None
+        try:
+            season = int(parsed.get("season") or sub.get("season") or 1)
+        except (TypeError, ValueError):
+            season = 1
+        return (subscribe_id, "season", season, 0)
 
     def _select_quality_candidates(
             self, candidates: List[Tuple[dict, dict]],
@@ -1393,6 +1420,10 @@ class TgChannelMonitor:
                 continue
             key = self._quality_candidate_key(item, matched)
             if not key:
+                continue
+            if key[1] != "movie":
+                # 剧集按订阅+季归并（1.7.110）：同一季的多条分享要合并进一个
+                # 队列单元，不能在这里按画质互相淘汰，否则整季包会把单集链接挤掉。
                 continue
             groups.setdefault(key, []).append({
                 "item": item,
@@ -1463,6 +1494,9 @@ class TgChannelMonitor:
 
     # 扫描期间 worker 可能已把条目写成这几态，扫描落盘时不能覆盖回去。
     _TERMINAL_STATUSES = frozenset({"transferred", "skipped", "failed"})
+    # worker 正在处理的条目：既不能被扫描覆盖状态，也不能被新消息合并进去
+    # （作业已经开跑，后到的链接和集数会丢）。
+    _IN_FLIGHT_STATUSES = frozenset({"transferring", "processing"})
 
     def _persist_scan_items(
             self, items: List[dict], state: Dict[str, Any],
@@ -1492,6 +1526,10 @@ class TgChannelMonitor:
                     # worker 已经给出结论：保留它的状态与转存字段。
                     merged.append(current)
                     continue
+                if str(current.get("status") or "") in self._IN_FLIGHT_STATUSES:
+                    # worker 正在处理：整条保留，别把 transferring 打回 queued。
+                    merged.append(current)
+                    continue
                 current.update(item)
                 merged.append(current)
             # 扫描期间别处新写入的条目（极少见）也保留，避免被这一次保存吞掉。
@@ -1511,7 +1549,7 @@ class TgChannelMonitor:
         返回 ``(统计, 待入队条目)``。真正的入队由调用方在落盘之后执行，
         保证 worker 读到的状态已经是 queued。
         """
-        stats = {"queued": 0, "ignored": 0, "failed": 0}
+        stats = {"queued": 0, "ignored": 0, "failed": 0, "merged": 0}
         if not candidates:
             return stats, []
         provider = getattr(self, "_subscribe_provider", None)
@@ -1536,16 +1574,18 @@ class TgChannelMonitor:
         for sub in subscriptions or []:
             try:
                 sub_id = int(sub.get("id") or sub.get("subscribe_id") or 0)
-                lack = int(sub.get("lack") or 0)
+                # 订阅模型字段是 lack_episode；老代码读 lack 恒为 0，导致
+                # 「缺集优先」全部退化成洗版优先级（1.7.110 修正）。
+                lack = int(sub.get("lack_episode", sub.get("lack", 0)) or 0)
             except (TypeError, ValueError):
                 continue
             if sub_id > 0:
                 lack_by_subscribe[sub_id] = max(0, lack)
         queue_full = self._transfer_queue.qsize() >= QUEUE_MAX
-        # 同订阅同季只留一条：队列里已有的、本批更高分的都算占位，
-        # 避免 19 条排队里 4 条都是同一个订阅同一季。
+        # 同一订阅同一季在队列里只保留一个单元：本批已入队的（pending）和
+        # 队列里已有的（occupied）都算占位，后来的消息把链接与目标集合并进去。
         occupied = self._queued_dedupe_keys()
-        best_in_batch: Dict[Tuple, Tuple[float, dict, str]] = {}
+        pending: Dict[Tuple, dict] = {}
         to_queue: List[dict] = []
         for item, _rule in candidates:
             item_id = str(item.get("id") or "")
@@ -1581,38 +1621,9 @@ class TgChannelMonitor:
             item["match_status"] = "matched"
             item["matched_subscribe_id"] = subscribe_id
             dedupe_key = self._quality_candidate_key(item, matched)
-            score = self._candidate_quality_score(item)
-            if dedupe_key:
-                item["matched_dedupe_key"] = list(dedupe_key)
-                if dedupe_key in occupied:
-                    item["status"] = "ignored"
-                    item["match_reason"] = (
-                        "同订阅同集已有条目在队列中，本条不再重复转存"
-                    )[:300]
-                    stats["ignored"] += 1
-                    continue
-                previous = best_in_batch.get(dedupe_key)
-                if previous is not None and previous[0] >= score:
-                    item["status"] = "ignored"
-                    item["match_reason"] = (
-                        f"同集已有更优候选（{previous[2]}），本条不再转存"
-                    )[:300]
-                    stats["ignored"] += 1
-                    continue
-                if previous is not None:
-                    # 本批出现更优候选：把先前那条退回忽略，队列里只留更好的
-                    previous_item = previous[1]
-                    previous_item["status"] = "ignored"
-                    previous_item["match_reason"] = (
-                        f"同集出现更优候选（{item.get('title') or ''}）"
-                    )[:300]
-                    if previous_item in to_queue:
-                        to_queue.remove(previous_item)
-                    stats["queued"] = max(0, stats["queued"] - 1)
-                    stats["ignored"] += 1
-                best_in_batch[dedupe_key] = (
-                    score, item, str(item.get("title") or "")[:48]
-                )
+            target_episodes = self._target_episodes_for(item)
+            if target_episodes:
+                item["target_episodes"] = target_episodes
             lack = lack_by_subscribe.get(subscribe_id, 0)
             item["queue_priority"] = (
                 QUEUE_PRIORITY_MISSING if lack > 0 else QUEUE_PRIORITY_UPGRADE
@@ -1621,10 +1632,35 @@ class TgChannelMonitor:
                 f"订阅还缺 {lack} 集，优先补集" if lack > 0
                 else "订阅已齐，仅洗版"
             )
+            if dedupe_key:
+                item["matched_dedupe_key"] = list(dedupe_key)
+                holder = pending.get(dedupe_key)
+                if holder is not None:
+                    self._merge_item_into(holder, item)
+                    item["status"] = "ignored"
+                    item["match_status"] = "merged"
+                    item["match_reason"] = (
+                        f"同订阅同季已在本批入队"
+                        f"（{str(holder.get('title') or '')[:32]}），链接与目标集已合并"
+                    )[:300]
+                    stats["merged"] += 1
+                    continue
+                if dedupe_key in occupied:
+                    merged_into = self._merge_into_queued(dedupe_key, item)
+                    if merged_into:
+                        item["status"] = "ignored"
+                        item["match_status"] = "merged"
+                        item["match_reason"] = (
+                            f"同订阅同季已在队列（{merged_into}），链接与目标集已合并"
+                        )[:300]
+                        stats["merged"] += 1
+                        continue
             if not queue_full:
                 item["status"] = "queued"
                 item["queued_at"] = int(time.time())
                 to_queue.append(item)
+                if dedupe_key:
+                    pending[dedupe_key] = item
                 stats["queued"] += 1
                 if len(to_queue) >= QUEUE_MAX:
                     queue_full = True
@@ -1635,8 +1671,134 @@ class TgChannelMonitor:
             stats["ignored"] += 1
         return stats, to_queue
 
+    def _target_episodes_for(self, item: Dict[str, Any]) -> List[int]:
+        """取这条频道消息覆盖的集数范围（空列表表示不限集）。"""
+        text = str((item or {}).get("title") or "").strip()
+        if not text:
+            text = str((item or {}).get("text") or "").strip()
+        if not text:
+            return []
+        try:
+            scope = parse_message_episode_scope(text)
+        except Exception as error:  # noqa: BLE001 - 解析失败按不限集处理
+            logger.debug(f"解析消息集数范围失败：{error}")
+            return []
+        episodes: List[int] = []
+        for value in scope.get("episodes") or []:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                episodes.append(number)
+        return sorted(set(episodes))
+
+    @staticmethod
+    def _merge_links(target: Dict[str, Any], item: Dict[str, Any]) -> None:
+        """把一条消息的链接并进目标条目（去重、封顶 ``MAX_ITEM_LINKS``）。"""
+        links = [str(link) for link in (target.get("links") or []) if str(link or "").strip()]
+        seen = set(links)
+        for link in (item or {}).get("links") or []:
+            text = str(link or "").strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            links.append(text)
+        target["links"] = links[:MAX_ITEM_LINKS]
+
+    @staticmethod
+    def _merge_target_episodes(target: Dict[str, Any], item: Dict[str, Any]) -> None:
+        """合并目标集：任一条是整季包（不限集）→ 整个单元不再限制集数。"""
+        current = target.get("target_episodes")
+        incoming = (item or {}).get("target_episodes")
+        if not current or not incoming:
+            target.pop("target_episodes", None)
+            return
+        merged = set()
+        for values in (current, incoming):
+            for value in values:
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if number > 0:
+                    merged.add(number)
+        if merged:
+            target["target_episodes"] = sorted(merged)
+        else:
+            target.pop("target_episodes", None)
+
+    @classmethod
+    def _merge_item_into(cls, target: Dict[str, Any], item: Dict[str, Any]) -> None:
+        """把 item 的链接、目标集、优先级合并进同订阅同季的 target。"""
+        current = target.get("target_episodes")
+        incoming = (item or {}).get("target_episodes")
+        same_scope = (
+            bool(current) and bool(incoming)
+            and [int(v) for v in current] == [int(v) for v in incoming]
+        )
+        if same_scope:
+            # 同一集的两个来源：只留画质更好的那条，避免同一集被转两遍
+            if cls._candidate_quality_score(item) > cls._candidate_quality_score(target):
+                target["links"] = list((item or {}).get("links") or [])[:MAX_ITEM_LINKS]
+                if item.get("title"):
+                    target["title"] = item.get("title")
+                if item.get("quality"):
+                    target["quality"] = item.get("quality")
+                target["replaced_by"] = str(item.get("id") or "")
+        else:
+            cls._merge_links(target, item)
+            cls._merge_target_episodes(target, item)
+        if cls._queue_priority(item) < cls._queue_priority(target):
+            target["queue_priority"] = cls._queue_priority(item)
+            target["queue_priority_reason"] = str(
+                (item or {}).get("queue_priority_reason") or ""
+            )[:300]
+        sources = list(target.get("merged_from") or [])
+        item_id = str((item or {}).get("id") or "")
+        if item_id and item_id not in sources:
+            sources.append(item_id)
+        target["merged_from"] = sources[-MAX_ITEM_LINKS:]
+        target["merged_at"] = int(time.time())
+
+    def _merge_into_queued(self, key: Tuple, item: Dict[str, Any]) -> str:
+        """把 item 合并进队列里同键、尚未开跑的条目；返回目标条目 id（没有则空串）。"""
+        try:
+            wanted = (
+                int(key[0]), str(key[1]), int(key[2]), int(key[3]),
+            )
+        except (TypeError, ValueError, IndexError):
+            return ""
+        with self._items_lock:
+            items = list(self._store.load(ITEMS_KEY, []) or [])
+            holder = None
+            for row in items:
+                if str(row.get("status") or "") != "queued":
+                    continue
+                raw = row.get("matched_dedupe_key")
+                if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+                    continue
+                try:
+                    row_key = (
+                        int(raw[0]), str(raw[1]), int(raw[2]), int(raw[3]),
+                    )
+                except (TypeError, ValueError):
+                    continue
+                if row_key == wanted:
+                    holder = row
+                    break
+            if holder is None:
+                return ""
+            self._merge_item_into(holder, item)
+            self._store.save(ITEMS_KEY, items)
+            logger.info(
+                f"TG 频道同订阅同季合并：{str(holder.get('title') or '')[:32]} "
+                f"← {str((item or {}).get('title') or '')[:32]}"
+            )
+            return str(holder.get("id") or "")
+
     def _queued_dedupe_keys(self) -> set:
-        """已在队列/待转存条目的「同订阅同季同集」键，用于跨批次去重。"""
+        """已在队列/待转存条目的「同订阅同季」键，用于跨批次合并去重。"""
         try:
             items = self._load_items()
         except Exception as error:  # noqa: BLE001 - 读台账失败只失去去重，不影响入队
@@ -1702,10 +1864,11 @@ class TgChannelMonitor:
             "item_count": len(items),
             "new_count": sum(
                 1 for item in items
-                if item.get("status") in ("queued", "new", "pending")
+                if item.get("status") in ("queued", "new", "pending", "transferring")
             ),
             "queued_count": sum(
-                1 for item in items if item.get("status") == "queued"
+                1 for item in items
+                if item.get("status") in ("queued", "transferring")
             ),
             "queue_pending": int(self._transfer_queue.qsize()),
             "last_scan_at": self._last_scan_at or int(stored.get("last_scan_at") or 0),

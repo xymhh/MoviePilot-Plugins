@@ -80,6 +80,30 @@ class SyncExecutionService(OwnerDelegator):
         logger.debug(f"同步操作已提交：{label}")
         return future
 
+    @staticmethod
+    def _apply_target_episodes(
+            subscribes: List[Any], target_episodes: Any,
+    ) -> set:
+        """把手动资源覆盖的集数范围下沉到订阅对象，供洗版链裁剪基线。
+
+        Returns:
+            生效的集数集合；空集合表示没有收敛（保持整季行为）。
+        """
+        scoped: set = set()
+        for value in target_episodes or []:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                scoped.add(number)
+        if not scoped:
+            return set()
+        for subscribe in subscribes or []:
+            if getattr(subscribe, "type", None) == MediaType.TV.value:
+                setattr(subscribe, "_target_episodes", set(scoped))
+        return scoped
+
     def _direct_cloud_manual_resources(
             self, resources: Optional[List[Dict[str, Any]]]
     ) -> bool:
@@ -506,6 +530,7 @@ class SyncExecutionService(OwnerDelegator):
             upgrade_request: Optional[Dict[str, Any]] = None,
             manual_upgrade: bool = False,
             discovered_via: str = "",
+            target_episodes: Optional[List[int]] = None,
     ) -> bool:
         if self._stop_requested():
             logger.info("同步任务已收到停止请求，取消执行")
@@ -682,6 +707,15 @@ class SyncExecutionService(OwnerDelegator):
         if manual_upgrade:
             for subscribe in subscribes:
                 setattr(subscribe, "_manual_upgrade", True)
+
+        # 资源级集数范围：只对这一批资源覆盖的集数建立基线、搜索与洗版。
+        # 传 None/空 时保持原有「整季」行为（1.7.110）。
+        if target_episodes:
+            scoped = self._apply_target_episodes(subscribes, target_episodes)
+            if scoped:
+                logger.debug(
+                    f"本次同步只处理 {len(scoped)} 集：{sorted(scoped)[:20]}"
+                )
 
         discovered_via = str(discovered_via or "").strip()
         if discovered_via:
@@ -1277,6 +1311,7 @@ class SyncExecutionService(OwnerDelegator):
             upgrade_request: Optional[Dict[str, Any]] = None,
             manual_upgrade: bool = False,
             discovered_via: str = "",
+            target_episodes: Optional[List[int]] = None,
             wait_for_slot: bool = False,
             queue_revision: Optional[int] = None,
             result: Optional[Dict[str, Any]] = None,
@@ -1356,6 +1391,7 @@ class SyncExecutionService(OwnerDelegator):
                     manual_upgrade=manual_upgrade,
                     upgrade_request=upgrade_request,
                     discovered_via=discovered_via,
+                    target_episodes=target_episodes,
                 )
             except Exception as e:
                 logger.error(f"同步任务异常：{e}")

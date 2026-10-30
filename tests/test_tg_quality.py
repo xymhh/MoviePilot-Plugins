@@ -124,6 +124,7 @@ class QualitySelectionTest(unittest.TestCase):
         return monitor
 
     def test_best_quality_queued_lower_ignored(self):
+        """同一集的两个来源：队列里只留一个单元，链接换成画质更好的那条。"""
         monitor = self._monitor()
         monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
@@ -145,12 +146,16 @@ class QualitySelectionTest(unittest.TestCase):
             "status": "new", "published_at": 100,
         }
         stats, to_queue = monitor._match_and_enqueue([(lower, {}), (better, {})])
-        self.assertEqual(better["status"], "queued")
-        self.assertEqual(lower["status"], "ignored")
-        self.assertIn("更优画质", lower["match_reason"])
         self.assertEqual(stats["queued"], 1)
-        self.assertEqual(stats["ignored"], 1)
-        self.assertEqual([row["id"] for row in to_queue], ["better"])
+        self.assertEqual(stats["merged"], 1)
+        self.assertEqual(len(to_queue), 1)
+        unit = to_queue[0]
+        # 单元只有一条：链接与标题被换成画质更好的那条，不会同集转两遍
+        self.assertEqual(unit["links"], ["https://pan.quark.cn/s/a"])
+        self.assertIn("2160p", unit["title"])
+        self.assertEqual(unit["target_episodes"], [1])
+        self.assertIn("better", unit["merged_from"])
+        self.assertEqual(better["match_status"], "merged")
 
     def test_failed_best_is_reported_not_silently_retried(self):
         """最优候选失败后状态为 failed，由用户决定是否手动补转。"""

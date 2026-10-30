@@ -109,45 +109,56 @@ class QueuePriorityTest(unittest.TestCase):
         )
         self.assertIn("仅洗版", by_id["u1"]["queue_priority_reason"])
 
-    def test_same_subscribe_season_keeps_only_best_score(self):
-        """同一订阅同一季在一批扫描里只入队一条，保留分高的那条。"""
+    def test_same_subscribe_season_merges_into_one_unit(self):
+        """同一订阅同一季在一批扫描里只入队一个单元，不同集的链接合并进去。"""
         self.monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
             channel_rules=[{"channel": "@a"}],
             auto_transfer_handler=lambda item, subscribe_id: {},
             subscribe_provider=lambda: [
                 {"id": 7, "name": "尚公主", "season": 1, "type": "电视剧",
-                 "lack": 0},
+                 "lack_episode": 0},
             ],
         )
         rule = {"channel": "@a"}
         low = {"id": "low", "links": ["https://pan.quark.cn/s/1"],
                "title": "尚公主 第5集 720p", "status": "new"}
         high = {"id": "high", "links": ["https://pan.quark.cn/s/2"],
-                "title": "尚公主 第5集 2160p", "status": "new"}
+                "title": "尚公主 第6集 2160p", "status": "new"}
         stats, to_queue = self.monitor._match_and_enqueue(
             [(low, rule), (high, rule)]
         )
-        self.assertEqual([item["id"] for item in to_queue], ["high"])
         self.assertEqual(stats["queued"], 1)
-        self.assertEqual(low["status"], "ignored")
-        self.assertIn("更优", low["match_reason"])
+        self.assertEqual(stats["merged"], 1)
+        self.assertEqual(len(to_queue), 1)
+        unit = to_queue[0]
+        self.assertEqual(
+            unit["links"],
+            ["https://pan.quark.cn/s/1", "https://pan.quark.cn/s/2"],
+        )
+        self.assertEqual(unit["target_episodes"], [5, 6])
+        self.assertEqual(high["match_status"], "merged")
 
-    def test_candidate_skipped_when_same_season_already_queued(self):
-        """跨批次去重：同订阅同季已有条目排队时，新候选不再入队。"""
-        # 单测里不走 SQLite：直接替换台账读取，验证跨批次去重判定
-        self.monitor._load_items = lambda: [
-            {"id": "queued-1", "status": "queued",
-             "matched_subscribe_id": 7,
-             "matched_dedupe_key": [7, "episode", 1, 5]},
-        ]
+    def test_candidate_merged_into_queued_season_unit(self):
+        """跨批次合并：同订阅同季已有条目排队时，新候选并进那条而不是另排。"""
+        self.monitor._store.save(
+            tg_module.ITEMS_KEY,
+            [{
+                "id": "queued-1", "status": "queued",
+                "matched_subscribe_id": 7,
+                "matched_dedupe_key": [7, "season", 1, 0],
+                "links": ["https://pan.quark.cn/s/old"],
+                "target_episodes": [3],
+                "queue_priority": 1,
+            }],
+        )
         self.monitor.configure(
             enabled=False, api_id=1, api_hash="hash", session="session",
             channel_rules=[{"channel": "@a"}],
             auto_transfer_handler=lambda item, subscribe_id: {},
             subscribe_provider=lambda: [
                 {"id": 7, "name": "尚公主", "season": 1, "type": "电视剧",
-                 "lack": 0},
+                 "lack_episode": 2},
             ],
         )
         item = {"id": "dup", "links": ["https://pan.quark.cn/s/3"],
@@ -157,8 +168,18 @@ class QueuePriorityTest(unittest.TestCase):
         )
         self.assertEqual(to_queue, [])
         self.assertEqual(stats["queued"], 0)
-        self.assertEqual(item["status"], "ignored")
-        self.assertIn("队列中", item["match_reason"])
+        self.assertEqual(stats["merged"], 1)
+        self.assertEqual(item["match_status"], "merged")
+        self.assertIn("queued-1", item["match_reason"])
+        stored = self.monitor._store.load(tg_module.ITEMS_KEY, [])
+        unit = stored[0]
+        self.assertEqual(
+            unit["links"],
+            ["https://pan.quark.cn/s/old", "https://pan.quark.cn/s/3"],
+        )
+        self.assertEqual(unit["target_episodes"], [3, 5])
+        # 合并后优先级取更急的一档：订阅缺集 → 先补集
+        self.assertEqual(unit["queue_priority"], tg_module.QUEUE_PRIORITY_MISSING)
 
     def test_recovery_keeps_persisted_priority(self):
         persisted = [

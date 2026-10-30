@@ -433,6 +433,95 @@ def score_subscription(
     }
 
 
+_EP_FULL_COUNT_RE = re.compile(r"全\s*(\d{1,4})\s*[集话話]")
+_EP_UPDATE_TO_RE = re.compile(
+    r"更(?:新)?(?:至|到)\s*(?:EP?\s*)?(\d{1,4})\s*[集话話]",
+    re.IGNORECASE,
+)
+_EP_PLAIN_RANGE_RE = re.compile(
+    r"(?<![\dA-Za-z])(\d{1,4})\s*[-~至]\s*(\d{1,4})(?!\d)"
+)
+# 综艺用「期」计量（更至10.18期），期号与订阅集数不同源，不做集数推断。
+_VARIETY_MARK_RE = re.compile(r"[期]")
+_EPISODE_MARK_RE = re.compile(r"[集话話]")
+
+# 一条消息最多推断多少集：超过这个量级说明是「全集 / 几万集」误识别，
+# 直接放弃限制，回退到不限集的老行为。
+MAX_SCOPE_EPISODES = 1000
+
+
+def parse_message_episode_scope(value: Any) -> Dict[str, Any]:
+    """解析一条频道消息覆盖的季/集范围，用于把转存收敛到「这一条消息的集」。
+
+    与 :func:`parse_message_title` 的区别：后者只取**第一个**集号用于匹配，
+    这里要保留区间（``19-20集`` / ``更至28集`` / ``全29集``），供转存链路限制
+    作业范围。识别不到时返回 ``episodes=None``（表示不限集）。
+
+    Returns:
+        ``{"season": int|None, "episodes": List[int]|None, "mode": str}``，
+        ``mode`` 取值 ``single`` / ``range`` / ``update`` / ``full`` / ``variety`` / ``""``。
+    """
+    raw = str(value or "").strip()
+    first_line = next((line.strip() for line in raw.splitlines() if line.strip()), "")
+    text = _PREFIX_RE.sub("", first_line)
+    text = unicodedata.normalize("NFKC", text)
+    text = text.replace("－", "-").replace("～", "~").replace("—", "-")
+
+    season = None
+    match = _SEASON_CN_RE.search(text) or _SEASON_EN_RE.search(text)
+    if match:
+        season = _cn_number(match.group(1))
+    season_episode = _SEASON_EPISODE_RE.search(text)
+    if season_episode:
+        season = int(season_episode.group(1))
+        episode = int(season_episode.group(2))
+        return {
+            "season": season,
+            "episodes": [episode] if episode > 0 else None,
+            "mode": "single",
+        }
+
+    if _VARIETY_MARK_RE.search(text) and not _EPISODE_MARK_RE.search(text):
+        return {"season": season, "episodes": None, "mode": "variety"}
+
+    def _range(start: int, end: int, mode: str) -> Dict[str, Any]:
+        if start <= 0 or end < start or end > MAX_SCOPE_EPISODES:
+            return {"season": season, "episodes": None, "mode": ""}
+        return {
+            "season": season,
+            "episodes": list(range(start, end + 1)),
+            "mode": mode,
+        }
+
+    match = _EP_FULL_COUNT_RE.search(text)
+    if match:
+        return _range(1, int(match.group(1)), "full")
+
+    match = _EPISODE_RANGE_CN_RE.search(text) or _EPISODE_RANGE_RE.search(text)
+    if match:
+        return _range(int(match.group(1)), int(match.group(2)), "range")
+
+    match = _EP_UPDATE_TO_RE.search(text)
+    if match:
+        return _range(1, int(match.group(1)), "update")
+
+    match = _EPISODE_CN_RE.search(text) or _EPISODE_EN_RE.search(text)
+    if match:
+        episode = int(match.group(1))
+        return {
+            "season": season,
+            "episodes": [episode] if episode > 0 else None,
+            "mode": "single",
+        }
+
+    # 「嫁金钗 1-8」这类不带集字的区间：只取末尾位置，避免命中年份/分辨率。
+    match = _EP_PLAIN_RANGE_RE.search(text)
+    if match and re.search(r"\d{1,4}\s*[-~至]\s*\d{1,4}\s*$", text):
+        return _range(int(match.group(1)), int(match.group(2)), "range")
+
+    return {"season": season, "episodes": None, "mode": ""}
+
+
 def match_item(
         item: Dict[str, Any],
         subscriptions: Iterable[Dict[str, Any]],
