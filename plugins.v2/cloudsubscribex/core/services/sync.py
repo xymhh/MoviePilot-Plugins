@@ -1,5 +1,6 @@
 """订阅同步执行与并发编排。"""
 
+import inspect
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from threading import Event as ThreadEvent, RLock, Thread
@@ -56,7 +57,39 @@ class SyncExecutionService(OwnerDelegator):
         stop_event = getattr(self, "_stop_event", None)
         if stop_event is not None and stop_event.is_set():
             stop_event.clear()
-        return self.sync_subscribes(**sync_kwargs, wait_for_slot=True)
+        return self.sync_subscribes(
+            **self._filter_sync_kwargs(sync_kwargs), wait_for_slot=True
+        )
+
+    def _filter_sync_kwargs(self, sync_kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """按 ``sync_subscribes`` 的实际签名裁剪参数。
+
+        线上 2026-10-30 现场：插件热升级后 MoviePilot 只重载了部分子模块，
+        调用方是新的（带 ``target_episodes``）、执行层还是旧的（不认这个参数），
+        于是所有排队任务一提交就失败：
+        ``sync_subscribes() got an unexpected keyword argument 'target_episodes'``。
+        与其要求用户重启，不如在这里按签名过滤：多出来的参数降级丢弃并告警，
+        转存照常跑，只是这一轮不做集数收敛。
+        """
+        try:
+            parameters = inspect.signature(self.sync_subscribes).parameters
+        except (TypeError, ValueError):
+            return dict(sync_kwargs)
+        if any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+        ):
+            return dict(sync_kwargs)
+        dropped = sorted(key for key in sync_kwargs if key not in parameters)
+        if dropped:
+            logger.warning(
+                f"同步参数与当前加载的代码版本不一致，已忽略：{dropped}"
+                "（插件刚升级过，建议重启 MoviePilot 以彻底生效）"
+            )
+        return {
+            key: value for key, value in sync_kwargs.items()
+            if key in parameters
+        }
 
     def _submit_sync_operation(
             self,

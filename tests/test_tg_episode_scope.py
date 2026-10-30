@@ -256,5 +256,26 @@ class TargetEpisodePlumbingTest(unittest.TestCase):
         self.assertFalse(hasattr(tv, "_target_episodes"))
 
 
+class SyncKwargsCompatTest(unittest.TestCase):
+    """热升级后 api 层与执行层版本不一致时，不能让所有任务提交即失败。"""
+
+    def setUp(self):
+        self.service = object.__new__(SyncExecutionService)
+
+    def test_known_kwargs_kept(self):
+        filtered = self.service._filter_sync_kwargs({
+            "subscribe_id": 7, "target_episodes": [20, 21],
+        })
+        self.assertEqual(
+            filtered, {"subscribe_id": 7, "target_episodes": [20, 21]}
+        )
+
+    def test_unknown_kwargs_dropped(self):
+        filtered = self.service._filter_sync_kwargs({
+            "subscribe_id": 7, "not_a_real_kwarg": 1,
+        })
+        self.assertEqual(filtered, {"subscribe_id": 7})
+
+
 if __name__ == "__main__":
     unittest.main()
