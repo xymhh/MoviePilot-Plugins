@@ -32,6 +32,22 @@ _RECENT_MANUAL_SUBMITS = create_platform_ttl_cache(
 
 
 class SyncApi(OwnerDelegator):
+    def _manual_upgrade_for_subscribe(self, subscribe) -> bool:
+        """手动/频道转存应走洗版路径还是普通转存。
+
+        洗版只作用于「全局开关开启且订阅在洗版范围内」的订阅；开关关闭或
+        订阅未启用 best_version 时退回普通转存，由缺失集判定只补缺口，
+        避免强制整季重建基线导致洗版开关形同虚设。
+        """
+        checker = getattr(self, "_is_cloud_upgrade_subscribe", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(subscribe))
+        except Exception:  # noqa: BLE001
+            logger.debug("判断订阅是否属于洗版范围失败，按普通转存处理", exc_info=True)
+            return False
+
     def _resolve_manual_tmdb_media(
             self,
             tmdb_id: int,
@@ -674,10 +690,14 @@ class SyncApi(OwnerDelegator):
                 return {"success": False, "message": "指定订阅不存在"}
             if subscribe.type not in {MediaType.TV.value, MediaType.MOVIE.value}:
                 return {"success": False, "message": "仅支持电影或电视剧订阅"}
-            # 资源链接提交到已启用洗版的 best_version 订阅时，沿用订阅洗版策略。
-            # 这样 Telegram 等入口不会把已入库媒体误判为普通重复资源。
+            # 只有订阅在洗版范围内时才沿用洗版策略；否则普通转存（只补缺集）。
+            # 历史上这里无条件注入 manual_upgrade=True，导致洗版开关关闭后
+            # Telegram/手动入口仍强制整季重建基线（见 2026-10-30 复盘）。
             if "manual_upgrade" not in (payload or {}):
-                payload = {**(payload or {}), "manual_upgrade": True}
+                payload = {
+                    **(payload or {}),
+                    "manual_upgrade": self._manual_upgrade_for_subscribe(subscribe),
+                }
 
         offline_download = None
         if self._cloud_drive:
