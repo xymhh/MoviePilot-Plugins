@@ -32,6 +32,7 @@ from .target_writer import (
     TargetUnknownError,
     TargetWriter,
 )
+from .aria2 import Aria2FileDownloadService, aria2_settings
 
 
 def _fd_safe_workers(requested: int, ceiling: int = 256) -> int:
@@ -313,6 +314,14 @@ class HttpFileDownloadService:
         # 0 = 自适应（见 _part_size_for）；显式给值时至少 1MB
         self._part_size = max(0, int(part_size or 0))
         self._max_retries = max(1, min(int(max_retries or 6), 12))
+        self._delegate = None
+        settings = aria2_settings()
+        if settings.enabled:
+            self._delegate = Aria2FileDownloadService(
+                resolver, timeout=timeout, concurrency=concurrency,
+                part_size=part_size, link_refresh_interval=link_refresh_interval,
+                link_max_age=link_max_age, max_retries=max_retries,
+            )
 
     @property
     def _request_timeout(self) -> tuple[int, int]:
@@ -601,6 +610,20 @@ class HttpFileDownloadService:
     def download_file(self, file_item: CloudFile, local_path: str,
                       progress_callback=None, stop_requested=None,
                       preserve_partial: bool = False) -> str:
+        if self._delegate is not None:
+            try:
+                return self._delegate.download_file(
+                    file_item, local_path, progress_callback,
+                    stop_requested, preserve_partial,
+                )
+            except InterruptedError:
+                # 用户主动停止：直接上抛，不要回落重下。
+                raise
+            except Exception as error:
+                logger.warning(
+                    f"aria2 下载失败，回落内置下载器：{file_item.name}（{error}）"
+                )
+                self._delegate = None
         refresher = _LinkRefresher(
             lambda: self._resolver(file_item),
             refresh_interval=self._link_refresh_interval,

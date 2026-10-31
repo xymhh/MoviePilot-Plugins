@@ -6,6 +6,7 @@ import ast
 import copy
 import datetime
 import json
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as ThreadEvent, Lock, RLock, local, Thread
 from typing import Optional, Any, List, Dict, Tuple, Callable
@@ -35,6 +36,7 @@ from .core import (
     get_component,
     resolve_component,
 )
+from .core.aria2 import configure_aria2, shutdown_aria2
 from .core.api import (
     AccountApi,
     ConfigApi,
@@ -177,7 +179,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.7.114"
+    plugin_version = "1.8.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -257,6 +259,11 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_download_path: str = ""
     _cross_transfer_download_threads: int = 16
     _cross_transfer_max_concurrent: int = 2
+    _cross_transfer_aria2_enabled: bool = False
+    _cross_transfer_aria2_connections: int = 64
+    _cross_transfer_aria2_max_concurrent: int = 2
+    _cross_transfer_aria2_min_split_size: str = "1M"
+    _cross_transfer_aria2_disk_cache: str = "32M"
     _cross_transfer_direct_stream: bool = True
     _cross_transfer_upload_concurrency: int = 4
     _cross_transfer_rapid_miss_action: str = "fallback"
@@ -1675,6 +1682,34 @@ class CloudSubscribeX(_PluginBase):
         self._cross_transfer_download_threads = max(1,
                                                     min(int(config.get("cross_transfer_download_threads", 16) or 16), 256))
         self._cross_transfer_max_concurrent = max(1, min(int(config.get("cross_transfer_max_concurrent", 2) or 2), 10))
+        self._cross_transfer_aria2_enabled = bool(
+            config.get("cross_transfer_aria2_enabled", False)
+        )
+        self._cross_transfer_aria2_connections = max(
+            1,
+            min(int(config.get("cross_transfer_aria2_connections", 64) or 64), 96),
+        )
+        self._cross_transfer_aria2_max_concurrent = max(
+            1,
+            min(int(config.get("cross_transfer_aria2_max_concurrent", 2) or 2), 4),
+        )
+        self._cross_transfer_aria2_min_split_size = str(
+            config.get("cross_transfer_aria2_min_split_size", "1M") or "1M"
+        ).strip() or "1M"
+        self._cross_transfer_aria2_disk_cache = str(
+            config.get("cross_transfer_aria2_disk_cache", "32M") or "32M"
+        ).strip() or "32M"
+        try:
+            configure_aria2(
+                enabled=self._cross_transfer_aria2_enabled,
+                connections=self._cross_transfer_aria2_connections,
+                max_concurrent=self._cross_transfer_aria2_max_concurrent,
+                min_split_size=self._cross_transfer_aria2_min_split_size,
+                disk_cache=self._cross_transfer_aria2_disk_cache,
+                data_dir=Path(self.get_data_path()),
+            )
+        except Exception as error:  # noqa: BLE001 - 配置失败不得阻塞插件加载
+            logger.warning(f"配置 aria2 下载引擎失败：{error}")
         self._cross_transfer_direct_stream = bool(config.get("cross_transfer_direct_stream", True))
         try:
             upload_concurrency = int(
@@ -1943,6 +1978,10 @@ class CloudSubscribeX(_PluginBase):
             stop_emby_proxy(self)
         except Exception as error:  # noqa: BLE001 - 反代停止失败不得阻塞插件卸载
             logger.warning(f"Emby 302 反代停止失败：{error}")
+        try:
+            shutdown_aria2()
+        except Exception as error:  # noqa: BLE001 - 下载引擎停止失败不得阻塞卸载
+            logger.warning(f"关闭 aria2 下载引擎失败：{error}")
         if not preserve_subscribe_queue and self._subscribe_search_queue_lock is not None:
             self.cancel_pending_subscribe_searches(shutdown=True)
             executor = self._sync_operation_executor
