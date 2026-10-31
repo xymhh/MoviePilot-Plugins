@@ -69,6 +69,8 @@ from .core.services import (
     SkipStatsCollector,
 )
 from .core.storage import CloudSubscribeDataStore
+from .core.retry_policy import is_dead_letter
+from .core.task_center import collect_tasks
 from .core.subscribe import AutoSubscribeService
 from .drive.scanner import DriverRegistry
 from .handlers import SearchHandler, SyncHandler, SubscribeHandler, WebhookHandler
@@ -179,7 +181,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.8.4"
+    plugin_version = "1.8.5"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -412,6 +414,59 @@ class CloudSubscribeX(_PluginBase):
     def _p115_manager(self, value: Any) -> None:
         if self._drive_manager:
             self._drive_manager._clients["115"] = value
+
+    def api_vue_tasks(self, state: str = "all") -> dict:
+        """统一任务中心：只读聚合同步作业与非终态历史。"""
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            with store.manager.session(write=False) as db:
+                tasks = collect_tasks(db, state_filter=state)
+            return {
+                "success": True,
+                "data": tasks,
+                "total": len(tasks),
+                "state": str(state or "all"),
+            }
+        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
+            logger.error(f"读取任务中心失败：{error}", exc_info=True)
+            return {"success": False, "message": str(error), "data": []}
+
+    def api_vue_retry_task(self, payload: Dict[str, Any]) -> dict:
+        """任务中心显式重试：只复活死信作业，次数与退避清零后重新入队。"""
+        data = payload if isinstance(payload, dict) else {}
+        job_id = str(data.get("job_id") or "").strip()
+        job_key = str(data.get("job_key") or "").strip()
+        if not job_id and not job_key:
+            return {"success": False, "message": "缺少 task 标识"}
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            repo = store.repositories.sync_jobs
+            row = (
+                repo.get_by_id(job_id) if job_id else repo.get(job_key)
+            )
+            if row is None:
+                return {"success": False, "message": "未找到对应任务"}
+            if not is_dead_letter(
+                    row.state, row.last_error, row.attempt, row.max_attempts,
+            ):
+                return {
+                    "success": False,
+                    "message": "该任务不在死信状态，无需手动重试",
+                }
+            reopened = repo.reopen_dead_letter(
+                row.job_key, "用户在任务中心手动重试",
+            )
+            if not reopened:
+                return {"success": False, "message": "重试未能入队，请刷新后重看"}
+            logger.info(
+                f"任务中心手动重试死信：{row.target_path}/{row.target_name}"
+            )
+            return {"success": True, "message": "死信已重新入队，最多再试 3 次"}
+        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
+            logger.error(f"任务中心重试失败：{error}", exc_info=True)
+            return {"success": False, "message": str(error)}
 
     def _get_data_store(self) -> CloudSubscribeDataStore:
         store = self.__dict__.get("_cloudsubscribe_data_store")

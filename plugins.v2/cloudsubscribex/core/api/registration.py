@@ -332,6 +332,20 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "查看运行状态",
             },
             {
+                "path": "/tasks",
+                "endpoint": self.api_vue_tasks,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "查看统一任务中心（作业与历史聚合）",
+            },
+            {
+                "path": "/tasks/retry",
+                "endpoint": self.api_vue_retry_task,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "任务中心手动重试死信作业",
+            },
+            {
                 "path": "/tg/status",
                 "endpoint": self.api_vue_tg_status,
                 "methods": ["GET"],

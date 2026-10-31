@@ -166,6 +166,9 @@ class SyncJob(CloudSubscribeBase):
     max_attempts: Mapped[int] = mapped_column(
         Integer, nullable=False, default=3
     )
+    next_retry_at: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
     lease_owner: Mapped[Optional[str]] = mapped_column(
         String(128), nullable=True
     )

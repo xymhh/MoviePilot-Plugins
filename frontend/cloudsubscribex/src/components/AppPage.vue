@@ -106,6 +106,7 @@
       <div class="workspace-window">
         <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
           <RuntimeCard class="runtime-panel" :runtime="runtime" :active="active" @stop-task="confirmStopTask" />
+          <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks'" />
         </div>
         <div v-show="mainTab === 'tg'" class="workspace-pane tg-pane">
           <TgMonitor :api="api" :active="mainTab === 'tg'" />
@@ -310,6 +311,7 @@
 import {computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch} from "vue";
 import {useDisplay} from "vuetify";
 import RuntimeCard from "./dashboard/RuntimeCard.vue";
+import TaskCenterTable from "./dashboard/TaskCenterTable.vue";
 import HistoryTable from "./dashboard/HistoryTable.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
 import OrganizePanel from "./dashboard/OrganizePanel.vue";

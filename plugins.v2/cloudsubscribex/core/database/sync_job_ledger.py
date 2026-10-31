@@ -27,6 +27,7 @@ from .sync_job_state import (
     normalize_path,
 )
 from .sync_jobs import SyncJobRepository
+from ..retry_policy import DEAD_LETTER_PREFIX, backoff_delay
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +180,9 @@ class SyncJobLedger:
         current = self._repo.get(row.job_key)
         if current is not None and current.state == JOB_DONE:
             return SyncJobLease(current.job_key, current.job_id, "", reused=True), ""
+        # 死信（重试次数耗尽）不在这里自动复活：正常同步一轮接一轮，自动
+        # 重开会把「永久失败」变成无限重试。只有用户在任务中心显式重试
+        # （``POST /tasks/retry``）才会 ``reopen_dead_letter`` 归零重来。
         # canceled 是「用户停掉了上一次」，不是永久不可用：同内容再次被发起
         # 同步时允许重新入队，否则该文件永远转存不进来（1.7.37）。
         if current is not None and current.state == JOB_CANCELED:
@@ -258,19 +262,40 @@ class SyncJobLedger:
         """记录失败；可重试进 ``retry_wait``，否则 ``failed``/``canceled``。"""
         if lease.reused:
             return True
-        if canceled:
-            to_state = JOB_CANCELED
-        elif retryable:
-            to_state = JOB_RETRY_WAIT
-        else:
-            to_state = JOB_FAILED
         timestamp = int(now if now is not None else time.time())
+        row = self._repo.get(lease.job_key)
+        attempt = int(getattr(row, "attempt", 0) or 0)
+        max_attempts = int(getattr(row, "max_attempts", 3) or 3)
+        message = str(error or "")[:2000]
+        if canceled:
+            return self._repo.transition(
+                lease.job_key, JOB_TRANSFERRING, JOB_CANCELED,
+                owner=lease.owner, now=timestamp,
+                last_error=message, last_error_at=timestamp,
+                next_retry_at=0,
+            )
+        if retryable and attempt < max_attempts:
+            return self._repo.transition(
+                lease.job_key, JOB_TRANSFERRING, JOB_RETRY_WAIT,
+                owner=lease.owner, now=timestamp,
+                last_error=message, last_error_at=timestamp,
+                next_retry_at=timestamp + backoff_delay(attempt),
+            )
+        if retryable:
+            message = _dead_letter_message(message)
         return self._repo.transition(
-            lease.job_key, JOB_TRANSFERRING, to_state,
+            lease.job_key, JOB_TRANSFERRING, JOB_FAILED,
             owner=lease.owner, now=timestamp,
-            last_error=str(error or "")[:2000],
-            last_error_at=timestamp,
+            last_error=message, last_error_at=timestamp,
+            next_retry_at=0,
         )
+
+
+def _dead_letter_message(message: str) -> str:
+    text = str(message or "")
+    if text.startswith(DEAD_LETTER_PREFIX):
+        return text[:2000]
+    return (DEAD_LETTER_PREFIX + text)[:2000]
 
 
 def _result_view(row: Any) -> SyncJobResult:

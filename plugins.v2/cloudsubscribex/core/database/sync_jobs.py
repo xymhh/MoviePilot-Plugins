@@ -103,12 +103,17 @@ class SyncJobRepository(DbOper):
                     SyncJob.lease_until.is_(None),
                     SyncJob.lease_until < timestamp,
                 ),
+                or_(
+                    SyncJob.next_retry_at == 0,
+                    SyncJob.next_retry_at <= timestamp,
+                ),
             )
             .values(
                 state=JOB_TRANSFERRING,
                 lease_owner=str(owner or ""),
                 lease_until=timestamp + ttl,
                 attempt=SyncJob.attempt + 1,
+                next_retry_at=0,
                 updated_at=timestamp,
             )
         )
@@ -180,6 +185,7 @@ class SyncJobRepository(DbOper):
             job_key, JOB_DONE, JOB_QUEUED,
             now=timestamp, expected_updated_at=expected_updated_at, db=db,
             attempt=0,
+            next_retry_at=0,
             finished_at=None,
             lease_owner=None,
             lease_until=None,
@@ -212,6 +218,56 @@ class SyncJobRepository(DbOper):
             job_key, JOB_CANCELED, JOB_QUEUED,
             now=timestamp, expected_updated_at=expected_updated_at, db=db,
             attempt=0,
+            next_retry_at=0,
+            finished_at=None,
+            lease_owner=None,
+            lease_until=None,
+            last_error=str(reason or "")[:2000],
+            last_error_at=timestamp,
+        )
+
+    @db_update
+    def reopen_failed(
+            self,
+            job_key: str,
+            reason: str,
+            now: Optional[int] = None,
+            expected_updated_at: Optional[int] = None,
+            db: Session = None,
+    ) -> bool:
+        """死信人工重开：``failed -> queued``，次数与退避时间全部归零。"""
+        timestamp = _now(now)
+        return self.transition(
+            job_key, JOB_FAILED, JOB_QUEUED,
+            now=timestamp, expected_updated_at=expected_updated_at, db=db,
+            attempt=0,
+            next_retry_at=0,
+            finished_at=None,
+            lease_owner=None,
+            lease_until=None,
+            last_error=str(reason or "")[:2000],
+            last_error_at=timestamp,
+        )
+
+    @db_update
+    def reopen_dead_letter(
+            self,
+            job_key: str,
+            reason: str,
+            now: Optional[int] = None,
+            expected_updated_at: Optional[int] = None,
+            db: Session = None,
+    ) -> bool:
+        """人工重开死信：兼容 ``failed`` 与旧数据里耗尽的 ``retry_wait``。"""
+        row = self.get(job_key, db=db)
+        if row is None or str(row.state) not in (JOB_FAILED, JOB_RETRY_WAIT):
+            return False
+        timestamp = _now(now)
+        return self.transition(
+            job_key, str(row.state), JOB_QUEUED,
+            now=timestamp, expected_updated_at=expected_updated_at, db=db,
+            attempt=0,
+            next_retry_at=0,
             finished_at=None,
             lease_owner=None,
             lease_until=None,

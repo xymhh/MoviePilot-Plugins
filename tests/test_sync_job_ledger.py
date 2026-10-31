@@ -664,10 +664,18 @@ class SyncJobLedgerTests(unittest.TestCase):
         first, reason = self._begin(self.ledger)
         self.assertIsNotNone(first, reason)
         self.assertTrue(
-            self.ledger.failure(first, error="网络抖动", retryable=True)
+            self.ledger.failure(first, error="网络抖动", retryable=True, now=1000)
         )
-        self.assertEqual(self._row(first.job_key).state, JOB_RETRY_WAIT)
+        row = self._row(first.job_key)
+        self.assertEqual(row.state, JOB_RETRY_WAIT)
+        self.assertEqual(row.next_retry_at, 1060)
 
+        # 退避期内不得被再次抢占；到点后恢复可重试。
+        self.assertFalse(self.repo.claim(first.job_key, "early", now=1059))
+        with self.session_factory() as db:
+            row = db.get(models_module.SyncJob, first.job_key)
+            row.next_retry_at = 0
+            db.commit()
         second, reason = self._begin(self.ledger)
         self.assertIsNotNone(second, reason)
         self.assertFalse(second.reused)

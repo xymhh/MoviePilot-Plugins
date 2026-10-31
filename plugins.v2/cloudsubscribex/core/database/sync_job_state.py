@@ -60,7 +60,8 @@ ALLOWED_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     # done 不是数学意义上的终态：目标文件可能被人删除/移走，允许回查后
     # 重新入队；目标同名但内容不一致时转待处理，绝不自动覆盖。
     JOB_DONE: frozenset({JOB_QUEUED, JOB_NEEDS_ATTENTION}),
-    JOB_FAILED: frozenset(),
+    # 死信可由用户显式重开；普通 failed 不会自动重试。
+    JOB_FAILED: frozenset({JOB_QUEUED}),
     JOB_NEEDS_ATTENTION: frozenset(),
     # canceled 只是「用户停掉了这一次」，不是「这文件永远不要」：
     # 用户之后重新发起同步时，同一 job_key 必须能重新入队，否则该内容会被
