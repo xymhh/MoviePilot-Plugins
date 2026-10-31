@@ -276,6 +276,16 @@ class SyncKwargsCompatTest(unittest.TestCase):
         })
         self.assertEqual(filtered, {"subscribe_id": 7})
 
+    def test_dropped_kwargs_recorded_for_restart_hint(self):
+        """1.7.114：参数被裁掉说明跑的是旧代码，状态接口要能提示重启。"""
+        before = sync_module.sync_signature_mismatch()
+        self.service._filter_sync_kwargs({
+            "subscribe_id": 7, "not_a_real_kwarg": 1,
+        })
+        after = sync_module.sync_signature_mismatch()
+        self.assertEqual(after["count"], before["count"] + 1)
+        self.assertIn("not_a_real_kwarg", after["dropped"])
+
 
 if __name__ == "__main__":
     unittest.main()

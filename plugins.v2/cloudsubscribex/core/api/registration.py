@@ -381,6 +381,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "把 TG 资源转存到订阅",
             },
             {
+                "path": "/tg/retry_failed",
+                "endpoint": self.api_vue_tg_retry_failed,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重试失败的 TG 转存任务",
+            },
+            {
                 "path": "/tg/login/start",
                 "endpoint": self.api_vue_tg_login_start,
                 "methods": ["POST"],

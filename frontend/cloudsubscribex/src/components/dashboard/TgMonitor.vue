@@ -29,8 +29,29 @@
         <v-btn class="tg-scan" size="small" color="primary" variant="flat" prepend-icon="mdi-radar" :loading="scanning" @click="scan">
           立即扫描
         </v-btn>
+        <v-btn
+          v-if="failedCount"
+          class="tg-retry-failed"
+          size="small"
+          color="warning"
+          variant="tonal"
+          prepend-icon="mdi-restart-alert"
+          :loading="retrying"
+          @click="retryFailed">
+          重试失败 {{ failedCount }}
+        </v-btn>
       </div>
     </div>
+
+    <v-alert
+      v-if="status.restart_required"
+      type="info"
+      variant="tonal"
+      density="compact"
+      class="mt-2">
+      插件代码已更新，但进程里仍是旧模块（{{ restartDroppedText }}）。正在跑的转存可能被中断或降级，
+      重启 MoviePilot 容器后彻底生效；被中断的条目重启后会自动续跑。
+    </v-alert>
 
     <v-alert v-if="status.last_error" type="warning" variant="tonal" density="compact" class="mt-2">
       {{ status.last_error }}
@@ -97,7 +118,7 @@
             <div
               v-if="item.auto_transfer_error"
               class="text-caption mt-1"
-              :class="item.status === 'skipped' ? 'text-medium-emphasis' : 'text-error'">
+              :class="errorClass(item)">
               {{ item.status === "skipped" ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}
             </div>
           </td>
@@ -275,6 +296,9 @@ const status = ref({
   channel_count: 0,
   item_count: 0,
   new_count: 0,
+  failed_count: 0,
+  restart_required: false,
+  restart_dropped: [],
   last_scan_at: 0,
   last_error: "",
 })
@@ -283,6 +307,7 @@ const statusFilter = ref("active")
 const page = ref(1)
 const PAGE_SIZE = 30
 const scanning = ref(false)
+const retrying = ref(false)
 const loadingSubscribes = ref(false)
 const subscribes = ref([])
 const transferVisible = ref(false)
@@ -321,6 +346,15 @@ const filterOptions = computed(() => {
     title: filter.title,
     count: rows.filter(filter.test).length,
   }))
+})
+
+const failedCount = computed(
+  () => (items.value || []).filter((item) => item.status === "failed").length
+)
+
+const restartDroppedText = computed(() => {
+  const dropped = status.value.restart_dropped || []
+  return dropped.length ? `已忽略参数：${dropped.join("、")}` : "部分参数被忽略"
 })
 
 const filteredItems = computed(() => {
@@ -431,6 +465,13 @@ function statusColor(value) {
   return STATUS_COLOR[value] || "grey"
 }
 
+function errorClass(item) {
+  if (item.status === "skipped" || item.failure_kind === "interrupted") {
+    return "text-medium-emphasis"
+  }
+  return "text-error"
+}
+
 async function loadStatus() {
   const result = await props.api.get(`plugin/${PLUGIN}/tg/status`)
   if (result?.success) status.value = result.data || status.value
@@ -461,6 +502,23 @@ async function scan() {
     }
   } finally {
     scanning.value = false
+  }
+}
+
+async function retryFailed() {
+  if (retrying.value) return
+  retrying.value = true
+  try {
+    // 1.7.114：批量把失败条目塞回队列（后端会沿用已匹配的订阅，单次上限 50 条）。
+    const result = await props.api.post(`plugin/${PLUGIN}/tg/retry_failed`, {})
+    if (result?.success) {
+      props.notify(result.message || "已重新排队", "success")
+      await refreshAll()
+    } else {
+      props.notify(result?.message || "重试失败", "error")
+    }
+  } finally {
+    retrying.value = false
   }
 }
 

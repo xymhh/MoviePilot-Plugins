@@ -119,6 +119,32 @@ class TgMonitorApi(OwnerDelegator):
             monitor.update_items([item_id], status="transferred", subscribe_id=subscribe_id)
         return result
 
+    def api_vue_tg_retry_failed(self, payload: Dict[str, Any] = None) -> dict:
+        """1.7.114：把失败条目重新排队（优先沿用扫描匹配到的订阅）。"""
+        payload = payload or {}
+        try:
+            limit = int(payload.get("limit") or 0)
+        except (TypeError, ValueError):
+            limit = 0
+        stats = self._monitor().retry_failed_items(limit=limit or 50)
+        if not stats.get("submitted"):
+            if stats.get("skipped_no_subscribe"):
+                message = (
+                    f"没有可重试的条目：{stats['skipped_no_subscribe']} 条失败条目"
+                    "没有匹配到订阅"
+                )
+            elif stats.get("skipped_queue_full"):
+                message = "转存队列已满，请稍后再试"
+            else:
+                message = "没有失败条目需要重试"
+        else:
+            message = f"已重新排队 {stats['submitted']} 条"
+            if stats.get("skipped_no_subscribe"):
+                message += f"；{stats['skipped_no_subscribe']} 条无匹配订阅已跳过"
+            if stats.get("skipped_queue_full"):
+                message += f"；{stats['skipped_queue_full']} 条因队列已满未入队"
+        return {"success": True, "message": message, "data": stats}
+
     # -------------------------------------------------------------- 登录
     def api_vue_tg_login_start(self, payload: Dict[str, Any]) -> dict:
         try:

@@ -22,6 +22,21 @@ _SUBSCRIBE_MEDIA_KEY_CACHE = create_platform_ttl_cache(
     "sync:subscribe_media_keys", maxsize=512, ttl=60
 )
 
+# 1.7.114：热升级后「调用方是新的、已加载的执行层还是旧的」，参数被裁剪掉
+# 就意味着这一轮跑的仍是旧代码。留个痕迹让界面提示重启，而不是静默降级。
+_SIGNATURE_MISMATCH: Dict[str, Any] = {"count": 0, "dropped": [], "at": 0}
+
+
+def sync_signature_mismatch() -> Dict[str, Any]:
+    """返回签名不一致的累计情况（供 /tg/status 提示重启）。"""
+    return dict(_SIGNATURE_MISMATCH)
+
+
+def _record_signature_mismatch(dropped: List[str]) -> None:
+    _SIGNATURE_MISMATCH["count"] = int(_SIGNATURE_MISMATCH.get("count") or 0) + 1
+    _SIGNATURE_MISMATCH["dropped"] = sorted(dropped)[:6]
+    _SIGNATURE_MISMATCH["at"] = int(time.time())
+
 
 class SyncExecutionService(OwnerDelegator):
     """执行订阅同步并维护全局执行边界。"""
@@ -82,6 +97,7 @@ class SyncExecutionService(OwnerDelegator):
             return dict(sync_kwargs)
         dropped = sorted(key for key in sync_kwargs if key not in parameters)
         if dropped:
+            _record_signature_mismatch(dropped)
             logger.warning(
                 f"同步参数与当前加载的代码版本不一致，已忽略：{dropped}"
                 "（插件刚升级过，建议重启 MoviePilot 以彻底生效）"

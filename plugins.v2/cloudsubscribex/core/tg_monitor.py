@@ -74,6 +74,26 @@ HISTORY_QUOTA_RATIO = 0.12
 # 按 420 FLOOD_WAIT 重罚，失败后先退避，别连续试探。
 RESOLVE_RETRY_SECONDS = 6 * 3600
 
+# 1.7.114：插件升级 / 进程重启会把跑到一半的批次打断，这类报错不是「转存
+# 真的失败」。现场 121 条失败全是这两类（92 条宿主签名错、29 条订阅搜索已停止），
+# 全部被写成永久失败，只能靠人工一条条点。这里按文本特征识别出来，回队列等下次
+# 启动自动续跑；真正的失败（链接失效、网盘报错）仍照常记 failed。
+INTERRUPTED_ERROR_HINTS = (
+    "订阅搜索已停止",
+    "unexpected keyword argument",
+    "got multiple values for keyword argument",
+    "cannot import name",
+    "ModuleNotFound",
+    "ImportError",
+    "插件已重载",
+    "plugin reloaded",
+)
+# 同一条目最多自动续跑几次：升级可能一天好几次，但连续 3 次都中断说明
+# 不是「碰巧撞上重启」，再重试只是刷日志。
+INTERRUPTED_RETRY_LIMIT = 3
+# 手动「重试全部失败」单次上限（复用转存队列，避免一次性把网盘打满）。
+RETRY_BATCH_LIMIT = 50
+
 # 同一进程里只允许一个监控线程：插件热重载会创建新实例，旧实例如果
 # 没被 stop，多个线程会同时扫描并触发 Telegram 限流。
 #
@@ -204,6 +224,21 @@ def _flood_wait_seconds(error: Any) -> int:
         return seconds
     match = re.search(r"(\d+)\s+seconds", str(error or ""), re.IGNORECASE)
     return int(match.group(1)) if match else 0
+
+
+def _is_interrupted_message(message: Any) -> bool:
+    """判断失败原因是不是「被插件更新/重启打断」而不是真的转存失败。"""
+    text = str(message or "")
+    if not text:
+        return False
+    return any(hint in text for hint in INTERRUPTED_ERROR_HINTS)
+
+
+def _retry_count_of(item: Dict[str, Any]) -> int:
+    try:
+        return max(0, int((item or {}).get("retry_count") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _auto_transfer_outcome(result: Any) -> Tuple[str, str]:
@@ -876,10 +911,16 @@ class TgChannelMonitor:
             except Exception as error:  # noqa: BLE001 - worker 不能死
                 for item_id in batch_ids:
                     self._queued_ids.discard(item_id)
-                self._mark_items(
-                    batch_ids, "failed",
-                    auto_transfer_error=f"转存异常：{error}"[:300],
-                )
+                message = f"转存异常：{error}"
+                if _is_interrupted_message(message):
+                    self._requeue_interrupted(batch_ids, message)
+                else:
+                    self._mark_items(
+                        batch_ids, "failed",
+                        match_status="failed",
+                        failure_kind="permanent",
+                        auto_transfer_error=message[:300],
+                    )
                 logger.warning(f"TG 频道转存批次异常：{error}")
 
     def _process_transfer_items(
@@ -903,6 +944,8 @@ class TgChannelMonitor:
             if subscribe_id <= 0:
                 self._mark_items(
                     [item_id], "failed",
+                    match_status="failed",
+                    failure_kind="permanent",
                     auto_transfer_error="缺少目标订阅",
                 )
                 continue
@@ -994,6 +1037,9 @@ class TgChannelMonitor:
                 "match_status": "transferred",
                 "auto_transferred_at": now,
                 "auto_transfer_error": "",
+                # 这一条已经跑通：把中断计数清零，免得下次升级被历史次数拖累。
+                "retry_count": 0,
+                "failure_kind": "",
             })
             self._mark_items(item_ids, "transferred", **changes)
             logger.info(
@@ -1006,17 +1052,65 @@ class TgChannelMonitor:
                 "match_status": "skipped",
                 "auto_skipped_at": now,
                 "auto_transfer_error": (message or "库中已有，未转存新文件")[:300],
+                "retry_count": 0,
+                "failure_kind": "",
             })
             self._mark_items(item_ids, "skipped", **changes)
             return
+        if _is_interrupted_message(message):
+            # 1.7.114：插件更新 / 重启打断的批次回队列，别再落一条永久失败。
+            self._requeue_interrupted(item_ids, message)
+            logger.warning(
+                f"TG 频道转存被中断（订阅 {subscribe_id}），已回队列等下次续跑：{message}"
+            )
+            return
         changes.update({
             "match_status": "failed",
+            "failure_kind": "permanent",
             "auto_transfer_error": (message or "转存失败")[:300],
         })
         self._mark_items(item_ids, "failed", **changes)
         logger.warning(
             f"TG 频道自动转存失败（订阅 {subscribe_id}）：{message}"
         )
+
+    def _requeue_interrupted(self, item_ids: List[str], message: str) -> None:
+        """把「被中断」的条目写回 queued，等下次启动由队列恢复逻辑续跑。
+
+        不在这里立刻重新入队：如果是宿主签名错这类问题，重排进去只会立刻
+        再失败一次（3 次耗尽反倒更难查）。进程重启后 ``_recover_queued_items``
+        会把 queued 条目重新入队，那一次才是真正的新代码在跑。
+        """
+        wanted = {str(item) for item in item_ids if str(item)}
+        if not wanted:
+            return
+        now = int(time.time())
+        with self._items_lock:
+            items = list(self._store.load(ITEMS_KEY, []) or [])
+            touched = False
+            for item in items:
+                if str(item.get("id")) not in wanted:
+                    continue
+                attempts = _retry_count_of(item) + 1
+                item["retry_count"] = attempts
+                item["last_interrupt_at"] = now
+                if attempts > INTERRUPTED_RETRY_LIMIT:
+                    item["status"] = "failed"
+                    item["match_status"] = "failed"
+                    item["failure_kind"] = "permanent"
+                    item["auto_transfer_error"] = (
+                        f"连续 {attempts} 次被中断，已停止自动续跑：{message or ''}"
+                    )[:300]
+                else:
+                    item["status"] = "queued"
+                    item["match_status"] = "interrupted"
+                    item["failure_kind"] = "interrupted"
+                    item["auto_transfer_error"] = (
+                        f"被中断（插件更新/重启），重启后自动续跑：{message or ''}"
+                    )[:300]
+                touched = True
+            if touched:
+                self._store.save(ITEMS_KEY, items)
 
     # ------------------------------------------------------------------ 客户端
     def _new_client(self, session: str = ""):
@@ -1833,9 +1927,84 @@ class TgChannelMonitor:
         return score
 
     # ------------------------------------------------------------------ 查询
+    def retry_failed_items(self, limit: int = RETRY_BATCH_LIMIT) -> Dict[str, Any]:
+        """把失败条目重新排队（1.7.114）：存量清理 + 手动兜底。
+
+        只收「有可用订阅」的条目：没匹配到订阅的失败条目重排进去也只会再
+        失败一次。重排会清零 ``retry_count``，等于给这批条目重新开始计数。
+        """
+        try:
+            limit = max(1, min(int(limit or RETRY_BATCH_LIMIT), RETRY_BATCH_LIMIT))
+        except (TypeError, ValueError):
+            limit = RETRY_BATCH_LIMIT
+        candidates: List[Dict[str, Any]] = []
+        skipped_no_subscribe = 0
+        for item in sorted(
+                self._load_items(), key=lambda row: row.get("created_at") or 0,
+        ):
+            if str(item.get("status") or "") != "failed":
+                continue
+            try:
+                subscribe_id = int(
+                    item.get("matched_subscribe_id") or item.get("subscribe_id") or 0
+                )
+            except (TypeError, ValueError):
+                subscribe_id = 0
+            if subscribe_id <= 0:
+                skipped_no_subscribe += 1
+                continue
+            if len(candidates) >= limit:
+                continue
+            candidates.append(item)
+        if not candidates:
+            return {
+                "submitted": 0,
+                "skipped_no_subscribe": skipped_no_subscribe,
+                "skipped_queue_full": 0,
+                "limit": limit,
+            }
+        ids = [str(item.get("id") or "") for item in candidates]
+        self._mark_items(
+            ids, "queued",
+            match_status="queued",
+            failure_kind="",
+            retry_count=0,
+            auto_transfer_error="",
+        )
+        submitted = 0
+        skipped_queue_full = 0
+        for item in candidates:
+            # 失败条目理论上早已出队；这里防御性清掉占位，免得入队被
+            # 「同一 id 只入一次」挡住后误报成「队列已满」。
+            self._queued_ids.discard(str(item.get("id") or ""))
+            if self._enqueue_item({**item, "status": "queued"}):
+                submitted += 1
+                continue
+            # 队列满：状态退回失败，别让它挂在 queued 里没人处理。
+            skipped_queue_full += 1
+            self._mark_items(
+                [str(item.get("id") or "")], "failed",
+                match_status="failed",
+                failure_kind="permanent",
+                auto_transfer_error="转存队列已满，稍后再试",
+            )
+        return {
+            "submitted": submitted,
+            "skipped_no_subscribe": skipped_no_subscribe,
+            "skipped_queue_full": skipped_queue_full,
+            "limit": limit,
+        }
+
     def status(self) -> Dict[str, Any]:
         stored = self._store.load(STATUS_KEY, {}) or {}
         items = self._store.load(ITEMS_KEY, []) or []
+        # 1.7.114：热升级后「调用方新、执行层旧」会在 sync 层留痕，界面提示重启。
+        try:
+            from .services.sync import sync_signature_mismatch
+            mismatch = sync_signature_mismatch()
+        except Exception as error:  # noqa: BLE001 - 状态接口不能因为导入失败挂掉
+            logger.debug(f"读取同步签名状态失败：{error}")
+            mismatch = {}
         return {
             "available": TELETHON_AVAILABLE,
             "enabled": self._enabled,
@@ -1870,6 +2039,17 @@ class TgChannelMonitor:
                 1 for item in items
                 if item.get("status") in ("queued", "transferring")
             ),
+            "failed_count": sum(
+                1 for item in items if item.get("status") == "failed"
+            ),
+            "interrupted_count": sum(
+                1 for item in items
+                if item.get("status") == "queued"
+                and item.get("failure_kind") == "interrupted"
+            ),
+            # 需要重启才彻底生效（插件代码已换、已加载模块还是旧的）。
+            "restart_required": bool(mismatch.get("count")),
+            "restart_dropped": list(mismatch.get("dropped") or []),
             "queue_pending": int(self._transfer_queue.qsize()),
             "last_scan_at": self._last_scan_at or int(stored.get("last_scan_at") or 0),
             "last_error": self._last_error,
