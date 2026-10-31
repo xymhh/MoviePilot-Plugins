@@ -16,6 +16,7 @@ from .manager import DbOper, db_query, db_update
 from .models import SyncJob
 from .sync_job_state import (
     JOB_CANCELED,
+    JOB_PAUSED,
     JOB_DONE,
     JOB_FAILED,
     JOB_FINALIZING,
@@ -218,6 +219,58 @@ class SyncJobRepository(DbOper):
             job_key, JOB_CANCELED, JOB_QUEUED,
             now=timestamp, expected_updated_at=expected_updated_at, db=db,
             attempt=0,
+            next_retry_at=0,
+            finished_at=None,
+            lease_owner=None,
+            lease_until=None,
+            last_error=str(reason or "")[:2000],
+            last_error_at=timestamp,
+        )
+
+    @db_update
+    def pause(
+            self,
+            job_key: str,
+            reason: str = "",
+            now: Optional[int] = None,
+            expected_updated_at: Optional[int] = None,
+            db: Session = None,
+    ) -> bool:
+        """用户暂停：``queued/retry_wait -> paused``。
+
+        暂停不消耗重试次数，也不清空 ``attempt`` —— 用户点的是「先别跑」，
+        不是「重新开始」。正在 transferred 的作业不在这里暂停（调用方先确认
+        状态），避免把未落盘的中间态写成 paused。
+        """
+        timestamp = _now(now)
+        for state in (JOB_QUEUED, JOB_RETRY_WAIT):
+            if self.transition(
+                    job_key, state, JOB_PAUSED,
+                    now=timestamp, expected_updated_at=expected_updated_at,
+                    db=db,
+                    next_retry_at=0,
+                    lease_owner=None,
+                    lease_until=None,
+                    last_error=str(reason or "")[:2000],
+                    last_error_at=timestamp,
+            ):
+                return True
+        return False
+
+    @db_update
+    def resume(
+            self,
+            job_key: str,
+            reason: str = "",
+            now: Optional[int] = None,
+            expected_updated_at: Optional[int] = None,
+            db: Session = None,
+    ) -> bool:
+        """用户恢复：``paused -> queued``，立即可被认领（不清 attempt）。"""
+        timestamp = _now(now)
+        return self.transition(
+            job_key, JOB_PAUSED, JOB_QUEUED,
+            now=timestamp, expected_updated_at=expected_updated_at, db=db,
             next_retry_at=0,
             finished_at=None,
             lease_owner=None,

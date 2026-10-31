@@ -271,6 +271,32 @@ class TaskCenterTests(unittest.TestCase):
         self.assertEqual(by_key["history:r4"]["actions"], ["stop"])
         self.assertEqual(by_key["job:j1"]["actions"], [])
 
+    def test_paused_job_shows_pause_label_and_resume_action(self):
+        self.add(_job("j1", state_value="paused", attempt=1))
+        task = self.collect()[0]
+        self.assertTrue(task["paused"])
+        self.assertEqual(task["status_label"], "已暂停")
+        self.assertEqual(task["actions"], ["resume"])
+        self.assertEqual(task["attempt"], 1)
+
+    def test_paused_job_only_in_paused_filter(self):
+        self.add(_job("j1", state_value="paused"))
+        self.assertEqual(len(self.collect("paused")), 1)
+        self.assertEqual(len(self.collect("active")), 0)
+        self.assertEqual(len(self.collect("waiting")), 0)
+        self.assertEqual(len(self.collect("failed")), 0)
+
+    def test_queued_job_offers_pause_action(self):
+        self.add(_job("j1", state_value="queued", attempt=0))
+        task = self.collect()[0]
+        self.assertIn("pause", task["actions"])
+
+    def test_running_job_offers_stop_not_pause(self):
+        self.add(_job("j1", state_value="transferring"))
+        task = self.collect()[0]
+        self.assertIn("stop", task["actions"])
+        self.assertNotIn("pause", task["actions"])
+
     def test_media_type_ignores_transfer_label(self):
         """历史记录的 media_type 常是「转存」，不能当成影视类型显示。"""
         self.add(

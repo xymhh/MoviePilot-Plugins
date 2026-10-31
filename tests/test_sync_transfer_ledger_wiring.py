@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -36,6 +37,9 @@ class OwnerDelegator:
 
 
 ensure_package("cloudsubscribex.core").OwnerDelegator = OwnerDelegator
+pause_module = ensure_package("cloudsubscribex.core.sync_pause")
+pause_module.is_paused = MagicMock(return_value=False)
+ensure_package("cloudsubscribex.core").sync_pause = pause_module
 mock_utils = ensure_package("cloudsubscribex.utils")
 MediaFileParser = load_module(
     "cloudsubscribex.utils.file_parser",
@@ -107,6 +111,7 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
         )
         ledger = FakeLedger(lease=lease, reason=reason)
         handler._sync_job_ledger_instance = ledger
+        handler._sync_pause_cache = None
         return handler, ledger
 
     @staticmethod
@@ -129,6 +134,38 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
         self.assertTrue(handler._transfer_file(*self._args()))
         handler._transfer_file_impl.assert_called_once()
         self.assertIsNone(ledger.begin_kwargs)
+
+    def test_sync_paused_reads_global_switch(self):
+        """暂停开关从 core.sync_pause 读取，且只认严格的 True。"""
+        core_pkg = sys.modules["cloudsubscribex.core"]
+        original = getattr(core_pkg, "sync_pause", None)
+        core_pkg.sync_pause = pause_module
+        try:
+            handler = SyncHandler.__new__(SyncHandler)
+            handler._sync_pause_cache = None
+            pause_module.is_paused.return_value = True
+            self.assertTrue(handler._sync_paused())
+            handler._sync_pause_cache = None
+            pause_module.is_paused.return_value = MagicMock()
+            self.assertFalse(
+                handler._sync_paused(),
+                "非 True（例如 mock 对象）一律按未暂停处理",
+            )
+        finally:
+            pause_module.is_paused.return_value = False
+            if original is not None:
+                core_pkg.sync_pause = original
+            else:
+                delattr(core_pkg, "sync_pause")
+
+    def test_global_pause_blocks_transfer_and_claim(self):
+        handler, ledger = self._handler(lease=_lease())
+        handler._sync_paused = lambda: True
+        self.assertFalse(handler._transfer_file(*self._args()))
+        handler._transfer_file_impl.assert_not_called()
+        self.assertIsNone(
+            ledger.begin_kwargs, "暂停时不该认领作业、不该消耗重试次数",
+        )
 
     def test_unclaimed_job_does_not_transfer(self):
         handler, ledger = self._handler(lease=None, reason="作业由其他 worker 持有")

@@ -19,6 +19,13 @@
           </v-btn>
         </v-btn-toggle>
         <v-btn
+          size="small"
+          variant="tonal"
+          :color="paused ? 'success' : 'warning'"
+          :prepend-icon="paused ? 'mdi-play-circle-outline' : 'mdi-pause-circle-outline'"
+          :loading="pausing"
+          @click="togglePause()">{{ paused ? "恢复转存" : "暂停转存" }}</v-btn>
+        <v-btn
           icon="mdi-refresh"
           variant="text"
           size="small"
@@ -27,6 +34,15 @@
           @click="loadTasks()" />
       </div>
     </div>
+
+    <v-alert
+      v-if="paused"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="mb-2 text-caption">
+      转存已暂停：不再认领新任务，正在写的文件不受影响。更新插件/重启前可先暂停，等当前文件跑完再更新。
+    </v-alert>
 
     <div v-if="error" class="text-caption text-error mb-2">{{ error }}</div>
 
@@ -94,6 +110,22 @@
             prepend-icon="mdi-stop-circle-outline"
             :loading="stoppingKey === item.task_key"
             @click="stopTask(item)">停止</v-btn>
+          <v-btn
+            v-if="item.actions.includes('resume')"
+            size="x-small"
+            variant="tonal"
+            color="success"
+            prepend-icon="mdi-play-circle-outline"
+            :loading="resumingKey === item.task_key"
+            @click="resumeTask(item)">恢复</v-btn>
+          <v-btn
+            v-if="item.actions.includes('pause')"
+            size="x-small"
+            variant="tonal"
+            color="warning"
+            prepend-icon="mdi-pause-circle-outline"
+            :loading="pausingKey === item.task_key"
+            @click="pauseTask(item)">暂停</v-btn>
           <span v-if="!item.actions.length" class="text-medium-emphasis">-</span>
         </div>
       </template>
@@ -140,6 +172,20 @@
             color="warning"
             :loading="stoppingKey === item.task_key"
             @click="stopTask(item)">停止</v-btn>
+          <v-btn
+            v-if="item.actions.includes('resume')"
+            size="x-small"
+            variant="tonal"
+            color="success"
+            :loading="resumingKey === item.task_key"
+            @click="resumeTask(item)">恢复</v-btn>
+          <v-btn
+            v-if="item.actions.includes('pause')"
+            size="x-small"
+            variant="tonal"
+            color="warning"
+            :loading="pausingKey === item.task_key"
+            @click="pauseTask(item)">暂停</v-btn>
         </div>
       </div>
     </div>
@@ -169,6 +215,10 @@ const error = ref("")
 const filter = ref("all")
 const retryingKey = ref("")
 const stoppingKey = ref("")
+const paused = ref(false)
+const pausing = ref(false)
+const pausingKey = ref("")
+const resumingKey = ref("")
 const message = ref("")
 const messageType = ref("success")
 
@@ -184,6 +234,7 @@ const filters = [
   {title: "等待重试", value: "waiting"},
   {title: "失败", value: "failed"},
   {title: "待确认", value: "pending"},
+  {title: "已暂停", value: "paused"},
 ]
 const headers = [
   {title: "状态", key: "status", sortable: false},
@@ -203,6 +254,7 @@ function notify(text, type = "success") {
 }
 
 function statusColor(task) {
+  if (task.paused) return "warning"
   if (task.status === "成功") return "success"
   if (task.status === "跳过") return "warning"
   if (task.status === "待确认") return "warning"
@@ -226,6 +278,9 @@ async function loadTasks(showLoading = true) {
     const result = await api.get(`plugin/${props.pluginId}/tasks?state=${encodeURIComponent(filter.value)}`)
     if (!result?.success) throw new Error(result?.message || "加载任务失败")
     tasks.value = Array.isArray(result.data) ? result.data : []
+    if (result.paused && typeof result.paused.paused === "boolean") {
+      paused.value = result.paused.paused
+    }
   } catch (e) {
     error.value = e.message || "加载任务失败"
     if (showLoading) notify(error.value, "error")
@@ -258,6 +313,57 @@ async function retryTask(task) {
     notify(e.message || "重试失败", "error")
   } finally {
     retryingKey.value = ""
+  }
+}
+
+async function togglePause() {
+  pausing.value = true
+  try {
+    const result = await api.post(`plugin/${props.pluginId}/sync/pause`, {paused: !paused.value})
+    if (!result?.success) throw new Error(result?.message || "切换暂停失败")
+    paused.value = Boolean(result.data?.paused)
+    notify(result.message || (paused.value ? "已暂停转存" : "已恢复转存"))
+    await loadTasks(false)
+  } catch (e) {
+    notify(e.message || "切换暂停失败", "error")
+  } finally {
+    pausing.value = false
+  }
+}
+
+async function pauseTask(task) {
+  if (!task.job_id) {
+    notify("该任务没有作业标识，无法单独暂停", "error")
+    return
+  }
+  pausingKey.value = task.task_key
+  try {
+    const result = await api.post(`plugin/${props.pluginId}/tasks/pause`, {job_id: task.job_id})
+    if (!result?.success) throw new Error(result?.message || "暂停失败")
+    notify(result.message || "已暂停")
+    await loadTasks(false)
+  } catch (e) {
+    notify(e.message || "暂停失败", "error")
+  } finally {
+    pausingKey.value = ""
+  }
+}
+
+async function resumeTask(task) {
+  if (!task.job_id) {
+    notify("该任务没有作业标识，无法恢复", "error")
+    return
+  }
+  resumingKey.value = task.task_key
+  try {
+    const result = await api.post(`plugin/${props.pluginId}/tasks/resume`, {job_id: task.job_id})
+    if (!result?.success) throw new Error(result?.message || "恢复失败")
+    notify(result.message || "已恢复")
+    await loadTasks(false)
+  } catch (e) {
+    notify(e.message || "恢复失败", "error")
+  } finally {
+    resumingKey.value = ""
   }
 }
 

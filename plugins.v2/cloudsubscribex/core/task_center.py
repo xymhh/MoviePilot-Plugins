@@ -34,6 +34,7 @@ from .database.sync_job_state import (
     JOB_FAILED,
     JOB_FINALIZING,
     JOB_NEEDS_ATTENTION,
+    JOB_PAUSED,
     JOB_QUEUED,
     JOB_RETRY_WAIT,
     JOB_TRANSFERRING,
@@ -208,6 +209,7 @@ def _job_fields(job: SyncJob) -> Dict[str, Any]:
         "attempt": _int(job.attempt),
         "max_attempts": _int(job.max_attempts),
         "next_retry_at": _int(job.next_retry_at),
+        "paused": state == JOB_PAUSED,
         "dead_letter": is_dead_letter(
             state, last_error, job.attempt, job.max_attempts,
         ),
@@ -239,6 +241,7 @@ def _blank_task(task_key: str, kind: str) -> Dict[str, Any]:
         "attempt": 0,
         "max_attempts": 0,
         "next_retry_at": 0,
+        "paused": False,
         "dead_letter": False,
         "failure_kind": "",
         "failure_label": "",
@@ -276,7 +279,10 @@ def _finalize(task: Dict[str, Any]) -> Dict[str, Any]:
     kind = _text(task.get("failure_kind"))
     if task.get("dead_letter") and status == STATUS_FAILED:
         kind = kind or "unknown"
-    task["status_label"] = status_label_of(status, kind)
+    if task.get("paused"):
+        task["status_label"] = "已暂停"
+    else:
+        task["status_label"] = status_label_of(status, kind)
     task["failure_label"] = failure_label(kind) if kind else ""
     task["stage_label"] = stage_label(task.get("stage"))
     actions: List[str] = []
@@ -284,10 +290,16 @@ def _finalize(task: Dict[str, Any]) -> Dict[str, Any]:
         task.get("record_id") or task.get("history_time")
         or task.get("history_id")
     )
-    if status in {STATUS_PENDING_CONFIRM, STATUS_FAILED}:
+    if task.get("paused"):
+        actions.append("resume")
+    elif status in {STATUS_PENDING_CONFIRM, STATUS_FAILED}:
         # 有历史记录走历史重试；纯作业死信走 /tasks/retry 显式重开。
         if has_history or (task.get("dead_letter") and task.get("job_id")):
             actions.append("retry")
+    elif _text(task.get("_state")) in {JOB_QUEUED, JOB_RETRY_WAIT} and bool(
+            task.get("job_id")):
+        # 排队中/等待重试的作业可以单独暂停；正在写的作业只能停止。
+        actions.append("pause")
     elif status in {STATUS_PROCESSING, STATUS_DOWNLOADING}:
         actions.append("stop")
     task["actions"] = actions
@@ -316,6 +328,8 @@ def _matches_state(task: Dict[str, Any], state: str) -> bool:
         return status == STATUS_FAILED or bool(task.get("dead_letter"))
     if state == "pending":
         return status == STATUS_PENDING_CONFIRM
+    if state == "paused":
+        return bool(task.get("paused"))
     return True
 
 

@@ -71,6 +71,7 @@ from .core.services import (
 from .core.storage import CloudSubscribeDataStore
 from .core.retry_policy import is_dead_letter
 from .core.task_center import collect_tasks
+from .core import sync_pause
 from .core.subscribe import AutoSubscribeService
 from .drive.scanner import DriverRegistry
 from .handlers import SearchHandler, SyncHandler, SubscribeHandler, WebhookHandler
@@ -181,7 +182,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.8.6"
+    plugin_version = "1.8.7"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -427,10 +428,71 @@ class CloudSubscribeX(_PluginBase):
                 "data": tasks,
                 "total": len(tasks),
                 "state": str(state or "all"),
+                "paused": sync_pause.snapshot(),
             }
         except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
             logger.error(f"读取任务中心失败：{error}", exc_info=True)
             return {"success": False, "message": str(error), "data": []}
+
+    def api_vue_sync_pause(self) -> dict:
+        """读取全局转存暂停开关。"""
+        return {"success": True, "data": sync_pause.snapshot()}
+
+    def api_vue_set_sync_pause(self, payload: Dict[str, Any]) -> dict:
+        """切换全局暂停：暂停后不再认领新作业，正在写的文件不打断。"""
+        data = payload if isinstance(payload, dict) else {}
+        if "paused" not in data:
+            return {"success": False, "message": "缺少 paused 参数"}
+        try:
+            state = sync_pause.set_paused(bool(data.get("paused")), actor="任务中心")
+        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
+            logger.error(f"切换转存暂停失败：{error}", exc_info=True)
+            return {"success": False, "message": str(error)}
+        self._sync_pause_cache = None
+        message = "已暂停转存，新作业不再认领" if state["paused"] else "已恢复转存"
+        return {"success": True, "message": message, "data": state}
+
+    def api_vue_pause_task(self, payload: Dict[str, Any]) -> dict:
+        """暂停单个排队中/等待重试的作业（不消耗重试次数）。"""
+        return self._task_pause_action(payload, pause=True)
+
+    def api_vue_resume_task(self, payload: Dict[str, Any]) -> dict:
+        """恢复暂停的作业，重新排队。"""
+        return self._task_pause_action(payload, pause=False)
+
+    def _task_pause_action(self, payload: Dict[str, Any], pause: bool) -> dict:
+        data = payload if isinstance(payload, dict) else {}
+        job_id = str(data.get("job_id") or "").strip()
+        job_key = str(data.get("job_key") or "").strip()
+        if not job_id and not job_key:
+            return {"success": False, "message": "缺少 task 标识"}
+        action = "暂停" if pause else "恢复"
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            repo = store.repositories.sync_jobs
+            row = repo.get_by_id(job_id) if job_id else repo.get(job_key)
+            if row is None:
+                return {"success": False, "message": "未找到对应任务"}
+            if pause:
+                changed = repo.pause(row.job_key, "用户在任务中心暂停")
+            else:
+                changed = repo.resume(row.job_key, "用户在任务中心恢复")
+            if not changed:
+                return {
+                    "success": False,
+                    "message": (
+                        f"当前状态无法{action}（只有排队中/等待重试的任务能暂停）"
+                        if pause else "该任务不是暂停状态，无需恢复"
+                    ),
+                }
+            logger.info(
+                f"任务中心{action}作业：{row.target_path}/{row.target_name}"
+            )
+            return {"success": True, "message": f"已{action}"}
+        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
+            logger.error(f"任务中心{action}失败：{error}", exc_info=True)
+            return {"success": False, "message": str(error)}
 
     def api_vue_retry_task(self, payload: Dict[str, Any]) -> dict:
         """任务中心显式重试：只复活死信作业，次数与退避清零后重新入队。"""

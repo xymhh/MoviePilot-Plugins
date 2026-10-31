@@ -23,6 +23,8 @@ JOB_DONE: Final = "done"
 JOB_FAILED: Final = "failed"
 JOB_NEEDS_ATTENTION: Final = "needs_attention"
 JOB_CANCELED: Final = "canceled"
+#: 用户手动暂停：不消耗重试次数，恢复后回到 queued 重新排队。
+JOB_PAUSED: Final = "paused"
 
 JOB_STATES: Final = frozenset({
     JOB_QUEUED,
@@ -34,6 +36,7 @@ JOB_STATES: Final = frozenset({
     JOB_FAILED,
     JOB_NEEDS_ATTENTION,
     JOB_CANCELED,
+    JOB_PAUSED,
 })
 
 TERMINAL_STATES: Final = frozenset({
@@ -45,7 +48,7 @@ TERMINAL_STATES: Final = frozenset({
 
 # 只允许这些迁移。新增边必须有明确语义，不能为了「少改代码」随便放行。
 ALLOWED_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
-    JOB_QUEUED: frozenset({JOB_TRANSFERRING, JOB_CANCELED}),
+    JOB_QUEUED: frozenset({JOB_TRANSFERRING, JOB_CANCELED, JOB_PAUSED}),
     JOB_TRANSFERRING: frozenset({
         JOB_VERIFYING, JOB_RETRY_WAIT, JOB_FAILED,
         JOB_NEEDS_ATTENTION, JOB_CANCELED,
@@ -56,7 +59,11 @@ ALLOWED_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     JOB_FINALIZING: frozenset({
         JOB_DONE, JOB_RETRY_WAIT, JOB_NEEDS_ATTENTION, JOB_CANCELED,
     }),
-    JOB_RETRY_WAIT: frozenset({JOB_QUEUED, JOB_FAILED, JOB_CANCELED}),
+    JOB_RETRY_WAIT: frozenset({
+        JOB_QUEUED, JOB_FAILED, JOB_CANCELED, JOB_PAUSED,
+    }),
+    # paused 是「用户按下的暂停」：只能被恢复成 queued 或被取消。
+    JOB_PAUSED: frozenset({JOB_QUEUED, JOB_CANCELED}),
     # done 不是数学意义上的终态：目标文件可能被人删除/移走，允许回查后
     # 重新入队；目标同名但内容不一致时转待处理，绝不自动覆盖。
     JOB_DONE: frozenset({JOB_QUEUED, JOB_NEEDS_ATTENTION}),

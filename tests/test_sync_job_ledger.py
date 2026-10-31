@@ -91,6 +91,7 @@ JOB_DONE = state_module.JOB_DONE
 JOB_FAILED = state_module.JOB_FAILED
 JOB_NEEDS_ATTENTION = state_module.JOB_NEEDS_ATTENTION
 JOB_CANCELED = state_module.JOB_CANCELED
+JOB_PAUSED = state_module.JOB_PAUSED
 DONE_CHECK_EXISTS = sync_job_ledger_module.DONE_CHECK_EXISTS
 DONE_CHECK_MISSING = sync_job_ledger_module.DONE_CHECK_MISSING
 DONE_CHECK_MISMATCH = sync_job_ledger_module.DONE_CHECK_MISMATCH
@@ -249,6 +250,51 @@ class SyncJobRepositoryTests(unittest.TestCase):
         self.assertFalse(created)
         self.assertEqual(second.job_id, first.job_id)
         self.assertEqual(self.repo.get(values["job_key"], db=self.db).job_id, first.job_id)
+
+    def test_pause_then_claim_is_blocked_and_attempt_kept(self):
+        values = self._values()
+        row = self._create(values)
+        row.attempt = 2
+        self.db.commit()
+        key = values["job_key"]
+        self.assertTrue(self.repo.pause(key, "用户暂停", now=1000, db=self.db))
+        self.db.commit()
+        row = self.repo.get(key, db=self.db)
+        self.assertEqual(row.state, JOB_PAUSED)
+        self.assertEqual(row.attempt, 2, "暂停不该消耗或清零重试次数")
+        self.assertFalse(
+            self.repo.claim(key, "worker-a", ttl_seconds=60, now=2000, db=self.db),
+            "暂停中的作业不能被认领",
+        )
+
+    def test_resume_requeues_without_resetting_attempt(self):
+        values = self._values()
+        row = self._create(values)
+        row.attempt = 1
+        self.db.commit()
+        key = values["job_key"]
+        self.assertTrue(self.repo.pause(key, "用户暂停", now=1000, db=self.db))
+        self.db.commit()
+        self.assertTrue(self.repo.resume(key, "用户恢复", now=1100, db=self.db))
+        self.db.commit()
+        row = self.repo.get(key, db=self.db)
+        self.assertEqual(row.state, JOB_QUEUED)
+        self.assertEqual(row.attempt, 1)
+        self.assertEqual(row.next_retry_at, 0)
+        self.assertTrue(
+            self.repo.claim(key, "worker-a", ttl_seconds=60, now=1200, db=self.db)
+        )
+
+    def test_pause_rejects_running_job(self):
+        values = self._values()
+        self._create(values)
+        key = values["job_key"]
+        self.assertTrue(self.repo.claim(key, "worker-a", ttl_seconds=600, now=1000, db=self.db))
+        self.db.commit()
+        self.assertFalse(
+            self.repo.pause(key, "用户暂停", now=1100, db=self.db),
+            "正在跑的作业不允许暂停（用停止）",
+        )
 
     def test_claim_is_exclusive(self):
         values = self._values()

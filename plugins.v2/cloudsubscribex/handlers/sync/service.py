@@ -689,6 +689,25 @@ class SyncHandler:
             "season_listing": season_listing,
         }
 
+    def _sync_paused(self) -> bool:
+        """全局暂停开关（3 秒缓存）：暂停期间不认领新作业、不发起新转存。"""
+        now = time.time()
+        cached = getattr(self, "_sync_pause_cache", None)
+        try:
+            if cached and (now - float(cached[0])) < 3:
+                return bool(cached[1])
+        except (TypeError, ValueError, IndexError):
+            cached = None
+        try:
+            from ...core import sync_pause  # 延迟导入，避免拉起仓储层依赖
+
+            paused = sync_pause.is_paused() is True
+        except Exception as error:
+            logger.warning(f"读取转存暂停开关失败，按未暂停处理：{error}")
+            paused = False
+        self._sync_pause_cache = (now, paused)
+        return paused
+
     def reset_sync_metrics(self) -> None:
         with self._sync_metrics_lock:
             self._sync_metrics = {}
@@ -946,6 +965,7 @@ class SyncHandler:
                     return bool(
                         global_vars.is_system_stopped
                         or self._stop_requested()
+                        or self._sync_paused()
                         or source_abort_event.is_set()
                         or (task_stop_event and task_stop_event.is_set())
                     )
@@ -3044,6 +3064,12 @@ class SyncHandler:
                 share_url, file_item, save_path, target_name, source_sha1,
                 parent_task_id, stop_requested, media_type,
             )
+
+        if self._sync_paused():
+            logger.warning(
+                f"转存已暂停，跳过本次转存：{save_path}/{target_name}"
+            )
+            return False
 
         should_stop = stop_requested or self._stop_requested
         source = self._resource_provider_for_url(share_url)

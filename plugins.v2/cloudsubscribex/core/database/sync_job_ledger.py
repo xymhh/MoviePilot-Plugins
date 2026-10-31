@@ -18,6 +18,7 @@ from .sync_job_state import (
     JOB_FAILED,
     JOB_FINALIZING,
     JOB_NEEDS_ATTENTION,
+    JOB_PAUSED,
     JOB_RETRY_WAIT,
     JOB_TRANSFERRING,
     JOB_VERIFYING,
@@ -206,6 +207,32 @@ class SyncJobLedger:
             current = self._repo.get(row.job_key)
         state = current.state if current is not None else "missing"
         return None, f"作业由其他 worker 持有或已终止：{state}"
+
+    def pause_job(self, job_key: str, reason: str = "用户暂停") -> bool:
+        """把排队中/等待重试的作业暂停；正在跑的作业不打断（返回 False）。"""
+        try:
+            return bool(self._repo.pause(str(job_key or ""), reason))
+        except Exception as error:
+            logger.warning("暂停作业失败（job=%s）：%s", job_key, error)
+            return False
+
+    def resume_job(self, job_key: str) -> bool:
+        """把暂停的作业放回队列，不消耗重试次数。"""
+        try:
+            return bool(self._repo.resume(str(job_key or ""), "用户恢复"))
+        except Exception as error:
+            logger.warning("恢复作业失败（job=%s）：%s", job_key, error)
+            return False
+
+    def job_state(self, job_key: str) -> str:
+        try:
+            row = self._repo.get(str(job_key or ""))
+        except Exception:
+            return ""
+        return str(getattr(row, "state", "") or "")
+
+    def is_paused(self, job_key: str) -> bool:
+        return self.job_state(job_key) == JOB_PAUSED
 
     def heartbeat(self, lease: SyncJobLease, ttl_seconds: int = 120) -> bool:
         """长转存续租，避免租约过期后同一作业被另一个 worker 抢走。"""
