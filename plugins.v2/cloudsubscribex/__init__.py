@@ -179,7 +179,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.8.0"
+    plugin_version = "1.8.1"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -260,7 +260,7 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_download_threads: int = 16
     _cross_transfer_max_concurrent: int = 2
     _cross_transfer_aria2_enabled: bool = False
-    _cross_transfer_aria2_connections: int = 64
+    _cross_transfer_aria2_connections: int = 16
     _cross_transfer_aria2_max_concurrent: int = 2
     _cross_transfer_aria2_min_split_size: str = "1M"
     _cross_transfer_aria2_disk_cache: str = "32M"
@@ -1687,7 +1687,7 @@ class CloudSubscribeX(_PluginBase):
         )
         self._cross_transfer_aria2_connections = max(
             1,
-            min(int(config.get("cross_transfer_aria2_connections", 64) or 64), 96),
+            min(int(config.get("cross_transfer_aria2_connections", 16) or 16), 16),
         )
         self._cross_transfer_aria2_max_concurrent = max(
             1,

@@ -15,7 +15,7 @@ class Aria2Settings:
     """aria2 引擎运行参数；默认关闭，关闭时不触碰进程与数据目录。"""
 
     enabled: bool = False
-    connections: int = 64
+    connections: int = 16
     max_concurrent: int = 2
     min_split_size: str = "1M"
     disk_cache: str = "32M"
@@ -47,7 +47,7 @@ def configure_aria2(**kwargs) -> None:
     settings = Aria2Settings(
         enabled=bool(kwargs.get("enabled", _SETTINGS.enabled)),
         connections=_as_int(
-            kwargs.get("connections", _SETTINGS.connections), 64, 1, 96
+            kwargs.get("connections", _SETTINGS.connections), 16, 1, 16
         ),
         max_concurrent=_as_int(
             kwargs.get("max_concurrent", _SETTINGS.max_concurrent), 2, 1, 4

@@ -166,10 +166,26 @@ class Aria2ServiceTest(unittest.TestCase):
         self.assertEqual(result, str(target))
         self.assertFalse(target.with_name(target.name + ".aria2").exists())
         options = rpc.added[0][1]
-        self.assertEqual(options["split"], "32")
-        self.assertEqual(options["max-connection-per-server"], "32")
+        self.assertEqual(options["split"], "16")
+        self.assertEqual(options["max-connection-per-server"], "16")
         self.assertEqual(options["header"], ["Cookie: c=1", "Accept-Encoding: identity"])
         self.assertEqual(rpc.results, [rpc.gid])
+
+    def test_connection_options_stay_within_aria2_limits(self):
+        """回归：--max-connection-per-server 超过 16 会被 aria2 RPC 直接 400。
+
+        线上 1.8.0 就是这样全量失败回落的（HTTP Error 400: Bad Request）。
+        """
+        target = self._target(8)
+        rpc = FakeRpc(target, [
+            {"status": "complete", "completedLength": "8", "errorCode": "0"},
+        ])
+        service = self._service(["http://example/a.mkv"], rpc)
+        service.download_file(FakeFile(8), str(target))
+        options = rpc.added[0][1]
+        for key in ("split", "max-connection-per-server"):
+            self.assertLessEqual(int(options[key]), 16, key)
+            self.assertGreaterEqual(int(options[key]), 1, key)
 
     def test_size_mismatch_raises(self):
         target = self._target(8)

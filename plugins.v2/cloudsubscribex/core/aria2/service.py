@@ -16,6 +16,8 @@ from app.log import logger
 POLL_INTERVAL = 0.8
 #: 单任务最多换链次数。
 MAX_LINK_REFRESH = 2
+# aria2 源码里 --max-connection-per-server 的合法区间是 1..16，越界直接 400。
+ARIA2_PER_SERVER_MAX = 16
 #: 触发换链的 aria2 errorCode：资源不存在 / 名称解析失败 / HTTP 授权失败。
 REFRESH_ERROR_CODES = frozenset({3, 19, 24})
 
@@ -94,7 +96,10 @@ class Aria2FileDownloadService:
         from . import aria2_settings
 
         settings = aria2_settings()
-        connections = max(1, min(int(settings.connections or 64), 96))
+        # aria2 的 --max-connection-per-server 取值上限就是 16，传 64 会被 RPC 直接
+        # 拒绝（实测 HTTP 400：problem while processing the option）。aria2 对同一
+        # 服务器的连接数硬顶 16，重复 URI / 多份 split 都无法突破，所以这里封顶 16。
+        connections = max(1, min(int(settings.connections or 16), ARIA2_PER_SERVER_MAX))
         engine = self._engine
         if engine is None:
             from . import get_engine
