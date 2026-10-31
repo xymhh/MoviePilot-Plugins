@@ -271,6 +271,28 @@ class TaskCenterTests(unittest.TestCase):
         self.assertEqual(by_key["history:r4"]["actions"], ["stop"])
         self.assertEqual(by_key["job:j1"]["actions"], [])
 
+    def test_media_type_ignores_transfer_label(self):
+        """历史记录的 media_type 常是「转存」，不能当成影视类型显示。"""
+        self.add(
+            _history("r1", media_type="转存", type="转存", updated_at=1),
+            _history("r2", media_type="转存", type="转存",
+                     tmdb_type="电视剧", updated_at=2),
+        )
+        by_key = {task["task_key"]: task for task in self.collect()}
+        self.assertEqual(by_key["history:r1"]["media_type"], "")
+        self.assertEqual(by_key["history:r2"]["media_type"], "电视剧")
+
+    def test_filename_title_falls_back_to_series_name(self):
+        self.add(
+            _history("r1", title="S01E19.2025.2160p.WEB-DL.HQ.DV.H265.mp4",
+                     file_name="沧元图 - S01E19 - 第19集.mp4", updated_at=1),
+            _history("r2", title="沧元图", file_name="沧元图 - S01E20 - 第20集.mp4",
+                     updated_at=2),
+        )
+        by_key = {task["task_key"]: task for task in self.collect()}
+        self.assertEqual(by_key["history:r1"]["title"], "沧元图")
+        self.assertEqual(by_key["history:r2"]["title"], "沧元图")
+
     def test_dead_letter_job_gets_retry_action(self):
         self.add(
             _job("j1", state_value="failed",

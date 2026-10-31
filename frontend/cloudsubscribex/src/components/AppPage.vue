@@ -301,7 +301,7 @@
       将为“{{ notifyingSummaryTitle || notifyingRecord?.file_name || "此记录" }}”重新发送入库通知和Webhook。
     </ConfirmDialog>
 
-    <v-snackbar v-model="fallbackVisible" :color="fallbackType" location="top" timeout="3000">
+    <v-snackbar v-model="fallbackVisible" :color="fallbackType" :style="snackbarTextStyle" location="top" timeout="3000">
       {{ fallbackMessage }}
     </v-snackbar>
   </div>
@@ -338,6 +338,10 @@ const isMobile = computed(() => display.xs.value)
 const fallbackVisible = ref(false)
 const fallbackMessage = ref("")
 const fallbackType = ref("success")
+
+const snackbarTextStyle = computed(() => ({
+  color: `rgb(var(--v-theme-on-${fallbackType.value || "success"}))`,
+}))
 const mainTab = ref("tasks")
 const offlineVisible = ref(false)
 const manualVisible = ref(false)
@@ -1010,12 +1014,21 @@ async function notifyHistory() {
 
 .task-pane {
   display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 12px;
 }
 
 .runtime-panel {
+  flex: 0 0 auto;
+  width: 100%;
+  min-width: 0;
+}
+
+.task-pane :deep(.task-center-panel) {
   flex: 1 1 auto;
-  min-height: 100%;
+  min-width: 0;
+  min-height: 0;
 }
 
 .history-pane {
@@ -1193,7 +1206,7 @@ async function notifyHistory() {
   .task-pane :deep(.runtime-panel) {
     display: flex;
     width: 100%;
-    min-height: 360px;
+    min-height: 0;
   }
 
   .overview-metric {

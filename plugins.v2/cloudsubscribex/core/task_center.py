@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List
@@ -65,8 +66,51 @@ _JOB_STAGE_MAP = {
 }
 
 
+_TYPE_NOISE = {"转存", "整理", "订阅", "未知", "其他", "-", "None"}
+_FILENAME_HINTS = (
+    "2160p", "1080p", "720p", "480p", "web-dl", "webdl", "webrip", "bluray",
+    "blu-ray", "hdr", "h.264", "h.265", "h264", "h265", "x264", "x265",
+    "hevc", "aac", "dts", "proper", "remux",
+)
+_EPISODE_PREFIX = re.compile(r"^[Ss]\d{1,2}\s*[Ee]\d{1,3}")
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _looks_like_filename(value: str) -> bool:
+    text = _text(value)
+    if not text:
+        return False
+    lowered = text.lower()
+    if _EPISODE_PREFIX.match(text):
+        return True
+    if any(hint in lowered for hint in _FILENAME_HINTS):
+        return True
+    return lowered.endswith((".mp4", ".mkv", ".ts", ".avi", ".rmvb", ".iso"))
+
+
+def _media_type(*values: Any) -> str:
+    """历史记录的 media_type 有时是「转存」（MP 的类型），不是影视类型。"""
+    for value in values:
+        text = _text(value)
+        if text and text not in _TYPE_NOISE:
+            return text
+    return ""
+
+
+def _display_title(title: Any, target_name: Any) -> str:
+    """标题优先用剧名；只有原始文件名时退到目标名的「剧名 - SxxEyy」前半段。"""
+    primary = _text(title)
+    if primary and not _looks_like_filename(primary):
+        return primary
+    name = _text(target_name)
+    if name:
+        head = name.split(" - ")[0].strip()
+        if head and not _looks_like_filename(head):
+            return head
+    return primary
 
 
 def _int(value: Any) -> int:
@@ -115,8 +159,16 @@ def _progress(payload: Any) -> Dict[str, int]:
 def _record_fields(record: HistoryRecord) -> Dict[str, Any]:
     payload = record.payload if isinstance(record.payload, dict) else {}
     return {
-        "title": _text(record.title or payload.get("title")),
-        "media_type": _text(record.media_type or payload.get("type")),
+        "title": _display_title(
+            record.title or payload.get("title"),
+            record.file_name or payload.get("file_name"),
+        ),
+        "media_type": _media_type(
+            record.media_type,
+            payload.get("media_type"),
+            payload.get("tmdb_type"),
+            payload.get("type"),
+        ),
         "status": _text(record.status),
         "stage": _text(record.stage),
         "target_provider": _text(
@@ -144,7 +196,9 @@ def _job_fields(job: SyncJob) -> Dict[str, Any]:
     kind_source.setdefault("failure_reason", last_error)
     kind = failure_kind_of(kind_source) if state in {JOB_FAILED, JOB_RETRY_WAIT} else ""
     return {
-        "title": _text(job.result_name or job.source_name),
+        "title": _display_title(
+            job.result_name or job.source_name, job.target_name,
+        ),
         "status": _JOB_STATUS_MAP.get(state, ""),
         "stage": _JOB_STAGE_MAP.get(state, ""),
         "target_provider": _text(job.target_provider),

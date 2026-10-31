@@ -7,7 +7,13 @@
         <v-chip size="x-small" variant="tonal">{{ tasks.length }}</v-chip>
       </div>
       <div class="d-flex align-center ga-2 flex-wrap">
-        <v-btn-toggle v-model="filter" mandatory density="compact" variant="outlined" divided>
+        <v-btn-toggle
+          v-model="filter"
+          class="task-center-filters"
+          mandatory
+          density="compact"
+          variant="outlined"
+          divided>
           <v-btn v-for="item in filters" :key="item.value" :value="item.value" size="small">
             {{ item.title }}
           </v-btn>
@@ -138,7 +144,7 @@
       </div>
     </div>
 
-    <v-snackbar v-model="messageVisible" :color="messageType" location="top" timeout="3000">
+    <v-snackbar v-model="messageVisible" :color="messageType" :style="snackbarTextStyle" location="top" timeout="3000">
       {{ message }}
     </v-snackbar>
   </section>
@@ -165,6 +171,10 @@ const retryingKey = ref("")
 const stoppingKey = ref("")
 const message = ref("")
 const messageType = ref("success")
+
+const snackbarTextStyle = computed(() => ({
+  color: `rgb(var(--v-theme-on-${messageType.value || "success"}))`,
+}))
 const messageVisible = ref(false)
 let timer = null
 
@@ -286,19 +296,35 @@ onUnmounted(() => {
 
 <style scoped>
 .task-center-panel {
-  margin-top: 16px;
   min-width: 0;
 }
 .task-center-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 8px;
 }
+.task-center-filters {
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.task-center-filters::-webkit-scrollbar {
+  display: none;
+}
+.task-center-filters :deep(.v-btn) {
+  white-space: nowrap;
+}
 .task-center-table {
   max-height: 420px;
+}
+.task-center-table :deep(.v-table__wrapper) {
+  overflow-x: auto;
+}
+.task-center-table :deep(.v-chip) {
+  white-space: nowrap;
 }
 .task-center-table :deep(th) {
   white-space: nowrap;
@@ -336,6 +362,12 @@ onUnmounted(() => {
   border-radius: 8px;
   padding: 10px;
   min-width: 0;
+}
+.task-mobile-card :deep(.v-chip) {
+  white-space: nowrap;
+}
+.task-mobile-head {
+  row-gap: 4px;
 }
 .task-mobile-title {
   margin-top: 4px;

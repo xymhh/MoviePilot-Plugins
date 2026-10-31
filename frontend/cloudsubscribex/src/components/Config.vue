@@ -662,7 +662,7 @@
         </v-card-actions>
       </v-card>
     </v-dialog>
-    <v-snackbar v-model="messageVisible" :color="messageType" location="top" timeout="3500" variant="elevated">
+    <v-snackbar v-model="messageVisible" :color="messageType" :style="{ color: `rgb(var(--v-theme-on-${messageType || 'success'}))` }" location="top" timeout="3500" variant="elevated">
       {{ message }}
       <template #actions>
         <v-btn icon="mdi-close" size="small" variant="text" @click="messageVisible = false" />
