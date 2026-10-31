@@ -12,12 +12,17 @@ from typing import Callable
 
 from app.log import logger
 
+from .rpc import Aria2Error
+
 #: aria2 进度轮询间隔（秒）。
 POLL_INTERVAL = 0.8
 #: 单任务最多换链次数。
 MAX_LINK_REFRESH = 2
-# aria2 源码里 --max-connection-per-server 的合法区间是 1..16，越界直接 400。
-ARIA2_PER_SERVER_MAX = 16
+#: 随包分发的 aria2c 是 Aria2-Pro 补丁版（1.36.0），已解锁
+#: --max-connection-per-server 上限，这里只夹到 96 防手滑。
+ARIA2_CONNECTIONS_MAX = 96
+#: 标准上游 aria2 的硬上限；补丁版拒绝时回落用。
+ARIA2_CONNECTIONS_FALLBACK = 16
 #: 触发换链的 aria2 errorCode：资源不存在 / 名称解析失败 / HTTP 授权失败。
 REFRESH_ERROR_CODES = frozenset({3, 19, 24})
 
@@ -56,6 +61,25 @@ class Aria2FileDownloadService:
             callback(*args)
         except Exception as error:  # noqa: BLE001 - 清理失败不影响主流程
             logger.debug(f"aria2 清理调用失败：{error}", exc_info=True)
+
+    @staticmethod
+    def _add_with_fallback(rpc, url: str, options: dict) -> str:
+        """首次添加任务；标准上游 aria2 拒绝大连接数时回落 16 重试一次。"""
+        try:
+            return rpc.add_uri([url], options)
+        except Aria2Error as error:
+            text = str(error).lower()
+            if "processing the option" not in text:
+                raise
+            if int(options.get("split", "0") or 0) <= ARIA2_CONNECTIONS_FALLBACK:
+                raise
+            logger.warning(
+                f"aria2 拒绝 {options.get('split')} 连接（{error}），回落 "
+                f"{ARIA2_CONNECTIONS_FALLBACK} 重试"
+            )
+            options["split"] = str(ARIA2_CONNECTIONS_FALLBACK)
+            options["max-connection-per-server"] = str(ARIA2_CONNECTIONS_FALLBACK)
+            return rpc.add_uri([url], options)
 
     def _cancel(self, rpc, gid: str, target: Path, preserve_partial: bool) -> None:
         self._safe_call(rpc.force_pause, gid)
@@ -96,10 +120,11 @@ class Aria2FileDownloadService:
         from . import aria2_settings
 
         settings = aria2_settings()
-        # aria2 的 --max-connection-per-server 取值上限就是 16，传 64 会被 RPC 直接
-        # 拒绝（实测 HTTP 400：problem while processing the option）。aria2 对同一
-        # 服务器的连接数硬顶 16，重复 URI / 多份 split 都无法突破，所以这里封顶 16。
-        connections = max(1, min(int(settings.connections or 16), ARIA2_PER_SERVER_MAX))
+        # 随包 aria2c 为 Aria2-Pro 补丁版，可吃 64+ 连接；96 是插件侧安全上限。
+        # 若运行时换了标准上游二进制（上限 16），下面 _add_with_fallback 会回落。
+        connections = max(
+            1, min(int(settings.connections or 64), ARIA2_CONNECTIONS_MAX)
+        )
         engine = self._engine
         if engine is None:
             from . import get_engine
@@ -123,7 +148,7 @@ class Aria2FileDownloadService:
         gid = ""
         succeeded = False
         try:
-            gid = rpc.add_uri([url], options)
+            gid = self._add_with_fallback(rpc, url, options)
             completed = 0
             refreshed = 0
             # 换链重下后 aria2 的 completedLength 会从续传点重报，用它重置进度基数，

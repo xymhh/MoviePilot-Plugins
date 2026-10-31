@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-BINARY_SHA256 = "36f66dab69edcc44255d0dba90c93f5aa4a304ec60c7136d8c279dfc89c23e1d"
+BINARY_SHA256 = "c7944f5e27212e0bd37b761f888039eea6e5cf29342e2f86d3f0075118586432"
 BINARY_NAME = "aria2c"
 
 

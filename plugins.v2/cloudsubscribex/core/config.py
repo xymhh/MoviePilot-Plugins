@@ -205,7 +205,7 @@ class UIConfig:
             "cross_transfer_download_threads": 16,
             "cross_transfer_max_concurrent": 2,
             "cross_transfer_aria2_enabled": False,
-            "cross_transfer_aria2_connections": 16,
+            "cross_transfer_aria2_connections": 64,
             "cross_transfer_aria2_max_concurrent": 2,
             "cross_transfer_aria2_min_split_size": "1M",
             "cross_transfer_aria2_disk_cache": "32M",

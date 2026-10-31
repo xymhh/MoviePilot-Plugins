@@ -68,7 +68,8 @@ class FakeFile:
 
 
 class FakeRpc:
-    def __init__(self, target, statuses=None):
+    def __init__(self, target, statuses=None, add_errors=None):
+        self.add_errors = list(add_errors or [])
         self.target = target
         self.statuses = list(statuses or [])
         self.added = []
@@ -80,6 +81,8 @@ class FakeRpc:
 
     def add_uri(self, uris, options):
         self.added.append((list(uris), dict(options)))
+        if self.add_errors:
+            raise self.add_errors.pop(0)
         return self.gid
 
     def tell_status(self, gid, keys=None):
@@ -166,16 +169,13 @@ class Aria2ServiceTest(unittest.TestCase):
         self.assertEqual(result, str(target))
         self.assertFalse(target.with_name(target.name + ".aria2").exists())
         options = rpc.added[0][1]
-        self.assertEqual(options["split"], "16")
-        self.assertEqual(options["max-connection-per-server"], "16")
+        self.assertEqual(options["split"], "32")
+        self.assertEqual(options["max-connection-per-server"], "32")
         self.assertEqual(options["header"], ["Cookie: c=1", "Accept-Encoding: identity"])
         self.assertEqual(rpc.results, [rpc.gid])
 
     def test_connection_options_stay_within_aria2_limits(self):
-        """回归：--max-connection-per-server 超过 16 会被 aria2 RPC 直接 400。
-
-        线上 1.8.0 就是这样全量失败回落的（HTTP Error 400: Bad Request）。
-        """
+        """连接数夹在 1..96：随包补丁版可吃 64+，仍需防手滑越界。"""
         target = self._target(8)
         rpc = FakeRpc(target, [
             {"status": "complete", "completedLength": "8", "errorCode": "0"},
@@ -184,8 +184,39 @@ class Aria2ServiceTest(unittest.TestCase):
         service.download_file(FakeFile(8), str(target))
         options = rpc.added[0][1]
         for key in ("split", "max-connection-per-server"):
-            self.assertLessEqual(int(options[key]), 16, key)
+            self.assertLessEqual(int(options[key]), 96, key)
             self.assertGreaterEqual(int(options[key]), 1, key)
+
+    def test_clamped_when_configured_above_ceiling(self):
+        aria2_module.configure_aria2(
+            enabled=True, connections=256, data_dir=Path(self._tmp.name) / "data"
+        )
+        target = self._target(8)
+        rpc = FakeRpc(target, [
+            {"status": "complete", "completedLength": "8", "errorCode": "0"},
+        ])
+        service = self._service(["http://example/a.mkv"], rpc)
+        service.download_file(FakeFile(8), str(target))
+        options = rpc.added[0][1]
+        self.assertEqual(options["split"], "96")
+        self.assertEqual(options["max-connection-per-server"], "96")
+
+    def test_falls_back_to_16_when_engine_rejects_connection_count(self):
+        """运行时若是标准上游 aria2（上限 16），回落 16 重试而不是直接失败。"""
+        target = self._target(8)
+        rpc = FakeRpc(
+            target,
+            [{"status": "complete", "completedLength": "8", "errorCode": "0"}],
+            add_errors=[aria2_module.Aria2Error(
+                1, "problem while processing the option E: max-connection-per-server"
+            )],
+        )
+        service = self._service(["http://example/a.mkv"], rpc)
+        service.download_file(FakeFile(8), str(target))
+        self.assertEqual(len(rpc.added), 2)
+        self.assertEqual(rpc.added[0][1]["split"], "32")
+        self.assertEqual(rpc.added[1][1]["split"], "16")
+        self.assertEqual(rpc.added[1][1]["max-connection-per-server"], "16")
 
     def test_size_mismatch_raises(self):
         target = self._target(8)
