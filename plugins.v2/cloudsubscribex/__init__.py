@@ -856,6 +856,7 @@ class CloudSubscribeX(_PluginBase):
         self._start_strm_full_scan()
         self._start_strm_increment()
         self._start_organize_schedule()
+        self._start_history_state_maintenance()
         # 配置保存可能改了开关/端口：apply 末尾同步一次代理运行态
         # （stop_service 在重载开头已经停过，这里按新配置重新决定起不起）。
         try:
@@ -1157,6 +1158,34 @@ class CloudSubscribeX(_PluginBase):
             self._strm_increment_scheduler = scheduler
         except Exception as error:  # noqa: BLE001
             logger.warning(f"STRM 增量补齐定时任务启动失败：{error}")
+
+    def _start_history_state_maintenance(self) -> None:
+        """每 5 分钟回收过期租约并清扫超时非终态历史。"""
+        if self.__dict__.get("_history_state_scheduler") is not None:
+            return
+        try:
+            scheduler = BackgroundScheduler(timezone=settings.TZ)
+            scheduler.add_job(
+                func=lambda: self._run_history_state_maintenance(),
+                trigger=IntervalTrigger(minutes=5),
+                id="cloudsubscribe_history_state_maintenance",
+                replace_existing=True,
+            )
+            scheduler.start()
+            self._history_state_scheduler = scheduler
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"历史状态周期维护启动失败：{error}")
+
+    def _run_history_state_maintenance(self) -> None:
+        sync_handler = getattr(self, "_sync_handler", None)
+        if sync_handler is None:
+            return
+        try:
+            result = sync_handler.maintain_history_states()
+            if result.get("swept"):
+                logger.info(f"已清扫 {result['swept']} 条超时转存历史")
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"历史状态周期维护失败：{error}")
 
     def _start_organize_schedule(self) -> None:
         """按 Cron 定时扫描 115 整理源目录；默认关闭。"""

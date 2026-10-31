@@ -71,6 +71,7 @@ class HistoryRecord(CloudSubscribeBase):
     group_key: Mapped[str] = mapped_column(String(255), nullable=False)
     record_time: Mapped[str] = mapped_column(String(40), nullable=False, default="")
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="")
     resource_type: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
     task_types: Mapped[str] = mapped_column(String(255), nullable=False, default="|")

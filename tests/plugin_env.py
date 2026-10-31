@@ -57,6 +57,20 @@ def install_app_mocks(*extra_packages: str) -> None:
     for name in extra_packages:
         ensure_package(name)
     install_core_failure()
+    install_core_state()
+
+
+def install_core_state():
+    """加载真实的 ``core.state``，供各 handler 的状态迁移导入。"""
+    existing = sys.modules.get("cloudsubscribex.core.state")
+    if existing is not None:
+        return existing
+    ensure_package("cloudsubscribex")
+    ensure_package("cloudsubscribex.core")
+    return load_module(
+        "cloudsubscribex.core.state",
+        "plugins.v2/cloudsubscribex/core/state.py",
+    )
 
 
 def install_core_failure():

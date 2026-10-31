@@ -478,6 +478,9 @@
                         {{ record.failure_reason || record.failure_label }}
                       </v-tooltip>
                     </v-chip>
+                    <div v-if="record.stage_label" class="text-caption text-medium-emphasis mt-1">
+                      {{ record.stage_label }}
+                    </div>
                   </td>
                   <td class="text-no-wrap">{{ record.time || "-" }}</td>
                   <td class="action-column">
@@ -655,6 +658,9 @@
                         {{ record.failure_reason }}
                       </v-tooltip>
                     </v-chip>
+                    <span v-if="record.stage_label" class="text-caption text-medium-emphasis ml-1">
+                      {{ record.stage_label }}
+                    </span>
                     <v-spacer />
                     <div class="action-buttons history-mobile-actions">
                       <v-btn
@@ -797,7 +803,7 @@ const filtersVisible = ref(false);
 const searchVisible = ref(false);
 let lastQuerySignature = "";
 
-const statusOptions = ["处理中", "下载中", "成功", "失败", "秒传失败", "跳过"];
+const statusOptions = ["处理中", "下载中", "待确认", "成功", "失败", "秒传失败", "跳过"];
 const taskTypeOptions = [
   {title: "跨盘", value: "cross_transfer"},
   {title: "洗版", value: "upgrade"},

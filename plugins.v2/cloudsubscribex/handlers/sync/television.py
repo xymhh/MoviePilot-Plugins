@@ -14,6 +14,14 @@ from ..notification import MediaServerResolver
 from ...core import OwnerDelegator
 from ...core.failure import apply_failure
 from ...core.services.skip_stats import SkipStatsCollector
+from ...core.state import (
+    STAGE_TRANSFERRING,
+    STAGE_VERIFYING,
+    STATUS_DOWNLOADING,
+    STATUS_PENDING_CONFIRM,
+    STATUS_PROCESSING,
+    transition,
+)
 
 
 class TelevisionSyncProcessor(OwnerDelegator):
@@ -944,7 +952,12 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     self._landed_verification_fields(landed_info)
                                 )
                                 if landed_blocked:
-                                    history_item["status"] = "待确认"
+                                    transition(
+                                        history_item, STATUS_PENDING_CONFIRM,
+                                        stage=STAGE_VERIFYING,
+                                        reason="tv_landed_verify",
+                                        task_id=history_item.get("record_id") or "",
+                                    )
                                     logger.warning(
                                         f"落盘自检未通过：{mediainfo.title} "
                                         f"S{int(season):02d}E{int(episode):02d} "
@@ -955,9 +968,14 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             if success:
                                 if pending_key:
                                     history_item["finalize_key"] = pending_key
-                                    history_item["status"] = (
-                                        "下载中" if self._is_ed2k_url(item_share_url)
-                                        else "处理中"
+                                    transition(
+                                        history_item,
+                                        STATUS_DOWNLOADING
+                                        if self._is_ed2k_url(item_share_url)
+                                        else STATUS_PROCESSING,
+                                        stage=STAGE_TRANSFERRING,
+                                        reason="tv_pending_finalize",
+                                        task_id=history_item.get("record_id") or "",
                                     )
                                 if landed_blocked:
                                     # 「待确认」不是失败也不是成功：不补齐、不通知、

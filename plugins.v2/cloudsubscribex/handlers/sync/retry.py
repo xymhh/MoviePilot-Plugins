@@ -24,6 +24,17 @@ from ...core.media import (
     recognize_media,
     tmdb_id_of,
 )
+from ...core.state import (
+    STAGE_DONE,
+    STAGE_TRANSFERRING,
+    STATUS_DOWNLOADING,
+    STATUS_FAILED,
+    STATUS_PENDING_CONFIRM,
+    STATUS_PROCESSING,
+    STATUS_SKIPPED,
+    STATUS_SUCCESS,
+    transition,
+)
 
 
 _retry_inflight_lock = Lock()
@@ -82,10 +93,27 @@ class HistoryRetryService(OwnerDelegator):
 
         try:
             processing = deepcopy(record)
-            processing["status"] = (
-                "下载中"
+            target_status = (
+                STATUS_DOWNLOADING
                 if self._is_ed2k_url(str(processing.get("share_url") or ""))
-                else "处理中"
+                else STATUS_PROCESSING
+            )
+            if processing.get("status") == STATUS_SUCCESS:
+                transition(
+                    processing, STATUS_PENDING_CONFIRM,
+                    stage=STAGE_TRANSFERRING, reason="history_retry_reopen",
+                    task_id=processing.get("record_id") or "",
+                )
+            elif processing.get("status") in {STATUS_FAILED, STATUS_SKIPPED}:
+                transition(
+                    processing, STATUS_PROCESSING,
+                    stage=STAGE_TRANSFERRING, reason="history_retry_reopen",
+                    task_id=processing.get("record_id") or "",
+                )
+            transition(
+                processing, target_status,
+                stage=STAGE_TRANSFERRING, reason="history_retry_submit",
+                task_id=processing.get("record_id") or "",
             )
             clear_failure(processing)
             self.append_history_records([processing], reopen_terminal=True)
@@ -581,14 +609,27 @@ class HistoryRetryService(OwnerDelegator):
             ))
         # 终态关联先落定，再做标题/年份/封面等装饰性更新：
         # 装饰性字段异常时记录仍带 finalize_key，后处理可把终态写回，不会卡在旧状态。
+        if record.get("status") in {STATUS_FAILED, STATUS_SKIPPED}:
+            transition(
+                record, STATUS_PROCESSING,
+                stage=STAGE_TRANSFERRING, reason="history_retry_reopen",
+                task_id=record.get("record_id") or "",
+            )
         if pending_key:
             record["finalize_key"] = pending_key
-            record["status"] = (
-                "下载中" if self._is_ed2k_url(canonical_url) else "处理中"
+            transition(
+                record,
+                STATUS_DOWNLOADING if self._is_ed2k_url(canonical_url) else STATUS_PROCESSING,
+                stage=STAGE_TRANSFERRING, reason="history_retry_pending",
+                task_id=record.get("record_id") or "",
             )
         else:
             record.pop("finalize_key", None)
-            record["status"] = "成功"
+            transition(
+                record, STATUS_SUCCESS,
+                stage=STAGE_DONE, reason="history_retry_success",
+                task_id=record.get("record_id") or "",
+            )
             self._media_server_notifier.notify(
                 path=strm_path,
                 mediainfo=mediainfo,

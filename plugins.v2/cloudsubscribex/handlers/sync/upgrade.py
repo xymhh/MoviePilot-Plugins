@@ -10,6 +10,12 @@ from app.utils.string import StringUtils
 
 from ...core import OwnerDelegator
 from ...core.failure import apply_failure
+from ...core.state import (
+    STAGE_TRANSFERRING,
+    STATUS_DOWNLOADING,
+    STATUS_PROCESSING,
+    transition,
+)
 
 
 def plan_upgrade_episode_order(
@@ -700,9 +706,14 @@ class UpgradeService(OwnerDelegator):
 
                             if pending_key:
                                 history_item["finalize_key"] = pending_key
-                                history_item["status"] = (
-                                    "下载中" if self._is_ed2k_url(share_url)
-                                    else "处理中"
+                                transition(
+                                    history_item,
+                                    STATUS_DOWNLOADING
+                                    if self._is_ed2k_url(share_url)
+                                    else STATUS_PROCESSING,
+                                    stage=STAGE_TRANSFERRING,
+                                    reason="upgrade_pending_finalize",
+                                    task_id=history_item.get("record_id") or "",
                                 )
                             if not pending_key:
                                 batch_detail_episodes.append(episode)

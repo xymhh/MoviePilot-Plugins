@@ -37,6 +37,17 @@ from ...core.failure import (
     status_label_of,
 )
 from ...core.history import history_group_key
+from ...core.state import (
+    STAGE_DONE,
+    STAGE_VERIFYING,
+    STATUS_DOWNLOADING,
+    STATUS_PENDING_CONFIRM,
+    STATUS_PROCESSING,
+    STATUS_SUCCESS,
+    stage_label,
+    transition,
+    transition_manual,
+)
 from ...drive.common import format_size, positive_int
 from ...core.media import (
     download_history_identity_payload,
@@ -50,6 +61,10 @@ except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过�
     def is_ignored_media_path(path):
         return False
 from ...search.types import normalize_resource_type, resource_type_from_url
+
+
+STALE_HISTORY_SECONDS = 60 * 60
+_STALE_HISTORY_STATUSES = frozenset({STATUS_PROCESSING, STATUS_DOWNLOADING})
 
 
 class HistoryService(OwnerDelegator):
@@ -710,10 +725,13 @@ class HistoryService(OwnerDelegator):
         )
         status = str(record.get("status") or "").strip()
         failure_kind = failure_kind_of(record) if status == "失败" else ""
+        stage = str(record.get("stage") or "").strip()
         return {
             "history_group_key": history_group_key(record),
             "display_name": display_name,
             "status_label": status_label_of(status, failure_kind),
+            "stage": stage,
+            "stage_label": stage_label(stage),
             "failure_kind": failure_kind,
             "failure_label": failure_label(failure_kind) if failure_kind else "",
             "display_file_name": file_name,
@@ -1036,7 +1054,11 @@ class HistoryService(OwnerDelegator):
                     continue
                 if not strm_path.is_file():
                     continue
-                record["status"] = "成功"
+                transition(
+                    record, STATUS_SUCCESS, stage=STAGE_DONE,
+                    reason="strm_exists_repair",
+                    task_id=record.get("record_id") or "",
+                )
                 record.pop("finalize_key", None)
                 clear_failure(record)
                 repaired_records.append(copy.deepcopy(record))
@@ -1434,7 +1456,13 @@ class HistoryService(OwnerDelegator):
                     continue
                 if status == "失败" and item.get("status") == "成功":
                     continue
-                item["status"] = status
+                if not transition(
+                        item, status,
+                        stage=STAGE_DONE if status == STATUS_SUCCESS else None,
+                        reason="finalize_history",
+                        task_id=item.get("record_id") or "",
+                ):
+                    continue
                 item.pop("finalize_key", None)
                 if status == "失败":
                     apply_failure(item, reason or "转存失败")
@@ -1457,7 +1485,11 @@ class HistoryService(OwnerDelegator):
                 for item in success_records:
                     info = landed_infos.get(id(item)) or {}
                     if info.get("landed") is False:
-                        item["status"] = "待确认"
+                        transition(
+                            item, STATUS_PENDING_CONFIRM,
+                            stage=STAGE_VERIFYING, reason="landed_verify",
+                            task_id=item.get("record_id") or "",
+                        )
                         item.update(HistoryService._landed_result_fields(info))
                         logger.warning(
                             f"落盘自检未通过：{item.get('title') or '未知媒体'} "
@@ -1731,6 +1763,134 @@ class HistoryService(OwnerDelegator):
             pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
             return [copy.deepcopy({**item, "pending_key": key}) for key, item in pending.items()]
 
+    @staticmethod
+    def _history_record_timestamp(record: Dict[str, Any]) -> Optional[float]:
+        """读取记录时间：优先 updated_at，其次 time；无法解析返回 None。"""
+        for key in ("updated_at", "time"):
+            value = record.get(key)
+            if value is None or value == "":
+                continue
+            if isinstance(value, (int, float)):
+                return float(value)
+            text = str(value).strip()
+            try:
+                return float(text)
+            except (TypeError, ValueError):
+                continue
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    return time.mktime(time.strptime(text, fmt))
+                except (TypeError, ValueError, OverflowError):
+                    continue
+        return None
+
+    def _history_has_active_sync_job(self, record: Dict[str, Any]) -> bool:
+        """同步作业账本里是否仍有对应活动作业；无账本/不可用时视为无。"""
+        plugin = getattr(self, "_plugin", None)
+        store_getter = getattr(plugin, "_get_data_store", None)
+        if not callable(store_getter):
+            return False
+        try:
+            store = store_getter()
+            if hasattr(store, "initialize"):
+                store.initialize()
+            repository = store.repositories.sync_jobs
+        except Exception:  # noqa: BLE001 - 账本不可用不能阻塞清扫
+            return False
+        try:
+            return bool(repository.has_active_history_job(
+                history_id=str(record.get("record_id") or ""),
+                target_path=str(record.get("cloud_dir") or ""),
+                target_name=str(record.get("file_name") or ""),
+            ))
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"查询活动同步作业失败：{error}", exc_info=True)
+            return False
+
+    def maintain_history_states(self, now: Optional[float] = None) -> Dict[str, int]:
+        """周期维护：回收过期作业租约，再清扫超时非终态历史。"""
+        timestamp = time.time() if now is None else float(now)
+        reclaimed = 0
+        plugin = getattr(self, "_plugin", None)
+        store_getter = getattr(plugin, "_get_data_store", None)
+        if callable(store_getter):
+            try:
+                store = store_getter()
+                if hasattr(store, "initialize"):
+                    store.initialize()
+                reclaimed = int(
+                    store.repositories.sync_jobs.reclaim_expired(now=int(timestamp))
+                    or 0
+                )
+                if reclaimed:
+                    logger.info(f"已回收 {reclaimed} 个过期同步作业租约")
+            except Exception as error:  # noqa: BLE001 - 维护任务失败不得影响主循环
+                logger.warning(f"回收过期同步作业租约失败：{error}")
+        swept = self.sweep_stale_history(now=timestamp)
+        return {"reclaimed": reclaimed, "swept": swept}
+
+    def sweep_stale_history(self, now: Optional[float] = None) -> int:
+        """清扫超时且无活动作业的非终态记录，让状态必然收敛。"""
+        if not self._get_data or not self._save_data:
+            return 0
+        current = time.time() if now is None else float(now)
+        cutoff = current - STALE_HISTORY_SECONDS
+        changed_records = []
+        with self._offline_pending_lock:
+            history = self._get_data("history") or []
+            candidates = []
+            for item in history:
+                if str(item.get("status") or "") not in _STALE_HISTORY_STATUSES:
+                    continue
+                if self._history_has_active_sync_job(item):
+                    continue
+                timestamp = self._history_record_timestamp(item)
+                if timestamp is None or timestamp > cutoff:
+                    continue
+                candidates.append(item)
+            if not candidates:
+                return 0
+            verify_records = getattr(self, "verify_landed_records", None)
+            landed_infos = (
+                verify_records(candidates) if callable(verify_records) else {}
+            )
+            for item in candidates:
+                info = landed_infos.get(id(item)) or {}
+                landed = info.get("landed")
+                task_id = str(item.get("record_id") or item.get("task_id") or "")
+                before = str(item.get("status") or "")
+                if landed is True:
+                    target = STATUS_SUCCESS
+                    stage = STAGE_DONE
+                elif landed is False:
+                    target = STATUS_PENDING_CONFIRM
+                    stage = STAGE_VERIFYING
+                else:
+                    logger.warning(
+                        f"task_id={task_id} from={before} to={before} "
+                        f"stage={item.get('stage') or ''} reason=sweeper "
+                        f"无法核实落盘，保持原状态"
+                    )
+                    continue
+                if not transition(
+                        item, target, stage=stage,
+                        reason="sweeper", task_id=task_id,
+                ):
+                    continue
+                fields = HistoryService._landed_result_fields(info)
+                if fields:
+                    item.update(fields)
+                logger.info(
+                    f"task_id={task_id} from={before} to={target} "
+                    f"stage={stage} reason=sweeper"
+                )
+                changed_records.append(copy.deepcopy(item))
+            if changed_records:
+                self._save_data("history", history)
+        if changed_records and callable(getattr(self, "_history_changed", None)):
+            self._history_changed()
+        return len(changed_records)
+
     def reconcile_orphan_finalize_records(self) -> int:
         """修复「后处理已提交但历史终态没写入」的记录，避免历史长期停在处理中。"""
         if not self._get_data or not self._save_data:
@@ -1746,7 +1906,11 @@ class HistoryService(OwnerDelegator):
                 key = str(item.get("finalize_key") or "").strip()
                 if not key or key in pending:
                     continue
-                item["status"] = "成功"
+                transition(
+                    item, STATUS_SUCCESS, stage=STAGE_DONE,
+                    reason="orphan_finalize_repair",
+                    task_id=item.get("record_id") or "",
+                )
                 item.pop("finalize_key", None)
                 clear_failure(item)
                 repaired_records.append(item)
@@ -1761,7 +1925,11 @@ class HistoryService(OwnerDelegator):
                 for item in repaired_records:
                     info = landed_infos.get(id(item)) or {}
                     if info.get("landed") is False:
-                        item["status"] = "待确认"
+                        transition(
+                            item, STATUS_PENDING_CONFIRM,
+                            stage=STAGE_VERIFYING, reason="orphan_landed_verify",
+                            task_id=item.get("record_id") or "",
+                        )
                         item.update(HistoryService._landed_result_fields(info))
                     else:
                         fields = HistoryService._landed_result_fields(info)
@@ -2627,7 +2795,11 @@ class HistoryService(OwnerDelegator):
                 if status not in self._MANUAL_SUCCESS_STATUSES:
                     skipped += 1
                     continue
-                record["status"] = "成功"
+                transition_manual(
+                    record, STATUS_SUCCESS, stage=STAGE_DONE,
+                    reason="manual_success",
+                    task_id=record.get("record_id") or "",
+                )
                 record["manual_success"] = True
                 record["manual_success_at"] = marked_at
                 record["manual_success_from"] = status

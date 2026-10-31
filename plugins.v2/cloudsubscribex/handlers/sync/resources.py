@@ -18,6 +18,11 @@ from ...core import (
     SearchCapability,
 )
 from ...core.services.skip_stats import SkipStatsCollector
+from ...core.state import (
+    STATUS_DOWNLOADING,
+    STATUS_FAILED,
+    STATUS_SUCCESS,
+)
 from ...search.types import (
     CANDIDATE_RESOURCE_TYPES,
     normalize_resource_type,
@@ -422,7 +427,7 @@ class ResourceTransferService(OwnerDelegator):
             history.append(self._build_transfer_history_item(
                 mediainfo=mediainfo,
                 subscribe=subscribe,
-                status="下载中",
+                status=STATUS_DOWNLOADING,
                 share_url=share_url,
                 file_name=entry["file_name"],
                 source_file_name=entry["file_name"],
@@ -881,8 +886,11 @@ class ResourceTransferService(OwnerDelegator):
 
     def _transfer_history_status(self, success: bool, share_url: str) -> str:
         if not success:
-            return "失败"
-        return "下载中" if self._is_offline_url(share_url) else "成功"
+            return STATUS_FAILED
+        return (
+            STATUS_DOWNLOADING if self._is_offline_url(share_url)
+            else STATUS_SUCCESS
+        )
 
     @staticmethod
     def _supported_resource_type(

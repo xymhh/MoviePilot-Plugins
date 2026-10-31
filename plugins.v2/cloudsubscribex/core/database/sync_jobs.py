@@ -8,7 +8,7 @@ from __future__ import annotations
 import time
 from typing import Any, Mapping, Optional
 
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -242,6 +242,40 @@ class SyncJobRepository(DbOper):
         )
         result = db.execute(statement)
         return bool(getattr(result, "rowcount", 0) == 1)
+
+
+    @db_query
+    def has_active_history_job(
+            self,
+            *,
+            history_id: str = "",
+            target_path: str = "",
+            target_name: str = "",
+            now: Optional[int] = None,
+            db: Session = None,
+    ) -> bool:
+        """历史记录是否存在仍在租约内的活动作业（执行态，不含 queued/retry_wait）。"""
+        filters = []
+        if str(history_id or "").strip():
+            filters.append(SyncJob.history_id == str(history_id).strip())
+        if str(target_path or "").strip() and str(target_name or "").strip():
+            filters.append(and_(
+                SyncJob.target_path == str(target_path).strip(),
+                SyncJob.target_name == str(target_name).strip(),
+            ))
+        if not filters:
+            return False
+        timestamp = _now(now)
+        statement = (
+            select(SyncJob.job_id)
+            .where(
+                or_(*filters),
+                SyncJob.state.in_((JOB_TRANSFERRING, JOB_VERIFYING, JOB_FINALIZING)),
+                or_(SyncJob.lease_until.is_(None), SyncJob.lease_until >= timestamp),
+            )
+            .limit(1)
+        )
+        return db.scalar(statement) is not None
 
     @db_update
     def reclaim_expired(

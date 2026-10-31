@@ -12,6 +12,7 @@ from app.schemas.types import MediaType
 
 from ...core import OwnerDelegator
 from ...core.media import list_subscribes_by_tmdb_id
+from ...core.state import STATUS_PROCESSING
 from ...utils import MediaFileParser
 
 
@@ -322,7 +323,7 @@ class PtUpgradeService(OwnerDelegator):
             history_item = self._build_transfer_history_item(
                 mediainfo=mediainfo,
                 subscribe=subscribe,
-                status="处理中",
+                status=STATUS_PROCESSING,
                 share_url=share_url,
                 file_name=target_name,
                 source_file_name=local_path.name,

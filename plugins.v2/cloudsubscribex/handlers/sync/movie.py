@@ -12,6 +12,12 @@ from ...core import OwnerDelegator
 from ...core.failure import apply_failure
 from ...core.media import tmdb_id_of
 from ...core.services.skip_stats import SkipStatsCollector
+from ...core.state import (
+    STAGE_TRANSFERRING,
+    STATUS_DOWNLOADING,
+    STATUS_PROCESSING,
+    transition,
+)
 from ...drive.common import format_size
 
 
@@ -710,9 +716,14 @@ class MovieSyncProcessor(OwnerDelegator):
                                 continue
                             if pending_key:
                                 history_item["finalize_key"] = pending_key
-                                history_item["status"] = (
-                                    "下载中" if self._is_offline_url(share_url)
-                                    else "处理中"
+                                transition(
+                                    history_item,
+                                    STATUS_DOWNLOADING
+                                    if self._is_offline_url(share_url)
+                                    else STATUS_PROCESSING,
+                                    stage=STAGE_TRANSFERRING,
+                                    reason="movie_pending_finalize",
+                                    task_id=history_item.get("record_id") or "",
                                 )
                             # 1.6.48 判重：额外旧版本在转存成功后批量删除
                             if extra_old_versions:

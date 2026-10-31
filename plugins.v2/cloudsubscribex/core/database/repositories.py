@@ -175,6 +175,7 @@ class HistoryRepository(DbOper):
             "group_key": group_key,
             "record_time": str(payload.get("time") or ""),
             "status": str(payload.get("status") or ""),
+            "stage": str(payload.get("stage") or ""),
             "resource_type": cls._resource_type(payload),
             "source": cls._source(payload),
             "task_types": "|" + "|".join(task_types) + "|",
