@@ -269,7 +269,7 @@ class LegacyFileMigrationTest(unittest.TestCase):
         self.assertEqual(
             store.load_scan_state()["cloud_root"], "/媒体"
         )
-        days = read_records(store.ledger_store(), days=2, offset=0, limit=50)
+        days = read_records(store.ledger_store(), days=3650, offset=0, limit=50)
         self.assertEqual(days["total"], 2)
 
         for legacy in [
@@ -292,7 +292,7 @@ class LegacyFileMigrationTest(unittest.TestCase):
         self.addCleanup(second.close)
         second.initialize()
         self.assertEqual(
-            read_records(second.ledger_store(), days=2, limit=50)["total"], 2
+            read_records(second.ledger_store(), days=3650, limit=50)["total"], 2
         )
         self.assertEqual(
             second.runtime_store("tg_monitor").load("state"), {"cursor": 7}

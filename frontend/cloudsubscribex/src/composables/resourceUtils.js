@@ -270,6 +270,14 @@ export function getResourceTabIcon(type) {
 
 export const getResourceTypeIcon = getResourceTabIcon;
 
+// 非搜索渠道的来源枚举：历史/账本里会出现这些值（手动转存、旧数据），
+// 但目录里没有对应渠道，不补显示名就会直接把英文 key 露在界面上。
+const EXTRA_SOURCE_META = {
+  manual: {key: "manual", name: "手动添加", icon: "mdi-pencil", color: "grey"},
+  unknown: {key: "unknown", name: "未知来源", icon: "mdi-help-circle-outline", color: "grey"},
+  quark: {key: "quark", name: "夸克（历史来源）", icon: "mdi-cloud", color: "blue"},
+};
+
 const THEME_COLOR_NAMES = new Set([
   "primary", "secondary", "success", "info", "warning", "error",
 ]);
@@ -332,7 +340,8 @@ export function getResourceTypeRank(type) {
 }
 
 export function getSourceMeta(source) {
-  return displayCatalog.sourceIndex[String(source || "").trim().toLowerCase()] || null;
+  const key = String(source || "").trim().toLowerCase();
+  return displayCatalog.sourceIndex[key] || EXTRA_SOURCE_META[key] || null;
 }
 
 export function getSourceName(source) {
