@@ -635,6 +635,14 @@ class MovieSyncProcessor(OwnerDelegator):
                             rule_score=current_score,
                             upgrade=is_upgrade,
                         )
+                        if history_item.get("status") == "失败":
+                            failure_reason = str(
+                                self._transfer_failure_reason(
+                                    str(matched_file.get("id") or "")
+                                ) or ""
+                            ).strip()
+                            if failure_reason:
+                                apply_failure(history_item, failure_reason)
                         history.append(history_item)
 
                         if success:

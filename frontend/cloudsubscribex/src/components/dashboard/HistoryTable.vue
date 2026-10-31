@@ -467,15 +467,15 @@
                     {{ formatSize(record.file_size) }}
                   </td>
                   <td>
-                    <v-chip :color="statusColor(record.status)" size="x-small" variant="tonal">
-                      {{ record.status }}
+                    <v-chip :color="statusColor(record)" size="x-small" variant="tonal">
+                      {{ record.status_label || record.status }}
                       <v-tooltip
-                        v-if="record.failure_reason"
+                        v-if="record.failure_reason || record.failure_label"
                         activator="parent"
                         location="top"
                         max-width="380"
                       >
-                        {{ record.failure_reason }}
+                        {{ record.failure_reason || record.failure_label }}
                       </v-tooltip>
                     </v-chip>
                   </td>
@@ -644,8 +644,8 @@
                         {{ record.cross_transfer_title }}
                       </v-tooltip>
                     </v-chip>
-                    <v-chip :color="statusColor(record.status)" size="x-small" variant="tonal">
-                      {{ record.status }}
+                    <v-chip :color="statusColor(record)" size="x-small" variant="tonal">
+                      {{ record.status_label || record.status }}
                       <v-tooltip
                         v-if="record.failure_reason"
                         activator="parent"
@@ -797,7 +797,7 @@ const filtersVisible = ref(false);
 const searchVisible = ref(false);
 let lastQuerySignature = "";
 
-const statusOptions = ["处理中", "下载中", "成功", "失败", "跳过"];
+const statusOptions = ["处理中", "下载中", "成功", "失败", "秒传失败", "跳过"];
 const taskTypeOptions = [
   {title: "跨盘", value: "cross_transfer"},
   {title: "洗版", value: "upgrade"},
@@ -1048,10 +1048,14 @@ function playItemId(item) {
   return String(props.embyPlayItems?.[item?.group_key] || "");
 }
 
-function statusColor(status) {
+function statusColor(record) {
+  const status = typeof record === "string" ? record : record?.status;
+  const kind = typeof record === "string" ? "" : record?.failure_kind;
   if (status === "成功") return "success";
   if (status === "跳过") return "warning";
   if (status === "待确认") return "warning";
+  // 秒传未命中不是真失败：单独琥珀色，避免和红色失败混在一起。
+  if (status === "失败" && kind === "checksum_miss") return "orange-lighten-1";
   return ["处理中", "下载中"].includes(status) ? "info" : "error";
 }
 

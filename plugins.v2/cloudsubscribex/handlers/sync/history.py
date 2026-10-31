@@ -29,10 +29,12 @@ from .utils import normalize_season
 from ...core.failure import (
     KIND_FILE_MISSING,
     KIND_SHARE_INVALID,
+    apply_failure,
     clear_failure,
     failure_kind_of,
     failure_label,
     failure_retryable_of,
+    status_label_of,
 )
 from ...core.history import history_group_key
 from ...drive.common import format_size, positive_int
@@ -706,9 +708,14 @@ class HistoryService(OwnerDelegator):
             if re.match(r"^(?:https?|ed2k|magnet):", share_url, re.IGNORECASE)
             else ""
         )
+        status = str(record.get("status") or "").strip()
+        failure_kind = failure_kind_of(record) if status == "失败" else ""
         return {
             "history_group_key": history_group_key(record),
             "display_name": display_name,
+            "status_label": status_label_of(status, failure_kind),
+            "failure_kind": failure_kind,
+            "failure_label": failure_label(failure_kind) if failure_kind else "",
             "display_file_name": file_name,
             "file_extension": extension,
             "source_link": source_link,
@@ -1429,10 +1436,10 @@ class HistoryService(OwnerDelegator):
                     continue
                 item["status"] = status
                 item.pop("finalize_key", None)
-                if reason:
-                    item["failure_reason"] = reason
+                if status == "失败":
+                    apply_failure(item, reason or "转存失败")
                 else:
-                    item.pop("failure_reason", None)
+                    clear_failure(item)
                 if updates and matched_key in updates and updates[matched_key]:
                     for up_key, up_val in updates[matched_key].items():
                         if up_val is not None:
@@ -1741,7 +1748,7 @@ class HistoryService(OwnerDelegator):
                     continue
                 item["status"] = "成功"
                 item.pop("finalize_key", None)
-                item.pop("failure_reason", None)
+                clear_failure(item)
                 repaired_records.append(item)
                 repaired += 1
             # 1.6.52 落盘自检：兜底修复同样过闸，查无实据记「待确认」而非「成功」。
@@ -2624,7 +2631,7 @@ class HistoryService(OwnerDelegator):
                 record["manual_success"] = True
                 record["manual_success_at"] = marked_at
                 record["manual_success_from"] = status
-                record.pop("failure_reason", None)
+                clear_failure(record)
                 record.pop("retrying", None)
                 updated += 1
             if updated:

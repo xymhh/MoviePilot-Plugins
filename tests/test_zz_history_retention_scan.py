@@ -149,6 +149,66 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(len(self.repo.list_all()), 3)
 
 
+class FailureStatusFilterTest(unittest.TestCase):
+    """「秒传失败」= 失败 + checksum_miss，单独可筛，普通「失败」不再混入。"""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.manager = CloudSubscribeDatabaseManager(
+            Path(self._tmp.name) / "cloudsubscribe.db"
+        )
+        self.manager.open()
+        self.manager.init_db()
+        self.addCleanup(self.manager.close)
+        self.repo = HistoryRepository(self.manager)
+        self.repo.replace_all([
+            {
+                "record_id": "a", "status": "失败", "title": "秒传剧集",
+                "file_name": "a.mp4", "time": "2026-10-31 10:00:00",
+                "resource_type": "115", "source": "pansou",
+                "failure_reason": "未命中秒传，已按设置中止（未上传任何数据）",
+            },
+            {
+                "record_id": "b", "status": "失败", "title": "网络剧集",
+                "file_name": "b.mp4", "time": "2026-10-31 10:01:00",
+                "resource_type": "115", "source": "pansou",
+                "failure_reason": "读取分享文件超时",
+            },
+            {
+                "record_id": "c", "status": "成功", "title": "成功剧集",
+                "file_name": "c.mp4", "time": "2026-10-31 10:02:00",
+                "resource_type": "115", "source": "pansou",
+            },
+        ])
+
+    def _titles(self, statuses) -> list:
+        page = self.repo.query_group_page(
+            page=1, page_size=20, statuses=statuses
+        )
+        titles = []
+        for group in page.get("groups") or page.get("items") or []:
+            for record in group.get("records") or [group]:
+                titles.append(record.get("title"))
+        return sorted(titles)
+
+    def test_backfill_sets_failure_kind(self) -> None:
+        repaired = self.repo.repair_failure_kinds()
+        self.assertGreaterEqual(repaired, 2)
+        rows = {row["record_id"]: row for row in self.repo.list_all()}
+        self.assertEqual(rows["a"]["failure_kind"], "checksum_miss")
+        self.assertEqual(rows["b"]["failure_kind"], "network")
+        self.assertNotIn("failure_kind", rows["c"])
+
+    def test_pseudo_status_only_matches_rapid_miss(self) -> None:
+        self.repo.repair_failure_kinds()
+        self.assertEqual(self._titles(["秒传失败"]), ["秒传剧集"])
+
+    def test_plain_failure_excludes_rapid_miss(self) -> None:
+        self.repo.repair_failure_kinds()
+        self.assertEqual(self._titles(["失败"]), ["网络剧集"])
+
+
 class _Owner:
     def __init__(self, path: Path) -> None:
         self._path = path

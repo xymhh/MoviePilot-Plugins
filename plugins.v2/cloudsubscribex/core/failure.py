@@ -107,6 +107,32 @@ def is_permanent(kind: Any) -> bool:
     return str(kind or "").strip() in PERMANENT_KINDS
 
 
+#: 需要单独显示的状态名：失败再细分，避免和通用「失败」混在一起。
+STATUS_LABELS: Dict[str, str] = {
+    KIND_CHECKSUM_MISS: "秒传失败",
+}
+
+#: 需要和历史页状态筛选并列出现的伪状态名（后端按类型过滤）。
+PSEUDO_STATUSES: Tuple[str, ...] = ("秒传失败",)
+
+
+def status_label_of(status: Any, kind: Any) -> str:
+    """状态展示名：``失败`` 按失败类型细分（如「秒传失败」）。"""
+    text = str(status or "").strip()
+    if text != "失败":
+        return text
+    return STATUS_LABELS.get(str(kind or "").strip()) or text
+
+
+def kind_of_pseudo_status(status: Any) -> str:
+    """伪状态名反查失败类型（「秒传失败」→ ``checksum_miss``），未知返回空串。"""
+    text = str(status or "").strip()
+    for kind, label in STATUS_LABELS.items():
+        if label == text:
+            return kind
+    return ""
+
+
 def failure_label(kind: Any) -> str:
     """类型的中文展示名，未知类型返回「未分类失败」。"""
     key = str(kind or "").strip()

@@ -157,10 +157,15 @@ class CloudSubscribeDataStore:
             self.manager.init_db()
             self.manager.update_db()
             repaired = self.repositories.history.repair_group_keys()
+            repaired_kinds = self.repositories.history.repair_failure_kinds()
             self._migrate_legacy_sha1_cache()
             self._migrate_legacy_json_state()
             if repaired:
                 logger.info(f"CloudSubscribe 历史媒体分组已修复：{repaired} 条")
+            if repaired_kinds:
+                logger.info(
+                    f"CloudSubscribe 历史失败类型已回填：{repaired_kinds} 条"
+                )
             self._initialized = True
 
     def _migrate_legacy_sha1_cache(self) -> None:

@@ -804,6 +804,19 @@ class SyncHandler:
             f"{key} 分享转存检测到风控，冷却 {self._transfer_risk_cooldown} 秒"
         )
 
+    def _remember_transfer_failure(self, file_item: Dict[str, Any], reason: str) -> None:
+        """记录单个文件的转存失败原因，供历史记录区分「秒传失败」等类型。"""
+        text = str(reason or "").strip()
+        file_id = str((file_item or {}).get("id") or "").strip()
+        if not text or not file_id:
+            return
+        cache = self.__dict__.setdefault("_transfer_failure_reasons", {})
+        cache[file_id] = text
+
+    def _transfer_failure_reason(self, file_id: str) -> str:
+        cache = self.__dict__.get("_transfer_failure_reasons") or {}
+        return str(cache.pop(str(file_id or "").strip(), "") or "")
+
     def _transfer_episode_items(
             self,
             matched_items: List[Dict[str, Any]],
@@ -1254,6 +1267,9 @@ class SyncHandler:
                 "file_id": file_id,
                 "success": success,
                 "pending_key": pending_key,
+                "failure_reason": (
+                    "" if success else self._transfer_failure_reason(file_id)
+                ),
             })
         return results
 
@@ -3352,6 +3368,14 @@ class SyncHandler:
                     if result_size > 0:
                         file_item["size"] = result_size
                 if not success:
+                    failure_reason = str(
+                        completed_task.get("error")
+                        or completed_task.get("message")
+                        or ""
+                    ).strip()
+                    if str(completed_task.get("abort_reason") or "") == "rapid_miss":
+                        failure_reason = failure_reason or "未命中秒传"
+                    self._remember_transfer_failure(file_item, failure_reason)
                     if (
                             should_stop()
                             or completed_task.get("status") in {"canceled", "stopping"}

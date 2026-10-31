@@ -522,7 +522,7 @@ class EpisodeDedupSkipStatusContractTests(unittest.TestCase):
     def test_frontend_supports_skipped_status(self):
         """19. 前端状态筛选/配色/可删除判定都认「跳过」。"""
         table = self._read("frontend/cloudsubscribex/src/components/dashboard/HistoryTable.vue")
-        self.assertIn('"处理中", "下载中", "成功", "失败", "跳过"', table)
+        self.assertIn('"处理中", "下载中", "成功", "失败", "秒传失败", "跳过"', table)
         self.assertIn('status === "跳过"', table)
         self.assertIn('["成功", "失败", "跳过"]', table)
         app_page = self._read("frontend/cloudsubscribex/src/components/AppPage.vue")

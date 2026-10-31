@@ -10,7 +10,7 @@ from collections import defaultdict
 from threading import RLock
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import Integer, case, cast, delete, func, or_, select
+from sqlalchemy import Integer, and_, case, cast, delete, func, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,11 @@ from .models import (
     SourceMissCache,
 )
 from .sync_jobs import SyncJobRepository
+from ..failure import (
+    KIND_CHECKSUM_MISS,
+    classify_failure,
+    kind_of_pseudo_status,
+)
 from ..history import history_group_key
 from ...drive.common import positive_int
 from ...search.types import normalize_resource_type, resource_type_from_url
@@ -242,6 +247,27 @@ class HistoryRepository(DbOper):
             repaired += 1
         return repaired
 
+    @db_update
+    def repair_failure_kinds(self, db: Session = None) -> int:
+        """幂等回填失败记录的类型，供历史页按类型单独筛选。"""
+        repaired = 0
+        for row in db.scalars(select(HistoryRecord)).all():
+            payload = copy.deepcopy(row.payload or {})
+            if str(payload.get("status") or "") != "失败":
+                continue
+            if str(payload.get("failure_kind") or "").strip():
+                continue
+            kind = classify_failure(
+                payload.get("failure_reason") or payload.get("error")
+            )
+            payload["failure_kind"] = kind
+            payload.setdefault("failure_retryable", kind not in {
+                "share_invalid", "file_missing"
+            })
+            row.update(db, {"payload": payload})
+            repaired += 1
+        return repaired
+
     @db_query
     def list_all(self, db: Session = None) -> List[Dict[str, Any]]:
         rows = db.scalars(
@@ -285,9 +311,17 @@ class HistoryRepository(DbOper):
         normalized_sources = {
             str(value).strip().lower() for value in sources if str(value).strip()
         }
-        normalized_statuses = {
-            str(value).strip().lower() for value in statuses if str(value).strip()
-        }
+        plain_statuses = set()
+        wanted_kinds = set()
+        for value in statuses or ():
+            text = str(value).strip()
+            if not text:
+                continue
+            kind = kind_of_pseudo_status(text)
+            if kind:
+                wanted_kinds.add(kind)
+            else:
+                plain_statuses.add(text.lower())
         normalized_task_types = {
             str(value).strip().lower() for value in task_types if str(value).strip()
         }
@@ -295,8 +329,30 @@ class HistoryRepository(DbOper):
             filters.append(HistoryRecord.resource_type.in_(normalized_resource_types))
         if normalized_sources:
             filters.append(HistoryRecord.source.in_(normalized_sources))
-        if normalized_statuses:
-            filters.append(func.lower(HistoryRecord.status).in_(normalized_statuses))
+        failure_kind_expr = func.json_extract(
+            HistoryRecord.payload, "$.failure_kind"
+        )
+        pseudo_kinds = {KIND_CHECKSUM_MISS}
+        if plain_statuses:
+            if "失败" in plain_statuses and pseudo_kinds:
+                # 「失败」不含细分的伪状态（如「秒传失败」），它们各有独立选项。
+                plain_statuses.discard("失败")
+                filters.append(and_(
+                    func.lower(HistoryRecord.status) == "失败",
+                    or_(
+                        failure_kind_expr.is_(None),
+                        failure_kind_expr.not_in(sorted(pseudo_kinds)),
+                    ),
+                ))
+            if plain_statuses:
+                filters.append(
+                    func.lower(HistoryRecord.status).in_(plain_statuses)
+                )
+        for kind in sorted(wanted_kinds):
+            filters.append(and_(
+                func.lower(HistoryRecord.status) == "失败",
+                failure_kind_expr == kind,
+            ))
         if normalized_task_types:
             filters.append(or_(*[
                 HistoryRecord.task_types.like(f"%|{value}|%")

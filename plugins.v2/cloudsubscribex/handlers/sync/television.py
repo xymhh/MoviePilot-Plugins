@@ -924,6 +924,12 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 rule_score=current_score,
                                 upgrade=is_upgrade,
                             )
+                            if history_item.get("status") == "失败":
+                                failure_reason = str(
+                                    transfer_result.get("failure_reason") or ""
+                                ).strip()
+                                if failure_reason:
+                                    apply_failure(history_item, failure_reason)
                             history.append(history_item)
 
                             landed_info = verify_map.get(str(index))
