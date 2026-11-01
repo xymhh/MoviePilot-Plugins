@@ -359,36 +359,54 @@ class PageApi(OwnerDelegator):
         try:
             from app.db import SessionFactory
             from app.db.models.subscribe import Subscribe
-            from app.plugins.cloudsubscribex.core.database.models import HistoryRecord
             with SessionFactory() as db:
                 subscribes = list(db.query(Subscribe).all())
-                # 查出插件转存成功的历史记录，确保刚转存的集数立即被计为已入库
-                history_rows = (
-                    db.query(HistoryRecord)
-                    .filter(HistoryRecord.status.in_(["成功", "完成"]))
-                    .all()
-                )
-                for hr in history_rows:
-                    if hr.tmdb_id:
-                        history_success_tmdb.add(str(hr.tmdb_id))
-                    ep = hr.episode
-                    if not ep or int(ep) <= 0:
-                        continue
-                    int_ep = int(ep)
-                    if hr.subscribe_id:
-                        history_success_map.setdefault(f"sub:{hr.subscribe_id}", set()).add(int_ep)
-                    if hr.tmdb_id:
-                        history_success_map.setdefault(f"tmdb:{hr.tmdb_id}:{hr.season or 1}", set()).add(int_ep)
-                    if hr.title:
-                        history_success_map.setdefault(f"title:{hr.title}:{hr.season or 1}", set()).add(int_ep)
         except Exception as err:
-            logger.warning(f"通过 SessionFactory 读取订阅与转存历史失败: {err}")
+            logger.warning(f"通过 SessionFactory 读取订阅失败: {err}")
             try:
                 from app.db.subscribe_oper import SubscribeOper
                 subscribes = SubscribeOper().list() or []
             except Exception as err2:
                 logger.warning(f"回退读取订阅列表仍失败: {err2}")
                 return []
+
+        # 转存历史存在插件自己的 SQLite（history_records 表），
+        # 用 MoviePilot 的 SessionFactory 去查只会静默返回空 —— 必须走插件数据仓库。
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            history_rows = store.repositories.history.list_all() or []
+        except Exception as err:
+            logger.warning(f"读取插件转存历史失败，已入库将只统计订阅 note: {err}")
+            history_rows = []
+        if not history_rows:
+            # 空历史会让「已入库」永远等于订阅 note，属于必须能被发现的口径故障
+            logger.warning("插件转存历史为空，已入库将只统计订阅 note")
+
+        for rec in history_rows:
+            if not isinstance(rec, dict):
+                continue
+            if str(rec.get("status") or "") not in ("成功", "完成"):
+                continue
+            hr_tmdb = str(rec.get("tmdb_id") or "").strip()
+            if hr_tmdb:
+                history_success_tmdb.add(hr_tmdb)
+            ep = rec.get("episode")
+            try:
+                int_ep = int(ep)
+            except (TypeError, ValueError):
+                continue
+            if int_ep <= 0:
+                continue
+            hr_season = rec.get("season") or 1
+            hr_sub = rec.get("subscribe_id")
+            hr_title = str(rec.get("title") or "").strip()
+            if hr_sub:
+                history_success_map.setdefault(f"sub:{hr_sub}", set()).add(int_ep)
+            if hr_tmdb:
+                history_success_map.setdefault(f"tmdb:{hr_tmdb}:{hr_season}", set()).add(int_ep)
+            if hr_title:
+                history_success_map.setdefault(f"title:{hr_title}:{hr_season}", set()).add(int_ep)
 
         active_tasks = []
         owner = getattr(self, "_owner", None)
