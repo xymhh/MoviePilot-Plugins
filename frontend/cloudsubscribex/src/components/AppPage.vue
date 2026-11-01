@@ -119,7 +119,8 @@
       <div class="workspace-window">
         <div v-show="mainTab === 'hub'" class="workspace-pane hub-pane">
           <MediaHub
-            :items="historyGroups"
+            :items="subscribesProgress.length ? subscribesProgress : historyGroups"
+            :is-subscribe-mode="Boolean(subscribesProgress.length)"
             :loading="loading"
             :retrying-key="retryingHistoryKey"
             @refresh="loadPage"
@@ -449,6 +450,7 @@ function notify(text, type = "success") {
 
 const {
   historyGroups,
+  subscribesProgress,
   historyPage,
   historyStats,
   embyPlayItems,

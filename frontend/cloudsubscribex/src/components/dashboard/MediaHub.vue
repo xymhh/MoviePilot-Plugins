@@ -1,12 +1,18 @@
 <template>
   <div class="media-hub-root">
-    <!-- 顶部工具栏：快速搜索 + 状态筛选 -->
+    <!-- 顶部工具栏：快速搜索 + 订阅状态筛选 -->
     <div class="hub-toolbar d-flex flex-wrap align-center justify-space-between ga-2 mb-3">
       <div class="hub-filter-chips d-flex align-center ga-1 flex-wrap">
         <v-chip-group v-model="filterStatus" mandatory selected-class="text-primary font-weight-bold">
-          <v-chip value="all" size="small" variant="tonal">全部 ({{ filteredGroups.length }})</v-chip>
-          <v-chip value="complete" size="small" variant="tonal" color="success">全部成功</v-chip>
-          <v-chip value="has_issue" size="small" variant="tonal" color="warning">包含未转/跳过</v-chip>
+          <v-chip value="all" size="small" variant="tonal">全部订阅 ({{ filteredGroups.length }})</v-chip>
+          <v-chip value="missing" size="small" variant="tonal" color="warning">
+            <v-icon icon="mdi-alert-circle-outline" size="14" class="mr-1" />
+            有缺集待补 ({{ missingCountTotal }})
+          </v-chip>
+          <v-chip value="complete" size="small" variant="tonal" color="success">
+            <v-icon icon="mdi-check-circle-outline" size="14" class="mr-1" />
+            已全部入库
+          </v-chip>
         </v-chip-group>
       </div>
 
@@ -25,7 +31,7 @@
           variant="tonal"
           size="small"
           color="primary"
-          title="刷新媒体列表"
+          title="刷新订阅进度"
           :loading="loading"
           @click="$emit('refresh')" />
       </div>
@@ -34,21 +40,21 @@
     <!-- 加载中状态 -->
     <div v-if="loading && (!items || !items.length)" class="d-flex flex-column align-center justify-center py-12">
       <v-progress-circular indeterminate color="primary" size="40" />
-      <span class="text-caption text-medium-emphasis mt-2">正在加载追更工作台...</span>
+      <span class="text-caption text-medium-emphasis mt-2">正在从 MoviePilot 同步追更进度大屏...</span>
     </div>
 
     <!-- 空数据提示 -->
     <div v-else-if="!displayedGroups.length" class="empty-state text-center py-12">
       <v-icon icon="mdi-filmstrip-off" size="56" color="medium-emphasis" class="mb-2" />
-      <div class="text-body-1 font-weight-medium">暂无匹配的追更条目</div>
-      <div class="text-caption text-medium-emphasis mt-1">可以通过右上角「手动添加」或等待自动同步搜源</div>
+      <div class="text-body-1 font-weight-medium">暂无匹配的追更订阅</div>
+      <div class="text-caption text-medium-emphasis mt-1">请先在 MoviePilot 添加订阅，或通过右上角「手动添加」</div>
     </div>
 
-    <!-- 媒体卡片网格 -->
+    <!-- 订阅进度卡片网格 -->
     <div v-else class="media-grid">
       <v-card
         v-for="group in displayedGroups"
-        :key="group.group_key || group.title"
+        :key="group.subscribe_id || group.group_key || group.title"
         class="media-card"
         variant="outlined"
         hover
@@ -72,58 +78,73 @@
               </template>
               <template #error>
                 <div class="poster-badge-art rounded">
-                  <span class="art-letter">{{ getInitial(group.title) }}</span>
+                  <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
                 </div>
               </template>
             </v-img>
             <div v-else class="poster-badge-art rounded">
-              <span class="art-letter">{{ getInitial(group.title) }}</span>
+              <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
             </div>
             <v-chip size="x-small" color="primary" variant="flat" class="poster-type-badge">
-              {{ group.type || "剧集" }}
+              {{ group.type || (group.season ? `S${String(group.season).padStart(2, '0')}` : "订阅") }}
             </v-chip>
           </div>
 
           <!-- 内容区 -->
           <div class="card-content">
-            <div class="card-header">
-              <h3 class="card-title text-truncate" :title="group.title">
-                {{ group.title }}
-              </h3>
-              <span v-if="group.year" class="card-year text-caption text-medium-emphasis">
-                ({{ group.year }})
-              </span>
+            <div class="card-header d-flex align-center justify-space-between min-w-0">
+              <div class="d-flex align-baseline ga-1 min-w-0">
+                <h3 class="card-title text-truncate" :title="group.title || group.name">
+                  {{ group.title || group.name }}
+                </h3>
+                <span v-if="group.year" class="card-year text-caption text-medium-emphasis">
+                  ({{ group.year }})
+                </span>
+              </div>
+              <v-chip v-if="group.season" size="x-small" color="primary" variant="tonal" class="font-weight-bold ml-1 flex-shrink-0">
+                第 {{ group.season }} 季
+              </v-chip>
             </div>
 
-            <!-- 进度条与集数 -->
+            <!-- 进度统计与缺失提示 -->
             <div class="progress-section my-2">
               <div class="d-flex align-center justify-space-between text-caption mb-1">
                 <span class="font-weight-medium">
                   {{ getStatusText(group) }}
                 </span>
-                <span class="text-medium-emphasis">
-                  {{ group.records ? group.records.length : 0 }} 集
+                <span class="text-caption font-weight-bold" :class="hasMissing(group) ? 'text-warning' : 'text-success'">
+                  {{ getMissingLabel(group) }}
                 </span>
               </div>
-              <v-progress-linear
-                :model-value="calcProgress(group)"
-                :color="getProgressColor(group)"
-                height="6"
-                rounded />
+              <!-- 视觉进度条 -->
+              <div class="custom-progress-bar rounded">
+                <div
+                  class="progress-fill progress-fill-success"
+                  :style="{ width: `${calcLibraryPct(group)}%` }"
+                  :title="`已入库: ${group.library_count || (group.library_episodes || []).length} 集`" />
+                <div
+                  v-if="calcTransferringPct(group) > 0"
+                  class="progress-fill progress-fill-warning"
+                  :style="{ width: `${calcTransferringPct(group)}%` }"
+                  :title="`正在转存中: ${(group.transferring_episodes || []).length} 集`" />
+              </div>
             </div>
 
-            <!-- 元数据胶囊 -->
+            <!-- 双引擎来源标签与状态 -->
             <div class="card-chips d-flex align-center ga-1 flex-wrap">
+              <v-chip size="x-small" variant="tonal" color="info" prepend-icon="mdi-radar">
+                频道雷达+搜源
+              </v-chip>
               <v-chip
-                v-for="rtype in (group.resource_types || []).slice(0, 2)"
-                :key="rtype"
+                v-if="hasMissing(group) && group.missing_episodes && group.missing_episodes.length"
                 size="x-small"
                 variant="tonal"
-                :color="resourceTypeColor(rtype)">
-                {{ resourceTypeLabel(rtype) }}
+                color="warning"
+                class="font-weight-medium">
+                缺 {{ formatMissingRange(group.missing_episodes) }}
               </v-chip>
-              <v-chip v-if="group.total_size" size="x-small" variant="tonal" color="secondary">
-                {{ formatSize(group.total_size) }}
+              <v-chip v-else-if="!hasMissing(group)" size="x-small" variant="tonal" color="success">
+                全集就绪
               </v-chip>
             </div>
 
@@ -136,9 +157,9 @@
                 size="x-small"
                 variant="tonal"
                 color="primary"
-                prepend-icon="mdi-card-text-outline"
+                prepend-icon="mdi-format-list-numbered"
                 @click.stop="openGroupDrawer(group)">
-                明细
+                分集矩阵
               </v-btn>
             </div>
           </div>
@@ -146,7 +167,7 @@
       </v-card>
     </div>
 
-    <!-- 单剧集明细抽屉 -->
+    <!-- 单剧集明细抽屉 / 选集矩阵 -->
     <MediaDrawer
       v-model="drawerVisible"
       :group="selectedGroup"
@@ -163,6 +184,7 @@ import MediaDrawer from "./MediaDrawer.vue"
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
+  isSubscribeMode: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   retryingKey: { type: String, default: "" },
 })
@@ -178,27 +200,25 @@ const filteredGroups = computed(() => {
   return props.items || []
 })
 
+const missingCountTotal = computed(() => {
+  return (props.items || []).filter((g) => hasMissing(g)).length
+})
+
 const displayedGroups = computed(() => {
   let list = filteredGroups.value
 
   // 状态筛选
   if (filterStatus.value === "complete") {
-    list = list.filter((g) => {
-      const recs = g.records || []
-      return recs.length > 0 && recs.every((r) => !r.status || r.status === "成功" || r.status === "完成")
-    })
-  } else if (filterStatus.value === "has_issue") {
-    list = list.filter((g) => {
-      const recs = g.records || []
-      return recs.some((r) => r.status && r.status !== "成功" && r.status !== "完成")
-    })
+    list = list.filter((g) => !hasMissing(g))
+  } else if (filterStatus.value === "missing") {
+    list = list.filter((g) => hasMissing(g))
   }
 
   // 片名模糊搜索
   const kw = searchKeyword.value.trim().toLowerCase()
   if (kw) {
     list = list.filter((g) => {
-      const title = String(g.title || "").toLowerCase()
+      const title = String(g.title || g.name || "").toLowerCase()
       const year = String(g.year || "")
       return title.includes(kw) || year.includes(kw)
     })
@@ -210,6 +230,66 @@ const displayedGroups = computed(() => {
 function openGroupDrawer(group) {
   selectedGroup.value = group
   drawerVisible.value = true
+}
+
+function hasMissing(group) {
+  if (group.missing_count !== undefined) {
+    return Number(group.missing_count) > 0
+  }
+  const recs = group.records || []
+  return recs.some((r) => r.status && r.status !== "成功" && r.status !== "完成")
+}
+
+function getMissingLabel(group) {
+  if (group.total_episodes !== undefined) {
+    const missing = Number(group.missing_count || 0)
+    return missing > 0 ? `待补齐 ${missing} 集` : "已齐"
+  }
+  return hasMissing(group) ? "有待补/跳过集" : "已全集转存"
+}
+
+function getStatusText(group) {
+  if (group.total_episodes !== undefined && group.total_episodes > 0) {
+    const libCount = group.library_count !== undefined ? group.library_count : (group.library_episodes || []).length
+    return `已入库 ${libCount} / 全 ${group.total_episodes} 集`
+  }
+  const recs = group.records || []
+  const success = recs.filter((r) => !r.status || r.status === "成功" || r.status === "完成").length
+  return `已转存 ${success} 集`
+}
+
+function calcLibraryPct(group) {
+  const total = Number(group.total_episodes || 0)
+  if (total > 0) {
+    const libCount = Number(group.library_count !== undefined ? group.library_count : (group.library_episodes || []).length)
+    return Math.min(100, Math.round((libCount / total) * 100))
+  }
+  const recs = group.records || []
+  if (!recs.length) return 0
+  const success = recs.filter((r) => !r.status || r.status === "成功" || r.status === "完成").length
+  return Math.round((success / recs.length) * 100)
+}
+
+function calcTransferringPct(group) {
+  const total = Number(group.total_episodes || 0)
+  if (total > 0 && group.transferring_episodes && group.transferring_episodes.length) {
+    return Math.min(100, Math.round((group.transferring_episodes.length / total) * 100))
+  }
+  return 0
+}
+
+function formatMissingRange(episodes) {
+  if (!episodes || !episodes.length) return ""
+  if (episodes.length === 1) return `E${episodes[0]}`
+  if (episodes.length <= 3) return episodes.map((e) => `E${e}`).join(",")
+  return `E${episodes[0]}-E${episodes[episodes.length - 1]}`
+}
+
+function getLastUpdateTime(group) {
+  if (group.last_updated_at) return `更新于 ${group.last_updated_at}`
+  const recs = group.records || []
+  if (!recs.length) return ""
+  return recs[0]?.time ? `更新于 ${recs[0].time}` : ""
 }
 
 function getCoverUrl(group) {
@@ -228,12 +308,10 @@ function getCoverUrl(group) {
   if (str.startsWith("/api/") || str.startsWith("data:") || str.startsWith("blob:")) {
     return str
   }
-  // 命中相对 TMDB 路径，自动拼接为完整 TMDB 并走 MP 图片代理
   if (str.startsWith("/") && !str.startsWith("//")) {
     const full = `https://image.tmdb.org/t/p/w500${str}`
     return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(full)}`
   }
-  // 命中直连 TMDB 域名，自动套用 MP 图片代理防国内网络阻断与防盗链
   if (str.includes("image.tmdb.org") || str.includes("themoviedb.org")) {
     return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(str)}`
   }
@@ -243,65 +321,6 @@ function getCoverUrl(group) {
 function getInitial(title) {
   const clean = String(title || "").trim().replace(/^[^\w\u4e00-\u9fa5]+/, "")
   return clean ? clean.slice(0, 1) : "片"
-}
-
-function calcProgress(group) {
-  const recs = group.records || []
-  if (!recs.length) return 0
-  const success = recs.filter((r) => !r.status || r.status === "成功" || r.status === "完成").length
-  return Math.round((success / recs.length) * 100)
-}
-
-function getProgressColor(group) {
-  const p = calcProgress(group)
-  if (p === 100) return "success"
-  const hasError = (group.records || []).some((r) => r.status && r.status.includes("失败"))
-  return hasError ? "error" : "primary"
-}
-
-function getStatusText(group) {
-  const recs = group.records || []
-  const success = recs.filter((r) => !r.status || r.status === "成功" || r.status === "完成").length
-  if (success === recs.length && recs.length > 0) return "已转存全部"
-  return `已转 ${success} / ${recs.length}`
-}
-
-function getLastUpdateTime(group) {
-  const recs = group.records || []
-  if (!recs.length) return ""
-  return recs[0]?.time ? `更新于 ${recs[0].time}` : ""
-}
-
-function formatSize(bytes) {
-  let value = Number(bytes || 0)
-  if (!value) return "-"
-  for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
-    if (value < 1024 || unit === "TB") return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`
-    value /= 1024
-  }
-  return "-"
-}
-
-function resourceTypeColor(type) {
-  const map = {
-    "115": "#2670e8",
-    quark: "#15b886",
-    alipan: "#ff6a00",
-    tianyi: "#e60012",
-    p123: "#6366f1",
-  }
-  return map[String(type).toLowerCase()] || "primary"
-}
-
-function resourceTypeLabel(type) {
-  const map = {
-    "115": "115",
-    quark: "夸克",
-    alipan: "阿里",
-    tianyi: "天翼",
-    p123: "123",
-  }
-  return map[String(type).toLowerCase()] || type
 }
 </script>
 
@@ -322,7 +341,7 @@ function resourceTypeLabel(type) {
 
 .media-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
   gap: 16px;
   overflow-y: auto;
 }
@@ -368,15 +387,6 @@ function resourceTypeLabel(type) {
   height: 100% !important;
 }
 
-.poster-placeholder {
-  width: 80px;
-  height: 116px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(var(--v-theme-surface-variant), 0.5);
-}
-
 .poster-badge-art {
   width: 80px;
   height: 116px;
@@ -411,20 +421,44 @@ function resourceTypeLabel(type) {
 }
 
 .card-header {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
+  min-width: 0;
 }
 
 .card-title {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: 0.96rem;
   font-weight: 600;
   line-height: 1.3;
 }
 
 .card-year {
   flex-shrink: 0;
+}
+
+/* 自定义三色进度条 */
+.custom-progress-bar {
+  position: relative;
+  display: flex;
+  height: 6px;
+  background: rgba(var(--v-theme-on-surface), 0.12);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.progress-fill-success {
+  background: rgb(var(--v-theme-success));
+}
+
+.progress-fill-warning {
+  background: rgb(var(--v-theme-warning));
+}
+
+.min-w-0 {
+  min-width: 0;
 }
 
 @media (max-width: 600px) {

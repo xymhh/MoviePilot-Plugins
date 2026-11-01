@@ -280,8 +280,104 @@ class PageApi(OwnerDelegator):
                     ),
                 },
                 "emby_play_items": self._history_emby_play_items(page_history),
+                "subscribes_progress": self._build_subscribes_progress(),
             },
         }
+
+    def api_vue_subscribes_progress(self) -> dict:
+        return {
+            "success": True,
+            "data": self._build_subscribes_progress(),
+        }
+
+    def _build_subscribes_progress(self) -> list[dict[str, Any]]:
+        """构建以 MoviePilot 订阅为核心的追更进度大屏数据。"""
+        try:
+            from app.db.subscribe_oper import SubscribeOper
+            subscribes = SubscribeOper().list() or []
+        except Exception as err:
+            logger.debug(f"读取订阅列表失败: {err}")
+            return []
+
+        active_tasks = []
+        owner = getattr(self, "_owner", None)
+        if owner and hasattr(owner, "_runtime_service"):
+            try:
+                active_tasks = owner._runtime_service.get_tasks() or []
+            except Exception:
+                pass
+
+        progress_list = []
+        for sub in subscribes:
+            try:
+                sub_id = int(getattr(sub, "id", 0) or 0)
+                name = str(getattr(sub, "name", "") or "未知剧集")
+                year = str(getattr(sub, "year", "") or "")
+                season = getattr(sub, "season", None)
+                if season is not None:
+                    try:
+                        season = int(season)
+                    except (ValueError, TypeError):
+                        season = None
+
+                total_episodes = int(getattr(sub, "total_episode", 0) or 0)
+                lack_episode = int(getattr(sub, "lack_episode", 0) or 0)
+                raw_note = getattr(sub, "note", []) or []
+                if isinstance(raw_note, str):
+                    try:
+                        raw_note = [int(x.strip()) for x in raw_note.split(",") if x.strip().isdigit()]
+                    except Exception:
+                        raw_note = []
+                library_episodes = sorted({int(x) for x in raw_note if str(x).isdigit() and int(x) > 0})
+
+                tmdb_id = getattr(sub, "tmdbid", None) or getattr(sub, "tmdb_id", None)
+                state = str(getattr(sub, "state", "R") or "R")
+                poster = str(getattr(sub, "poster", "") or "")
+                poster_url = _platform_image_url(poster, "w500") if poster else ""
+
+                transferring = []
+                for t in active_tasks:
+                    if int(t.get("subscribe_id") or 0) == sub_id:
+                        ep = t.get("episode")
+                        if ep and int(ep) > 0:
+                            transferring.append(int(ep))
+                transferring_episodes = sorted(set(transferring))
+
+                if total_episodes > 0:
+                    missing_episodes = [
+                        i for i in range(1, total_episodes + 1)
+                        if i not in library_episodes and i not in transferring_episodes
+                    ]
+                else:
+                    missing_episodes = []
+
+                progress_list.append({
+                    "subscribe_id": sub_id,
+                    "name": name,
+                    "title": name,
+                    "year": year,
+                    "season": season,
+                    "type": "电视剧" if season is not None else "电影",
+                    "total_episodes": total_episodes,
+                    "library_episodes": library_episodes,
+                    "library_count": len(library_episodes),
+                    "transferring_episodes": transferring_episodes,
+                    "missing_episodes": missing_episodes,
+                    "missing_count": len(missing_episodes) if total_episodes > 0 else lack_episode,
+                    "tmdb_id": tmdb_id,
+                    "state": state,
+                    "poster": poster,
+                    "poster_url": poster_url,
+                })
+            except Exception as err:
+                logger.debug(f"处理订阅条目追更进度失败: {err}")
+                continue
+
+        progress_list.sort(key=lambda x: (
+            0 if (x["missing_count"] > 0 and x["state"] != "S") else 1,
+            -x["subscribe_id"],
+        ))
+        return progress_list
 
     def api_vue_history_summary(self) -> dict:
         today = datetime.datetime.now(

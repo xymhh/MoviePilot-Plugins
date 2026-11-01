@@ -3,6 +3,7 @@ import {applyDisplayCatalog} from "./resourceUtils";
 
 export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
   const historyGroups = ref([]);
+  const subscribesProgress = ref([]);
   const embyPlayItems = ref({});
   const loading = ref(false);
   const historyPage = reactive({
@@ -97,6 +98,7 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       applyDisplayCatalog(data);
       const pageData = data.history_page || {};
       historyGroups.value = Array.isArray(data.history_groups) ? data.history_groups : [];
+      subscribesProgress.value = Array.isArray(data.subscribes_progress) ? data.subscribes_progress : [];
       embyPlayItems.value = data.emby_play_items || {};
       Object.assign(historyPage, {
         page: Math.max(1, Number(pageData.page || 1)),
@@ -225,6 +227,7 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
 
   return {
     historyGroups,
+    subscribesProgress,
     historyPage,
     historyStats,
     embyPlayItems,
