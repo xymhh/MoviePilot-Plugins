@@ -267,9 +267,29 @@ function calcTransferringPct(group) {
 
 function formatMissingRange(episodes) {
   if (!episodes || !episodes.length) return ""
-  if (episodes.length === 1) return `E${episodes[0]}`
-  if (episodes.length <= 3) return episodes.map((e) => `E${e}`).join(",")
-  return `E${episodes[0]}-E${episodes[episodes.length - 1]}`
+  // 缺集往往不连续（如 93-96 与 98-110），必须按连续段拆开，不能首尾一拉了之
+  const nums = [...new Set(episodes.map(Number).filter((n) => Number.isFinite(n) && n > 0))].sort(
+    (a, b) => a - b,
+  )
+  if (!nums.length) return ""
+
+  const ranges = []
+  let start = nums[0]
+  let prev = nums[0]
+  for (let i = 1; i < nums.length; i += 1) {
+    const n = nums[i]
+    if (n === prev + 1) {
+      prev = n
+      continue
+    }
+    ranges.push(start === prev ? `E${start}` : `E${start}-E${prev}`)
+    start = n
+    prev = n
+  }
+  ranges.push(start === prev ? `E${start}` : `E${start}-E${prev}`)
+
+  if (ranges.length <= 3) return ranges.join(",")
+  return `${ranges.slice(0, 3).join(",")} 等 ${ranges.length} 段`
 }
 
 function getLastUpdateTime(group) {
