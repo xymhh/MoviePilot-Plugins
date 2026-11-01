@@ -1,35 +1,33 @@
 <template>
-  <v-navigation-drawer
+  <v-dialog
     v-model="visible"
-    location="right"
-    temporary
-    width="680"
-    class="media-drawer"
-    scrim="rgba(0,0,0,0.4)">
-    <div v-if="group" class="drawer-container">
+    max-width="760"
+    scrollable
+    class="media-detail-dialog">
+    <v-card v-if="group" class="rounded-lg elevation-8 overflow-hidden">
       <!-- 头部：海报 + 基础元信息 + 关闭按钮 -->
-      <div class="drawer-header">
+      <v-card-title class="drawer-header pa-4 bg-surface-variant d-flex align-start ga-3">
         <div class="drawer-cover">
           <v-img
             v-if="coverUrl"
             :src="coverUrl"
             aspect-ratio="2/3"
             cover
-            class="rounded-lg elevation-2 cover-img">
+            class="rounded elevation-2 cover-img">
             <template #placeholder>
-              <div class="d-flex align-center justify-center fill-height bg-surface-variant">
+              <div class="d-flex align-center justify-center fill-height bg-surface">
                 <v-icon icon="mdi-filmstrip" color="medium-emphasis" />
               </div>
             </template>
           </v-img>
-          <div v-else class="cover-placeholder rounded-lg elevation-2">
+          <div v-else class="cover-placeholder rounded elevation-2">
             <v-icon icon="mdi-filmstrip" size="32" color="medium-emphasis" />
           </div>
         </div>
 
-        <div class="drawer-title-box">
+        <div class="drawer-title-box flex-grow-1 min-w-0">
           <div class="d-flex align-center justify-space-between">
-            <h2 class="text-h6 font-weight-bold drawer-title" :title="group.title">
+            <h2 class="text-h6 font-weight-bold drawer-title text-truncate" :title="group.title">
               {{ group.title }}
               <span v-if="group.year" class="text-medium-emphasis text-body-1">({{ group.year }})</span>
             </h2>
@@ -41,7 +39,7 @@
               {{ group.type || "电视剧" }}
             </v-chip>
             <v-chip size="x-small" variant="tonal" color="info">
-              共 {{ group.records ? group.records.length : 0 }} 条记录
+              共 {{ group.records ? group.records.length : 0 }} 集
             </v-chip>
             <v-chip v-if="group.total_size" size="x-small" variant="tonal" color="secondary">
               {{ formatSize(group.total_size) }}
@@ -79,20 +77,20 @@
             </v-btn>
           </div>
         </div>
-      </div>
+      </v-card-title>
 
-      <v-divider class="my-3" />
+      <v-divider />
 
-      <!-- 明细列表 -->
-      <div class="drawer-body">
-        <div class="d-flex align-center justify-space-between px-3 mb-2">
+      <!-- 明细列表 (可滚动) -->
+      <v-card-text class="drawer-body pa-3" style="max-height: 60vh;">
+        <div class="d-flex align-center justify-space-between px-1 mb-2">
           <span class="text-subtitle-2 font-weight-bold">集数转存明细</span>
           <span class="text-caption text-medium-emphasis">
             已成功 {{ successCount }} / {{ (group.records || []).length }}
           </span>
         </div>
 
-        <div class="record-list px-2">
+        <div class="record-list">
           <v-card
             v-for="(rec, idx) in group.records || []"
             :key="recordKey(rec, idx)"
@@ -124,7 +122,7 @@
                   <span v-if="rec.resource_type">网盘: {{ resourceTypeLabel(rec.resource_type) }}</span>
                 </div>
                 <div v-if="rec.reason" class="record-reason text-caption text-warning mt-1">
-                  原因: {{ rec.reason }}
+                  ⚠️ 原因: {{ rec.reason }}
                 </div>
               </div>
 
@@ -149,9 +147,14 @@
             </div>
           </v-card>
         </div>
-      </div>
-    </div>
-  </v-navigation-drawer>
+      </v-card-text>
+
+      <v-divider />
+      <v-card-actions class="pa-3 bg-surface-variant d-flex justify-end">
+        <v-btn variant="text" size="small" @click="visible = false">关闭</v-btn>
+      </v-card-actions>
+    </v-card>
+  </v-dialog>
 </template>
 
 <script setup>
@@ -250,37 +253,23 @@ function retryKey(rec) {
 </script>
 
 <style scoped>
-.media-drawer {
-  max-width: 90vw;
-}
-
-.drawer-container {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  padding: 16px;
-  overflow: hidden;
-}
-
 .drawer-header {
-  display: flex;
-  gap: 16px;
-  flex: 0 0 auto;
+  border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.08);
 }
 
 .drawer-cover {
-  width: 90px;
-  flex: 0 0 90px;
+  width: 72px;
+  flex: 0 0 72px;
 }
 
 .cover-img {
-  width: 90px;
-  height: 135px;
+  width: 72px;
+  height: 108px;
 }
 
 .cover-placeholder {
-  width: 90px;
-  height: 135px;
+  width: 72px;
+  height: 108px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -288,7 +277,6 @@ function retryKey(rec) {
 }
 
 .drawer-title-box {
-  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -298,14 +286,12 @@ function retryKey(rec) {
 }
 
 .drawer-body {
-  flex: 1 1 auto;
   overflow-y: auto;
-  min-height: 0;
 }
 
 .record-item {
-  border-color: rgba(var(--v-theme-on-surface), 0.08);
-  background: rgba(var(--v-theme-surface), 0.5);
+  border-color: rgba(var(--v-theme-on-surface), 0.12);
+  background: rgba(var(--v-theme-surface-variant), 0.25);
   border-radius: 8px;
 }
 

@@ -83,7 +83,7 @@
                 {{ group.title }}
               </h3>
               <span v-if="group.year" class="card-year text-caption text-medium-emphasis">
-                {{ group.year }}
+                ({{ group.year }})
               </span>
             </div>
 
@@ -271,8 +271,12 @@ function resourceTypeLabel(type) {
   min-height: 100%;
 }
 
+.hub-search-box {
+  flex: 0 0 auto;
+}
+
 .hub-search-input {
-  max-width: 260px;
+  width: 220px;
 }
 
 .media-grid {
