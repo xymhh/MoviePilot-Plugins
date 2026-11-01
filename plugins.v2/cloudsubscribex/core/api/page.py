@@ -354,12 +354,12 @@ class PageApi(OwnerDelegator):
                     if hr.title:
                         history_success_map.setdefault(f"title:{hr.title}:{hr.season or 1}", set()).add(int_ep)
         except Exception as err:
-            logger.debug(f"通过 SessionFactory 读取订阅与转存历史失败: {err}")
+            logger.warning(f"通过 SessionFactory 读取订阅与转存历史失败: {err}")
             try:
                 from app.db.subscribe_oper import SubscribeOper
                 subscribes = SubscribeOper().list() or []
             except Exception as err2:
-                logger.debug(f"回退读取订阅列表仍失败: {err2}")
+                logger.warning(f"回退读取订阅列表仍失败: {err2}")
                 return []
 
         active_tasks = []
@@ -372,6 +372,7 @@ class PageApi(OwnerDelegator):
 
         history_items = page_history or []
         progress_list = []
+        build_errors = 0
         for sub in subscribes:
             try:
                 sub_id = int(getattr(sub, "id", 0) or 0)
@@ -394,17 +395,22 @@ class PageApi(OwnerDelegator):
                         raw_note = []
                 library_episodes = {int(x) for x in raw_note if str(x).isdigit() and int(x) > 0}
 
-                # 合并转存历史中已成功的集数，确保转存后列表即时更新
-                eff_season = season or 1
-                history_eps = (
-                    history_success_map.get(f"sub:{sub_id}", set())
-                    | history_success_map.get(f"tmdb:{tmdb_id}:{eff_season}", set())
-                    | history_success_map.get(f"title:{name}:{eff_season}", set())
-                )
-                library_episodes = sorted(library_episodes | history_eps)
-
+                # 必须先解析 tmdb_id，下面合并转存历史时要用它做键
                 tmdb_id = getattr(sub, "tmdbid", None) or getattr(sub, "tmdb_id", None)
                 state = str(getattr(sub, "state", "R") or "R")
+
+                # 合并转存历史中已成功的集数，确保转存后列表即时更新
+                eff_season = season or 1
+                history_eps = set(history_success_map.get(f"sub:{sub_id}", set()))
+                if tmdb_id:
+                    history_eps |= history_success_map.get(
+                        f"tmdb:{tmdb_id}:{eff_season}", set()
+                    )
+                if name:
+                    history_eps |= history_success_map.get(
+                        f"title:{name}:{eff_season}", set()
+                    )
+                library_episodes = sorted(library_episodes | history_eps)
 
                 # 海报多级回查与增强
                 poster = str(getattr(sub, "poster", "") or getattr(sub, "backdrop", "") or "")
@@ -463,8 +469,17 @@ class PageApi(OwnerDelegator):
                     "records": matched_records,
                 })
             except Exception as err:
-                logger.debug(f"处理订阅条目追更进度失败: {err}")
+                # 单条订阅失败不能静默：整表归零会让前端退化回历史卡片视图
+                build_errors += 1
+                if build_errors <= 3:
+                    logger.warning(f"处理订阅条目追更进度失败(累计 {build_errors}): {err}")
                 continue
+
+        if build_errors:
+            logger.warning(
+                f"追更进度构建部分失败：{build_errors} 条订阅被跳过，"
+                f"成功 {len(progress_list)} 条"
+            )
 
         # 按同剧同季自动合并重复订阅，避免数据库中历史重复卡片导致大屏泛滥
         dedup_map = {}
