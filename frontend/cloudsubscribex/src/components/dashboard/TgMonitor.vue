@@ -1,32 +1,25 @@
 <template>
   <div class="tg-monitor">
-    <div class="tg-toolbar">
-      <div class="tg-status">
-        <div class="tg-status-chips">
-          <v-chip size="small" :color="status.enabled ? 'success' : 'grey'" variant="tonal">
-            {{ status.enabled ? "监控中" : "未启用" }}
-          </v-chip>
-          <v-chip v-if="!status.configured" size="small" color="warning" variant="tonal">未登录 TG</v-chip>
-        </div>
-        <span class="tg-meta">
-          频道 {{ status.channel_count || 0 }} · 资源 {{ status.item_count || 0 }} · 待处理 {{ status.new_count || 0 }}
-          <template v-if="status.last_scan_at">· 上次扫描 {{ formatTime(status.last_scan_at) }}</template>
+    <div class="tg-toolbar d-flex align-center justify-space-between flex-wrap ga-2">
+      <div class="tg-status d-flex align-center ga-2">
+        <span :class="['status-badge', status.enabled ? 'status-badge-active' : 'status-badge-idle']">
+          <span class="status-dot"></span>
+          {{ status.enabled ? "正在监控" : "未启用" }}
+        </span>
+        <span class="tg-meta text-caption text-medium-emphasis">
+          {{ status.channel_count || 0 }} 个频道 · {{ status.item_count || 0 }} 条抓取
+          <template v-if="status.last_scan_at">· {{ formatTime(status.last_scan_at) }}</template>
         </span>
       </div>
-      <div class="tg-actions">
-        <v-btn class="tg-login" size="small" variant="tonal" prepend-icon="mdi-account-key-outline" @click="openLogin">
-          {{ status.configured ? "重新登录" : "登录 TG" }}
-        </v-btn>
+      <div class="tg-actions d-flex align-center ga-2">
         <v-btn
-          class="tg-logout"
+          class="tg-scan"
           size="small"
-          variant="tonal"
-          prepend-icon="mdi-delete-outline"
-          :disabled="!status.configured"
-          @click="logout">
-          退出登录
-        </v-btn>
-        <v-btn class="tg-scan" size="small" color="primary" variant="flat" prepend-icon="mdi-radar" :loading="scanning" @click="scan">
+          color="primary"
+          variant="flat"
+          prepend-icon="mdi-radar"
+          :loading="scanning"
+          @click="scan">
           立即扫描
         </v-btn>
         <v-btn
@@ -38,8 +31,29 @@
           prepend-icon="mdi-restart-alert"
           :loading="retrying"
           @click="retryFailed">
-          重试失败 {{ failedCount }}
+          重试失败 ({{ failedCount }})
         </v-btn>
+        <v-menu location="bottom end">
+          <template #activator="{ props: menuProps }">
+            <v-btn
+              v-bind="menuProps"
+              size="small"
+              variant="tonal"
+              icon="mdi-dots-vertical"
+              title="TG 账号设置" />
+          </template>
+          <v-list density="compact">
+            <v-list-item
+              prepend-icon="mdi-account-key-outline"
+              :title="status.configured ? '重新登录 Telegram' : '登录 Telegram'"
+              @click="openLogin" />
+            <v-list-item
+              v-if="status.configured"
+              prepend-icon="mdi-logout"
+              title="退出登录"
+              @click="logout" />
+          </v-list>
+        </v-menu>
       </div>
     </div>
 
@@ -60,7 +74,7 @@
       频道监控未启用：到「配置 → 频道监控」填写 TG api_id / api_hash、登录，并添加频道后启用。
     </v-alert>
 
-    <div v-if="items.length" class="tg-filter-row">
+    <div v-if="items.length" class="tg-filter-row mt-2">
       <v-chip
         v-for="option in filterOptions"
         :key="option.value"
@@ -74,85 +88,38 @@
       </v-chip>
     </div>
 
-    <v-table v-if="filteredItems.length" density="compact" class="tg-table mt-2">
-      <thead>
-        <tr>
-          <th style="width: 88px">时间</th>
-          <th style="width: 132px">频道</th>
-          <th>资源</th>
-          <th style="width: 96px">类型</th>
-          <th style="width: 72px">状态</th>
-          <th style="width: 132px">操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="item in pagedItems" :key="item.id">
-          <td class="text-caption">{{ formatTime(item.published_at || item.created_at) }}</td>
-          <td class="text-caption">{{ item.channel_title }}</td>
-          <td>
-            <div class="tg-title">{{ item.title || "（无标题）" }}</div>
-            <div v-if="qualityTags(item).length" class="tg-tags mt-1">
-              <v-chip
-                v-for="tag in qualityTags(item)"
-                :key="tag"
-                size="x-small"
-                :color="tagColor(tag)"
-                variant="tonal">
-                {{ tag }}
-              </v-chip>
-            </div>
-            <div class="tg-links">
-              <a v-for="link in item.links" :key="link" :href="link" target="_blank" rel="noreferrer">
-                {{ shortLink(link) }}
-              </a>
-              <a v-if="item.message_url" :href="item.message_url" target="_blank" rel="noreferrer" class="tg-msg">
-                原消息
-              </a>
-            </div>
-            <div
-              v-if="item.match_reason"
-              class="text-caption mt-1"
-              :class="item.match_status === 'pending' ? 'text-warning' : 'text-medium-emphasis'">
-              自动匹配：{{ item.match_reason }}
-            </div>
-            <div
-              v-if="item.auto_transfer_error"
-              class="text-caption mt-1"
-              :class="errorClass(item)">
-              {{ item.status === "skipped" ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}
-            </div>
-          </td>
-          <td class="text-caption">{{ typeText(item.types) }}</td>
-          <td>
-            <v-chip size="x-small" :color="statusColor(item.status)" variant="tonal">
-              {{ statusText(item.status) }}
+    <!-- 现代 Feed 卡片流列表 -->
+    <div v-if="filteredItems.length" class="tg-feed-grid mt-3">
+      <v-card
+        v-for="item in pagedItems"
+        :key="item.id"
+        variant="outlined"
+        class="tg-feed-card pa-3">
+        <!-- 卡片头部：频道名 + 时间 + 状态 Badge -->
+        <div class="tg-card-head d-flex align-center justify-space-between mb-2">
+          <div class="d-flex align-center ga-1 min-w-0">
+            <v-chip size="x-small" color="primary" variant="tonal" prepend-icon="mdi-bullhorn-outline" class="font-weight-medium">
+              {{ item.channel_title || "未知频道" }}
             </v-chip>
-          </td>
-          <td>
-            <v-btn
-              size="x-small"
-              variant="text"
-              color="primary"
-              :disabled="item.status === 'transferred'"
-              @click="openTransfer(item)">
-              转存
-            </v-btn>
-            <v-btn size="x-small" variant="text" @click="ignore(item)">忽略</v-btn>
-            <v-btn size="x-small" variant="text" color="error" @click="remove(item)">删除</v-btn>
-          </td>
-        </tr>
-      </tbody>
-    </v-table>
-    <div v-if="filteredItems.length" class="tg-cards mt-2">
-      <article v-for="item in pagedItems" :key="`card-${item.id}`" class="tg-card">
-        <div class="tg-card-head">
-          <div class="tg-card-channel">{{ item.channel_title || "未知频道" }}</div>
-          <v-chip size="x-small" :color="statusColor(item.status)" variant="tonal">
+            <span class="text-caption text-medium-emphasis ml-1">
+              {{ formatTime(item.published_at || item.created_at) }}
+            </span>
+          </div>
+          <v-chip size="x-small" :color="statusColor(item.status)" variant="flat" class="font-weight-bold">
             {{ statusText(item.status) }}
           </v-chip>
         </div>
-        <div class="tg-card-title">{{ item.title || "（无标题）" }}</div>
-        <div v-if="qualityTags(item).length" class="tg-tags mt-1">
+
+        <!-- 标题主体 -->
+        <div class="tg-feed-title text-body-1 font-weight-bold mb-1" :title="item.title">
+          {{ item.title || "（无标题）" }}
+        </div>
+
+        <!-- 画质与类型标签 -->
+        <div class="d-flex flex-wrap align-center ga-1 mb-2">
+          <v-chip size="x-small" variant="tonal" color="info">
+            {{ typeText(item.types) }}
+          </v-chip>
           <v-chip
             v-for="tag in qualityTags(item)"
             :key="tag"
@@ -162,44 +129,61 @@
             {{ tag }}
           </v-chip>
         </div>
-        <div class="tg-card-meta">
-          <span>{{ formatTime(item.published_at || item.created_at) }}</span>
-          <span>·</span>
-          <span>{{ typeText(item.types) }}</span>
+
+        <!-- 命中订阅或原因气泡 -->
+        <div v-if="item.match_reason" class="tg-match-bubble pa-2 rounded mb-2 text-caption">
+          <v-icon icon="mdi-target" size="14" color="primary" class="mr-1" />
+          <span class="font-weight-medium">命中订阅：</span>
+          <span>{{ item.match_reason }}</span>
         </div>
-        <div class="tg-links">
-          <a v-for="link in item.links" :key="`card-${link}`" :href="link" target="_blank" rel="noreferrer">
+        <div v-if="item.auto_transfer_error" class="tg-error-bubble pa-2 rounded mb-2 text-caption">
+          <v-icon icon="mdi-alert-circle-outline" size="14" color="warning" class="mr-1" />
+          <span>{{ item.status === "skipped" ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}</span>
+        </div>
+
+        <!-- 分享链接栏 -->
+        <div class="tg-links-box d-flex flex-wrap align-center ga-2 mb-3">
+          <v-btn
+            v-for="link in item.links"
+            :key="link"
+            size="x-small"
+            variant="tonal"
+            color="secondary"
+            prepend-icon="mdi-link-variant"
+            :href="link"
+            target="_blank"
+            class="text-none">
             {{ shortLink(link) }}
-          </a>
-          <a v-if="item.message_url" :href="item.message_url" target="_blank" rel="noreferrer" class="tg-msg">
+          </v-btn>
+          <v-btn
+            v-if="item.message_url"
+            size="x-small"
+            variant="text"
+            prepend-icon="mdi-send-outline"
+            :href="item.message_url"
+            target="_blank"
+            class="text-medium-emphasis text-none">
             原消息
-          </a>
+          </v-btn>
         </div>
-        <div
-          v-if="item.match_reason"
-          class="tg-card-note"
-          :class="item.match_status === 'pending' ? 'text-warning' : 'text-medium-emphasis'">
-          自动匹配：{{ item.match_reason }}
-        </div>
-        <div
-          v-if="item.auto_transfer_error"
-          class="tg-card-note"
-          :class="item.status === 'skipped' ? 'text-medium-emphasis' : 'text-error'">
-          {{ item.status === "skipped" ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}
-        </div>
-        <div class="tg-card-actions">
+
+        <!-- 底部快捷动作条 -->
+        <div class="tg-card-actions d-flex align-center justify-space-between pt-2 border-t">
           <v-btn
             size="small"
-            variant="tonal"
             color="primary"
+            variant="flat"
+            prepend-icon="mdi-cloud-upload-outline"
             :disabled="item.status === 'transferred'"
             @click="openTransfer(item)">
-            转存
+            {{ item.status === "transferred" ? "已转存" : "一键转存" }}
           </v-btn>
-          <v-btn size="small" variant="text" @click="ignore(item)">忽略</v-btn>
-          <v-btn size="small" variant="text" color="error" @click="remove(item)">删除</v-btn>
+          <div class="d-flex align-center ga-1">
+            <v-btn size="small" variant="text" @click="ignore(item)">忽略</v-btn>
+            <v-btn size="small" variant="text" color="error" icon="mdi-delete-outline" @click="remove(item)" />
+          </div>
         </div>
-      </article>
+      </v-card>
     </div>
     <div v-if="filteredItems.length && pageCount > 1" class="tg-pager">
       <v-pagination
@@ -389,7 +373,14 @@ const subscribeOptions = computed(() =>
 
 function formatTime(timestamp) {
   if (!timestamp) return "-"
-  const date = new Date(Number(timestamp) * 1000)
+  let date
+  if (typeof timestamp === "number" || /^\d+$/.test(String(timestamp).trim())) {
+    const num = Number(timestamp)
+    date = new Date(num > 1e11 ? num : num * 1000)
+  } else {
+    date = new Date(timestamp)
+  }
+  if (isNaN(date.getTime())) return String(timestamp).slice(5, 16) || "-"
   const pad = (value) => String(value).padStart(2, "0")
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
@@ -725,68 +716,68 @@ onUnmounted(() => {
   color: rgb(var(--v-theme-on-surface-variant));
   font-size: 13px;
 }
-.tg-cards {
-  display: none;
-}
-.tg-card {
-  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  border-radius: 10px;
-  padding: 10px;
-  background: rgb(var(--v-theme-surface));
-}
-.tg-card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.tg-card-channel {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: rgb(var(--v-theme-primary));
-  font-size: 12px;
-  font-weight: 600;
-}
-.tg-card-title {
-  margin-top: 6px;
-  font-size: 14px;
-  font-weight: 500;
-  line-height: 1.45;
-  word-break: break-word;
-}
-.tg-card-meta {
-  display: flex;
+
+.status-badge {
+  display: inline-flex;
   align-items: center;
   gap: 5px;
-  margin-top: 4px;
-  color: rgb(var(--v-theme-on-surface-variant));
-  font-size: 11.5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 500;
 }
-.tg-card-note {
-  margin-top: 6px;
-  font-size: 11.5px;
-  line-height: 1.45;
+
+.status-badge-active {
+  background: rgba(var(--v-theme-success), 0.12);
+  color: rgb(var(--v-theme-success));
+  border: 1px solid rgba(var(--v-theme-success), 0.25);
+}
+
+.status-badge-idle {
+  background: rgba(var(--v-theme-on-surface), 0.08);
+  color: rgba(var(--v-theme-on-surface), 0.6);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.tg-feed-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 14px;
+}
+
+.tg-feed-card {
+  border-radius: 10px;
+  border-color: rgba(var(--v-theme-on-surface), 0.08);
+  background: rgba(var(--v-theme-surface), 0.6);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.tg-feed-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.tg-feed-title {
+  line-height: 1.4;
   word-break: break-word;
 }
-.tg-card-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity));
+
+.tg-match-bubble {
+  background: rgba(var(--v-theme-primary), 0.1);
+  color: rgb(var(--v-theme-primary));
+  border-left: 3px solid rgb(var(--v-theme-primary));
 }
-.tg-card-actions :deep(.v-btn) {
-  flex: 1 1 0;
-  min-width: 0;
-  height: 32px;
-  padding-inline: 4px;
-  font-size: 12px;
-}
-.tg-card-actions :deep(.v-btn--variant-tonal) {
-  flex: 1.35 1 0;
+
+.tg-error-bubble {
+  background: rgba(var(--v-theme-warning), 0.1);
+  color: rgb(var(--v-theme-warning));
+  border-left: 3px solid rgb(var(--v-theme-warning));
 }
 
 @media (max-width: 600px) {
@@ -798,6 +789,10 @@ onUnmounted(() => {
     align-items: stretch;
     gap: 10px;
   }
+  .tg-feed-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
   .tg-status {
     align-items: flex-start;
     flex-direction: column;
@@ -806,30 +801,6 @@ onUnmounted(() => {
   .tg-meta {
     font-size: 11.5px;
     line-height: 1.45;
-  }
-  .tg-actions {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
-    width: 100%;
-  }
-  .tg-actions :deep(.v-btn) {
-    width: 100%;
-    min-width: 0;
-    height: 34px;
-    padding-inline: 6px;
-    font-size: 12px;
-  }
-  .tg-scan {
-    grid-column: 1 / -1;
-  }
-  .tg-table {
-    display: none;
-  }
-  .tg-cards {
-    display: grid;
-    gap: 10px;
-    margin-top: 10px !important;
   }
   .tg-empty {
     padding: 28px 8px;

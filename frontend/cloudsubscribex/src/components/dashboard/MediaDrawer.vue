@@ -19,9 +19,14 @@
                 <v-icon icon="mdi-filmstrip" color="medium-emphasis" />
               </div>
             </template>
+            <template #error>
+              <div class="cover-badge-art rounded elevation-2">
+                <span class="art-letter">{{ getInitial(group.title) }}</span>
+              </div>
+            </template>
           </v-img>
-          <div v-else class="cover-placeholder rounded elevation-2">
-            <v-icon icon="mdi-filmstrip" size="32" color="medium-emphasis" />
+          <div v-else class="cover-badge-art rounded elevation-2">
+            <span class="art-letter">{{ getInitial(group.title) }}</span>
           </div>
         </div>
 
@@ -176,8 +181,21 @@ const visible = computed({
 
 const coverUrl = computed(() => {
   if (!props.group) return ""
-  return props.group.poster_path || props.group.backdrop_path || ""
+  return (
+    props.group.poster ||
+    props.group.image ||
+    props.group.poster_path ||
+    props.group.backdrop_path ||
+    props.group.poster_url ||
+    (props.group.records && props.group.records[0] && (props.group.records[0].image || props.group.records[0].poster)) ||
+    ""
+  )
 })
+
+function getInitial(title) {
+  const clean = String(title || "").trim().replace(/^[^\w\u4e00-\u9fa5]+/, "")
+  return clean ? clean.slice(0, 1) : "片"
+}
 
 const mediaDetailLink = computed(() => {
   const tmdbId = props.group?.tmdb_id
@@ -274,6 +292,23 @@ function retryKey(rec) {
   align-items: center;
   justify-content: center;
   background: rgba(var(--v-theme-surface-variant), 0.5);
+}
+
+.cover-badge-art {
+  width: 72px;
+  height: 108px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(var(--v-theme-primary), 0.25), rgba(var(--v-theme-surface-variant), 0.8));
+  border: 1px solid rgba(var(--v-theme-primary), 0.2);
+}
+
+.art-letter {
+  font-size: 1.6rem;
+  font-weight: 700;
+  color: rgb(var(--v-theme-primary));
+  opacity: 0.9;
 }
 
 .drawer-title-box {

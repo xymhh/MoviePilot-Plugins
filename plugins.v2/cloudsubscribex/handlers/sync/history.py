@@ -968,11 +968,28 @@ class HistoryService(OwnerDelegator):
             if r.get("status") == "待确认"
         ][:20]
         prepared["total_size"] = sum(int(r.get("file_size") or 0) for r in records)
+        poster = (
+            first.get("image")
+            or first.get("poster")
+            or first.get("poster_path")
+            or first.get("poster_url")
+            or next(
+                (
+                    str(r.get("image") or r.get("poster") or r.get("poster_path") or r.get("poster_url") or "")
+                    for r in records
+                    if (r.get("image") or r.get("poster") or r.get("poster_path") or r.get("poster_url"))
+                ),
+                "",
+            )
+        )
         prepared.update({
             "tmdb_id": first.get("tmdb_id"),
             "title": first.get("title") or "未知媒体",
             "year": first.get("year") or "",
             "type": first.get("type") or "未知类型",
+            "poster": poster,
+            "image": poster,
+            "poster_path": poster,
             "resource_types": list(dict.fromkeys(
                 str(record.get("resource_type") or "unknown")
                 for record in records

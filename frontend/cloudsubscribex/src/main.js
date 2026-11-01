@@ -84,6 +84,53 @@ const mockApi = {
         data: { status: "idle", tasks: [], sync_in_progress: false },
       });
     }
+    if (url.includes("/tg/status")) {
+      return Promise.resolve({
+        success: true,
+        data: { enabled: true, configured: true, channel_count: 8, item_count: 24, new_count: 3 },
+      });
+    }
+    if (url.includes("/tg/items")) {
+      return Promise.resolve({
+        success: true,
+        data: {
+          items: [
+            {
+              id: 1,
+              channel_title: "阿里云盘盘友圈",
+              published_at: "2024-11-01 10:20:00",
+              title: "【国创动画】凡人修仙传 第121集 4K 60帧 高码版",
+              types: ["alipan"],
+              links: ["https://www.alipan.com/s/sample123"],
+              message_url: "https://t.me/sample/1",
+              match_reason: "命中订阅《凡人修仙传》缺集 S01E121",
+              status: "transferred",
+            },
+            {
+              id: 2,
+              channel_title: "夸克网盘精选",
+              published_at: "2024-11-01 11:30:00",
+              title: "庆余年 第二季 01-36集 全集 4K HDR",
+              types: ["quark"],
+              links: ["https://pan.quark.cn/s/sample456"],
+              message_url: "https://t.me/sample/2",
+              match_reason: "命中订阅《庆余年 第二季》洗版更优画质",
+              status: "queued",
+            },
+            {
+              id: 3,
+              channel_title: "115分享大本营",
+              published_at: "2024-11-01 12:00:00",
+              title: "沙丘2 Dune.Part.Two.2024.2160p.HDR.Remux",
+              types: ["115"],
+              links: ["https://115.com/s/sample789"],
+              auto_transfer_error: "分享包含提取码但未提供",
+              status: "skipped",
+            },
+          ],
+        },
+      });
+    }
     return Promise.resolve({ success: true, data: {} });
   },
   post(url, body) {

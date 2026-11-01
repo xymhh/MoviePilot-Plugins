@@ -100,7 +100,7 @@
           </v-tab>
           <v-tab value="history">
             <v-icon icon="mdi-history" size="small" class="mr-2" />
-            转存流水
+            历史记录
             <v-chip v-if="historyStats.total" size="x-small" class="ml-2">
               {{ historyStats.total }}
             </v-chip>
@@ -129,7 +129,26 @@
         </div>
         <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
           <RuntimeCard class="runtime-panel" :runtime="runtime" :active="active" @stop-task="confirmStopTask" />
-          <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks'" />
+          
+          <div class="task-ledger-toggle mt-3 d-flex align-center justify-space-between px-1">
+            <span class="text-caption text-medium-emphasis">
+              <v-icon icon="mdi-information-outline" size="14" class="mr-1" />
+              当前同步运行情况如上；日常无需关注底层退避队列。
+            </span>
+            <v-btn
+              variant="text"
+              size="small"
+              color="primary"
+              :prepend-icon="showTaskCenter ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+              @click="showTaskCenter = !showTaskCenter">
+              {{ showTaskCenter ? "收起底层作业表" : "展开底层作业表" }}
+            </v-btn>
+          </div>
+          <v-expand-transition>
+            <div v-show="showTaskCenter" class="mt-2">
+              <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks' && showTaskCenter" />
+            </div>
+          </v-expand-transition>
         </div>
         <div v-show="mainTab === 'tg'" class="workspace-pane tg-pane">
           <TgMonitor :api="api" :active="mainTab === 'tg'" />
@@ -377,6 +396,7 @@ const snackbarTextStyle = computed(() => ({
   color: `rgb(var(--v-theme-on-${fallbackType.value || "success"}))`,
 }))
 const mainTab = ref("hub")
+const showTaskCenter = ref(false)
 // 历史页的两个视图：转存结果 / 未转存原因（原「资源账本」降级为子视图）
 const historyView = ref("records")
 const historyStatuses = ref([])

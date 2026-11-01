@@ -57,8 +57,8 @@
           <!-- 海报区 -->
           <div class="card-poster">
             <v-img
-              v-if="group.poster_path || group.backdrop_path"
-              :src="group.poster_path || group.backdrop_path"
+              v-if="getCoverUrl(group)"
+              :src="getCoverUrl(group)"
               aspect-ratio="2/3"
               cover
               class="poster-img rounded">
@@ -67,9 +67,14 @@
                   <v-icon icon="mdi-filmstrip" color="medium-emphasis" />
                 </div>
               </template>
+              <template #error>
+                <div class="poster-badge-art rounded">
+                  <span class="art-letter">{{ getInitial(group.title) }}</span>
+                </div>
+              </template>
             </v-img>
-            <div v-else class="poster-placeholder rounded">
-              <v-icon icon="mdi-filmstrip" size="28" color="medium-emphasis" />
+            <div v-else class="poster-badge-art rounded">
+              <span class="art-letter">{{ getInitial(group.title) }}</span>
             </div>
             <v-chip size="x-small" color="primary" variant="flat" class="poster-type-badge">
               {{ group.type || "剧集" }}
@@ -204,6 +209,24 @@ function openGroupDrawer(group) {
   drawerVisible.value = true
 }
 
+function getCoverUrl(group) {
+  if (!group) return ""
+  return (
+    group.poster ||
+    group.image ||
+    group.poster_path ||
+    group.backdrop_path ||
+    group.poster_url ||
+    (group.records && group.records[0] && (group.records[0].image || group.records[0].poster)) ||
+    ""
+  )
+}
+
+function getInitial(title) {
+  const clean = String(title || "").trim().replace(/^[^\w\u4e00-\u9fa5]+/, "")
+  return clean ? clean.slice(0, 1) : "片"
+}
+
 function calcProgress(group) {
   const recs = group.records || []
   if (!recs.length) return 0
@@ -323,6 +346,23 @@ function resourceTypeLabel(type) {
   align-items: center;
   justify-content: center;
   background: rgba(var(--v-theme-surface-variant), 0.5);
+}
+
+.poster-badge-art {
+  width: 80px;
+  height: 116px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, rgba(var(--v-theme-primary), 0.25), rgba(var(--v-theme-surface-variant), 0.8));
+  border: 1px solid rgba(var(--v-theme-primary), 0.2);
+}
+
+.art-letter {
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: rgb(var(--v-theme-primary));
+  opacity: 0.9;
 }
 
 .poster-type-badge {
