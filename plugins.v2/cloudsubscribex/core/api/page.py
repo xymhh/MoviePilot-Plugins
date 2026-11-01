@@ -329,13 +329,32 @@ class PageApi(OwnerDelegator):
     def _build_subscribes_progress(self, page_history: list[dict[str, Any]] = None) -> list[dict[str, Any]]:
         """构建以 MoviePilot 订阅为核心的追更进度大屏数据。"""
         subscribes = []
+        history_success_map: dict[str, set[int]] = {}
         try:
             from app.db import SessionFactory
             from app.db.models.subscribe import Subscribe
+            from app.plugins.cloudsubscribex.core.database.models import HistoryRecord
             with SessionFactory() as db:
                 subscribes = list(db.query(Subscribe).all())
+                # 查出插件转存成功的历史记录，确保刚转存的集数立即被计为已入库
+                history_rows = (
+                    db.query(HistoryRecord)
+                    .filter(HistoryRecord.status.in_(["成功", "完成"]))
+                    .all()
+                )
+                for hr in history_rows:
+                    ep = hr.episode
+                    if not ep or int(ep) <= 0:
+                        continue
+                    int_ep = int(ep)
+                    if hr.subscribe_id:
+                        history_success_map.setdefault(f"sub:{hr.subscribe_id}", set()).add(int_ep)
+                    if hr.tmdb_id:
+                        history_success_map.setdefault(f"tmdb:{hr.tmdb_id}:{hr.season or 1}", set()).add(int_ep)
+                    if hr.title:
+                        history_success_map.setdefault(f"title:{hr.title}:{hr.season or 1}", set()).add(int_ep)
         except Exception as err:
-            logger.debug(f"通过 SessionFactory 读取订阅列表失败，尝试回退 SubscribeOper: {err}")
+            logger.debug(f"通过 SessionFactory 读取订阅与转存历史失败: {err}")
             try:
                 from app.db.subscribe_oper import SubscribeOper
                 subscribes = SubscribeOper().list() or []
@@ -373,7 +392,16 @@ class PageApi(OwnerDelegator):
                         raw_note = [int(x.strip()) for x in raw_note.split(",") if x.strip().isdigit()]
                     except Exception:
                         raw_note = []
-                library_episodes = sorted({int(x) for x in raw_note if str(x).isdigit() and int(x) > 0})
+                library_episodes = {int(x) for x in raw_note if str(x).isdigit() and int(x) > 0}
+
+                # 合并转存历史中已成功的集数，确保转存后列表即时更新
+                eff_season = season or 1
+                history_eps = (
+                    history_success_map.get(f"sub:{sub_id}", set())
+                    | history_success_map.get(f"tmdb:{tmdb_id}:{eff_season}", set())
+                    | history_success_map.get(f"title:{name}:{eff_season}", set())
+                )
+                library_episodes = sorted(library_episodes | history_eps)
 
                 tmdb_id = getattr(sub, "tmdbid", None) or getattr(sub, "tmdb_id", None)
                 state = str(getattr(sub, "state", "R") or "R")
