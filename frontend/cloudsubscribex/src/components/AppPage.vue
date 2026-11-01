@@ -2,18 +2,18 @@
   <div class="cloud-app-page">
     <header class="app-header">
       <div class="app-identity">
-        <v-avatar color="primary" variant="tonal" size="42">
-          <v-icon icon="mdi-cloud-sync-outline" size="23" />
+        <v-avatar color="primary" variant="tonal" size="38">
+          <v-icon icon="mdi-cloud-sync-outline" size="20" />
         </v-avatar>
         <div class="identity-text">
           <div class="identity-title-row">
-            <h1>网盘订阅助手</h1>
-            <span :class="['status-badge', active ? 'status-badge-active' : 'status-badge-idle']">
+            <h1 class="text-truncate">网盘订阅助手</h1>
+            <span :class="['status-badge', active ? 'status-badge-active' : 'status-badge-idle']" :title="active ? '正在同步' : '就绪'">
               <span class="status-dot"></span>
-              {{ active ? "正在同步" : "就绪" }}
+              <span class="status-text">{{ active ? "同步中" : "就绪" }}</span>
             </span>
           </div>
-          <p>{{ runtimeSummary }}</p>
+          <p class="text-truncate">{{ runtimeSummary }}</p>
         </div>
       </div>
       <div class="app-actions">
@@ -958,17 +958,20 @@ async function notifyHistory() {
 
 .app-identity {
   min-width: 0;
-  gap: 12px;
+  gap: 10px;
+  flex: 1 1 auto;
 }
 
 .identity-text {
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .identity-title-row {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 
 .app-identity h1 {
@@ -977,6 +980,7 @@ async function notifyHistory() {
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: 0;
+  white-space: nowrap;
 }
 
 .status-badge {
@@ -1112,6 +1116,23 @@ async function notifyHistory() {
   flex: 1 1 auto;
 }
 
+.workspace-tabs :deep(.v-tab) {
+  min-width: auto;
+  padding-inline: 14px;
+  letter-spacing: normal;
+  text-transform: none;
+  font-size: 0.86rem;
+  gap: 4px;
+}
+
+.workspace-tabs :deep(.v-tab .v-icon) {
+  margin-right: 2px !important;
+}
+
+.workspace-tabs :deep(.v-tab .v-chip) {
+  margin-left: 4px !important;
+}
+
 .workspace-window,
 .workspace-pane {
   min-height: 0;
@@ -1233,28 +1254,49 @@ async function notifyHistory() {
 
   .app-header {
     align-items: center;
+    gap: 8px;
   }
 
   .app-identity {
     flex: 1 1 auto;
-    gap: 9px;
+    gap: 6px;
     overflow: hidden;
+    min-width: 0;
   }
 
   .app-identity :deep(.v-avatar) {
-    width: 36px !important;
-    height: 36px !important;
+    width: 32px !important;
+    height: 32px !important;
+    flex-shrink: 0;
   }
 
-  .app-identity h1,
-  .app-identity p {
+  .identity-title-row {
+    gap: 6px;
+  }
+
+  .app-identity h1 {
+    font-size: 0.95rem;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .app-identity h1 {
-    font-size: 1.05rem;
+  .status-text {
+    display: none;
+  }
+
+  .status-badge {
+    padding: 3px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    justify-content: center;
+  }
+
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    margin: 0;
   }
 
   .app-identity p {
@@ -1346,10 +1388,26 @@ async function notifyHistory() {
     padding: 9px 12px;
   }
 
+  .workspace-nav {
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .workspace-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .workspace-tabs {
+    flex: 0 0 auto;
+    width: auto;
+  }
+
   .workspace-tabs :deep(.v-tab) {
-    min-width: 0;
-    flex: 1 1 50%;
-    padding-inline: 8px;
+    min-width: auto;
+    flex: 0 0 auto;
+    padding-inline: 10px;
+    font-size: 0.8rem;
     text-transform: none;
   }
 

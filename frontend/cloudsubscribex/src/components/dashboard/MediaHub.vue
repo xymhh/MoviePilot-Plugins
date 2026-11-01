@@ -59,8 +59,11 @@
             <v-img
               v-if="getCoverUrl(group)"
               :src="getCoverUrl(group)"
+              :width="80"
+              :height="116"
               aspect-ratio="2/3"
               cover
+              referrerpolicy="no-referrer"
               class="poster-img rounded">
               <template #placeholder>
                 <div class="d-flex align-center justify-center fill-height bg-surface-variant">
@@ -331,12 +334,23 @@ function resourceTypeLabel(type) {
 .card-poster {
   position: relative;
   width: 80px;
+  height: 116px;
   flex: 0 0 80px;
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .poster-img {
   width: 80px;
   height: 116px;
+  border-radius: 6px;
+}
+
+.poster-img :deep(.v-img__img),
+.poster-img :deep(img) {
+  object-fit: cover !important;
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .poster-placeholder {
