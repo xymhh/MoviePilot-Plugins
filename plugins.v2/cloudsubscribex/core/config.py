@@ -211,7 +211,7 @@ class UIConfig:
             "cross_transfer_aria2_disk_cache": "32M",
             "cross_transfer_direct_stream": True,
             "cross_transfer_upload_concurrency": 4,
-            "cross_transfer_rapid_miss_action": "fallback",
+            "cross_transfer_rapid_miss_action": "abort",
             "cross_transfer_residue_cleanup": True,
             # 跨盘中继缓存：保留期（小时，默认 6）、清理间隔（小时，默认 6）、
             # 磁盘剩余比例低于该百分比时按最老优先强制清理（0 关闭，默认 10）。

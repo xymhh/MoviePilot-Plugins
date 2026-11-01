@@ -807,7 +807,7 @@ class CrossTransferTaskManager:
                  download_path: str = "", download_threads: int = 5,
                  max_concurrent: int = 2,
                  direct_stream: bool = True,
-                 rapid_miss_action: str = "fallback",
+                 rapid_miss_action: str = "abort",
                  on_change: Optional[Callable[[], None]] = None,
                  hash_cache_get: Optional[Callable[[str], Optional[dict]]] = None,
                  hash_cache_put: Optional[Callable[[str, dict], None]] = None,
@@ -818,7 +818,8 @@ class CrossTransferTaskManager:
         self._download_path = str(download_path or "").strip()
         self._download_threads = max(1, min(int(download_threads or 5), 256))
         self._direct_stream = bool(direct_stream)
-        # 秒传未命中处理：fallback=回落普通上传（默认，行为不变）；abort=中止不上传。
+        # 秒传未命中处理：abort=中止不上传（默认，未命中即删中继缓存并记负缓存，
+        # 让上层换下一个分享重试）；fallback=回落普通上传（老行为）。
         # 非法值一律回退 fallback。
         self._rapid_miss_action = (
             "abort" if str(rapid_miss_action or "").strip().lower() == "abort" else "fallback"
@@ -2111,7 +2112,7 @@ class CrossTransferTaskManager:
             # 探测在下载前发生时 temporary_path 尚未赋值，无需清理。
             if 'temporary_path' in locals() and temporary_path:
                 self._delete_cache_path_for_task(task, Path(temporary_path))
-            message = "未命中秒传，已按设置中止（未上传任何数据）"
+            message = "未命中秒传，已按设置中止（未上传任何数据；中继缓存已清理）"
             miss_sha1 = observed_sha1 or (
                 str(checksum or "").strip().upper()
                 if str(algorithm or "").strip().lower() == "sha1" else ""
@@ -2119,6 +2120,10 @@ class CrossTransferTaskManager:
             if miss_sha1:
                 # 记负缓存：下次同一哈希 24 小时内直接跳过，不再下 5GB 验一遍
                 self._remember_rapid_miss(target_key, miss_sha1)
+            logger.info(
+                "秒传未命中：已清理中继缓存并记录 SHA1"
+                f"（{miss_sha1 or '无'}），跳过该资源，继续尝试其它分享"
+            )
             self._update(task_id, status="failed", phase="aborted",
                          message=message, error=message,
                          abort_reason="rapid_miss",

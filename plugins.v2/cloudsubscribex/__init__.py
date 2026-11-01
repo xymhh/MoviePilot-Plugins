@@ -182,7 +182,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.8.8"
+    plugin_version = "1.8.9"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -269,7 +269,7 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_aria2_disk_cache: str = "32M"
     _cross_transfer_direct_stream: bool = True
     _cross_transfer_upload_concurrency: int = 4
-    _cross_transfer_rapid_miss_action: str = "fallback"
+    _cross_transfer_rapid_miss_action: str = "abort"
     # 国内中继上传（实验）：默认关闭，未配置地址时强制视为关闭。
     # TG 频道监控（用户自己的 TG API 会话）：默认关闭，未配置凭据时强制视为关闭。
     _tg_monitor_enabled: bool = False
@@ -1920,7 +1920,7 @@ class CloudSubscribeX(_PluginBase):
         self._sync_cross_transfer_upload_concurrency()
 
         rapid_miss_action = str(
-            config.get("cross_transfer_rapid_miss_action", "fallback") or "fallback"
+            config.get("cross_transfer_rapid_miss_action", "abort") or "abort"
         ).strip().lower()
         # 秒传未命中处理：fallback=回落普通上传（默认）；abort=中止且不真实上传。
         # 非法值一律回退 fallback，保证老行为逐字节不变。

@@ -3410,6 +3410,12 @@ class SyncHandler:
                             f"跨盘转存已由用户停止：{source.name} -> "
                             f"{self._cloud_drive.name}"
                         )
+                    elif str(completed_task.get("abort_reason") or "") == "rapid_miss":
+                        logger.warning(
+                            f"秒传未命中，已清理中继缓存并跳过该资源：{source.name} -> "
+                            f"{self._cloud_drive.name}（中继缓存已删，SHA1 已记录，"
+                            f"本次同步继续尝试后面的候选分享）"
+                        )
                     else:
                         logger.error(
                             f"跨盘转存失败：{source.name} -> {self._cloud_drive.name}，"

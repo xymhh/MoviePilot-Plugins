@@ -179,6 +179,9 @@ class _RelayHarnessBase(unittest.TestCase):
             resolver, download_path=self.tempdir.name,
             download_threads=5, max_concurrent=max_concurrent,
             direct_stream=False,
+            # 本文件测的是中继缓存的生命周期与串行化，需要走「未命中回落普通上传」
+            # 才会真正产出缓存；秒传策略的默认值另有 test_rapid_miss_abort 覆盖。
+            rapid_miss_action="fallback",
         )
 
     def _wait_terminal(self, manager, task_id, timeout=8.0):
