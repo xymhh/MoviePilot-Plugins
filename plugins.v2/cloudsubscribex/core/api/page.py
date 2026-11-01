@@ -100,7 +100,7 @@ def _recognized_season_counts(recognized) -> dict[int, int]:
 
 
 def _platform_image_url(value: object, size: str = "w500") -> str:
-    """使用插件内置图片代理或直连地址，彻底避开 MP 系统端点的 401 鉴权问题。"""
+    """使用 MoviePilot V3 官方图片缓存代理生成前端可直接加载的地址。"""
     raw = str(value or "").strip()
     if not raw or raw.startswith(("data:", "blob:")):
         return raw
@@ -110,7 +110,7 @@ def _platform_image_url(value: object, size: str = "w500") -> str:
         else:
             builder = getattr(settings, "TMDB_IMAGE_URL", None)
             raw = builder(raw, size) if callable(builder) else raw
-    return f"api/v1/plugin/CloudSubscribeX/image_proxy?url={quote(raw, safe='')}" if raw else ""
+    return f"/api/v1/system/cache/image?url={quote(raw, safe='')}" if raw else ""
 
 
 def _media_value(media: object, *names: str):

@@ -302,15 +302,14 @@ function getCoverUrl(group) {
   if (str.startsWith("data:") || str.startsWith("blob:")) {
     return str
   }
-  // 提取原始图片地址并统一走插件内置图片反代通道
-  let target = str
-  if (target.startsWith("api/v1/plugin/") || target.startsWith("/api/v1/plugin/")) {
-    return target
+  if (str.startsWith("/api/v1/system/cache/image") || str.startsWith("api/v1/plugin/")) {
+    return str
   }
+  let target = str
   if (target.startsWith("/") && !target.startsWith("//")) {
     target = `https://image.tmdb.org/t/p/w500${target}`
   }
-  return `api/v1/plugin/CloudSubscribeX/image_proxy?url=${encodeURIComponent(target)}`
+  return `/api/v1/system/cache/image?url=${encodeURIComponent(target)}`
 }
 
 function getInitial(title) {
@@ -363,16 +362,22 @@ function getInitial(title) {
 .card-poster {
   position: relative;
   width: 80px;
+  min-width: 80px;
+  max-width: 80px;
   height: 116px;
+  min-height: 116px;
   flex: 0 0 80px;
   border-radius: 6px;
   overflow: hidden;
+  background: rgba(var(--v-theme-surface-variant), 0.3);
 }
 
 .poster-img {
   width: 80px;
   height: 116px;
   border-radius: 6px;
+  display: block;
+  object-fit: cover;
 }
 
 .poster-img :deep(.v-img__img),
