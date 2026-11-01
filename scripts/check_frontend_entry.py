@@ -47,6 +47,10 @@ def main(root: Path) -> int:
     if 'historyView === \'skipped\'' not in app_text:
         errors.append("AppPage 缺少「未转存原因」子视图开关（historyView === 'skipped'）")
 
+    for ref in sorted(set(re.findall(r'@click="(\w*Visible) = true"', app_text))):
+        if f'v-model="{ref}"' not in app_text:
+            errors.append(f"AppPage 里 {ref} 没有对应的 v-model 弹窗（按钮会点了没反应）")
+
     status_module = components.parent / "utils" / "status.js"
     if not status_module.exists():
         errors.append(f"缺少状态词表：{status_module}")
