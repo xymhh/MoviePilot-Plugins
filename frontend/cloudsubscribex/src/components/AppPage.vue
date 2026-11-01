@@ -5,8 +5,14 @@
         <v-avatar color="primary" variant="tonal" size="42">
           <v-icon icon="mdi-cloud-sync-outline" size="23" />
         </v-avatar>
-        <div>
-          <h1>网盘订阅助手</h1>
+        <div class="identity-text">
+          <div class="identity-title-row">
+            <h1>网盘订阅助手</h1>
+            <span :class="['status-badge', active ? 'status-badge-active' : 'status-badge-idle']">
+              <span class="status-dot"></span>
+              {{ active ? "正在同步" : "就绪" }}
+            </span>
+          </div>
           <p>{{ runtimeSummary }}</p>
         </div>
       </div>
@@ -19,25 +25,6 @@
           title="手动添加"
           @click="openManualDialog()">
           <span class="action-label">手动添加</span>
-        </v-btn>
-        <v-btn
-          v-if="offlineSupported"
-          class="offline-action"
-          variant="tonal"
-          color="info"
-          prepend-icon="mdi-cloud-download-outline"
-          title="查看离线任务"
-          @click="offlineVisible = true">
-          <span class="action-label">离线任务</span>
-        </v-btn>
-        <v-btn
-          class="cache-action"
-          variant="tonal"
-          color="warning"
-          prepend-icon="mdi-cached"
-          title="选择并清理缓存"
-          @click="cacheVisible = true">
-          <span class="action-label">清理缓存</span>
         </v-btn>
         <v-btn
           :class="['sync-action', { 'sync-action-active': active }]"
@@ -60,6 +47,32 @@
           @click="openConfig">
           <span class="action-label">设置</span>
         </v-btn>
+        <v-menu location="bottom end">
+          <template #activator="{ props: menuProps }">
+            <v-btn
+              v-bind="menuProps"
+              class="more-action"
+              variant="tonal"
+              color="default"
+              icon="mdi-dots-vertical"
+              title="更多工具" />
+          </template>
+          <v-list density="compact" class="more-action-list">
+            <v-list-item
+              v-if="offlineSupported"
+              prepend-icon="mdi-cloud-download-outline"
+              title="离线任务"
+              @click="offlineVisible = true" />
+            <v-list-item
+              prepend-icon="mdi-cached"
+              title="清理缓存"
+              @click="cacheVisible = true" />
+            <v-list-item
+              prepend-icon="mdi-folder-move-outline"
+              title="网盘整理台"
+              @click="mainTab = 'organize'" />
+          </v-list>
+        </v-menu>
       </div>
     </header>
 
@@ -74,16 +87,20 @@
     <section :class="['workspace', { 'workspace-history': mainTab === 'history' }]">
       <div class="workspace-nav">
         <v-tabs v-model="mainTab" color="primary" class="workspace-tabs">
+          <v-tab value="hub">
+            <v-icon icon="mdi-filmstrip-box" size="small" class="mr-2" />
+            追更工作台
+          </v-tab>
           <v-tab value="tasks">
             <v-icon icon="mdi-format-list-checks" size="small" class="mr-2" />
-            任务
+            任务调度
             <v-chip v-if="activeTaskCount" size="x-small" class="ml-2">
               {{ activeTaskCount }}
             </v-chip>
           </v-tab>
           <v-tab value="history">
             <v-icon icon="mdi-history" size="small" class="mr-2" />
-            历史记录
+            转存流水
             <v-chip v-if="historyStats.total" size="x-small" class="ml-2">
               {{ historyStats.total }}
             </v-chip>
@@ -100,6 +117,16 @@
       </div>
 
       <div class="workspace-window">
+        <div v-show="mainTab === 'hub'" class="workspace-pane hub-pane">
+          <MediaHub
+            :items="historyGroups"
+            :loading="loading"
+            :retrying-key="retryingHistoryKey"
+            @refresh="loadPage"
+            @retry="confirmRetryHistory"
+            @retry-failed="confirmRetryFailedHistory"
+            @delete="confirmDeleteHistory" />
+        </div>
         <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
           <RuntimeCard class="runtime-panel" :runtime="runtime" :active="active" @stop-task="confirmStopTask" />
           <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks'" />
@@ -318,6 +345,7 @@ import {useDisplay} from "vuetify";
 import RuntimeCard from "./dashboard/RuntimeCard.vue";
 import TaskCenterTable from "./dashboard/TaskCenterTable.vue";
 import HistoryTable from "./dashboard/HistoryTable.vue";
+import MediaHub from "./dashboard/MediaHub.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
 import OrganizePanel from "./dashboard/OrganizePanel.vue";
 import CandidateLedgerPanel from "./dashboard/CandidateLedgerPanel.vue";
@@ -348,7 +376,7 @@ const fallbackType = ref("success")
 const snackbarTextStyle = computed(() => ({
   color: `rgb(var(--v-theme-on-${fallbackType.value || "success"}))`,
 }))
-const mainTab = ref("tasks")
+const mainTab = ref("hub")
 // 历史页的两个视图：转存结果 / 未转存原因（原「资源账本」降级为子视图）
 const historyView = ref("records")
 const historyStatuses = ref([])
@@ -425,7 +453,7 @@ function scheduleHistoryRefresh() {
   historyRefreshTimer = window.setTimeout(async () => {
     historyRefreshTimer = null
     await loadSummary(false)
-    if (mainTab.value === "history" && historyDirty.value) {
+    if ((mainTab.value === "history" || mainTab.value === "hub") && historyDirty.value) {
       historyDirty.value = false
       await loadPage(false)
     }
@@ -445,7 +473,10 @@ const {
   onHistoryChanged: scheduleHistoryRefresh,
 })
 
-onMounted(() => void loadSummary())
+onMounted(() => {
+  void loadSummary()
+  void loadPage(false)
+})
 onUnmounted(() => {
   if (historyRefreshTimer !== null) window.clearTimeout(historyRefreshTimer)
 })
@@ -457,7 +488,7 @@ watch(mainTab, (tab) => {
     mainTab.value = "history"
     return
   }
-  if (tab !== "history" || !historyDirty.value) return
+  if ((tab !== "history" && tab !== "hub") || !historyDirty.value) return
   historyDirty.value = false
   void loadPage()
 })
@@ -910,8 +941,14 @@ async function notifyHistory() {
   gap: 12px;
 }
 
-.app-identity > div {
+.identity-text {
   min-width: 0;
+}
+
+.identity-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .app-identity h1 {
@@ -920,6 +957,44 @@ async function notifyHistory() {
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: 0;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+.status-badge-active {
+  background: rgba(var(--v-theme-warning), 0.15);
+  color: rgb(var(--v-theme-warning));
+  border: 1px solid rgba(var(--v-theme-warning), 0.3);
+}
+
+.status-badge-idle {
+  background: rgba(var(--v-theme-success), 0.12);
+  color: rgb(var(--v-theme-success));
+  border: 1px solid rgba(var(--v-theme-success), 0.25);
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.status-badge-active .status-dot {
+  animation: pulse-dot 1.5s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.85); }
 }
 
 .app-identity p {
@@ -1095,15 +1170,14 @@ async function notifyHistory() {
   }
 
   .app-actions {
-    display: grid;
-    grid-template-columns: repeat(4, 40px) auto;
+    display: flex;
+    align-items: center;
     gap: 4px;
   }
 
   .app-actions :deep(.v-btn) {
-    min-width: 40px;
-    width: 40px;
-    padding-inline: 0;
+    min-width: 36px;
+    padding-inline: 6px;
   }
 
   .app-actions :deep(.v-btn__prepend) {
@@ -1115,13 +1189,8 @@ async function notifyHistory() {
   }
 
   .app-actions :deep(.settings-action) {
-    width: auto;
-    min-width: 64px;
-    padding-inline: 8px;
-  }
-
-  .app-actions :deep(.settings-action .v-btn__prepend) {
-    margin-inline-end: 4px;
+    min-width: 36px;
+    padding-inline: 6px;
   }
 }
 
@@ -1173,7 +1242,7 @@ async function notifyHistory() {
   }
 
   .app-actions {
-    grid-template-columns: repeat(5, 34px);
+    grid-template-columns: repeat(4, 34px);
   }
 
   .app-actions :deep(.v-btn) {

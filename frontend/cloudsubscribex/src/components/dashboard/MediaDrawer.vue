@@ -1,0 +1,320 @@
+<template>
+  <v-navigation-drawer
+    v-model="visible"
+    location="right"
+    temporary
+    width="680"
+    class="media-drawer"
+    scrim="rgba(0,0,0,0.4)">
+    <div v-if="group" class="drawer-container">
+      <!-- 头部：海报 + 基础元信息 + 关闭按钮 -->
+      <div class="drawer-header">
+        <div class="drawer-cover">
+          <v-img
+            v-if="coverUrl"
+            :src="coverUrl"
+            aspect-ratio="2/3"
+            cover
+            class="rounded-lg elevation-2 cover-img">
+            <template #placeholder>
+              <div class="d-flex align-center justify-center fill-height bg-surface-variant">
+                <v-icon icon="mdi-filmstrip" color="medium-emphasis" />
+              </div>
+            </template>
+          </v-img>
+          <div v-else class="cover-placeholder rounded-lg elevation-2">
+            <v-icon icon="mdi-filmstrip" size="32" color="medium-emphasis" />
+          </div>
+        </div>
+
+        <div class="drawer-title-box">
+          <div class="d-flex align-center justify-space-between">
+            <h2 class="text-h6 font-weight-bold drawer-title" :title="group.title">
+              {{ group.title }}
+              <span v-if="group.year" class="text-medium-emphasis text-body-1">({{ group.year }})</span>
+            </h2>
+            <v-btn icon="mdi-close" variant="text" size="small" @click="visible = false" />
+          </div>
+
+          <div class="drawer-meta-tags mt-2 d-flex flex-wrap align-center ga-1">
+            <v-chip size="x-small" color="primary" variant="tonal">
+              {{ group.type || "电视剧" }}
+            </v-chip>
+            <v-chip size="x-small" variant="tonal" color="info">
+              共 {{ group.records ? group.records.length : 0 }} 条记录
+            </v-chip>
+            <v-chip v-if="group.total_size" size="x-small" variant="tonal" color="secondary">
+              {{ formatSize(group.total_size) }}
+            </v-chip>
+            <v-chip
+              v-for="rtype in group.resource_types || []"
+              :key="rtype"
+              size="x-small"
+              variant="flat"
+              :color="resourceTypeColor(rtype)">
+              {{ resourceTypeLabel(rtype) }}
+            </v-chip>
+          </div>
+
+          <div class="drawer-actions mt-3 d-flex align-center ga-2">
+            <v-btn
+              v-if="hasFailedRecords"
+              size="small"
+              color="warning"
+              variant="tonal"
+              prepend-icon="mdi-refresh"
+              :loading="retrying"
+              @click="$emit('retry-failed', group)">
+              重试失败集
+            </v-btn>
+            <v-btn
+              v-if="mediaDetailLink"
+              size="small"
+              variant="text"
+              color="primary"
+              prepend-icon="mdi-open-in-new"
+              :href="mediaDetailLink"
+              target="_blank">
+              TMDB / 详情
+            </v-btn>
+          </div>
+        </div>
+      </div>
+
+      <v-divider class="my-3" />
+
+      <!-- 明细列表 -->
+      <div class="drawer-body">
+        <div class="d-flex align-center justify-space-between px-3 mb-2">
+          <span class="text-subtitle-2 font-weight-bold">集数转存明细</span>
+          <span class="text-caption text-medium-emphasis">
+            已成功 {{ successCount }} / {{ (group.records || []).length }}
+          </span>
+        </div>
+
+        <div class="record-list px-2">
+          <v-card
+            v-for="(rec, idx) in group.records || []"
+            :key="recordKey(rec, idx)"
+            variant="outlined"
+            class="record-item mb-2 pa-3">
+            <div class="d-flex align-start justify-space-between ga-2">
+              <div class="record-main min-w-0">
+                <div class="d-flex align-center ga-2 mb-1">
+                  <v-chip
+                    size="x-small"
+                    :color="recordStatusColor(rec)"
+                    variant="tonal"
+                    class="font-weight-medium">
+                    {{ rec.status || "已转存" }}
+                  </v-chip>
+                  <span v-if="rec.season || rec.episode" class="text-caption font-weight-bold text-primary">
+                    {{ formatSeasonEpisode(rec) }}
+                  </span>
+                  <span class="text-caption text-medium-emphasis">
+                    {{ rec.time || "-" }}
+                  </span>
+                </div>
+                <div class="record-filename text-body-2 text-truncate" :title="rec.file_name">
+                  {{ rec.file_name || "未知文件" }}
+                </div>
+                <div class="record-meta mt-1 d-flex align-center ga-2 text-caption text-medium-emphasis">
+                  <span v-if="rec.size">{{ formatSize(rec.size) }}</span>
+                  <span v-if="rec.source_type">来源: {{ rec.source_type }}</span>
+                  <span v-if="rec.resource_type">网盘: {{ resourceTypeLabel(rec.resource_type) }}</span>
+                </div>
+                <div v-if="rec.reason" class="record-reason text-caption text-warning mt-1">
+                  原因: {{ rec.reason }}
+                </div>
+              </div>
+
+              <!-- 单条操作按钮 -->
+              <div class="record-actions d-flex align-center ga-1">
+                <v-btn
+                  icon="mdi-refresh"
+                  size="x-small"
+                  variant="text"
+                  color="primary"
+                  title="重试此条"
+                  :loading="retryingKey === retryKey(rec)"
+                  @click="$emit('retry', rec)" />
+                <v-btn
+                  icon="mdi-delete-outline"
+                  size="x-small"
+                  variant="text"
+                  color="error"
+                  title="删除记录"
+                  @click="$emit('delete', rec)" />
+              </div>
+            </div>
+          </v-card>
+        </div>
+      </div>
+    </div>
+  </v-navigation-drawer>
+</template>
+
+<script setup>
+import { computed } from "vue"
+
+const props = defineProps({
+  modelValue: { type: Boolean, default: false },
+  group: { type: Object, default: null },
+  retrying: { type: Boolean, default: false },
+  retryingKey: { type: String, default: "" },
+})
+
+const emit = defineEmits(["update:modelValue", "retry", "retry-failed", "delete"])
+
+const visible = computed({
+  get: () => props.modelValue,
+  set: (val) => emit("update:modelValue", val),
+})
+
+const coverUrl = computed(() => {
+  if (!props.group) return ""
+  return props.group.poster_path || props.group.backdrop_path || ""
+})
+
+const mediaDetailLink = computed(() => {
+  const tmdbId = props.group?.tmdb_id
+  const type = props.group?.type === "电影" ? "movie" : "tv"
+  return tmdbId ? `https://www.themoviedb.org/${type}/${tmdbId}` : ""
+})
+
+const hasFailedRecords = computed(() => {
+  return (props.group?.records || []).some((r) => r.status && r.status !== "成功" && r.status !== "完成")
+})
+
+const successCount = computed(() => {
+  return (props.group?.records || []).filter((r) => !r.status || r.status === "成功" || r.status === "完成").length
+})
+
+function formatSize(bytes) {
+  let value = Number(bytes || 0)
+  if (!value) return "-"
+  for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
+    if (value < 1024 || unit === "TB") return `${value.toFixed(value >= 100 ? 0 : 1)} ${unit}`
+    value /= 1024
+  }
+  return "-"
+}
+
+function formatSeasonEpisode(rec) {
+  const parts = []
+  if (rec.season !== undefined && rec.season !== null && rec.season !== "") {
+    parts.push(`S${String(rec.season).padStart(2, "0")}`)
+  }
+  if (rec.episode !== undefined && rec.episode !== null && rec.episode !== "") {
+    parts.push(`E${String(rec.episode).padStart(2, "0")}`)
+  }
+  return parts.join("")
+}
+
+function recordStatusColor(rec) {
+  const status = rec.status
+  if (!status || status === "成功" || status === "完成") return "success"
+  if (status.includes("跳过") || status.includes("未命中")) return "warning"
+  return "error"
+}
+
+function resourceTypeColor(type) {
+  const map = {
+    "115": "#2670e8",
+    quark: "#15b886",
+    alipan: "#ff6a00",
+    tianyi: "#e60012",
+    p123: "#6366f1",
+  }
+  return map[String(type).toLowerCase()] || "primary"
+}
+
+function resourceTypeLabel(type) {
+  const map = {
+    "115": "115网盘",
+    quark: "夸克网盘",
+    alipan: "阿里云盘",
+    tianyi: "天翼云盘",
+    p123: "123云盘",
+  }
+  return map[String(type).toLowerCase()] || type
+}
+
+function recordKey(rec, index) {
+  return `${rec.time || ""}:${rec.file_name || ""}:${index}`
+}
+
+function retryKey(rec) {
+  return [rec.time, rec.share_url, rec.file_name].join("|")
+}
+</script>
+
+<style scoped>
+.media-drawer {
+  max-width: 90vw;
+}
+
+.drawer-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px;
+  overflow: hidden;
+}
+
+.drawer-header {
+  display: flex;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.drawer-cover {
+  width: 90px;
+  flex: 0 0 90px;
+}
+
+.cover-img {
+  width: 90px;
+  height: 135px;
+}
+
+.cover-placeholder {
+  width: 90px;
+  height: 135px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(var(--v-theme-surface-variant), 0.5);
+}
+
+.drawer-title-box {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.drawer-title {
+  margin: 0;
+  line-height: 1.3;
+}
+
+.drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.record-item {
+  border-color: rgba(var(--v-theme-on-surface), 0.08);
+  background: rgba(var(--v-theme-surface), 0.5);
+  border-radius: 8px;
+}
+
+.record-filename {
+  font-weight: 500;
+  word-break: break-all;
+}
+
+.min-w-0 {
+  min-width: 0;
+}
+</style>
