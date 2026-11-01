@@ -123,7 +123,15 @@
                 频道雷达+搜源
               </v-chip>
               <v-chip
-                v-if="hasMissing(group) && group.missing_episodes && group.missing_episodes.length"
+                v-if="isMovie(group)"
+                size="x-small"
+                variant="tonal"
+                :color="movieLanded(group) ? 'success' : 'warning'"
+                class="font-weight-medium">
+                {{ movieLanded(group) ? "已入库" : "待转存" }}
+              </v-chip>
+              <v-chip
+                v-else-if="hasMissing(group) && group.missing_episodes && group.missing_episodes.length"
                 size="x-small"
                 variant="tonal"
                 color="warning"
@@ -141,6 +149,7 @@
                 {{ getLastUpdateTime(group) }}
               </div>
               <v-btn
+                v-if="!isMovie(group)"
                 size="x-small"
                 variant="tonal"
                 color="primary"
@@ -219,7 +228,23 @@ function openGroupDrawer(group) {
   drawerVisible.value = true
 }
 
+function isMovie(group) {
+  if (group.media_type) return group.media_type === "movie"
+  // 老数据没有 media_type：没有季号且没有总集数 → 电影
+  return !group.season && !Number(group.total_episodes || 0)
+}
+
+function movieLanded(group) {
+  if (Number(group.library_count || 0) > 0) return true
+  return (group.records || []).some(
+    (r) => !r.status || r.status === "成功" || r.status === "完成",
+  )
+}
+
 function hasMissing(group) {
+  if (isMovie(group)) {
+    return !movieLanded(group)
+  }
   if (group.missing_count !== undefined) {
     return Number(group.missing_count) > 0
   }
@@ -228,6 +253,9 @@ function hasMissing(group) {
 }
 
 function getMissingLabel(group) {
+  if (isMovie(group)) {
+    return movieLanded(group) ? "已入库" : "未入库"
+  }
   if (group.total_episodes !== undefined) {
     const missing = Number(group.missing_count || 0)
     return missing > 0 ? `待补齐 ${missing} 集` : "已齐"
@@ -236,6 +264,9 @@ function getMissingLabel(group) {
 }
 
 function getStatusText(group) {
+  if (isMovie(group)) {
+    return movieLanded(group) ? "已入库" : "尚未入库"
+  }
   if (group.total_episodes !== undefined && group.total_episodes > 0) {
     const libCount = group.library_count !== undefined ? group.library_count : (group.library_episodes || []).length
     return `已入库 ${libCount} / 全 ${group.total_episodes} 集`
@@ -246,6 +277,9 @@ function getStatusText(group) {
 }
 
 function calcLibraryPct(group) {
+  if (isMovie(group)) {
+    return movieLanded(group) ? 100 : 0
+  }
   const total = Number(group.total_episodes || 0)
   if (total > 0) {
     const libCount = Number(group.library_count !== undefined ? group.library_count : (group.library_episodes || []).length)

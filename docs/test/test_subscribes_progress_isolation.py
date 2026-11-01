@@ -28,6 +28,7 @@ class FakeSubscribe:
         # MoviePilot V3 字段：外部 ID 改由 media_source + media_id 承载
         self.media_source = kw.get("media_source")
         self.media_id = kw.get("media_id")
+        self.type = kw.get("type")
 
 
 class _FakeCol:
@@ -62,9 +63,14 @@ SUBS = [
     # 尚公主：缺 21-24
     FakeSubscribe(id=2, name="尚公主", year="2026", season=1, total_episode=24,
                   note=list(range(1, 21)), tmdbid=307478, poster="/b.jpg"),
-    # 电影型：无季、总集数 0
-    FakeSubscribe(id=3, name="某电影", year="2025", season=None, total_episode=0,
-                  note=[], tmdbid=None, poster=""),
+    # 电影型：无季、总集数 0、从未落地
+    FakeSubscribe(id=3, name="某电影", year="2025", season=None, total_episode=None,
+                  note=[], tmdbid=None, media_id="999001", media_source="themoviedb",
+                  type="电影", poster=""),
+    # 电影型：已落地（有成功流水，但 episode 为空 → 只能靠流水判定）
+    FakeSubscribe(id=5, name="已落地电影", year="2024", season=None, total_episode=None,
+                  note=[], tmdbid=None, media_id="999002", media_source="themoviedb",
+                  type="电影", poster=""),
     # V3 真实形态：tmdbid 为空，只有 media_id/media_source
     # 线上数据：note=1..92+97，历史成功 93..106 → 合并后应缺 107-110
     FakeSubscribe(id=4, name="沧元图", year="2024", season=1, total_episode=110,
@@ -81,6 +87,10 @@ HIST = [
     FakeHistory(episode=ep, subscribe_id=None, tmdb_id=236534, season=1,
                 title=f"沧元图 - S01E{ep} - 第{ep}集.mp4")
     for ep in range(93, 107)
+] + [
+    # 电影流水：episode 为空，只能靠 tmdb + status 判定已落地
+    FakeHistory(episode=None, subscribe_id=None, tmdb_id=999002, season=None,
+                title="已落地电影.2024.2160p.mkv"),
 ]
 
 
@@ -186,7 +196,11 @@ def main():
     assert sg["missing_episodes"] == [21, 22, 23, 24], f"尚公主应缺 21-24，实得 {sg['missing_episodes']}"
 
     mv = by_name["某电影"]
-    assert mv["total_episodes"] == 0 and mv["missing_count"] == 0
+    assert mv["total_episodes"] == 0 and mv["missing_count"] == 1, "未落地的电影必须算作待补"
+    assert mv["media_type"] == "movie" and mv["library_count"] == 0
+
+    landed = by_name["已落地电影"]
+    assert landed["missing_count"] == 0 and landed["library_count"] == 1, "有成功流水的电影应算已入库"
 
     # V3 回归：tmdbid 为空、只有 media_id 时也要能按 tmdb 合并历史成功集
     cy = by_name["沧元图"]

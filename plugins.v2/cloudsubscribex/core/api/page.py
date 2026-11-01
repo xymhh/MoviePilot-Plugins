@@ -353,6 +353,9 @@ class PageApi(OwnerDelegator):
         """构建以 MoviePilot 订阅为核心的追更进度大屏数据。"""
         subscribes = []
         history_success_map: dict[str, set[int]] = {}
+        # 电影没有集号，episode 为空时进不了 history_success_map，
+        # 单独留一份「成功落地的 tmdb id」用于判定电影是否已入库
+        history_success_tmdb: set[str] = set()
         try:
             from app.db import SessionFactory
             from app.db.models.subscribe import Subscribe
@@ -366,6 +369,8 @@ class PageApi(OwnerDelegator):
                     .all()
                 )
                 for hr in history_rows:
+                    if hr.tmdb_id:
+                        history_success_tmdb.add(str(hr.tmdb_id))
                     ep = hr.episode
                     if not ep or int(ep) <= 0:
                         continue
@@ -421,6 +426,9 @@ class PageApi(OwnerDelegator):
                 # 必须先解析 tmdb_id，下面合并转存历史时要用它做键
                 tmdb_id = _resolve_subscribe_tmdb_id(sub)
                 state = str(getattr(sub, "state", "R") or "R")
+                # 电影/剧集判定：优先用订阅自身的 type，缺省时按有无季号推断
+                sub_type = str(getattr(sub, "type", "") or "").strip()
+                is_movie = sub_type == "电影" or (not sub_type and season is None)
 
                 # 合并转存历史中已成功的集数，确保转存后列表即时更新
                 eff_season = season or 1
@@ -456,13 +464,44 @@ class PageApi(OwnerDelegator):
                             transferring.append(int(ep))
                 transferring_episodes = sorted(set(transferring))
 
+                # 挂载该订阅对应的真实转存记录（电影判定也要用，故提前计算）
+                matched_records = [
+                    rec for rec in history_items
+                    if int(rec.get("subscribe_id") or 0) == sub_id
+                    or (tmdb_id and str(rec.get("tmdb_id") or "") == str(tmdb_id))
+                    or str(rec.get("title") or "") == name
+                ]
+
                 if total_episodes > 0:
                     missing_episodes = [
                         i for i in range(1, total_episodes + 1)
                         if i not in library_episodes and i not in transferring_episodes
                     ]
+                    missing_count = len(missing_episodes)
+                elif is_movie:
+                    # 电影没有集数概念：已入库 = 有集数记录 ∪ 有成功转存流水。
+                    # MoviePilot 的 lack_episode 在电影订阅上常为 None，直接沿用会让
+                    # 「一次都没转存成功」的电影被算成「已全部入库」。
+                    landed = (
+                        bool(library_episodes)
+                        or (bool(tmdb_id) and str(tmdb_id) in history_success_tmdb)
+                        or any(
+                            str(rec.get("status") or "") in ("成功", "完成")
+                            for rec in matched_records
+                        )
+                    )
+                    if landed:
+                        library_episodes = [1]
+                        transferring_episodes = []
+                        missing_episodes = []
+                        missing_count = 0
+                    else:
+                        library_episodes = []
+                        missing_episodes = [1]
+                        missing_count = 1
                 else:
                     missing_episodes = []
+                    missing_count = lack_episode
 
                 # 挂载该订阅对应的真实转存记录
                 matched_records = [
@@ -478,13 +517,14 @@ class PageApi(OwnerDelegator):
                     "title": name,
                     "year": year,
                     "season": season,
-                    "type": "电视剧" if season is not None else "电影",
+                    "type": "电影" if is_movie else "电视剧",
+                    "media_type": "movie" if is_movie else "tv",
                     "total_episodes": total_episodes,
                     "library_episodes": library_episodes,
                     "library_count": len(library_episodes),
                     "transferring_episodes": transferring_episodes,
                     "missing_episodes": missing_episodes,
-                    "missing_count": len(missing_episodes) if total_episodes > 0 else lack_episode,
+                    "missing_count": missing_count,
                     "tmdb_id": tmdb_id,
                     "state": state,
                     "poster": poster,
