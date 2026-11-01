@@ -251,9 +251,16 @@ class PageApi(OwnerDelegator):
                     )
                     for record in group.get("records", [])
                 ]
-                history_groups.append(
-                    self._sync_handler.prepare_history_group(group)
+                prepared_group = self._sync_handler.prepare_history_group(group)
+                poster = (
+                    prepared_group.get("poster")
+                    or prepared_group.get("image")
+                    or prepared_group.get("poster_path")
+                    or prepared_group.get("poster_url")
                 )
+                if poster:
+                    prepared_group["poster_url"] = _platform_image_url(poster, "w500")
+                history_groups.append(prepared_group)
         else:
             page_history = [copy.deepcopy(item) for item in page_history]
             history_groups = [copy.deepcopy(group) for group in page_groups]

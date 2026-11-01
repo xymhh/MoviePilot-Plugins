@@ -214,15 +214,30 @@ function openGroupDrawer(group) {
 
 function getCoverUrl(group) {
   if (!group) return ""
-  return (
+  const raw = (
+    group.poster_url ||
     group.poster ||
     group.image ||
     group.poster_path ||
     group.backdrop_path ||
-    group.poster_url ||
-    (group.records && group.records[0] && (group.records[0].image || group.records[0].poster)) ||
+    (group.records && group.records[0] && (group.records[0].poster_url || group.records[0].image || group.records[0].poster || group.records[0].poster_path)) ||
     ""
   )
+  if (!raw) return ""
+  const str = String(raw).trim()
+  if (str.startsWith("/api/") || str.startsWith("data:") || str.startsWith("blob:")) {
+    return str
+  }
+  // 命中相对 TMDB 路径，自动拼接为完整 TMDB 并走 MP 图片代理
+  if (str.startsWith("/") && !str.startsWith("//")) {
+    const full = `https://image.tmdb.org/t/p/w500${str}`
+    return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(full)}`
+  }
+  // 命中直连 TMDB 域名，自动套用 MP 图片代理防国内网络阻断与防盗链
+  if (str.includes("image.tmdb.org") || str.includes("themoviedb.org")) {
+    return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(str)}`
+  }
+  return str
 }
 
 function getInitial(title) {

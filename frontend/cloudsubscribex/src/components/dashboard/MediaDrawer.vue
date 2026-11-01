@@ -181,15 +181,28 @@ const visible = computed({
 
 const coverUrl = computed(() => {
   if (!props.group) return ""
-  return (
+  const raw = (
+    props.group.poster_url ||
     props.group.poster ||
     props.group.image ||
     props.group.poster_path ||
     props.group.backdrop_path ||
-    props.group.poster_url ||
-    (props.group.records && props.group.records[0] && (props.group.records[0].image || props.group.records[0].poster)) ||
+    (props.group.records && props.group.records[0] && (props.group.records[0].poster_url || props.group.records[0].image || props.group.records[0].poster || props.group.records[0].poster_path)) ||
     ""
   )
+  if (!raw) return ""
+  const str = String(raw).trim()
+  if (str.startsWith("/api/") || str.startsWith("data:") || str.startsWith("blob:")) {
+    return str
+  }
+  if (str.startsWith("/") && !str.startsWith("//")) {
+    const full = `https://image.tmdb.org/t/p/w500${str}`
+    return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(full)}`
+  }
+  if (str.includes("image.tmdb.org") || str.includes("themoviedb.org")) {
+    return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(str)}`
+  }
+  return str
 })
 
 function getInitial(title) {
