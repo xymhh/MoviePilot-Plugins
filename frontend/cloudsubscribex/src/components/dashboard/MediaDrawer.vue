@@ -8,26 +8,13 @@
       <!-- 头部：海报 + 基础元信息 + 关闭按钮 -->
       <v-card-title class="drawer-header pa-4 bg-surface-variant d-flex align-start ga-3">
         <div class="drawer-cover">
-          <v-img
-            v-if="coverUrl"
+          <img
+            v-if="coverUrl && !coverError"
             :src="coverUrl"
-            :width="72"
-            :height="108"
-            aspect-ratio="2/3"
-            cover
-            referrerpolicy="no-referrer"
-            class="rounded elevation-2 cover-img">
-            <template #placeholder>
-              <div class="d-flex align-center justify-center fill-height bg-surface">
-                <v-icon icon="mdi-filmstrip" color="medium-emphasis" />
-              </div>
-            </template>
-            <template #error>
-              <div class="cover-badge-art rounded elevation-2">
-                <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
-              </div>
-            </template>
-          </v-img>
+            class="cover-img rounded elevation-2"
+            alt=""
+            loading="lazy"
+            @error="coverError = true" />
           <div v-else class="cover-badge-art rounded elevation-2">
             <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
           </div>
@@ -236,12 +223,16 @@ const props = defineProps({
 const emit = defineEmits(["update:modelValue", "retry", "retry-failed", "delete"])
 
 const selectedEpisode = ref(null)
+const coverError = ref(false)
 
 const visible = computed({
   get: () => props.modelValue,
   set: (val) => {
     emit("update:modelValue", val)
-    if (!val) selectedEpisode.value = null
+    if (!val) {
+      selectedEpisode.value = null
+      coverError.value = false
+    }
   },
 })
 
@@ -258,17 +249,17 @@ const coverUrl = computed(() => {
   )
   if (!raw) return ""
   const str = String(raw).trim()
-  if (str.startsWith("/api/") || str.startsWith("data:") || str.startsWith("blob:")) {
+  if (str.startsWith("data:") || str.startsWith("blob:")) {
     return str
   }
-  if (str.startsWith("/") && !str.startsWith("//")) {
-    const full = `https://image.tmdb.org/t/p/w500${str}`
-    return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(full)}`
+  let target = str
+  if (target.startsWith("api/v1/plugin/") || target.startsWith("/api/v1/plugin/")) {
+    return target
   }
-  if (str.includes("image.tmdb.org") || str.includes("themoviedb.org")) {
-    return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(str)}`
+  if (target.startsWith("/") && !target.startsWith("//")) {
+    target = `https://image.tmdb.org/t/p/w500${target}`
   }
-  return str
+  return `api/v1/plugin/CloudSubscribeX/image_proxy?url=${encodeURIComponent(target)}`
 })
 
 function getInitial(title) {

@@ -100,14 +100,17 @@ def _recognized_season_counts(recognized) -> dict[int, int]:
 
 
 def _platform_image_url(value: object, size: str = "w500") -> str:
-    """使用 MoviePilot v2 图片代理生成前端可直接加载的地址。"""
+    """使用插件内置图片代理或直连地址，彻底避开 MP 系统端点的 401 鉴权问题。"""
     raw = str(value or "").strip()
     if not raw or raw.startswith(("data:", "blob:")):
         return raw
     if not raw.lower().startswith(("http://", "https://")):
-        builder = getattr(settings, "TMDB_IMAGE_URL", None)
-        raw = builder(raw, size) if callable(builder) else raw
-    return f"/api/v1/system/img/1?cache=1&imgurl={quote(raw, safe='')}" if raw else ""
+        if raw.startswith("/") and not raw.startswith("//"):
+            raw = f"https://image.tmdb.org/t/p/{size}{raw}"
+        else:
+            builder = getattr(settings, "TMDB_IMAGE_URL", None)
+            raw = builder(raw, size) if callable(builder) else raw
+    return f"api/v1/plugin/CloudSubscribeX/image_proxy?url={quote(raw, safe='')}" if raw else ""
 
 
 def _media_value(media: object, *names: str):
@@ -289,6 +292,39 @@ class PageApi(OwnerDelegator):
             "success": True,
             "data": self._build_subscribes_progress([]),
         }
+
+    def api_vue_image_proxy(self, url: str):
+        """插件内置图片代理：由服务端容器拉取外部 TMDB 海报并缓存，绕过浏览器网络阻断与 401。"""
+        from fastapi import Response
+        target = str(url or "").strip()
+        if not target or not target.lower().startswith(("http://", "https://")):
+            return Response(status_code=400, content=b"Invalid URL")
+
+        cache_key = f"img:{target}"
+        cached = _UI_OPTIONS_CACHE.get(cache_key)
+        if cached:
+            return Response(
+                content=cached[0],
+                media_type=cached[1],
+                headers={"Cache-Control": "public, max-age=86400"},
+            )
+
+        try:
+            import urllib.request
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            req = urllib.request.Request(target, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                content = resp.read()
+                content_type = resp.headers.get("Content-Type", "image/jpeg")
+                _UI_OPTIONS_CACHE.set(cache_key, (content, content_type))
+                return Response(
+                    content=content,
+                    media_type=content_type,
+                    headers={"Cache-Control": "public, max-age=86400"},
+                )
+        except Exception as err:
+            logger.debug(f"代理拉取海报失败 {target}: {err}")
+            return Response(status_code=502, content=b"Failed to fetch image")
 
     def _build_subscribes_progress(self, page_history: list[dict[str, Any]] = None) -> list[dict[str, Any]]:
         """构建以 MoviePilot 订阅为核心的追更进度大屏数据。"""

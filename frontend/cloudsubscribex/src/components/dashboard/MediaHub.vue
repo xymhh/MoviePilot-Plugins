@@ -62,26 +62,13 @@
         <div class="card-inner">
           <!-- 海报区 -->
           <div class="card-poster">
-            <v-img
-              v-if="getCoverUrl(group)"
+            <img
+              v-if="getCoverUrl(group) && !imgErrors[group.subscribe_id || group.title]"
               :src="getCoverUrl(group)"
-              :width="80"
-              :height="116"
-              aspect-ratio="2/3"
-              cover
-              referrerpolicy="no-referrer"
-              class="poster-img rounded">
-              <template #placeholder>
-                <div class="d-flex align-center justify-center fill-height bg-surface-variant">
-                  <v-icon icon="mdi-filmstrip" color="medium-emphasis" />
-                </div>
-              </template>
-              <template #error>
-                <div class="poster-badge-art rounded">
-                  <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
-                </div>
-              </template>
-            </v-img>
+              class="poster-img rounded"
+              alt=""
+              loading="lazy"
+              @error="onImgError(group)" />
             <div v-else class="poster-badge-art rounded">
               <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
             </div>
@@ -292,6 +279,13 @@ function getLastUpdateTime(group) {
   return recs[0]?.time ? `更新于 ${recs[0].time}` : ""
 }
 
+const imgErrors = ref({})
+
+function onImgError(group) {
+  const key = group.subscribe_id || group.title || group.name
+  if (key) imgErrors.value[key] = true
+}
+
 function getCoverUrl(group) {
   if (!group) return ""
   const raw = (
@@ -305,17 +299,18 @@ function getCoverUrl(group) {
   )
   if (!raw) return ""
   const str = String(raw).trim()
-  if (str.startsWith("/api/") || str.startsWith("data:") || str.startsWith("blob:")) {
+  if (str.startsWith("data:") || str.startsWith("blob:")) {
     return str
   }
-  if (str.startsWith("/") && !str.startsWith("//")) {
-    const full = `https://image.tmdb.org/t/p/w500${str}`
-    return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(full)}`
+  // 提取原始图片地址并统一走插件内置图片反代通道
+  let target = str
+  if (target.startsWith("api/v1/plugin/") || target.startsWith("/api/v1/plugin/")) {
+    return target
   }
-  if (str.includes("image.tmdb.org") || str.includes("themoviedb.org")) {
-    return `/api/v1/system/img/1?cache=1&imgurl=${encodeURIComponent(str)}`
+  if (target.startsWith("/") && !target.startsWith("//")) {
+    target = `https://image.tmdb.org/t/p/w500${target}`
   }
-  return str
+  return `api/v1/plugin/CloudSubscribeX/image_proxy?url=${encodeURIComponent(target)}`
 }
 
 function getInitial(title) {
