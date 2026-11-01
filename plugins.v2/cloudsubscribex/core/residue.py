@@ -42,6 +42,25 @@ def _canonical(name: str) -> str:
     return _VARIANT_PATTERN.sub("", str(name or ""))
 
 
+def resolve_roots(*candidates: object) -> list:
+    """按顺序取目录列表，跳过空值并按实际路径去重（保留原始写法）。"""
+    roots: list = []
+    seen: Set[str] = set()
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        try:
+            marker = str(Path(text).resolve())
+        except OSError:
+            marker = text
+        if marker in seen:
+            continue
+        seen.add(marker)
+        roots.append(text)
+    return roots
+
+
 def _disk_free_ratio(base: Path) -> Optional[float]:
     """返回根目录所在文件系统的剩余比例；取不到返回 None。"""
     try:

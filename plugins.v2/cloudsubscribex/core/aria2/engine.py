@@ -26,6 +26,8 @@ class Aria2Engine:
 
     READY_TIMEOUT = 10.0
     READY_INTERVAL = 0.2
+    #: aria2 日志单文件上限；启动前超限即滚动到 ``.1``（只保留一份）。
+    LOG_LIMIT_BYTES = 20 * 1024 * 1024
 
     def __init__(self, settings):
         self._settings = settings
@@ -87,6 +89,8 @@ class Aria2Engine:
         if binary is None:
             logger.warning(f"aria2 二进制不可用（{reason}），回落内置下载器")
             return False
+
+        self._rotate_logs(data_dir)
 
         # 端口冲突概率极低，允许换端口重试一次。
         for _attempt in range(2):
@@ -166,6 +170,24 @@ class Aria2Engine:
             sock.bind(("127.0.0.1", 0))
             return int(sock.getsockname()[1])
 
+    @staticmethod
+    def _rotate_logs(data_dir: Path) -> None:
+        """启动前限制 aria2 日志体积：超过上限就滚到 ``.1``，只保留一份。"""
+        path = data_dir / "aria2.log"
+        try:
+            if not path.is_file() or path.stat().st_size <= Aria2Engine.LOG_LIMIT_BYTES:
+                return
+            backup = data_dir / "aria2.log.1"
+            if backup.is_file():
+                backup.unlink()
+            path.replace(backup)
+            logger.info(
+                f"aria2 日志超过 {Aria2Engine.LOG_LIMIT_BYTES // (1024 * 1024)}MB，"
+                "已轮转到 aria2.log.1"
+            )
+        except OSError as error:  # noqa: BLE001 - 轮转失败不影响启动
+            logger.debug(f"轮转 aria2 日志失败：{error}", exc_info=True)
+
     def _build_command(
             self, binary: Path, port: int, secret: str, data_dir: Path,
     ) -> list[str]:
@@ -191,6 +213,7 @@ class Aria2Engine:
             "--enable-dht=false",
             "--bt-enable-lpd=false",
             "--console-log-level=warn",
+            "--log-level=warn",
             "--summary-interval=0",
             "--quiet=true",
             f"--log={data_dir / 'aria2.log'}",

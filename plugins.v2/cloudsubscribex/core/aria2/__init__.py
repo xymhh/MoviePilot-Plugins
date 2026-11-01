@@ -26,6 +26,24 @@ class Aria2Settings:
 
 _SETTINGS = Aria2Settings()
 
+#: 跟随跨盘缓存目录时的工作子目录名（放二进制、会话与日志）。
+DATA_DIR_NAME = ".aria2"
+
+
+def resolve_data_dir(download_path: Any, plugin_data_path: Any) -> Path:
+    """aria2 工作目录：配置了跨盘缓存目录就跟随它，否则保持插件的原位置。
+
+    下载本体一直由 RPC 的 ``dir`` / ``out`` 指向跨盘缓存目录，这里只决定
+    aria2c 二进制、会话文件与日志落在哪个盘上。未配置缓存目录时返回插件
+    数据目录本身（与历史行为一致，不迁移已有 bin/log）。
+    """
+    root = str(download_path or "").strip()
+    if root:
+        return Path(root) / DATA_DIR_NAME
+    text = str(plugin_data_path or "").strip()
+    return Path(text) if text else Path("/tmp/cloudsubscribex-aria2")
+
+
 _ENGINE: Optional[Any] = None
 _LOCK = Lock()
 
@@ -68,8 +86,11 @@ def configure_aria2(**kwargs) -> None:
     )
     stale = None
     with _LOCK:
+        # 数据目录变化必须重启 daemon：--log/--dir/二进制位置都写在启动参数里，
+        # 只换 _SETTINGS 会让旧进程继续往旧目录写。
+        moved = Path(settings.data_dir) != Path(_SETTINGS.data_dir)
         _SETTINGS = settings
-        if not settings.enabled and _ENGINE is not None:
+        if _ENGINE is not None and (not settings.enabled or moved):
             stale = _ENGINE
             _ENGINE = None
     if stale is not None:

@@ -182,7 +182,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.8.10"
+    plugin_version = "1.8.11"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1364,17 +1364,24 @@ class CloudSubscribeX(_PluginBase):
         """
         from .core.residue import scan_residue
 
-        root = self._cross_transfer_download_path or "/tmp"
         retention_hours = max(1, int(getattr(self, "_residue_retention_hours", 6) or 6))
-        result = scan_residue(
-            root,
-            min_age_seconds=retention_hours * 3600,
-            disk_free_ratio=getattr(self, "_residue_disk_free_ratio", 0.0) or 0.0,
-        )
+        result = self._empty_residue_result()
+        roots = self._residue_roots()
+        result["roots"] = roots
+        for root in roots:
+            scanned = scan_residue(
+                root,
+                min_age_seconds=retention_hours * 3600,
+                disk_free_ratio=getattr(self, "_residue_disk_free_ratio", 0.0) or 0.0,
+            )
+            self._merge_residue_result(result, scanned)
+            if not result.get("root"):
+                result["root"] = scanned.get("root")
         freed_mb = int(result.get("freed_bytes") or 0) / (1024 * 1024)
         pressure_mb = int(result.get("pressure_freed_bytes") or 0) / (1024 * 1024)
         logger.info(
-            f"跨盘缓存残留清理（{reason}）：删除 {result.get('deleted_files')} 个文件、"
+            f"跨盘缓存残留清理（{reason}）：扫描 {len(roots)} 个目录，"
+            f"删除 {result.get('deleted_files')} 个文件、"
             f"释放 {freed_mb:.1f} MB（其中磁盘压力清理 {result.get('pressure_deleted_files')} 个 / "
             f"{pressure_mb:.1f} MB）；跳过未过期 {result.get('skipped_recent')} 组、"
             f"任务中 {result.get('skipped_active')} 组、活跃保护 {result.get('skipped_protected')} 组；"
@@ -1383,6 +1390,72 @@ class CloudSubscribeX(_PluginBase):
         for error in result.get("errors") or []:
             logger.warning(f"跨盘缓存残留清理：{error}")
         return result
+
+    @staticmethod
+    def _empty_residue_result() -> dict:
+        return {
+            "root": "",
+            "roots": [],
+            "deleted_files": 0,
+            "freed_bytes": 0,
+            "skipped_recent": 0,
+            "skipped_active": 0,
+            "skipped_protected": 0,
+            "pressure_deleted_files": 0,
+            "pressure_freed_bytes": 0,
+            "disk_free_ratio": None,
+            "disk_free_target": None,
+            "errors": [],
+        }
+
+    @staticmethod
+    def _merge_residue_result(total: dict, part: dict) -> None:
+        for key in (
+            "deleted_files", "freed_bytes", "skipped_recent", "skipped_active",
+            "skipped_protected", "pressure_deleted_files", "pressure_freed_bytes",
+        ):
+            total[key] = int(total.get(key) or 0) + int(part.get(key) or 0)
+        if part.get("disk_free_ratio") is not None:
+            total["disk_free_ratio"] = part.get("disk_free_ratio")
+        total["disk_free_target"] = part.get("disk_free_target")
+        total["errors"].extend(part.get("errors") or [])
+
+    def _residue_roots(self) -> list[str]:
+        """缓存清理要扫的目录：配置的缓存目录、aria2 工作目录、历史插件数据目录。
+
+        历史版本把 aria2 数据目录（含日志、会话与早期下载残留）放在插件数据
+        目录下，升级后这些残留没人清，所以保留这一条只读扫描路径。
+        """
+        from .core.residue import resolve_roots
+
+        data_path = ""
+        getter = getattr(self, "get_data_path", None)
+        if callable(getter):
+            try:
+                data_path = getter()
+            except Exception as error:  # noqa: BLE001 - 取不到数据目录不影响清理
+                logger.debug(f"读取插件数据目录失败：{error}", exc_info=True)
+        directories = [
+            self._cross_transfer_download_path or "/tmp",
+            self._aria2_data_dir(),
+            data_path,
+        ]
+        roots = resolve_roots(*directories)
+        # 只扫真实存在的目录：aria2 工作目录可能还没建，报「目录不存在」是噪音。
+        return [path for path in roots if Path(path).is_dir()] or roots
+
+    def _aria2_data_dir(self) -> Path:
+        """aria2 工作目录：优先跟随跨盘缓存目录，未配置才回落插件数据目录。
+
+        下载本体一直由 RPC 的 ``dir`` / ``out`` 指向跨盘缓存目录；这里放的
+        是 aria2c 二进制、会话文件与日志。日志按 warn 级别写入且启动前轮转，
+        跟随缓存目录可避免把大文件写到配置盘上。
+        """
+        from .core.aria2 import resolve_data_dir
+
+        return resolve_data_dir(
+            self._cross_transfer_download_path, self.get_data_path()
+        )
 
     def _start_residue_cleanup(self) -> None:
         """启动时跑一次 + 按配置间隔周期跑（默认每 6 小时），与 STRM 校准错峰。
@@ -1916,7 +1989,7 @@ class CloudSubscribeX(_PluginBase):
                 max_concurrent=self._cross_transfer_aria2_max_concurrent,
                 min_split_size=self._cross_transfer_aria2_min_split_size,
                 disk_cache=self._cross_transfer_aria2_disk_cache,
-                data_dir=Path(self.get_data_path()),
+                data_dir=self._aria2_data_dir(),
             )
         except Exception as error:  # noqa: BLE001 - 配置失败不得阻塞插件加载
             logger.warning(f"配置 aria2 下载引擎失败：{error}")
