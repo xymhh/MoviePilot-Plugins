@@ -14,7 +14,7 @@ import re
 import sys
 from pathlib import Path
 
-EXPECTED_TABS = ["tasks", "history", "tg", "organize", "ledger"]
+EXPECTED_TABS = ["tasks", "history", "tg", "organize"]
 
 
 def main(root: Path) -> int:
@@ -41,6 +41,21 @@ def main(root: Path) -> int:
     if "TgMonitor" not in app_text:
         errors.append("AppPage 未挂载 TgMonitor（频道监控页签会空白）")
 
+    # 1.9.0：资源账本并入历史页，必须仍挂载账本面板，否则「未转存原因」会空白
+    if "CandidateLedgerPanel" not in app_text:
+        errors.append("AppPage 未挂载 CandidateLedgerPanel（历史页的未转存原因会空白）")
+    if 'historyView === \'skipped\'' not in app_text:
+        errors.append("AppPage 缺少「未转存原因」子视图开关（historyView === 'skipped'）")
+
+    status_module = components.parent / "utils" / "status.js"
+    if not status_module.exists():
+        errors.append(f"缺少状态词表：{status_module}")
+    else:
+        status_text = status_module.read_text(encoding="utf-8")
+        for word in ("排队", "进行中", "待确认", "成功", "失败", "已跳过", "忽略"):
+            if word not in status_text:
+                errors.append(f"状态词表缺少统一词「{word}」")
+
     if re.search(r"<v-tab\b", page_text) or len(page_text.splitlines()) > 40:
         errors.append(
             "Page.vue 又长成了完整实现（应只有转发壳，"
@@ -58,7 +73,7 @@ def report(errors: list[str]) -> int:
         for line in errors:
             print(f"  - {line}")
         return 1
-    print("前端单入口校验通过：AppPage 5 个页签，Page 为转发壳")
+    print("前端单入口校验通过：AppPage 4 个页签 + 历史双子视图，Page 为转发壳")
     return 0
 
 
