@@ -1,7 +1,7 @@
 <template>
   <v-dialog
     v-model="visible"
-    max-width="760"
+    max-width="820"
     scrollable
     class="media-detail-dialog">
     <v-card v-if="group" class="rounded-lg elevation-8 overflow-hidden">
@@ -11,8 +11,11 @@
           <v-img
             v-if="coverUrl"
             :src="coverUrl"
+            :width="72"
+            :height="108"
             aspect-ratio="2/3"
             cover
+            referrerpolicy="no-referrer"
             class="rounded elevation-2 cover-img">
             <template #placeholder>
               <div class="d-flex align-center justify-center fill-height bg-surface">
@@ -21,19 +24,19 @@
             </template>
             <template #error>
               <div class="cover-badge-art rounded elevation-2">
-                <span class="art-letter">{{ getInitial(group.title) }}</span>
+                <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
               </div>
             </template>
           </v-img>
           <div v-else class="cover-badge-art rounded elevation-2">
-            <span class="art-letter">{{ getInitial(group.title) }}</span>
+            <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
           </div>
         </div>
 
         <div class="drawer-title-box flex-grow-1 min-w-0">
           <div class="d-flex align-center justify-space-between">
-            <h2 class="text-h6 font-weight-bold drawer-title text-truncate" :title="group.title">
-              {{ group.title }}
+            <h2 class="text-h6 font-weight-bold drawer-title text-truncate" :title="group.title || group.name">
+              {{ group.title || group.name }}
               <span v-if="group.year" class="text-medium-emphasis text-body-1">({{ group.year }})</span>
             </h2>
             <v-btn icon="mdi-close" variant="text" size="small" @click="visible = false" />
@@ -41,21 +44,19 @@
 
           <div class="drawer-meta-tags mt-2 d-flex flex-wrap align-center ga-1">
             <v-chip size="x-small" color="primary" variant="tonal">
-              {{ group.type || "电视剧" }}
+              {{ group.type || (group.season ? `S${String(group.season).padStart(2, '0')}` : "电视剧") }}
             </v-chip>
-            <v-chip size="x-small" variant="tonal" color="info">
-              共 {{ group.records ? group.records.length : 0 }} 集
+            <v-chip v-if="group.season" size="x-small" color="info" variant="tonal">
+              第 {{ group.season }} 季
             </v-chip>
-            <v-chip v-if="group.total_size" size="x-small" variant="tonal" color="secondary">
-              {{ formatSize(group.total_size) }}
+            <v-chip size="x-small" variant="tonal" color="success">
+              已入库 {{ libraryCount }} 集
             </v-chip>
-            <v-chip
-              v-for="rtype in group.resource_types || []"
-              :key="rtype"
-              size="x-small"
-              variant="flat"
-              :color="resourceTypeColor(rtype)">
-              {{ resourceTypeLabel(rtype) }}
+            <v-chip v-if="missingCount > 0" size="x-small" variant="tonal" color="warning">
+              待补齐 {{ missingCount }} 集
+            </v-chip>
+            <v-chip v-if="totalCount > 0" size="x-small" variant="tonal" color="secondary">
+              全剧共 {{ totalCount }} 集
             </v-chip>
           </div>
 
@@ -86,71 +87,131 @@
 
       <v-divider />
 
-      <!-- 明细列表 (可滚动) -->
-      <v-card-text class="drawer-body pa-3" style="max-height: 60vh;">
-        <div class="d-flex align-center justify-space-between px-1 mb-2">
-          <span class="text-subtitle-2 font-weight-bold">集数转存明细</span>
-          <span class="text-caption text-medium-emphasis">
-            已成功 {{ successCount }} / {{ (group.records || []).length }}
-          </span>
-        </div>
+      <!-- 主体内容 -->
+      <v-card-text class="drawer-body pa-4" style="max-height: 65vh;">
+        <!-- 1. 分集选集方块矩阵 (B站/爱奇艺风格) -->
+        <div v-if="episodesList.length" class="episode-matrix-section mb-4">
+          <div class="d-flex align-center justify-space-between mb-2">
+            <div class="d-flex align-center ga-2">
+              <span class="text-subtitle-2 font-weight-bold">选集追更全景矩阵</span>
+              <span class="text-caption text-medium-emphasis">（点击单集查看详情与状态）</span>
+            </div>
+            <!-- 状态图例 -->
+            <div class="matrix-legend d-flex align-center ga-2 text-caption">
+              <span class="legend-item"><span class="legend-dot bg-success"></span>已入库</span>
+              <span class="legend-item"><span class="legend-dot bg-warning"></span>转存中</span>
+              <span class="legend-item"><span class="legend-dot bg-surface-variant border"></span>待补齐</span>
+            </div>
+          </div>
 
-        <div class="record-list">
-          <v-card
-            v-for="(rec, idx) in group.records || []"
-            :key="recordKey(rec, idx)"
-            variant="outlined"
-            class="record-item mb-2 pa-3">
-            <div class="d-flex align-start justify-space-between ga-2">
-              <div class="record-main min-w-0">
-                <div class="d-flex align-center ga-2 mb-1">
-                  <v-chip
-                    size="x-small"
-                    :color="recordStatusColor(rec)"
-                    variant="tonal"
-                    class="font-weight-medium">
-                    {{ rec.status || "已转存" }}
+          <div class="episode-grid">
+            <button
+              v-for="ep in episodesList"
+              :key="ep.number"
+              type="button"
+              :class="['ep-box', `ep-box--${ep.status}`, { 'ep-box--selected': selectedEpisode === ep.number }]"
+              @click="onSelectEp(ep)">
+              <span class="ep-num">{{ ep.number }}</span>
+              <span class="ep-badge">{{ ep.statusText }}</span>
+            </button>
+          </div>
+
+          <!-- 选中某一集后的快捷卡片 -->
+          <v-expand-transition>
+            <div v-if="selectedEpData" class="selected-ep-card mt-3 pa-3 rounded border">
+              <div class="d-flex align-center justify-space-between">
+                <div class="d-flex align-center ga-2">
+                  <v-chip size="small" :color="selectedEpData.statusColor" variant="tonal" class="font-weight-bold">
+                    第 {{ selectedEpData.number }} 集 · {{ selectedEpData.statusText }}
                   </v-chip>
-                  <span v-if="rec.season || rec.episode" class="text-caption font-weight-bold text-primary">
-                    {{ formatSeasonEpisode(rec) }}
-                  </span>
-                  <span class="text-caption text-medium-emphasis">
-                    {{ rec.time || "-" }}
+                  <span v-if="selectedEpData.matchedRecord?.file_name" class="text-caption text-truncate max-w-300" :title="selectedEpData.matchedRecord.file_name">
+                    {{ selectedEpData.matchedRecord.file_name }}
                   </span>
                 </div>
-                <div class="record-filename text-body-2 text-truncate" :title="rec.file_name">
-                  {{ rec.file_name || "未知文件" }}
+                <div class="d-flex align-center ga-1">
+                  <v-btn
+                    v-if="selectedEpData.matchedRecord"
+                    size="x-small"
+                    variant="tonal"
+                    color="primary"
+                    prepend-icon="mdi-refresh"
+                    @click="$emit('retry', selectedEpData.matchedRecord)">
+                    重新转存此集
+                  </v-btn>
                 </div>
-                <div class="record-meta mt-1 d-flex align-center ga-2 text-caption text-medium-emphasis">
-                  <span v-if="rec.size">{{ formatSize(rec.size) }}</span>
-                  <span v-if="rec.source_type">来源: {{ rec.source_type }}</span>
-                  <span v-if="rec.resource_type">网盘: {{ resourceTypeLabel(rec.resource_type) }}</span>
-                </div>
-                <div v-if="rec.reason" class="record-reason text-caption text-warning mt-1">
-                  ⚠️ 原因: {{ rec.reason }}
-                </div>
-              </div>
-
-              <!-- 单条操作按钮 -->
-              <div class="record-actions d-flex align-center ga-1">
-                <v-btn
-                  icon="mdi-refresh"
-                  size="x-small"
-                  variant="text"
-                  color="primary"
-                  title="重试此条"
-                  :loading="retryingKey === retryKey(rec)"
-                  @click="$emit('retry', rec)" />
-                <v-btn
-                  icon="mdi-delete-outline"
-                  size="x-small"
-                  variant="text"
-                  color="error"
-                  title="删除记录"
-                  @click="$emit('delete', rec)" />
               </div>
             </div>
-          </v-card>
+          </v-expand-transition>
+        </div>
+
+        <!-- 2. 转存流水记录（如存在） -->
+        <div v-if="(group.records || []).length" class="records-log-section mt-4">
+          <div class="d-flex align-center justify-space-between mb-2">
+            <span class="text-subtitle-2 font-weight-bold">转存流水与跳过原因 ({{ (group.records || []).length }})</span>
+          </div>
+
+          <div class="record-list">
+            <v-card
+              v-for="(rec, idx) in group.records || []"
+              :key="recordKey(rec, idx)"
+              variant="outlined"
+              class="record-item mb-2 pa-3">
+              <div class="d-flex align-start justify-space-between ga-2">
+                <div class="record-main min-w-0">
+                  <div class="d-flex align-center ga-2 mb-1">
+                    <v-chip
+                      size="x-small"
+                      :color="recordStatusColor(rec)"
+                      variant="tonal"
+                      class="font-weight-medium">
+                      {{ rec.status || "已转存" }}
+                    </v-chip>
+                    <span v-if="rec.season || rec.episode" class="text-caption font-weight-bold text-primary">
+                      {{ formatSeasonEpisode(rec) }}
+                    </span>
+                    <span class="text-caption text-medium-emphasis">
+                      {{ rec.time || "-" }}
+                    </span>
+                  </div>
+                  <div class="record-filename text-body-2 text-truncate" :title="rec.file_name">
+                    {{ rec.file_name || "未知文件" }}
+                  </div>
+                  <div class="record-meta mt-1 d-flex align-center ga-2 text-caption text-medium-emphasis">
+                    <span v-if="rec.size">{{ formatSize(rec.size) }}</span>
+                    <span v-if="rec.source_type || rec.source">来源: {{ rec.source_type || rec.source }}</span>
+                    <span v-if="rec.resource_type">网盘: {{ resourceTypeLabel(rec.resource_type) }}</span>
+                  </div>
+                  <div v-if="rec.reason" class="record-reason text-caption text-warning mt-1">
+                    ⚠️ 原因: {{ rec.reason }}
+                  </div>
+                </div>
+
+                <div class="record-actions d-flex align-center ga-1">
+                  <v-btn
+                    icon="mdi-refresh"
+                    size="x-small"
+                    variant="text"
+                    color="primary"
+                    title="重试此条"
+                    :loading="retryingKey === retryKey(rec)"
+                    @click="$emit('retry', rec)" />
+                  <v-btn
+                    icon="mdi-delete-outline"
+                    size="x-small"
+                    variant="text"
+                    color="error"
+                    title="删除记录"
+                    @click="$emit('delete', rec)" />
+                </div>
+              </div>
+            </v-card>
+          </div>
+        </div>
+
+        <!-- 3. 空提示（如果既无分集也无流水） -->
+        <div v-else-if="!episodesList.length" class="empty-drawer text-center py-8 text-medium-emphasis">
+          <v-icon icon="mdi-information-outline" size="40" class="mb-2" />
+          <div>该订阅当前没有分集与转存记录</div>
         </div>
       </v-card-text>
 
@@ -163,7 +224,7 @@
 </template>
 
 <script setup>
-import { computed } from "vue"
+import { ref, computed } from "vue"
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -174,9 +235,14 @@ const props = defineProps({
 
 const emit = defineEmits(["update:modelValue", "retry", "retry-failed", "delete"])
 
+const selectedEpisode = ref(null)
+
 const visible = computed({
   get: () => props.modelValue,
-  set: (val) => emit("update:modelValue", val),
+  set: (val) => {
+    emit("update:modelValue", val)
+    if (!val) selectedEpisode.value = null
+  },
 })
 
 const coverUrl = computed(() => {
@@ -216,13 +282,95 @@ const mediaDetailLink = computed(() => {
   return tmdbId ? `https://www.themoviedb.org/${type}/${tmdbId}` : ""
 })
 
+const totalCount = computed(() => {
+  if (props.group?.total_episodes !== undefined) {
+    return Number(props.group.total_episodes) || 0
+  }
+  return (props.group?.records || []).length
+})
+
+const libraryCount = computed(() => {
+  if (props.group?.library_count !== undefined) {
+    return Number(props.group.library_count) || (props.group.library_episodes || []).length
+  }
+  return (props.group?.records || []).filter((r) => !r.status || r.status === "成功" || r.status === "完成").length
+})
+
+const missingCount = computed(() => {
+  if (props.group?.missing_count !== undefined) {
+    return Number(props.group.missing_count) || 0
+  }
+  return (props.group?.records || []).filter((r) => r.status && r.status !== "成功" && r.status !== "完成").length
+})
+
 const hasFailedRecords = computed(() => {
   return (props.group?.records || []).some((r) => r.status && r.status !== "成功" && r.status !== "完成")
 })
 
-const successCount = computed(() => {
-  return (props.group?.records || []).filter((r) => !r.status || r.status === "成功" || r.status === "完成").length
+// 生成 1..N 的分集列表
+const episodesList = computed(() => {
+  if (!props.group) return []
+  const total = totalCount.value
+  const libSet = new Set(props.group.library_episodes || [])
+  const transferringSet = new Set(props.group.transferring_episodes || [])
+  const recs = props.group.records || []
+
+  // 如果没有显式 total_episodes，根据 records 提取集号
+  const maxEp = Math.max(total, ...recs.map((r) => Number(r.episode || 0)))
+  if (maxEp <= 0) return []
+
+  const list = []
+  for (let i = 1; i <= maxEp; i++) {
+    let status = "missing"
+    let statusText = "待补"
+
+    if (libSet.has(i)) {
+      status = "success"
+      statusText = "已入库"
+    } else if (transferringSet.has(i)) {
+      status = "transferring"
+      statusText = "转存中"
+    } else {
+      // 检查 records 中是否有该集的记录
+      const rec = recs.find((r) => Number(r.episode) === i)
+      if (rec) {
+        if (!rec.status || rec.status === "成功" || rec.status === "完成") {
+          status = "success"
+          statusText = "已入库"
+        } else if (rec.status.includes("跳过") || rec.status.includes("未命中")) {
+          status = "skipped"
+          statusText = "已跳过"
+        } else if (rec.status.includes("失败")) {
+          status = "failed"
+          statusText = "失败"
+        }
+      }
+    }
+
+    list.push({
+      number: i,
+      status,
+      statusText,
+    })
+  }
+  return list
 })
+
+const selectedEpData = computed(() => {
+  if (!selectedEpisode.value) return null
+  const ep = episodesList.value.find((e) => e.number === selectedEpisode.value)
+  if (!ep) return null
+  const matchedRecord = (props.group?.records || []).find((r) => Number(r.episode) === ep.number)
+  return {
+    ...ep,
+    statusColor: ep.status === "success" ? "success" : ep.status === "transferring" ? "warning" : "default",
+    matchedRecord,
+  }
+})
+
+function onSelectEp(ep) {
+  selectedEpisode.value = selectedEpisode.value === ep.number ? null : ep.number
+}
 
 function formatSize(bytes) {
   let value = Number(bytes || 0)
@@ -252,17 +400,6 @@ function recordStatusColor(rec) {
   return "error"
 }
 
-function resourceTypeColor(type) {
-  const map = {
-    "115": "#2670e8",
-    quark: "#15b886",
-    alipan: "#ff6a00",
-    tianyi: "#e60012",
-    p123: "#6366f1",
-  }
-  return map[String(type).toLowerCase()] || "primary"
-}
-
 function resourceTypeLabel(type) {
   const map = {
     "115": "115网盘",
@@ -290,12 +427,23 @@ function retryKey(rec) {
 
 .drawer-cover {
   width: 72px;
+  height: 108px;
   flex: 0 0 72px;
+  border-radius: 6px;
+  overflow: hidden;
 }
 
 .cover-img {
   width: 72px;
   height: 108px;
+  border-radius: 6px;
+}
+
+.cover-img :deep(.v-img__img),
+.cover-img :deep(img) {
+  object-fit: cover !important;
+  width: 100% !important;
+  height: 100% !important;
 }
 
 .cover-placeholder {
@@ -337,6 +485,83 @@ function retryKey(rec) {
   overflow-y: auto;
 }
 
+/* 选集网格 */
+.episode-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+  gap: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.ep-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 48px;
+  border-radius: 6px;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  background: rgba(var(--v-theme-surface-variant), 0.2);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.ep-box:hover {
+  border-color: rgb(var(--v-theme-primary));
+  transform: translateY(-1px);
+}
+
+.ep-box--selected {
+  outline: 2px solid rgb(var(--v-theme-primary));
+}
+
+.ep-box--success {
+  background: rgba(var(--v-theme-success), 0.15);
+  border-color: rgba(var(--v-theme-success), 0.4);
+  color: rgb(var(--v-theme-success));
+}
+
+.ep-box--transferring {
+  background: rgba(var(--v-theme-warning), 0.15);
+  border-color: rgba(var(--v-theme-warning), 0.4);
+  color: rgb(var(--v-theme-warning));
+  animation: pulse-border 1.5s infinite;
+}
+
+.ep-box--skipped {
+  background: rgba(var(--v-theme-warning), 0.08);
+  border-color: rgba(var(--v-theme-warning), 0.3);
+  color: rgba(var(--v-theme-warning), 0.85);
+}
+
+.ep-box--failed {
+  background: rgba(var(--v-theme-error), 0.12);
+  border-color: rgba(var(--v-theme-error), 0.4);
+  color: rgb(var(--v-theme-error));
+}
+
+.ep-num {
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.ep-badge {
+  font-size: 0.65rem;
+  opacity: 0.8;
+  margin-top: 2px;
+}
+
+.legend-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 4px;
+}
+
 .record-item {
   border-color: rgba(var(--v-theme-on-surface), 0.12);
   background: rgba(var(--v-theme-surface-variant), 0.25);
@@ -348,7 +573,16 @@ function retryKey(rec) {
   word-break: break-all;
 }
 
+.max-w-300 {
+  max-width: 300px;
+}
+
 .min-w-0 {
   min-width: 0;
+}
+
+@keyframes pulse-border {
+  0%, 100% { border-color: rgba(var(--v-theme-warning), 0.4); }
+  50% { border-color: rgba(var(--v-theme-warning), 0.9); }
 }
 </style>

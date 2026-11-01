@@ -280,24 +280,32 @@ class PageApi(OwnerDelegator):
                     ),
                 },
                 "emby_play_items": self._history_emby_play_items(page_history),
-                "subscribes_progress": self._build_subscribes_progress(),
+                "subscribes_progress": self._build_subscribes_progress(page_history),
             },
         }
 
     def api_vue_subscribes_progress(self) -> dict:
         return {
             "success": True,
-            "data": self._build_subscribes_progress(),
+            "data": self._build_subscribes_progress([]),
         }
 
-    def _build_subscribes_progress(self) -> list[dict[str, Any]]:
+    def _build_subscribes_progress(self, page_history: list[dict[str, Any]] = None) -> list[dict[str, Any]]:
         """构建以 MoviePilot 订阅为核心的追更进度大屏数据。"""
+        subscribes = []
         try:
-            from app.db.subscribe_oper import SubscribeOper
-            subscribes = SubscribeOper().list() or []
+            from app.db import SessionFactory
+            from app.db.models.subscribe import Subscribe
+            with SessionFactory() as db:
+                subscribes = list(db.query(Subscribe).all())
         except Exception as err:
-            logger.debug(f"读取订阅列表失败: {err}")
-            return []
+            logger.debug(f"通过 SessionFactory 读取订阅列表失败，尝试回退 SubscribeOper: {err}")
+            try:
+                from app.db.subscribe_oper import SubscribeOper
+                subscribes = SubscribeOper().list() or []
+            except Exception as err2:
+                logger.debug(f"回退读取订阅列表仍失败: {err2}")
+                return []
 
         active_tasks = []
         owner = getattr(self, "_owner", None)
@@ -307,6 +315,7 @@ class PageApi(OwnerDelegator):
             except Exception:
                 pass
 
+        history_items = page_history or []
         progress_list = []
         for sub in subscribes:
             try:
@@ -332,7 +341,18 @@ class PageApi(OwnerDelegator):
 
                 tmdb_id = getattr(sub, "tmdbid", None) or getattr(sub, "tmdb_id", None)
                 state = str(getattr(sub, "state", "R") or "R")
-                poster = str(getattr(sub, "poster", "") or "")
+
+                # 海报多级回查与增强
+                poster = str(getattr(sub, "poster", "") or getattr(sub, "backdrop", "") or "")
+                if not poster and history_items:
+                    for rec in history_items:
+                        rec_tmdb = str(rec.get("tmdb_id") or "")
+                        rec_title = str(rec.get("title") or "")
+                        if (tmdb_id and rec_tmdb == str(tmdb_id)) or rec_title == name:
+                            cand = rec.get("image") or rec.get("poster") or rec.get("poster_path")
+                            if cand:
+                                poster = str(cand)
+                                break
                 poster_url = _platform_image_url(poster, "w500") if poster else ""
 
                 transferring = []
@@ -351,6 +371,14 @@ class PageApi(OwnerDelegator):
                 else:
                     missing_episodes = []
 
+                # 挂载该订阅对应的真实转存记录
+                matched_records = [
+                    rec for rec in history_items
+                    if int(rec.get("subscribe_id") or 0) == sub_id
+                    or (tmdb_id and str(rec.get("tmdb_id") or "") == str(tmdb_id))
+                    or str(rec.get("title") or "") == name
+                ]
+
                 progress_list.append({
                     "subscribe_id": sub_id,
                     "name": name,
@@ -368,6 +396,7 @@ class PageApi(OwnerDelegator):
                     "state": state,
                     "poster": poster,
                     "poster_url": poster_url,
+                    "records": matched_records,
                 })
             except Exception as err:
                 logger.debug(f"处理订阅条目追更进度失败: {err}")
