@@ -61,7 +61,7 @@
       <template #item.status="{ item }">
         <div class="d-flex flex-column align-start">
           <v-chip :color="statusColor(item)" size="x-small" variant="tonal">
-            {{ item.status_label || item.status || "-" }}
+            {{ statusText(item.status_label || item.status) }}
             <v-tooltip v-if="item.dead_letter" activator="parent" location="top">
               重试次数已耗尽，需要人工处理
             </v-tooltip>
@@ -137,7 +137,7 @@
       <div v-for="item in tasks" :key="item.task_key" class="task-mobile-card">
         <div class="d-flex align-center flex-wrap ga-2">
           <v-chip :color="statusColor(item)" size="x-small" variant="tonal">
-            {{ item.status_label || item.status || "-" }}
+            {{ statusText(item.status_label || item.status) }}
           </v-chip>
           <span v-if="item.stage_label" class="text-caption text-medium-emphasis">{{ item.stage_label }}</span>
           <v-chip v-if="item.dead_letter" size="x-small" color="error" variant="tonal">死信</v-chip>
@@ -199,6 +199,7 @@
 <script setup>
 import {computed, onMounted, onUnmounted, ref, watch} from "vue";
 import {useDisplay} from "vuetify";
+import {statusColor as statusColorOf, statusText} from "../../utils/status.js";
 
 const props = defineProps({
   api: { type: [Object, Function], default: () => ({}) },
@@ -230,8 +231,8 @@ let timer = null
 
 const filters = [
   {title: "全部", value: "all"},
-  {title: "运行中", value: "active"},
-  {title: "等待重试", value: "waiting"},
+  {title: "进行中", value: "active"},
+  {title: "排队", value: "waiting"},
   {title: "失败", value: "failed"},
   {title: "待确认", value: "pending"},
   {title: "已暂停", value: "paused"},
@@ -255,11 +256,9 @@ function notify(text, type = "success") {
 
 function statusColor(task) {
   if (task.paused) return "warning"
-  if (task.status === "成功") return "success"
-  if (task.status === "跳过") return "warning"
-  if (task.status === "待确认") return "warning"
-  if (task.status === "失败") return task.dead_letter ? "error" : "orange-lighten-1"
-  return ["处理中", "下载中"].includes(task.status) ? "info" : "error"
+  if (task.status === "失败" && task.dead_letter) return "error"
+  if (task.status === "失败") return "orange-lighten-1"
+  return statusColorOf(task.status)
 }
 
 function formatTime(value) {

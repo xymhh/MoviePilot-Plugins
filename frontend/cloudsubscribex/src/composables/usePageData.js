@@ -37,24 +37,28 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       value: historyStats.total,
       color: "primary",
       icon: "mdi-cloud-upload-outline",
+      filter: "",
     },
     {
       title: "今日转存",
       value: historyStats.today,
       color: "info",
       icon: "mdi-calendar-today",
+      filter: "",
     },
     {
       title: "成功",
       value: historyStats.success,
       color: "success",
       icon: "mdi-check-circle-outline",
+      filter: "成功",
     },
     {
       title: "失败",
       value: historyStats.failed,
       color: "error",
       icon: "mdi-alert-circle-outline",
+      filter: "失败",
     },
   ])
 

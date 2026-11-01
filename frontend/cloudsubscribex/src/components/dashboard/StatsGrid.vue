@@ -3,7 +3,16 @@
     <div
       v-for="(stat, index) in stats"
       :key="stat.title"
-      :class="['stat-card', { 'stat-card--desktop-only': ['成功', '失败'].includes(stat.title) }]"
+      :class="['stat-card', {
+        'stat-card--desktop-only': ['成功', '失败'].includes(stat.title),
+        'stat-card--clickable': stat.filter !== undefined,
+      }]"
+      :role="stat.filter !== undefined ? 'button' : undefined"
+      :tabindex="stat.filter !== undefined ? 0 : undefined"
+      :title="stat.filter !== undefined ? `查看${stat.title}对应的历史记录` : ''"
+      @click="stat.filter !== undefined && emit('select', stat)"
+      @keydown.enter="stat.filter !== undefined && emit('select', stat)"
+      @keydown.space.prevent="stat.filter !== undefined && emit('select', stat)"
       :style="{
         '--stat-color': `var(--v-theme-${stat.color})`,
         '--stat-delay': `${index * 40}ms`,
@@ -30,6 +39,7 @@
 
 <script setup>
 defineProps({stats: {type: Array, default: () => []}});
+const emit = defineEmits(["select"]);
 </script>
 
 <style scoped>
@@ -58,6 +68,15 @@ defineProps({stats: {type: Array, default: () => []}});
   transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1);
   animation: stat-enter 240ms cubic-bezier(0.16, 1, 0.3, 1) both;
   animation-delay: var(--stat-delay);
+}
+
+.stat-card--clickable {
+  cursor: pointer;
+}
+
+.stat-card--clickable:focus-visible {
+  outline: 2px solid rgb(var(--stat-color));
+  outline-offset: 2px;
 }
 
 .stat-card:hover {

@@ -520,13 +520,26 @@ class EpisodeDedupSkipStatusContractTests(unittest.TestCase):
         self.assertIn('{"成功", "处理中", "下载中", "跳过"}', source)
 
     def test_frontend_supports_skipped_status(self):
-        """19. 前端状态筛选/配色/可删除判定都认「跳过」。"""
+        """19. 前端筛选/配色/可删除判定都认「跳过」。
+
+        1.9.0 起状态词收敛到 utils/status.js：筛选选项存统一词「已跳过」，提交时
+        由 STATUS_QUERY 展开成后端的「跳过」；配色也由 statusText 统一映射。
+        """
+        status_js = self._read("frontend/cloudsubscribex/src/utils/status.js")
+        self.assertIn("跳过: STATUS.SKIPPED", status_js)
+        self.assertIn('[STATUS.SKIPPED]: ["跳过"]', status_js)
         table = self._read("frontend/cloudsubscribex/src/components/dashboard/HistoryTable.vue")
-        self.assertIn('"处理中", "下载中", "待确认", "成功", "失败", "秒传失败", "跳过"', table)
-        self.assertIn('status === "跳过"', table)
+        self.assertIn("statusQueryValues(selectedStatuses.value)", table)
         self.assertIn('["成功", "失败", "跳过"]', table)
         app_page = self._read("frontend/cloudsubscribex/src/components/AppPage.vue")
         self.assertIn('["成功", "失败", "跳过"]', app_page)
+
+    def test_frontend_status_map_covers_history_statuses(self):
+        """20. 统一状态表必须覆盖后端全部历史状态词，漏一个就会显示成原始值。"""
+        status_js = self._read("frontend/cloudsubscribex/src/utils/status.js")
+        for raw in ("处理中", "下载中", "待确认", "成功", "失败", "秒传失败", "跳过"):
+            with self.subTest(status=raw):
+                self.assertIn(f"{raw}: STATUS.", status_js)
 
 
 class MovieDedupTests(unittest.TestCase):

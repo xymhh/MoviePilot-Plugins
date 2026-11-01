@@ -68,7 +68,7 @@
         <v-icon icon="mdi-chart-box-outline" color="primary" size="small" />
         <span class="text-subtitle-2 font-weight-bold">转存统计</span>
       </div>
-      <StatsGrid :stats="stats" class="overview-stats-grid" />
+      <StatsGrid :stats="stats" class="overview-stats-grid" @select="handleStatSelect" />
     </section>
 
     <section :class="['workspace', { 'workspace-history': mainTab === 'history' }]">
@@ -76,7 +76,7 @@
         <v-tabs v-model="mainTab" color="primary" class="workspace-tabs">
           <v-tab value="tasks">
             <v-icon icon="mdi-format-list-checks" size="small" class="mr-2" />
-            订阅任务
+            任务
             <v-chip v-if="activeTaskCount" size="x-small" class="ml-2">
               {{ activeTaskCount }}
             </v-chip>
@@ -96,16 +96,22 @@
             <v-icon icon="mdi-folder-move-outline" size="small" class="mr-2" />
             网盘整理
           </v-tab>
-          <v-tab value="ledger">
-            <v-icon icon="mdi-clipboard-text-search-outline" size="small" class="mr-2" />
-            资源账本
-          </v-tab>
         </v-tabs>
       </div>
 
       <div class="workspace-window">
         <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
-          <RuntimeCard class="runtime-panel" :runtime="runtime" :active="active" @stop-task="confirmStopTask" />
+          <div class="runtime-bar">
+            <v-icon :icon="active ? 'mdi-progress-clock' : 'mdi-power-sleep'" :color="active ? 'primary' : undefined" size="small" />
+            <span class="runtime-bar-text">{{ runtimeSummary }}</span>
+            <v-chip v-if="activeTaskCount" size="x-small" color="primary" variant="tonal">
+              {{ activeTaskCount }} 项进行中
+            </v-chip>
+            <v-spacer />
+            <v-btn size="small" variant="text" prepend-icon="mdi-information-outline" @click="runtimeDetailVisible = true">
+              运行详情
+            </v-btn>
+          </div>
           <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks'" />
         </div>
         <div v-show="mainTab === 'tg'" class="workspace-pane tg-pane">
@@ -114,11 +120,19 @@
         <div v-show="mainTab === 'organize'" class="workspace-pane organize-pane">
           <OrganizePanel :api="api" />
         </div>
-        <div v-show="mainTab === 'ledger'" class="workspace-pane ledger-pane">
-          <CandidateLedgerPanel :api="api" />
-        </div>
         <div v-show="mainTab === 'history'" class="workspace-pane history-pane">
+          <div class="history-view-switch">
+            <v-btn-toggle v-model="historyView" density="compact" variant="tonal" divided mandatory>
+              <v-btn value="records" prepend-icon="mdi-history" size="small">转存结果</v-btn>
+              <v-btn value="skipped" prepend-icon="mdi-clipboard-text-search-outline" size="small">未转存原因</v-btn>
+            </v-btn-toggle>
+            <span class="text-caption text-medium-emphasis">
+              {{ historyView === "records" ? "这次转到哪、成没成" : "同一批候选为什么没转成" }}
+            </span>
+          </div>
+          <CandidateLedgerPanel v-if="historyView === 'skipped'" :api="api" class="history-ledger" />
           <HistoryTable
+            v-show="historyView === 'records'"
             :items="historyGroups"
             :page="historyPage.page"
             :page-size="historyPage.pageSize"
@@ -132,6 +146,7 @@
             :notifying-key="notifyingHistoryKey"
             :upgrading-key="upgradingHistoryKey"
             :enable-cloud-upgrade="historyPage.enableCloudUpgrade"
+            :initial-statuses="historyStatuses"
             @refresh="loadPage"
             @query-change="updateHistoryQuery"
             @clear="openClearHistory"
@@ -343,6 +358,10 @@ const snackbarTextStyle = computed(() => ({
   color: `rgb(var(--v-theme-on-${fallbackType.value || "success"}))`,
 }))
 const mainTab = ref("tasks")
+// 历史页的两个视图：转存结果 / 未转存原因（原「资源账本」降级为子视图）
+const historyView = ref("records")
+const historyStatuses = ref([])
+const runtimeDetailVisible = ref(false)
 const offlineVisible = ref(false)
 const manualVisible = ref(false)
 const manualInitialMode = ref("links")
@@ -442,10 +461,23 @@ onUnmounted(() => {
 })
 
 watch(mainTab, (tab) => {
+  if (tab === "ledger") {
+    // 旧入口/旧状态里的「资源账本」已并入历史页
+    historyView.value = "skipped"
+    mainTab.value = "history"
+    return
+  }
   if (tab !== "history" || !historyDirty.value) return
   historyDirty.value = false
   void loadPage()
 })
+
+function handleStatSelect(stat) {
+  const filter = String(stat?.filter || "").trim()
+  historyView.value = "records"
+  historyStatuses.value = filter ? [filter] : []
+  mainTab.value = "history"
+}
 
 const activeTaskCount = computed(
   () =>
@@ -1033,6 +1065,52 @@ async function notifyHistory() {
 
 .history-pane {
   display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-view-switch {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 2px 0;
+}
+
+.history-pane :deep(.history-table-root),
+.history-pane :deep(.history-ledger) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.history-ledger {
+  overflow: auto;
+}
+
+.runtime-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 8px 12px;
+  background: rgba(var(--v-theme-surface), 0.6);
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.08);
+  border-radius: 10px;
+}
+
+.runtime-bar-text {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(var(--v-theme-on-surface), 0.78);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.runtime-dialog :deep(.runtime-panel) {
+  box-shadow: none;
 }
 
 :global(html:has(.cloud-app-page)),
@@ -1185,7 +1263,8 @@ async function notifyHistory() {
     overflow: visible;
   }
 
-  .task-pane :deep(.runtime-panel),
+  .runtime-bar,
+  .history-view-switch,
   .task-pane :deep(.task-list),
   .workspace-history .history-pane :deep(.history-table-root),
   .workspace-history .history-pane :deep(.history-mobile-list),
@@ -1203,10 +1282,14 @@ async function notifyHistory() {
     max-width: 100%;
   }
 
-  .task-pane :deep(.runtime-panel) {
-    display: flex;
-    width: 100%;
-    min-height: 0;
+  .runtime-bar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .runtime-bar-text {
+    flex: 1 1 100%;
+    white-space: normal;
   }
 
   .overview-metric {

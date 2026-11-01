@@ -468,7 +468,7 @@
                   </td>
                   <td>
                     <v-chip :color="statusColor(record)" size="x-small" variant="tonal">
-                      {{ record.status_label || record.status }}
+                      {{ statusText(record.status_label || record.status) }}
                       <v-tooltip
                         v-if="record.failure_reason || record.failure_label"
                         activator="parent"
@@ -648,7 +648,7 @@
                       </v-tooltip>
                     </v-chip>
                     <v-chip :color="statusColor(record)" size="x-small" variant="tonal">
-                      {{ record.status_label || record.status }}
+                      {{ statusText(record.status_label || record.status) }}
                       <v-tooltip
                         v-if="record.failure_reason"
                         activator="parent"
@@ -757,6 +757,13 @@ import {
   getSourceName,
   getTypeColor,
 } from "../../composables/resourceUtils";
+import {
+  HISTORY_STATUS_OPTIONS,
+  statusColor as statusColorOf,
+  statusFilterLabel,
+  statusQueryValues,
+  statusText,
+} from "../../utils/status.js";
 
 const props = defineProps({
   items: {type: Array, default: () => []},
@@ -772,6 +779,8 @@ const props = defineProps({
   notifyingKey: {type: String, default: ""},
   upgradingKey: {type: String, default: ""},
   enableCloudUpgrade: Boolean,
+  // 外部（顶部统计卡片）点击后希望应用的状态筛选，值是统一状态词。
+  initialStatuses: {type: Array, default: () => []},
 })
 const emit = defineEmits([
   "refresh",
@@ -803,7 +812,7 @@ const filtersVisible = ref(false);
 const searchVisible = ref(false);
 let lastQuerySignature = "";
 
-const statusOptions = ["处理中", "下载中", "待确认", "成功", "失败", "秒传失败", "跳过"];
+const statusOptions = HISTORY_STATUS_OPTIONS;
 const taskTypeOptions = [
   {title: "跨盘", value: "cross_transfer"},
   {title: "洗版", value: "upgrade"},
@@ -900,7 +909,7 @@ function emitQueryChange(overrides = {}) {
     resourceTypes: [...selectedResourceTypes.value],
     sources: [...selectedSources.value],
     taskTypes: [...selectedTaskTypes.value],
-    statuses: [...selectedStatuses.value],
+    statuses: statusQueryValues(selectedStatuses.value),
     ...overrides,
   }
   const signature = JSON.stringify(query);
@@ -941,6 +950,17 @@ watch(
   {
     deep: true,
   },
+)
+
+// 顶部统计卡片点击后由父组件下发统一状态词，这里同步到筛选项。
+watch(
+  () => props.initialStatuses,
+  (next) => {
+    const labels = statusQueryLabels(next);
+    if (JSON.stringify(labels) === JSON.stringify(statusQueryLabels(selectedStatuses.value))) return;
+    selectedStatuses.value = labels;
+  },
+  {deep: true},
 )
 
 watch(
@@ -1057,12 +1077,9 @@ function playItemId(item) {
 function statusColor(record) {
   const status = typeof record === "string" ? record : record?.status;
   const kind = typeof record === "string" ? "" : record?.failure_kind;
-  if (status === "成功") return "success";
-  if (status === "跳过") return "warning";
-  if (status === "待确认") return "warning";
   // 秒传未命中不是真失败：单独琥珀色，避免和红色失败混在一起。
   if (status === "失败" && kind === "checksum_miss") return "orange-lighten-1";
-  return ["处理中", "下载中"].includes(status) ? "info" : "error";
+  return statusColorOf(status);
 }
 
 function formatSize(bytes) {
@@ -1179,6 +1196,11 @@ function markSelectedSuccess() {
   );
   if (!records.length) return;
   emit("mark-success", { records });
+}
+
+// 把外部传进来的值（可能是后端原始值，也可能是统一词）收敛成统一词。
+function statusQueryLabels(values) {
+  return [...new Set((Array.isArray(values) ? values : []).map((item) => statusFilterLabel(item)).filter(Boolean))];
 }
 
 function clearFilters() {

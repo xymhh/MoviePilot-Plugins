@@ -281,6 +281,7 @@
 </template>
 
 <script setup>
+import {STATUS, statusColor as statusColorOf, statusText as statusTextOf} from "../../utils/status.js";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue"
 
 const props = defineProps({
@@ -442,27 +443,20 @@ function tagColor(tag) {
   return "grey"
 }
 
+// 状态词统一走 utils/status.js，避免「排队中 / 待处理 / 未转存」各说各话。
 const STATUS_TEXT = {
-  queued: "排队中",
-  new: "待处理",
-  transferred: "已转存",
-  skipped: "未转存",
-  failed: "失败",
-  ignored: "已忽略",
-}
-const STATUS_COLOR = {
-  queued: "primary",
-  new: "primary",
-  transferred: "success",
-  skipped: "warning",
-  failed: "error",
-  ignored: "grey",
+  queued: STATUS.QUEUED,
+  new: STATUS.QUEUED,
+  transferred: STATUS.SUCCESS,
+  skipped: STATUS.SKIPPED,
+  failed: STATUS.FAILED,
+  ignored: STATUS.IGNORED,
 }
 function statusText(value) {
-  return STATUS_TEXT[value] || value || "-"
+  return STATUS_TEXT[value] || statusTextOf(value, "-")
 }
 function statusColor(value) {
-  return STATUS_COLOR[value] || "grey"
+  return statusColorOf(value)
 }
 
 function errorClass(item) {
