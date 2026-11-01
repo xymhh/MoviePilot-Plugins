@@ -113,6 +113,29 @@ def _platform_image_url(value: object, size: str = "w500") -> str:
     return f"/api/v1/system/cache/image?url={quote(raw, safe='')}" if raw else ""
 
 
+def _resolve_subscribe_tmdb_id(subscribe: object):
+    """解析订阅的 TMDB ID。
+
+    MoviePilot V3 起订阅模型改用 media_source + media_id（字符串）承载外部 ID，
+    旧的 tmdbid / tmdb_id 字段在 V3 数据里常为空 —— 只读旧字段会让按 tmdb 合并
+    转存历史的键全部失配，表现为「头部说缺 17 集、矩阵却把 93-106 涂成已入库」。
+    """
+    for attr in ("tmdbid", "tmdb_id"):
+        value = getattr(subscribe, attr, None)
+        if value not in (None, "", 0, "0"):
+            return value
+
+    media_id = getattr(subscribe, "media_id", None)
+    if media_id in (None, "", 0, "0"):
+        return None
+
+    source = str(getattr(subscribe, "media_source", "") or "").strip().lower()
+    # 未标注来源时按 TMDB 处理（V3 剧集订阅绝大多数来自 TMDB）
+    if source and "tmdb" not in source and "themoviedb" not in source:
+        return None
+    return media_id
+
+
 def _media_value(media: object, *names: str):
     """兼容平台媒体对象与原始字典，返回首个有效字段。"""
     for name in names:
@@ -396,7 +419,7 @@ class PageApi(OwnerDelegator):
                 library_episodes = {int(x) for x in raw_note if str(x).isdigit() and int(x) > 0}
 
                 # 必须先解析 tmdb_id，下面合并转存历史时要用它做键
-                tmdb_id = getattr(sub, "tmdbid", None) or getattr(sub, "tmdb_id", None)
+                tmdb_id = _resolve_subscribe_tmdb_id(sub)
                 state = str(getattr(sub, "state", "R") or "R")
 
                 # 合并转存历史中已成功的集数，确保转存后列表即时更新

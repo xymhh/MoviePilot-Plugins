@@ -306,8 +306,11 @@ const episodesList = computed(() => {
   const transferringSet = new Set(props.group.transferring_episodes || [])
   const recs = props.group.records || []
 
-  // 如果没有显式 total_episodes，根据 records 提取集号
-  const maxEp = Math.max(total, ...recs.map((r) => Number(r.episode || 0)))
+  // 有后端聚合口径（total_episodes）时，已入库只认 library_episodes，
+  // 否则会出现「头部说缺 17 集、矩阵却把 93-106 全涂成已入库」的分裂。
+  const aggregateMode = total > 0
+  // 聚合模式下集数上界就是全剧集数；否则按流水里的最大集号推断
+  const maxEp = aggregateMode ? total : Math.max(0, ...recs.map((r) => Number(r.episode || 0)))
   if (maxEp <= 0) return []
 
   const list = []
@@ -326,8 +329,11 @@ const episodesList = computed(() => {
       const rec = recs.find((r) => Number(r.episode) === i)
       if (rec) {
         if (!rec.status || rec.status === "成功" || rec.status === "完成") {
-          status = "success"
-          statusText = "已入库"
+          // 聚合模式下后端说没入库就是没入库，不让单条流水把状态改绿
+          if (!aggregateMode) {
+            status = "success"
+            statusText = "已入库"
+          }
         } else if (rec.status.includes("跳过") || rec.status.includes("未命中")) {
           status = "skipped"
           statusText = "已跳过"

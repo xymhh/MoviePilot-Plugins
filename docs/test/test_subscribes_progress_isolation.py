@@ -25,6 +25,9 @@ class FakeSubscribe:
         self.tmdbid = kw.get("tmdbid")
         self.state = kw.get("state", "R")
         self.poster = kw.get("poster", "")
+        # MoviePilot V3 字段：外部 ID 改由 media_source + media_id 承载
+        self.media_source = kw.get("media_source")
+        self.media_id = kw.get("media_id")
 
 
 class _FakeCol:
@@ -62,12 +65,22 @@ SUBS = [
     # 电影型：无季、总集数 0
     FakeSubscribe(id=3, name="某电影", year="2025", season=None, total_episode=0,
                   note=[], tmdbid=None, poster=""),
+    # V3 真实形态：tmdbid 为空，只有 media_id/media_source
+    # 线上数据：note=1..92+97，历史成功 93..106 → 合并后应缺 107-110
+    FakeSubscribe(id=4, name="沧元图", year="2024", season=1, total_episode=110,
+                  note=list(range(1, 93)) + [97], tmdbid=None,
+                  media_source="themoviedb", media_id="236534", poster="/c.jpg"),
 ]
 
 HIST = [
     FakeHistory(episode=11, subscribe_id=1, tmdb_id=292741, season=1, title="牧神记"),
     FakeHistory(episode=12, subscribe_id=1, tmdb_id=292741, season=1, title="牧神记"),
     FakeHistory(episode=13, subscribe_id=None, tmdb_id=292741, season=1, title="牧神记"),
+    # V3：历史行 subscribe_id 为空、title 是文件名（不是剧名），只能靠 tmdb 键命中
+] + [
+    FakeHistory(episode=ep, subscribe_id=None, tmdb_id=236534, season=1,
+                title=f"沧元图 - S01E{ep} - 第{ep}集.mp4")
+    for ep in range(93, 107)
 ]
 
 
@@ -127,14 +140,21 @@ def install_stubs():
     models.subscribe = sub_mod
 
 
-def load_function():
-    tree = ast.parse(open(SRC_PATH, encoding="utf-8").read())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_build_subscribes_progress":
-            fn_src = ast.get_source_segment(open(SRC_PATH, encoding="utf-8").read(), node)
-            import textwrap
-            return textwrap.dedent(fn_src)
-    raise SystemExit("函数未找到")
+def load_function(names=("_build_subscribes_progress",)):
+    src = open(SRC_PATH, encoding="utf-8").read()
+    tree = ast.parse(src)
+    import textwrap
+
+    out = []
+    found = set()
+    for node in ast.walk(tree):  # 方法（类内）与模块级函数都要能抓到
+        if isinstance(node, ast.FunctionDef) and node.name in names and node.name not in found:
+            out.append(textwrap.dedent(ast.get_source_segment(src, node)))
+            found.add(node.name)
+    missing = set(names) - found - {"_resolve_subscribe_tmdb_id"}
+    if missing:
+        raise SystemExit(f"函数未找到: {missing}")
+    return "\n\n".join(out)
 
 
 def main():
@@ -145,7 +165,7 @@ def main():
         "_platform_image_url": lambda p, s="w500": f"img://{p}",
         "Any": object,
     }
-    exec(load_function(), ns)
+    exec(load_function(("_resolve_subscribe_tmdb_id", "_build_subscribes_progress")), ns)
     holder = types.SimpleNamespace(_build_subscribes_progress=ns["_build_subscribes_progress"], _owner=None)
     result = holder._build_subscribes_progress([])
 
@@ -168,7 +188,13 @@ def main():
     mv = by_name["某电影"]
     assert mv["total_episodes"] == 0 and mv["missing_count"] == 0
 
-    print("PASS: 所有断言通过（tmdb_id 顺序缺陷已修复）")
+    # V3 回归：tmdbid 为空、只有 media_id 时也要能按 tmdb 合并历史成功集
+    cy = by_name["沧元图"]
+    assert cy["tmdb_id"] == "236534", f"应能从 media_id 解析出 tmdb，实得 {cy['tmdb_id']}"
+    assert cy["library_count"] == 106, f"应并入历史 93-106 → 106，实得 {cy['library_count']}"
+    assert cy["missing_episodes"] == [107, 108, 109, 110], f"应只缺 107-110，实得 {cy['missing_episodes']}"
+
+    print("PASS: 所有断言通过（tmdb_id 顺序缺陷 + V3 media_id 合并缺陷均已修复）")
 
 
 if __name__ == "__main__":
