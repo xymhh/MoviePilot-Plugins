@@ -102,6 +102,25 @@ class SyncPauseTests(unittest.TestCase):
         repo = _FakeRepo(broken=True)
         self.assertFalse(sync_pause.is_paused(repo))
 
+    def test_missing_repository_reads_as_running(self):
+        """没注入仓储时不能抛：1.8.7 在这里无参 new 仓储，把任务中心整条接口带崩。"""
+        snapshot = sync_pause.snapshot()
+        self.assertFalse(snapshot["paused"])
+        self.assertEqual(snapshot["updated_at"], 0)
+        self.assertFalse(sync_pause.is_paused())
+
+    def test_missing_repository_rejects_write(self):
+        """写操作没有仓储时要明确报错，不能静默「暂停成功」。"""
+        with self.assertRaises(RuntimeError):
+            sync_pause.set_paused(True)
+
+    def test_repository_requires_manager(self):
+        """固化事实：DbOper 子类必须带 manager，任何无参 new 都会抛 TypeError。"""
+        from cloudsubscribex.core.database.repositories import RuntimeRecordRepository
+
+        with self.assertRaises(TypeError):
+            RuntimeRecordRepository()
+
 
 if __name__ == "__main__":
     unittest.main()

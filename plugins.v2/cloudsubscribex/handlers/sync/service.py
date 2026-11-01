@@ -701,7 +701,11 @@ class SyncHandler:
         try:
             from ...core import sync_pause  # 延迟导入，避免拉起仓储层依赖
 
-            paused = sync_pause.is_paused() is True
+            repository = None
+            provider = getattr(self._plugin, "_sync_pause_repository", None)
+            if callable(provider):
+                repository = provider()
+            paused = sync_pause.is_paused(repository) is True
         except Exception as error:
             logger.warning(f"读取转存暂停开关失败，按未暂停处理：{error}")
             paused = False

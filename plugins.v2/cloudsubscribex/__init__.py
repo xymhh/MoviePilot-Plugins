@@ -182,7 +182,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.8.9"
+    plugin_version = "1.8.10"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -433,7 +433,7 @@ class CloudSubscribeX(_PluginBase):
                 "data": tasks,
                 "total": len(tasks),
                 "state": str(state or "all"),
-                "paused": sync_pause.snapshot(),
+                "paused": sync_pause.snapshot(self._sync_pause_repository()),
             }
         except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
             logger.error(f"读取任务中心失败：{error}", exc_info=True)
@@ -441,7 +441,10 @@ class CloudSubscribeX(_PluginBase):
 
     def api_vue_sync_pause(self) -> dict:
         """读取全局转存暂停开关。"""
-        return {"success": True, "data": sync_pause.snapshot()}
+        return {
+            "success": True,
+            "data": sync_pause.snapshot(self._sync_pause_repository()),
+        }
 
     def api_vue_set_sync_pause(self, payload: Dict[str, Any]) -> dict:
         """切换全局暂停：暂停后不再认领新作业，正在写的文件不打断。"""
@@ -449,7 +452,11 @@ class CloudSubscribeX(_PluginBase):
         if "paused" not in data:
             return {"success": False, "message": "缺少 paused 参数"}
         try:
-            state = sync_pause.set_paused(bool(data.get("paused")), actor="任务中心")
+            state = sync_pause.set_paused(
+                bool(data.get("paused")),
+                actor="任务中心",
+                repository=self._sync_pause_repository(),
+            )
         except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
             logger.error(f"切换转存暂停失败：{error}", exc_info=True)
             return {"success": False, "message": str(error)}
@@ -534,6 +541,14 @@ class CloudSubscribeX(_PluginBase):
         except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
             logger.error(f"任务中心重试失败：{error}", exc_info=True)
             return {"success": False, "message": str(error)}
+
+    def _sync_pause_repository(self) -> Any:
+        """暂停开关用的仓储；库没就绪时返回 None（读按未暂停、写明确报错）。"""
+        try:
+            return self._get_data_store().repositories.runtime
+        except Exception as error:  # noqa: BLE001 - 暂停开关故障不能拖垮调用方
+            logger.warning(f"获取转存暂停开关仓储失败：{error}")
+            return None
 
     def _get_data_store(self) -> CloudSubscribeDataStore:
         store = self.__dict__.get("_cloudsubscribe_data_store")
