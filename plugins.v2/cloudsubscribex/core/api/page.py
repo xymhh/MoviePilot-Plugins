@@ -438,11 +438,40 @@ class PageApi(OwnerDelegator):
                 logger.debug(f"处理订阅条目追更进度失败: {err}")
                 continue
 
-        progress_list.sort(key=lambda x: (
+        # 按同剧同季自动合并重复订阅，避免数据库中历史重复卡片导致大屏泛滥
+        dedup_map = {}
+        for item in progress_list:
+            dedup_key = (
+                str(item["tmdb_id"]) if item.get("tmdb_id") else item["name"].strip().lower(),
+                item.get("season"),
+            )
+            if dedup_key not in dedup_map:
+                dedup_map[dedup_key] = item
+            else:
+                existing = dedup_map[dedup_key]
+                merged_lib = sorted(set(existing["library_episodes"]) | set(item["library_episodes"]))
+                existing["library_episodes"] = merged_lib
+                existing["library_count"] = len(merged_lib)
+                if existing["total_episodes"] > 0:
+                    existing["missing_episodes"] = [
+                        i for i in range(1, existing["total_episodes"] + 1)
+                        if i not in merged_lib and i not in existing["transferring_episodes"]
+                    ]
+                    existing["missing_count"] = len(existing["missing_episodes"])
+                dup_ids = existing.setdefault("duplicate_subscribe_ids", [existing["subscribe_id"]])
+                if item["subscribe_id"] not in dup_ids:
+                    dup_ids.append(item["subscribe_id"])
+                existing["records"].extend(item.get("records") or [])
+                if not existing.get("poster_url") and item.get("poster_url"):
+                    existing["poster_url"] = item["poster_url"]
+                    existing["poster"] = item.get("poster") or ""
+
+        final_list = list(dedup_map.values())
+        final_list.sort(key=lambda x: (
             0 if (x["missing_count"] > 0 and x["state"] != "S") else 1,
             -x["subscribe_id"],
         ))
-        return progress_list
+        return final_list
 
     def api_vue_history_summary(self) -> dict:
         today = datetime.datetime.now(
