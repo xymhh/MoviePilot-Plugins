@@ -102,15 +102,37 @@
       <div class="workspace-window">
         <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
           <div class="runtime-bar">
-            <v-icon :icon="active ? 'mdi-progress-clock' : 'mdi-power-sleep'" :color="active ? 'primary' : undefined" size="small" />
-            <span class="runtime-bar-text">{{ runtimeSummary }}</span>
-            <v-chip v-if="activeTaskCount" size="x-small" color="primary" variant="tonal">
-              {{ activeTaskCount }} 项进行中
-            </v-chip>
-            <v-spacer />
-            <v-btn size="small" variant="text" prepend-icon="mdi-information-outline" @click="runtimeDetailVisible = true">
-              运行详情
-            </v-btn>
+            <div class="runtime-bar-main">
+              <v-icon :icon="active ? 'mdi-progress-clock' : 'mdi-power-sleep'" :color="active ? 'primary' : undefined" size="small" />
+              <span class="runtime-bar-text">{{ runtimeSummary }}</span>
+              <v-chip v-if="activeTaskCount" size="x-small" color="primary" variant="tonal">
+                {{ activeTaskCount }} 项进行中
+              </v-chip>
+              <v-spacer />
+              <v-btn size="small" variant="text" prepend-icon="mdi-information-outline" @click="runtimeDetailVisible = true">
+                运行详情
+              </v-btn>
+            </div>
+            <div v-if="runningTasks.length" class="runtime-progress-list">
+              <div v-for="task in visibleRunningTasks" :key="task.id" class="runtime-progress">
+                <span class="runtime-progress-name" :title="task.task || task.name">{{ task.task || task.name }}</span>
+                <v-progress-linear
+                  :model-value="taskProgressOf(task)"
+                  :indeterminate="isTaskIndeterminate(task)"
+                  :color="taskProgressColor(task)"
+                  height="4"
+                  rounded
+                  class="flex-grow-1" />
+                <span class="runtime-progress-label text-caption">
+                  <template v-if="taskBytesOf(task)">{{ taskBytesOf(task) }}</template>
+                  <template v-if="taskSpeedOf(task)"> · {{ taskSpeedOf(task) }}</template>
+                  <template v-if="!isTaskIndeterminate(task)"> · {{ taskProgressOf(task) }}%</template>
+                </span>
+              </div>
+              <div v-if="runningTasks.length > visibleRunningTasks.length" class="runtime-progress-more text-caption">
+                还有 {{ runningTasks.length - visibleRunningTasks.length }} 项进行中，详见「运行详情」
+              </div>
+            </div>
           </div>
           <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks'" />
         </div>
@@ -334,6 +356,7 @@ import CandidateLedgerPanel from "./dashboard/CandidateLedgerPanel.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";
 import {CACHE_CATEGORIES, useCacheActions} from "../composables/useCacheActions.js";
+import {formatBytes} from "../composables/resourceUtils.js";
 
 const Config = defineAsyncComponent(() => import("./Config.vue"))
 const TgMonitor = defineAsyncComponent(() => import("./dashboard/TgMonitor.vue"))
@@ -495,6 +518,53 @@ const immediateSearchTitle = computed(() =>
   selectedHistoryCount.value ? `立即搜索所选 ${selectedHistoryCount.value} 个历史媒体` : "立即搜索全部订阅",
 )
 const immediateSearchDialogTitle = computed(() => (selectedHistoryCount.value ? "搜索所选历史记录" : "搜索全部订阅"))
+// 任务页只留一条列表，运行中任务的进度在状态条里直接可见（完整明细见「运行详情」）。
+const RUNNING_STATUSES = ["downloading", "transferring", "postprocessing", "running"];
+
+const runningTasks = computed(() => {
+  const tasks = Array.isArray(runtime.tasks) ? runtime.tasks : [];
+  return tasks.filter((task) => RUNNING_STATUSES.includes(task.status) && task.phase !== "等待调度");
+});
+
+const visibleRunningTasks = computed(() => runningTasks.value.slice(0, 3));
+
+function taskProgressOf(task) {
+  if (!task) return 0;
+  const percent = Number(task.progress);
+  if (Number.isFinite(percent) && percent > 0) return Math.min(100, Math.round(percent));
+  const stageTotal = Number(task.stage_total || 0);
+  const total = stageTotal > 0 ? stageTotal : Number(task.total || 0);
+  const done = stageTotal > 0 ? Number(task.stage_transferred || 0) : Number(task.transferred || 0);
+  if (total > 0) return Math.min(100, Math.round((done / total) * 100));
+  const fileTotal = Number(task.postprocess_file_total || 0);
+  if (fileTotal > 0) {
+    return Math.min(100, Math.round((Number(task.postprocess_file_completed || 0) / fileTotal) * 100));
+  }
+  return 0;
+}
+
+function isTaskIndeterminate(task) {
+  return taskProgressOf(task) <= 0;
+}
+
+function taskProgressColor(task) {
+  return task?.status === "postprocessing" ? "warning" : "primary";
+}
+
+function taskBytesOf(task) {
+  if (!task) return "";
+  const stageTotal = Number(task.stage_total || 0);
+  const total = stageTotal > 0 ? stageTotal : Number(task.total || 0);
+  const done = stageTotal > 0 ? Number(task.stage_transferred || 0) : Number(task.transferred || 0);
+  if (total <= 0) return "";
+  return `${formatBytes(done)} / ${formatBytes(total)}`;
+}
+
+function taskSpeedOf(task) {
+  const speed = Number(task?.speed_bytes_per_second || 0);
+  return speed > 0 ? `${formatBytes(speed)}/s` : "";
+}
+
 const runtimeSummary = computed(() => {
   if (runtime.status === "starting") return "正在准备订阅任务"
   if (runtime.status === "stopping") return "正在停止当前任务"
@@ -1100,6 +1170,51 @@ async function notifyHistory() {
   border-radius: 10px;
 }
 
+.runtime-bar-main {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.runtime-progress-list {
+  display: flex;
+  flex: 1 1 100%;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 0 2px 2px;
+}
+
+.runtime-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.runtime-progress-name {
+  flex: 0 1 34%;
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(var(--v-theme-on-surface), 0.78);
+  font-size: 0.78rem;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.runtime-progress-more {
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+
+.runtime-progress-label {
+  flex-shrink: 0;
+  color: rgba(var(--v-theme-on-surface), 0.6);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .runtime-bar-text {
   min-width: 0;
   overflow: hidden;
@@ -1283,8 +1398,17 @@ async function notifyHistory() {
   }
 
   .runtime-bar {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .runtime-bar-main {
     flex-wrap: wrap;
     row-gap: 6px;
+  }
+
+  .runtime-progress-label {
+    font-size: 0.72rem;
   }
 
   .runtime-bar-text {
