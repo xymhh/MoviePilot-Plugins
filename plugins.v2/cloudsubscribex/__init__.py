@@ -182,7 +182,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.8.7"
+    plugin_version = "1.8.8"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -286,6 +286,11 @@ class CloudSubscribeX(_PluginBase):
     _tg_monitor_keep_unmatched: bool = False
     # 跨盘缓存残留清理（历史 Gopeed 中间文件与内置下载器的半截文件共用同一套扫描）
     _residue_cleanup: bool = True
+    #: 中继缓存保留期（小时）与清理间隔（小时）
+    _residue_retention_hours: int = 6
+    _residue_interval_hours: int = 6
+    #: 磁盘剩余比例低于该值时触发最老优先强制清理（0 = 关闭）
+    _residue_disk_free_ratio: float = 0.10
     #: STRM 全量校准单次时间预算（秒），0 表示不限；到达上限后断点续扫。
     _strm_full_scan_budget: int = 900
     _residue_scheduler: Optional[BackgroundScheduler] = None
@@ -1337,35 +1342,79 @@ class CloudSubscribeX(_PluginBase):
     def cleanup_transfer_residue(self, reason: str = "手动") -> dict:
         """删除跨盘缓存残留（cloud-transfer-*），返回统计。
 
-        判定见 :mod:`core.residue`：仅删超过保留期（默认 24 小时）的文件 ——
+        判定见 :mod:`core.residue`：先删超过保留期（默认 6 小时）的缓存 ——
         运行中的下载会持续刷新 mtime，所以不需要额外的任务列表兜底
-        （1.7.35 移除 Gopeed 后已无外部任务列表可查）。
+        （1.7.35 移除 Gopeed 后已无外部任务列表可查）；磁盘余量低于阈值时
+        再按最老优先清理未到期缓存，10 分钟内有写入的组一律保护。
         """
         from .core.residue import scan_residue
 
         root = self._cross_transfer_download_path or "/tmp"
-        result = scan_residue(root)
+        retention_hours = max(1, int(getattr(self, "_residue_retention_hours", 6) or 6))
+        result = scan_residue(
+            root,
+            min_age_seconds=retention_hours * 3600,
+            disk_free_ratio=getattr(self, "_residue_disk_free_ratio", 0.0) or 0.0,
+        )
         freed_mb = int(result.get("freed_bytes") or 0) / (1024 * 1024)
+        pressure_mb = int(result.get("pressure_freed_bytes") or 0) / (1024 * 1024)
         logger.info(
             f"跨盘缓存残留清理（{reason}）：删除 {result.get('deleted_files')} 个文件、"
-            f"释放 {freed_mb:.1f} MB；跳过未过期 {result.get('skipped_recent')} 组、"
-            f"任务中 {result.get('skipped_active')} 组"
+            f"释放 {freed_mb:.1f} MB（其中磁盘压力清理 {result.get('pressure_deleted_files')} 个 / "
+            f"{pressure_mb:.1f} MB）；跳过未过期 {result.get('skipped_recent')} 组、"
+            f"任务中 {result.get('skipped_active')} 组、活跃保护 {result.get('skipped_protected')} 组；"
+            f"磁盘剩余 {result.get('disk_free_ratio')}"
         )
         for error in result.get("errors") or []:
             logger.warning(f"跨盘缓存残留清理：{error}")
         return result
 
     def _start_residue_cleanup(self) -> None:
-        """启动时跑一次 + 每天 03:40 跑一次（同一进程只挂一次），与 STRM 校准错峰。"""
+        """启动时跑一次 + 按配置间隔周期跑（默认每 6 小时），与 STRM 校准错峰。
+
+        配置改动后再次调用本方法即可：间隔变化会原地重排任务，
+        关闭开关会移除已挂的定时任务。
+        """
+        scheduler = self.__dict__.get("_residue_scheduler")
         if not self._residue_cleanup:
+            if scheduler is not None:
+                try:
+                    scheduler.remove_job("cloudsubscribe_residue_cleanup")
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(f"移除跨盘缓存清理定时任务失败：{error}", exc_info=True)
             return
-        if self.__dict__.get("_residue_scheduler") is not None:
-            return
+        interval_hours = max(1, min(int(getattr(self, "_residue_interval_hours", 6) or 6), 24))
+        if scheduler is not None:
+            try:
+                job = scheduler.get_job("cloudsubscribe_residue_cleanup")
+                if job is None:
+                    # 任务被外部移除（例如上次 remove_job 后重新开启）：补挂即可
+                    scheduler.add_job(
+                        func=lambda: self.cleanup_transfer_residue("定时"),
+                        trigger=IntervalTrigger(hours=interval_hours),
+                        id="cloudsubscribe_residue_cleanup",
+                        replace_existing=True,
+                    )
+                    return
+                current = None
+                trigger = getattr(job, "trigger", None)
+                if trigger is not None and getattr(trigger, "interval", None) is not None:
+                    current = trigger.interval.total_seconds() / 3600
+                if current is not None and abs(current - interval_hours) < 1e-6:
+                    return
+                scheduler.reschedule_job(
+                    "cloudsubscribe_residue_cleanup",
+                    trigger=IntervalTrigger(hours=interval_hours),
+                )
+                logger.info(f"跨盘缓存清理间隔已改为每 {interval_hours} 小时")
+                return
+            except Exception as error:  # noqa: BLE001
+                logger.warning(f"重排跨盘缓存清理定时任务失败：{error}")
         try:
             scheduler = BackgroundScheduler(timezone=settings.TZ)
             scheduler.add_job(
-                func=lambda: self.cleanup_transfer_residue("每日"),
-                trigger=CronTrigger(hour=3, minute=40),
+                func=lambda: self.cleanup_transfer_residue("定时"),
+                trigger=IntervalTrigger(hours=interval_hours),
                 id="cloudsubscribe_residue_cleanup",
                 replace_existing=True,
             )
@@ -1882,6 +1931,26 @@ class CloudSubscribeX(_PluginBase):
         self._residue_cleanup = bool(
             config.get("cross_transfer_residue_cleanup", True)
         )
+        # 跨盘中继缓存策略：保留期 / 清理间隔（小时）与磁盘压力阈值（剩余百分比）。
+        # 非法值一律回落到默认，保证老配置升级后行为可预期。
+        try:
+            self._residue_retention_hours = max(
+                1, min(int(config.get("cross_transfer_residue_retention_hours", 6) or 6), 168)
+            )
+        except (TypeError, ValueError):
+            self._residue_retention_hours = 6
+        try:
+            self._residue_interval_hours = max(
+                1, min(int(config.get("cross_transfer_residue_interval_hours", 6) or 6), 24)
+            )
+        except (TypeError, ValueError):
+            self._residue_interval_hours = 6
+        try:
+            disk_free_pct = float(config.get("cross_transfer_residue_disk_free_pct", 10) or 0)
+        except (TypeError, ValueError):
+            disk_free_pct = 10.0
+        disk_free_pct = max(0.0, min(disk_free_pct, 90.0))
+        self._residue_disk_free_ratio = disk_free_pct / 100.0
 
         self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", 2) or 2), 5))
         self._batch_size = int(config.get("batch_size", 20) or 20)
