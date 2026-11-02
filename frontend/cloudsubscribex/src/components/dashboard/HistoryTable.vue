@@ -127,6 +127,16 @@
         </div>
         <v-spacer />
         <v-btn
+          variant="tonal"
+          size="small"
+          color="secondary"
+          prepend-icon="mdi-clipboard-text-search-outline"
+          class="mr-2"
+          title="打开全网未转存候选排障账本"
+          @click.stop="openGlobalLedger">
+          未转存账本
+        </v-btn>
+        <v-btn
           class="retry-batch-button"
           color="primary"
           variant="text"
@@ -515,6 +525,25 @@
                     </div>
                   </td>
                 </tr>
+                <tr v-if="item.skipped_count" class="bg-surface-variant-subtle">
+                  <td colspan="7" class="pa-3">
+                    <div class="d-flex align-center justify-space-between flex-wrap ga-2">
+                      <div class="d-flex align-center ga-2 text-caption">
+                        <v-icon icon="mdi-information-outline" color="warning" size="16" />
+                        <span class="font-weight-medium text-warning">本剧另有 {{ item.skipped_count }} 次候选被跳过：</span>
+                        <span class="text-medium-emphasis">{{ skipReasonText(item) }}</span>
+                      </div>
+                      <v-btn
+                        size="x-small"
+                        variant="tonal"
+                        color="primary"
+                        prepend-icon="mdi-magnify"
+                        @click.stop="openItemLedger(item)">
+                        查看本剧跳过明细
+                      </v-btn>
+                    </div>
+                  </td>
+                </tr>
                 </tbody>
               </v-table>
             </td>
@@ -730,6 +759,23 @@
                     </span>
                   </div>
                 </div>
+
+                <div v-if="item.skipped_count" class="pa-2 mt-2 bg-surface-variant-subtle rounded text-caption">
+                  <div class="d-flex align-center ga-1 text-warning font-weight-medium mb-1">
+                    <v-icon icon="mdi-information-outline" size="14" />
+                    <span>本剧另有 {{ item.skipped_count }} 次候选被跳过</span>
+                  </div>
+                  <div class="text-medium-emphasis mb-2">{{ skipReasonText(item) }}</div>
+                  <v-btn
+                    size="x-small"
+                    variant="tonal"
+                    color="primary"
+                    prepend-icon="mdi-magnify"
+                    block
+                    @click.stop="openItemLedger(item)">
+                    查看本剧跳过明细
+                  </v-btn>
+                </div>
               </v-expansion-panel-text>
             </v-expansion-panel>
           </v-expansion-panels>
@@ -744,12 +790,32 @@
           @update:model-value="changePage" />
       </div>
     </div>
+
+    <!-- 全局未转存排障账本弹窗 -->
+    <v-dialog v-model="showGlobalLedger" max-width="1100" scrollable>
+      <v-card class="pa-2">
+        <v-card-title class="d-flex align-center justify-space-between pb-1">
+          <div class="d-flex align-center ga-2">
+            <v-icon icon="mdi-clipboard-text-search-outline" color="primary" />
+            <span class="text-subtitle-1 font-weight-bold">
+              {{ ledgerTargetKeyword ? `《${ledgerTargetKeyword}》未转存排障明细` : "全网候选未转存账本" }}
+            </span>
+          </div>
+          <v-btn icon="mdi-close" variant="text" size="small" @click="showGlobalLedger = false" />
+        </v-card-title>
+        <v-divider />
+        <v-card-text class="pa-0">
+          <CandidateLedgerPanel :api="props.api" :initial-keyword="ledgerTargetKeyword" class="pa-3" />
+        </v-card-text>
+      </v-card>
+    </v-dialog>
   </div>
 </template>
 
 <script setup>
 import {computed, ref, watch} from "vue";
 import {useDisplay} from "vuetify";
+import CandidateLedgerPanel from "./CandidateLedgerPanel.vue";
 import {
   getResourceTypeName,
   getSourceColor,
@@ -766,6 +832,7 @@ import {
 } from "../../utils/status.js";
 
 const props = defineProps({
+  api: {type: Object, default: () => ({})},
   items: {type: Array, default: () => []},
   page: {type: Number, default: 1},
   pageSize: {type: Number, default: 10},
@@ -810,6 +877,18 @@ const expanded = ref([]);
 const selectedGroupKeys = ref([]);
 const filtersVisible = ref(false);
 const searchVisible = ref(false);
+const showGlobalLedger = ref(false);
+const ledgerTargetKeyword = ref("");
+
+function openGlobalLedger() {
+  ledgerTargetKeyword.value = "";
+  showGlobalLedger.value = true;
+}
+
+function openItemLedger(item) {
+  ledgerTargetKeyword.value = item?.title || "";
+  showGlobalLedger.value = true;
+}
 let lastQuerySignature = "";
 
 const statusOptions = HISTORY_STATUS_OPTIONS;

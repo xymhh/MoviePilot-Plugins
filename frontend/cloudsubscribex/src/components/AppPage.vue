@@ -105,8 +105,8 @@
             </v-chip>
           </v-tab>
           <v-tab value="history">
-            <v-icon icon="mdi-history" size="small" class="mr-2" />
-            历史记录
+            <v-icon icon="mdi-clipboard-text-clock-outline" size="small" class="mr-2" />
+            转存台账
             <v-chip v-if="historyStats.total" size="x-small" class="ml-2">
               {{ historyStats.total }}
             </v-chip>
@@ -164,18 +164,8 @@
           <OrganizePanel :api="api" />
         </div>
         <div v-show="mainTab === 'history'" class="workspace-pane history-pane">
-          <div class="history-view-switch">
-            <v-btn-toggle v-model="historyView" density="compact" variant="tonal" divided mandatory>
-              <v-btn value="records" prepend-icon="mdi-history" size="small">转存结果</v-btn>
-              <v-btn value="skipped" prepend-icon="mdi-clipboard-text-search-outline" size="small">未转存原因</v-btn>
-            </v-btn-toggle>
-            <span class="text-caption text-medium-emphasis">
-              {{ historyView === "records" ? "这次转到哪、成没成" : "同一批候选为什么没转成" }}
-            </span>
-          </div>
-          <CandidateLedgerPanel v-if="historyView === 'skipped'" :api="api" class="history-ledger" />
           <HistoryTable
-            v-show="historyView === 'records'"
+            :api="api"
             :items="historyGroups"
             :page="historyPage.page"
             :page-size="historyPage.pageSize"
@@ -406,8 +396,6 @@ const snackbarTextStyle = computed(() => ({
 }))
 const mainTab = ref("hub")
 const showTaskCenter = ref(false)
-// 历史页的两个视图：转存结果 / 未转存原因（原「资源账本」降级为子视图）
-const historyView = ref("records")
 const historyStatuses = ref([])
 const offlineVisible = ref(false)
 const manualVisible = ref(false)
@@ -513,12 +501,6 @@ onUnmounted(() => {
 })
 
 watch(mainTab, (tab) => {
-  if (tab === "ledger") {
-    // 旧入口/旧状态里的「资源账本」已并入历史页
-    historyView.value = "skipped"
-    mainTab.value = "history"
-    return
-  }
   if ((tab !== "history" && tab !== "hub") || !historyDirty.value) return
   historyDirty.value = false
   void loadPage()
@@ -526,7 +508,6 @@ watch(mainTab, (tab) => {
 
 function handleStatSelect(stat) {
   const filter = String(stat?.filter || "").trim()
-  historyView.value = "records"
   historyStatuses.value = filter ? [filter] : []
   mainTab.value = "history"
 }

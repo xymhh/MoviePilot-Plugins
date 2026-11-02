@@ -179,11 +179,12 @@ import {computed, onMounted, ref, watch} from "vue";
 const props = defineProps({
   api: {type: Object, default: () => ({})},
   pluginId: {type: String, default: "CloudSubscribeX"},
+  initialKeyword: {type: String, default: ""},
 });
 
 const days = ref(3);
 const kind = ref("");
-const keyword = ref("");
+const keyword = ref(props.initialKeyword || "");
 const items = ref([]);
 const total = ref(0);
 const page = ref(1);
@@ -348,6 +349,15 @@ function goPage(target) {
   page.value = next;
   loadPage();
 }
+
+watch(
+  () => props.initialKeyword,
+  (val) => {
+    keyword.value = val || "";
+    page.value = 1;
+    reload();
+  }
+);
 
 watch([days, kind], () => {
   reload();
