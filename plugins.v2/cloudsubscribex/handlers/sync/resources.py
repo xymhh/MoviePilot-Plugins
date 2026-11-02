@@ -18,6 +18,7 @@ from ...core import (
     SearchCapability,
 )
 from ...core.services.skip_stats import SkipStatsCollector
+from ...core.share_link import canonicalize_share_url
 from ...core.state import (
     STATUS_DOWNLOADING,
     STATUS_FAILED,
@@ -801,6 +802,7 @@ class ResourceTransferService(OwnerDelegator):
             target_file_names: Optional[List[str]] = None,
     ) -> List[Dict[str, Any]]:
         """校验分享并读取文件列表，供电影、剧集和洗版共同使用。"""
+        share_url = canonicalize_share_url(share_url)
         if self._is_cloud_resource_url(share_url):
             files = self._list_cloud_resource_files(
                 self._cloud_resource_path(share_url),

@@ -27,7 +27,8 @@ TYPE_HOSTS = {
         "123pan.com", "123pan.cn", "123.cn", "123684.com", "123685.com",
         "123865.com", "123912.com", "123592.com",
     },
-    "quark": {"quark.cn"},
+    # qoark.cn 是夸克的中转短链（实测 302 → pan.quark.cn），漏了会被当成未知来源回退 115。
+    "quark": {"quark.cn", "qoark.cn"},
     "alipan": {"alipan.com", "aliyundrive.com", "aliyundrive.net"},
     "tianyi": {"cloud.189.cn"},
     # caiyun.139.com 是 PanSou 实际返回的移动云盘分享主域名

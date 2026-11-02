@@ -20,6 +20,7 @@ from ...core import (
     CloudFile,
     OwnerDelegator,
 )
+from ...core.share_link import canonicalize_share_url
 from ...drive.scanner import get_driver_definitions
 
 
@@ -535,6 +536,7 @@ class TransferOpsMixin(OwnerDelegator):
         开关关闭时行为与旧版完全一致。打开后，同一内容写同一目标位置只会
         有一个 worker 真正执行；已完成的作业直接复用。
         """
+        share_url = canonicalize_share_url(share_url)
         if not bool(getattr(self, "_sync_job_ledger_enabled", False)):
             return self._transfer_file_impl(
                 share_url, file_item, save_path, target_name, source_sha1,
