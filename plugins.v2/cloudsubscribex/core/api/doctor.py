@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from app.log import logger
 
 from .. import OwnerDelegator
+from ..bypass_guard import bypass_guard
 from ...utils.cache import cache_stats
 
 #: 转存历史超过这么多小时没有成功记录 → 黄灯
@@ -105,7 +106,30 @@ class DoctorApi(OwnerDelegator):
             ("tmdb", "TMDB 刮削", self._check_tmdb),
             ("media_dir", "整理目录", self._check_media_dir),
             ("cache", "缓存健康", self._check_cache),
+            ("bypass", "旁路能力", self._check_bypass),
         ]
+
+    def _check_bypass(self, context: Dict[str, Any]) -> CheckResult:
+        """签到 / STRM / 媒体库刷新 / 通知 / aria2 的熔断状态。"""
+        rows = bypass_guard.snapshot()
+        if not rows:
+            return STATUS_OK, "旁路尚未运行，暂无异常记录", None, None
+        cooling = [row for row in rows if row.get("state") == "cooling"]
+        if not cooling:
+            return STATUS_OK, f"{len(rows)} 项旁路状态正常", None, None
+        detail = "冷却中：" + "、".join(
+            f"{row['name']}（剩余 {max(1, int(row['remaining_seconds'] // 60))} 分钟）"
+            for row in cooling
+        )
+        last_error = next(
+            (row.get("last_error") for row in cooling if row.get("last_error")), ""
+        )
+        hint = "旁路失败不影响转存主链路；按提示修好对应能力后会自行恢复"
+        if last_error:
+            hint = f"{hint}。最近错误：{last_error}"
+        if len(cooling) == len(rows):
+            return STATUS_ERROR, detail, hint, None
+        return STATUS_WARN, detail, hint, None
 
     def _history_rows(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
         """转存历史只在插件私有 SQLite，且一次体检只读一遍。"""

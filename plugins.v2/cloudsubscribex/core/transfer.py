@@ -33,6 +33,7 @@ from .target_writer import (
     TargetWriter,
 )
 from .aria2 import Aria2FileDownloadService, aria2_settings
+from .bypass_guard import bypass_guard
 
 
 def _fd_safe_workers(requested: int, ceiling: int = 256) -> int:
@@ -620,6 +621,8 @@ class HttpFileDownloadService:
                 # 用户主动停止：直接上抛，不要回落重下。
                 raise
             except Exception as error:
+                # aria2 是旁路加速能力：失败只记账并回落内置下载器，绝不打断转存
+                bypass_guard.note("aria2", error)
                 logger.warning(
                     f"aria2 下载失败，回落内置下载器：{file_item.name}（{error}）"
                 )

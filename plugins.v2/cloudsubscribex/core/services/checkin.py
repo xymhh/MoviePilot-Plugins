@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.log import logger
 
 from .. import OwnerDelegator, render_template, resolve_template
+from ..bypass_guard import bypass_guard
 from ..checkin_manager import get_checkin_definitions
 from ..definitions import CheckinDefinition
 from ..search import SearchCapability
@@ -1050,6 +1051,16 @@ class CheckinService(OwnerDelegator):
         }
 
     def run_scheduled_checkins(self) -> Dict[str, Any]:
+        """定时签到入口（旁路：失败或冷却时只跳过签到，不影响转存）。"""
+        return bypass_guard.call(
+            "checkin",
+            self._run_scheduled_checkins_impl,
+            fallback=self._skipped_result(
+                "签到能力冷却中，本轮跳过", success=False
+            ),
+        )
+
+    def _run_scheduled_checkins_impl(self) -> Dict[str, Any]:
         """单任务入口：每天首次只签到尚未成功的渠道，随后仅重试失败渠道。"""
         if not self._schedule_lock.acquire(blocking=False):
             return self._skipped_result("签到调度正在执行", success=False)

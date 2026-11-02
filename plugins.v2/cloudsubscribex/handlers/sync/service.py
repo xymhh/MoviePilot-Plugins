@@ -68,6 +68,7 @@ from ...core import (
     resolve_component,
     MediaScraper,
 )
+from ...core.bypass_guard import bypass_guard
 from ...core.media import (
     legacy_media_ids,
     list_subscribes_by_tmdb_id,
@@ -789,8 +790,12 @@ class SyncHandler:
         return self._media_server_notifier.begin_task_batch()
 
     def finish_notification_batch(self) -> bool:
-        """同步任务收尾后统一提交媒体目录通知。"""
-        return self._media_server_notifier.finish_task_batch()
+        """同步任务收尾后统一提交媒体目录通知（旁路：失败不影响主链路）。"""
+        return bool(bypass_guard.call(
+            "notify",
+            self._media_server_notifier.finish_task_batch,
+            fallback=False,
+        ))
 
     def _stop_requested(self) -> bool:
         try:
@@ -1371,7 +1376,15 @@ class SyncHandler:
         }
 
     def refresh_media_servers(self) -> Dict[str, Any]:
-        """让媒体服务器重新扫描库，用于文件被删除/新增后立刻生效。"""
+        """让媒体服务器重新扫描库（旁路：失败只丢掉刷新，不影响转存结果）。"""
+        return bypass_guard.call(
+            "media_server",
+            self._refresh_media_servers_impl,
+            fallback={},
+        )
+
+    def _refresh_media_servers_impl(self) -> Dict[str, Any]:
+        """媒体服务器刷新实现：逐台独立 try/except，全挂也不会外抛。"""
         results: Dict[str, Any] = {}
         try:
             services = MediaServerResolver._services() or {}
@@ -1541,7 +1554,28 @@ class SyncHandler:
             "media_refresh": refreshed,
         }
 
+    _STRM_EMPTY_STATS = {
+        "directories": 0, "files": 0, "created": 0,
+        "updated": 0, "skipped": 0, "errors": 0,
+    }
+
     def rebuild_strm_files(
+            self,
+            overwrite: bool = False,
+            time_budget_seconds: float = 0.0,
+            state_store: Any = None,
+    ) -> Dict[str, int]:
+        """STRM 重建（旁路：失败或冷却时返回全 0 统计，不影响转存）。"""
+        return bypass_guard.call(
+            "strm",
+            self._rebuild_strm_files_impl,
+            overwrite=overwrite,
+            time_budget_seconds=time_budget_seconds,
+            state_store=state_store,
+            fallback=dict(self._STRM_EMPTY_STATS),
+        )
+
+    def _rebuild_strm_files_impl(
             self,
             overwrite: bool = False,
             time_budget_seconds: float = 0.0,
