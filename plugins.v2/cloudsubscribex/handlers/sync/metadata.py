@@ -401,6 +401,43 @@ class SyncMetadataService(OwnerDelegator):
                     update_data.setdefault(key, val)
             self._task_update(task_id, **update_data)
 
+    def _correct_bangumi_episode_total(self, subscribe: Any, mediainfo: Any) -> None:
+        """纠正 Bangumi 混合了 OP/ED/SP 的条目总集数，避免 TMDB S01 产生虚假缺集。"""
+        bangumi_id = getattr(subscribe, "bangumiid", None)
+        current = getattr(subscribe, "total_episode", None)
+        season = normalize_season(getattr(subscribe, "season", 1))
+        if not bangumi_id or season != 1 or media_identity(mediainfo)[0] != "themoviedb":
+            return
+        episodes = (getattr(mediainfo, "seasons", None) or {}).get(season)
+        if not isinstance(episodes, (list, tuple, set)) or not episodes:
+            return
+        try:
+            numbers = {int(value) for value in episodes}
+            main = max(numbers)
+            # 仅处理 TMDB 已播集号连续（1..main）且订阅总集数大于正片集数的情况
+            if numbers != set(range(1, main + 1)) or int(current or 0) <= main:
+                return
+            from app.modules.bangumi import BangumiModule
+            subject = BangumiModule().bangumi_info(bangumiid=int(bangumi_id))
+            if not isinstance(subject, dict):
+                return
+            bgm_main = int(subject.get("eps") or 0)
+            mixed = int(subject.get("total_episodes") or 0)
+            # 三重相等才认定「订阅总集数抄的是含 OP/ED/SP 的总条目数」
+            if 0 < main == bgm_main < mixed == int(current or 0):
+                if SubscribeOper().update(subscribe.id, {"total_episode": main}):
+                    subscribe.total_episode = main
+                    logger.info(
+                        f"已按 Bangumi 正片集数修正订阅总集数："
+                        f"{getattr(subscribe, 'name', '')} "
+                        f"{int(current)} → {main}（BGM 总条目 {mixed}）"
+                    )
+        except Exception as error:
+            logger.debug(
+                f"Bangumi 正片集数交叉核对未完成，保持原配置：{error}",
+                exc_info=True,
+            )
+
     def _subscribe_mediainfo(
             self,
             subscribe: Any,

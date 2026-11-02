@@ -182,6 +182,10 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 return transferred_count
 
             self._set_task_phase(subscribe, "核对播出范围", 20)
+            if not transient_target:
+                correct_count = getattr(self, "_correct_bangumi_episode_total", None)
+                if callable(correct_count):
+                    correct_count(subscribe, mediainfo)
             season = normalize_season(subscribe.season)
             cloud_drive_name = self._cloud_drive_name()
             total_ep = subscribe.total_episode or 0
