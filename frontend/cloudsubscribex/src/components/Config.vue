@@ -17,6 +17,14 @@
             <!-- 手机端顶部右侧操作栏（位置正确且直接置顶） -->
             <div class="sidebar-mobile-actions d-md-none">
               <v-btn
+                class="mobile-header-btn"
+                variant="text"
+                size="small"
+                density="compact"
+                :prepend-icon="wizardMode ? 'mdi-cog-outline' : 'mdi-wand'"
+                :title="wizardMode ? '专家配置' : '配置向导'"
+                @click="toggleWizard">{{ wizardMode ? '专家' : '向导' }}</v-btn>
+              <v-btn
                 v-if="showSwitch"
                 class="mobile-header-btn"
                 variant="text"
@@ -37,7 +45,7 @@
                 @click="emit('close')" />
             </div>
           </div>
-          <nav class="sidebar-nav" aria-label="配置导航">
+          <nav v-show="!wizardMode" class="sidebar-nav" aria-label="配置导航">
             <!-- 电脑端：带精美分组层级 -->
             <template v-if="!isMobile">
               <div
@@ -160,6 +168,13 @@
             </div>
             <div class="config-header-actions">
               <v-btn
+                class="config-header-btn"
+                variant="text"
+                size="small"
+                :prepend-icon="wizardMode ? 'mdi-cog-outline' : 'mdi-wand'"
+                :title="wizardMode ? '切回专家配置（全部字段）' : '打开配置向导（只配必填 3 步）'"
+                @click="toggleWizard">{{ wizardMode ? '专家模式' : '配置向导' }}</v-btn>
+              <v-btn
                 v-if="showSwitch"
                 class="config-header-btn"
                 variant="text"
@@ -184,7 +199,91 @@
           <!-- 内容展示容器：带丝滑淡入过渡动画，仅渲染当前激活的 section -->
           <div class="config-main-body">
             <transition name="fade-slide" mode="out-in">
-              <div :key="activeTab" class="config-window-section">
+              <!-- 配置向导：只配必填三步，字段渲染完全复用 ConfigSection -->
+              <div v-if="wizardMode" :key="`wizard-${wizardStep}`" class="config-window-section wizard-panel">
+                <div class="wizard-head">
+                  <div class="wizard-steps">
+                    <div
+                      v-for="(step, index) in wizardSteps"
+                      :key="step.value"
+                      :class="['wizard-step-chip', {'is-active': index === wizardStep, 'is-done': index < wizardStep}]">
+                      <span class="wizard-step-index">{{ index < wizardStep ? '✓' : index + 1 }}</span>
+                      <span class="wizard-step-title">{{ step.title }}</span>
+                    </div>
+                  </div>
+                  <div class="wizard-headline">{{ currentWizardStep.title }}</div>
+                  <div class="wizard-subline">{{ currentWizardStep.hint }}</div>
+                </div>
+
+                <ConfigSection
+                  v-if="currentWizardStep.groups.length"
+                  :section="currentWizardStep"
+                  :config="config"
+                  :options="options"
+                  :api="api"
+                  :refreshing-accounts="refreshingAccounts"
+                  :testing-source="testingSource"
+                  :testing-auto-subscribe="testingAutoSubscribe"
+                  :testing-proxy="testingProxy"
+                  :testing-auto-subscribe-proxy="testingAutoSubscribeProxy"
+                  :hdhive-oauth-action="hdhiveOauthAction"
+                  @scan="openQrCode"
+                  @browse-directory="openDirectoryPicker"
+                  @test-source="openSourceTest"
+                  @test-auto-subscribe="testAutoSubscribe"
+                  @test-proxy="testSearchProxy"
+                  @test-auto-subscribe-proxy="testAutoSubscribeProxy"
+                  @refresh-account="refreshAccount"
+                  @hdhive-oauth-start="startHdhiveOAuth"
+                  @hdhive-oauth-exchange="exchangeHdhiveOAuth"
+                  @checkin-result="handleCheckinResult"
+                  @copy-text="copyText"
+                  @load-options="loadDynamicOptions"
+                  @refresh-options="refreshDynamicOptions"
+                  @notify="notify" />
+
+                <div v-else class="wizard-finish">
+                  <div v-if="wizardDoctorLoading" class="wizard-finish-loading">
+                    <v-progress-circular indeterminate size="18" width="2" color="primary" />
+                    <span>正在体检…</span>
+                  </div>
+                  <template v-else-if="wizardDoctor">
+                    <div class="wizard-finish-title">
+                      自检 {{ wizardDoctor.counts?.ok || 0 }} 项正常
+                      <span v-if="wizardDoctor.counts?.warn" class="is-warn">· {{ wizardDoctor.counts.warn }} 项注意</span>
+                      <span v-if="wizardDoctor.counts?.error" class="is-error">· {{ wizardDoctor.counts.error }} 项故障</span>
+                    </div>
+                    <div v-for="item in wizardDoctor.items" :key="item.key" class="wizard-finish-row">
+                      <span :class="['doctor-dot', `is-${item.status}`]" />
+                      <span class="wizard-finish-name">{{ item.name }}</span>
+                      <span class="wizard-finish-detail">{{ item.detail }}</span>
+                    </div>
+                  </template>
+                  <div v-else class="wizard-finish-title">已保存，可点「重新体检」确认</div>
+                </div>
+
+                <div class="wizard-actions">
+                  <v-btn v-if="wizardStep > 0" variant="text" size="small" @click="prevWizardStep">上一步</v-btn>
+                  <v-spacer />
+                  <v-btn
+                    v-if="wizardStep === 1 && !String(config.organize_source_path || '').trim()"
+                    variant="text"
+                    size="small"
+                    @click="nextWizardStep">跳过这步</v-btn>
+                  <v-btn
+                    v-if="wizardStep < wizardSteps.length - 1"
+                    color="primary"
+                    variant="flat"
+                    size="small"
+                    :disabled="!wizardStepValid"
+                    @click="nextWizardStep">下一步</v-btn>
+                  <template v-else>
+                    <v-btn variant="text" size="small" :loading="wizardDoctorLoading" @click="runWizardDoctor">重新体检</v-btn>
+                    <v-btn color="primary" variant="flat" size="small" :loading="saving" @click="finishWizard">完成并保存</v-btn>
+                  </template>
+                </div>
+              </div>
+              <div v-else :key="activeTab" class="config-window-section">
                 <ConfigSection
                   v-if="currentSection"
                   :section="currentSection"
@@ -907,6 +1006,112 @@ const options = reactive({
   rsshubLoading: false,
 })
 const sections = computed(() => createConfigSections(options, config))
+
+// ---------------------------------------------------------------- 配置向导
+// 只做「必填三件事」：选网盘并登录 → 落地目录 → 保存并体检。
+// 字段按 key 从既有 sections 里挑，不复制定义，避免两处漂移。
+const wizardMode = ref(false)
+const wizardStep = ref(0)
+const wizardDoctor = ref(null)
+const wizardDoctorLoading = ref(false)
+
+/** 从全部 section 里按 key 取字段定义（取不到就跳过，不报错） */
+function pickFields(keys) {
+  const wanted = new Set(keys)
+  const picked = []
+  for (const section of sections.value || []) {
+    for (const group of section.groups || []) {
+      for (const field of group.fields || []) {
+        if (field?.key && wanted.has(field.key)) picked.push(field)
+      }
+    }
+  }
+  return picked
+}
+
+/** 当前选中网盘的动态凭据 schema（后端下发） */
+const activeDriveSchema = computed(() => {
+  const id = String(config.cloud_drive || "")
+  const list = Array.isArray(options.driverSchemas) ? options.driverSchemas : []
+  return list.find((item) => item.id === id) || null
+})
+
+const wizardSteps = computed(() => {
+  const baseFields = pickFields(["enabled", "cloud_drive"])
+  const driveGroups = activeDriveSchema.value?.groups || []
+  const organizeFields = pickFields(["organize_source_path", "organize_after_transfer"])
+  return [
+    {
+      value: "wizard-drive",
+      title: "连网盘",
+      icon: "mdi-cloud-lock-outline",
+      hint: "选一个网盘并完成登录，插件才有地方转存",
+      groups: [
+        ...(baseFields.length ? [{title: "基础", icon: "mdi-cog-outline", fields: baseFields}] : []),
+        ...driveGroups,
+      ],
+    },
+    {
+      value: "wizard-landing",
+      title: "落地位置",
+      icon: "mdi-folder-check-outline",
+      hint: "转存后的文件整理到哪里（不需要整理可跳过）",
+      groups: organizeFields.length
+        ? [{title: "目录", icon: "mdi-folder-outline", fields: organizeFields}]
+        : [],
+    },
+    {
+      value: "wizard-done",
+      title: "完成",
+      icon: "mdi-check-decagram-outline",
+      hint: "保存配置并自动体检，确认每一环都通",
+      groups: [],
+    },
+  ]
+})
+
+const currentWizardStep = computed(
+  () => wizardSteps.value[wizardStep.value] || wizardSteps.value[0],
+)
+
+const wizardStepValid = computed(() => {
+  if (wizardStep.value === 0) return Boolean(String(config.cloud_drive || "").trim())
+  return true
+})
+
+function toggleWizard() {
+  wizardMode.value = !wizardMode.value
+  if (wizardMode.value) wizardStep.value = 0
+}
+
+function nextWizardStep() {
+  if (wizardStep.value >= wizardSteps.value.length - 1) return
+  wizardStep.value += 1
+  if (wizardStep.value === wizardSteps.value.length - 1) runWizardDoctor()
+}
+
+function prevWizardStep() {
+  if (wizardStep.value > 0) wizardStep.value -= 1
+}
+
+async function runWizardDoctor() {
+  if (wizardDoctorLoading.value) return
+  wizardDoctorLoading.value = true
+  try {
+    const response = await api.get("plugin/CloudSubscribeX/doctor")
+    wizardDoctor.value = response?.data || null
+  } catch (error) {
+    wizardDoctor.value = null
+  } finally {
+    wizardDoctorLoading.value = false
+  }
+}
+
+async function finishWizard() {
+  const ok = await save()
+  if (ok) await runWizardDoctor()
+}
+
 const navGroups = computed(() => {
   const all = sections.value || [];
   const map = new Map(all.map((s) => [s.value, s]));
@@ -1675,7 +1880,7 @@ async function refreshAccount(accountKey, { silent = false } = {}) {
 }
 
 async function save() {
-  if (saving.value) return
+  if (saving.value) return false
   saving.value = true
   messageVisible.value = false
   try {
@@ -1691,8 +1896,10 @@ async function save() {
     }
     await reloadVisibleOptionScopes()
     notify(response.message || "配置已保存")
+    return true
   } catch (e) {
     notify(`保存配置失败：${e.message || e}`, "error")
+    return false
   } finally {
     saving.value = false
   }
@@ -1926,6 +2133,8 @@ onMounted(async () => {
   } catch (e) {
     notify(`加载配置选项失败：${e.message || e}`, "warning")
   }
+  // 首次运行（还没选网盘）直接进向导；老用户保持专家模式零感知
+  if (!String(config.cloud_drive || "").trim()) wizardMode.value = true
 })
 
 watch(activeTab, (tab) => {
@@ -3134,4 +3343,39 @@ watch(
     padding-inline: 12px !important;
   }
 }
+
+/* ---------------------------------------------------------------- 配置向导 */
+.wizard-panel { display: flex; flex-direction: column; gap: 14px; }
+.wizard-head { display: flex; flex-direction: column; gap: 8px; }
+.wizard-steps { display: flex; gap: 6px; flex-wrap: wrap; }
+.wizard-step-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px; border-radius: 999px;
+  background: rgba(var(--v-border-color), 0.35);
+  font-size: 12px; opacity: 0.65;
+}
+.wizard-step-chip.is-active { background: rgba(var(--v-theme-primary), 0.14); color: rgb(var(--v-theme-primary)); opacity: 1; font-weight: 600; }
+.wizard-step-chip.is-done { opacity: 0.9; }
+.wizard-step-index {
+  width: 16px; height: 16px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; background: rgba(var(--v-theme-primary), 0.18);
+}
+.wizard-step-chip.is-done .wizard-step-index { background: rgb(var(--v-theme-success)); color: #fff; }
+.wizard-headline { font-size: 16px; font-weight: 650; }
+.wizard-subline { font-size: 12px; opacity: 0.65; }
+.wizard-finish { display: flex; flex-direction: column; gap: 6px; padding: 10px 4px; }
+.wizard-finish-loading { display: flex; align-items: center; gap: 8px; font-size: 13px; opacity: 0.75; }
+.wizard-finish-title { font-size: 13px; font-weight: 600; }
+.wizard-finish-title .is-warn { color: rgb(var(--v-theme-warning)); }
+.wizard-finish-title .is-error { color: rgb(var(--v-theme-error)); }
+.wizard-finish-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.wizard-finish-name { font-weight: 600; min-width: 76px; }
+.wizard-finish-detail { opacity: 0.7; word-break: break-all; }
+.wizard-finish-row .doctor-dot { width: 7px; height: 7px; border-radius: 50%; margin-top: 0; flex: 0 0 auto; }
+.wizard-finish-row .doctor-dot.is-ok { background: rgb(var(--v-theme-success)); }
+.wizard-finish-row .doctor-dot.is-warn { background: rgb(var(--v-theme-warning)); }
+.wizard-finish-row .doctor-dot.is-error { background: rgb(var(--v-theme-error)); }
+.wizard-finish-row .doctor-dot.is-skip { background: rgba(var(--v-border-color), 0.9); }
+.wizard-actions { display: flex; align-items: center; gap: 6px; padding-top: 10px; border-top: 1px solid rgba(var(--v-border-color), 0.6); }
 </style>
