@@ -19,16 +19,28 @@ class SkipStatsCollector:
 
     KIND_INVALID = "invalid"   # 分享链接失效
     KIND_EMPTY = "empty"       # 分享链接无可用文件
-    KIND_MISMATCH = "mismatch" # 内容与目标季/集不匹配
+    # 以下三类过去统一叫「内容不匹配」，用户点开链接发现剧是对的，
+    # 却分不清是「不是这部剧」还是「集号对不上」。按真实原因拆开记。
+    KIND_MISMATCH = "mismatch"           # 分享内容不是目标作品
+    KIND_EPISODE_MISS = "episode_miss"   # 是这部剧，但资源集号不在缺失范围
+    KIND_UNPARSABLE = "unparsable"       # 是这部剧，但解析不出季集号
 
     #: 类型 -> 中文文案（与候选摘要同一套中文命名）。
     KIND_LABELS: Dict[str, str] = {
         KIND_INVALID: "分享链接失效",
         KIND_EMPTY: "无可用文件",
-        KIND_MISMATCH: "内容不匹配",
+        KIND_MISMATCH: "剧名不符",
+        KIND_EPISODE_MISS: "集号不符",
+        KIND_UNPARSABLE: "无法解析集号",
     }
-    #: 汇总文案里的类型顺序：先失效、后无可用文件、再内容不匹配。
-    KIND_ORDER: Tuple[str, ...] = (KIND_INVALID, KIND_EMPTY, KIND_MISMATCH)
+    #: 汇总文案里的类型顺序：先失效、后无可用文件、再内容类问题。
+    KIND_ORDER: Tuple[str, ...] = (
+        KIND_INVALID,
+        KIND_EMPTY,
+        KIND_MISMATCH,
+        KIND_EPISODE_MISS,
+        KIND_UNPARSABLE,
+    )
     #: 识别不出来源网盘时的兜底展示名。
     UNKNOWN_PROVIDER = "未知来源"
 

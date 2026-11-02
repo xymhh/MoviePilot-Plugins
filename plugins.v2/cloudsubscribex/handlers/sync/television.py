@@ -675,16 +675,16 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         )
                         if video_count and not share_episodes:
                             reason = (
-                                "跨盘分享内容未被平台识别为目标媒体"
-                                if is_cross_batch
-                                else "目标网盘分享未识别到目标季集数"
+                                f"解析不出目标季集号（含 {video_count} 个视频）"
+                                f"：{'跨盘分享' if is_cross_batch else '分享'}"
+                                f"文件名与目录都没有 S{season:02d} 的集号"
                             )
                             logger.debug(
                                 f"{reason}：{mediainfo.title_year} "
                                 f"S{season:02d}，已跳过该资源"
                             )
                             self._record_skip_candidate(
-                                SkipStatsCollector.KIND_MISMATCH,
+                                SkipStatsCollector.KIND_UNPARSABLE,
                                 share_url,
                                 reason=reason,
                                 resource_title=resource_title,
@@ -832,14 +832,21 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 matched_items.append(item_entry)
 
                         if not matched_items:
+                            # 到这里说明集号解析成功、只是与缺失集没有交集，
+                            # 不是「内容不匹配」——账本要能直接看出差在哪。
+                            reason = (
+                                f"资源集号与缺失不符（S{season:02d}）：资源含 "
+                                f"{self._format_episode_ranges(share_episodes) or '无'}，"
+                                f"缺 {self._format_episode_ranges(missing_episode_set) or '无'}"
+                            )[:180]
                             logger.debug(
-                                f"该{resource_input_label}未匹配到 S{season} 的任何缺失剧集，"
-                                "可能是季数不匹配或文件名无法识别"
+                                f"该{resource_input_label}未匹配到 S{season} 的任何缺失剧集："
+                                f"{reason}"
                             )
                             self._record_skip_candidate(
-                                SkipStatsCollector.KIND_MISMATCH,
+                                SkipStatsCollector.KIND_EPISODE_MISS,
                                 share_url,
-                                reason=f"未匹配到 S{season} 的缺失剧集",
+                                reason=reason,
                                 resource_title=resource_title,
                             )
                             continue

@@ -655,10 +655,18 @@ class FileMatcher:
             text = str(data.get(field) or "").strip().strip("/")
             if text and text not in dir_texts:
                 dir_texts.append(text)
+        # 由内到外看：外层目录常是旧季（最后生还者 第一季/…/S02最新…/S01最新…），
+        # 只要最近一层写了季号就以它为准，不能被外层 Season 1 误判。
         for dir_text in dir_texts:
-            if MediaFileParser.path_conflicts_season(dir_text, target):
-                found = MediaFileParser.path_season(dir_text)
-                return True, dir_text, int(found) if found is not None else 0
+            for dir_name in reversed(
+                    [part for part in dir_text.split("/") if part]
+            ):
+                found = MediaFileParser.path_season(dir_name)
+                if found is None:
+                    continue
+                if int(found) != target:
+                    return True, dir_name, int(found)
+                break
         return False, "", 0
 
     @classmethod
@@ -690,21 +698,24 @@ class FileMatcher:
             return period_episode
         meta = cls._platform_meta(name)
         if not meta:
-            return None
+            return cls._episode_from_path_evidence(item, name, season)
 
         if not cls._has_explicit_media_title(meta):
             meta, default_episode = cls._meta_with_target_defaults(
                 name, meta, mediainfo, season
             )
             if not meta:
-                return None
+                return cls._episode_from_path_evidence(item, name, season)
         else:
             default_episode = None
 
         parsed_season = getattr(meta, "begin_season", None)
         episode = getattr(meta, "begin_episode", None) or default_episode
         if parsed_season is None or episode is None:
-            return None
+            # 文件名本身没有季集号（01 官中最新4K高清完整版.mp4、上集：xxx.mkv），
+            # 但父目录常写着 S01 / 第一季。包级标题守卫已确认整包属于本剧，
+            # 这里用「目录季号 + 文件名集号」补上文件级证据。
+            return cls._episode_from_path_evidence(item, name, season)
         try:
             parsed_season, episode = int(parsed_season), int(episode)
         except (TypeError, ValueError):
@@ -712,6 +723,109 @@ class FileMatcher:
         if parsed_season != int(season) or episode <= 0:
             return None
         if not cls._matches_target_media(meta, mediainfo, season):
+            return None
+        return episode
+
+    #: 「【压制组】E01.mkv」这种没有季号、只有 E01 的集号标记（韩剧/压制组常见）。
+    _BARE_EPISODE_RE = re.compile(r"(?<![A-Za-z0-9])[Ee][Pp]?0*(\d{1,4})(?![0-9])")
+    #: 「组名 - 01 [WebRip…]」「[LoliHouse] 罗马音 - 07」这类连字符/方括号夹住的集号。
+    #: 上限由调用方限制在 999，1080p / 2160p 这类分辨率不会被当集号。
+    _DELIMITED_EPISODE_RE = re.compile(
+        r"(?:[-–—]\s*|\[)(\d{1,4})(?=[ ._\]-]|$)"
+    )
+    #: 短剧常见的「上/中/下」分段集号映射（文件名是剧情小标题，没有 E01）。
+    _PART_EPISODE_TOKENS = (
+        (("上集", "上部", "上篇", "（上）", "(上)"), 1),
+        (("中集", "中部", "中篇", "（中）", "(中)"), 2),
+        (("下集", "下部", "下篇", "（下）", "(下)"), 3),
+    )
+
+    @classmethod
+    def _episode_from_name(cls, name: str, season: int) -> int | None:
+        """只按文件名取集号：SxxExx → 第N集 → 开头裸数字 → 上/中/下。"""
+        stem = str(name or "").rsplit("/", 1)[-1]
+        if not stem:
+            return None
+        pair = MediaFileParser.extract_season_episode(stem)
+        if pair:
+            if int(pair[0]) == int(season) and int(pair[1]) > 0:
+                return int(pair[1])
+            return None
+        match = cls._SXEX_EPISODE_RE.search(stem)
+        if match:
+            if int(match.group(1)) == int(season):
+                return int(match.group(2))
+            return None
+        match = cls._BARE_EPISODE_RE.search(stem)
+        if match:
+            value = int(match.group(1))
+            return value if value > 0 else None
+        match = cls._CN_EPISODE_RE.search(stem)
+        if match:
+            value = int(match.group(1))
+            return value if value > 0 else None
+        match = cls._TITLELESS_EPISODE.match(stem)
+        if match:
+            value = int(match.group(1))
+            # 上限 999：1080p/2160p 这类分辨率数字不是集号。
+            if 0 < value <= 999:
+                return value
+        match = cls._DELIMITED_EPISODE_RE.search(stem)
+        if match:
+            value = int(match.group(1))
+            if 0 < value <= 999:
+                return value
+        for tokens, episode in cls._PART_EPISODE_TOKENS:
+            if any(token in stem for token in tokens):
+                return episode
+        return None
+
+    @classmethod
+    def _path_dir_names(cls, item: Any) -> List[str]:
+        """文件所在目录名，**由内到外**（最靠近文件的最先）。
+
+        分享常是多层嵌套（``最后生还者 第一季/…/S02最新4K…/S01最新4K…/01.mp4``），
+        外层目录的季号是旧季，必须以内层为准，否则会拿 Season 1 去比 S02。
+        """
+        if not isinstance(item, dict):
+            return []
+        names: List[str] = []
+        for key in ("_relative_path", "relative_path"):
+            text = str(item.get(key) or "").strip().strip("/")
+            if not text:
+                continue
+            parts = [part for part in text.split("/") if part]
+            if len(parts) >= 2:
+                names.extend(reversed(parts[:-1]))
+        for key in ("parent_path", "cloud_path"):
+            text = str(item.get(key) or "").strip().strip("/")
+            if text:
+                names.extend(reversed([part for part in text.split("/") if part]))
+        return list(dict.fromkeys(names))
+
+    @classmethod
+    def _episode_from_path_evidence(
+            cls, item: Any, name: str, season: int
+    ) -> int | None:
+        """平台解析不出季集时的兜底：父目录季号 + 文件名集号。
+
+        包级标题守卫已确认整个分享属于本剧，这里只补文件级证据：
+        目录写明的季号必须等于目标季；目录完全没写季号时只放行第一季，
+        避免把没有季号的旧季资源塞进第二季。
+        """
+        episode = cls._episode_from_name(name, season)
+        if episode is None or episode <= 0:
+            return None
+        dir_season = None
+        for dir_name in cls._path_dir_names(item):
+            found = MediaFileParser.path_season(dir_name)
+            if found is not None:
+                dir_season = found
+                break
+        if dir_season is not None:
+            if int(dir_season) != int(season):
+                return None
+        elif int(season) != 1:
             return None
         return episode
 

@@ -140,14 +140,28 @@ class MediaFileParser:
     def iter_files(cls, files: list, parent_path: str = "") -> Iterator[Any]:
         for item in files or []:
             name = str(item.get("name") or item.get("file_name") or "").strip()
-            relative_path = "/".join(
+            nested_path = "/".join(
                 value for value in (parent_path.strip("/"), name) if value
             )
             if item.get("is_dir"):
                 yield from cls.iter_files(
-                    item.get("children") or [], relative_path
+                    item.get("children") or [], nested_path
                 )
             else:
+                # 夸克/115 的 list_share_files 返回的是扁平列表，条目里已带
+                # 真实相对路径（邻人可疑/上集：….mkv）。这种场景上层没有
+                # parent_path 可拼，必须沿用条目自带路径，否则根目录守卫
+                # 会把文件名当成目录名，整包判成「另一部剧」。
+                builtin_path = ""
+                if isinstance(item, dict):
+                    builtin_path = str(
+                        item.get("relative_path") or ""
+                    ).strip().strip("/")
+                relative_path = (
+                    nested_path
+                    if parent_path.strip("/") or not builtin_path
+                    else builtin_path
+                )
                 if relative_path and isinstance(item, dict):
                     item.setdefault("_relative_path", relative_path)
                     if parent_path:

@@ -93,10 +93,12 @@ _ensure_leaf(
 )
 _ensure_leaf("cloudsubscribex.utils.cache", create_platform_ttl_cache=MagicMock())
 if "cloudsubscribex.handlers.sync.utils" not in sys.modules:
-    load_module(
+    sync_utils_module = load_module(
         "cloudsubscribex.handlers.sync.utils",
         "plugins.v2/cloudsubscribex/handlers/sync/utils.py",
     )
+else:
+    sync_utils_module = sys.modules["cloudsubscribex.handlers.sync.utils"]
 
 # ---- 被测模块 ----
 skip_stats_module = load_module(
@@ -160,6 +162,9 @@ class _StubShareService:
 
 class _StubOwner:
     """职责委托宿主：只提供采集与通知所需的运行态。"""
+
+    # 集号区间文案走真实实现，避免断言自己编的格式。
+    _format_episode_ranges = staticmethod(sync_utils_module.format_episode_ranges)
 
     def __init__(
             self,
@@ -544,14 +549,14 @@ def _branch_calls(branch, attr_name):
     ]
 
 
-def _assert_mismatch_wiring(case, branch):
-    """结构断言：只按 KIND_MISMATCH + share_url + reason= 采集，debug 原样且不升级。"""
+def _assert_mismatch_wiring(case, branch, kind_expr="SkipStatsCollector.KIND_MISMATCH"):
+    """结构断言：只按指定 kind + share_url + reason= 采集，debug 原样且不升级。"""
     records = _branch_calls(branch, "_record_skip_candidate")
     case.assertEqual(len(records), 1, "分支必须恰好采集一次")
     record = records[0]
     case.assertEqual(
         [ast.unparse(arg) for arg in record.args],
-        ["SkipStatsCollector.KIND_MISMATCH", "share_url"],
+        [kind_expr, "share_url"],
     )
     case.assertTrue(
         any(keyword.arg == "reason" for keyword in record.keywords),
@@ -575,8 +580,9 @@ def _assert_mismatch_wiring(case, branch):
 
 def _run_skip_branch(case, source: str, test_source: str, **namespace):
     """抽取真实分支源码，用最小 stub 触发一次；返回作用域 / 采集器 / 日志探针。"""
+    kind_expr = namespace.pop("kind_expr", "SkipStatsCollector.KIND_MISMATCH")
     branch = _find_branch(source, test_source)
-    _assert_mismatch_wiring(case, branch)
+    _assert_mismatch_wiring(case, branch, kind_expr)
     collector = SkipStatsCollector()
     probe_logger = _ProbeLogger()
     scope = {
@@ -596,11 +602,14 @@ def _run_skip_branch(case, source: str, test_source: str, **namespace):
     return scope, collector, probe_logger
 
 
-def _assert_mismatch_recorded(case, collector, provider: str, reason: str) -> None:
+def _assert_mismatch_recorded(
+        case, collector, provider: str, reason: str,
+        kind: str = SkipStatsCollector.KIND_MISMATCH,
+) -> None:
     # take() 快照不含 reason，明细直接读采集器内部记录（仅测试读取）。
     reasons = [record["reason"] for record in collector._records.values()]
     snapshot = collector.take()
-    case.assertEqual(snapshot["by_kind"], {SkipStatsCollector.KIND_MISMATCH: 1})
+    case.assertEqual(snapshot["by_kind"], {kind: 1})
     case.assertEqual(snapshot["by_provider"], {provider: 1})
     case.assertEqual(reasons, [reason])
 
@@ -610,13 +619,18 @@ class TestThreeKindsOrder(unittest.TestCase):
 
     def test_mismatch_kind_registered(self):
         self.assertEqual(SkipStatsCollector.KIND_MISMATCH, "mismatch")
-        self.assertEqual(SkipStatsCollector.kind_label("mismatch"), "内容不匹配")
+        self.assertEqual(SkipStatsCollector.kind_label("mismatch"), "剧名不符")
+        # 「内容不匹配」拆成三类：剧名不符 / 集号不符 / 无法解析集号。
+        self.assertEqual(SkipStatsCollector.kind_label("episode_miss"), "集号不符")
+        self.assertEqual(SkipStatsCollector.kind_label("unparsable"), "无法解析集号")
         self.assertEqual(
             SkipStatsCollector.KIND_ORDER,
             (
                 SkipStatsCollector.KIND_INVALID,
                 SkipStatsCollector.KIND_EMPTY,
                 SkipStatsCollector.KIND_MISMATCH,
+                SkipStatsCollector.KIND_EPISODE_MISS,
+                SkipStatsCollector.KIND_UNPARSABLE,
             ),
         )
 
@@ -656,13 +670,13 @@ class TestThreeKindsOrder(unittest.TestCase):
         )
         self.assertEqual(
             SkipStatsCollector.format_summary(snapshot),
-            "本次跳过 3 个候选资源：分享链接失效 1、无可用文件 1、内容不匹配 1"
+            "本次跳过 3 个候选资源：分享链接失效 1、无可用文件 1、剧名不符 1"
             "（夸克网盘 1、115网盘 1、光鸭网盘 1）",
         )
         self.assertEqual(
             SkipStatsCollector.format_notify(snapshot),
             "跳过 3 个候选 · 分享链接失效 1 个（115网盘）；无可用文件 1 个（光鸭网盘）；"
-            "内容不匹配 1 个（夸克网盘）",
+            "剧名不符 1 个（夸克网盘）",
         )
 
 
@@ -680,14 +694,21 @@ class TestMismatchCollectionBranches(unittest.TestCase):
             mediainfo=SimpleNamespace(title_year="玉簟秋 (2024)"),
             season=3,
             share_url="https://115.com/s/tv-unmatched",
+            kind_expr="SkipStatsCollector.KIND_UNPARSABLE",
         )
-        self.assertEqual(scope["reason"], "目标网盘分享未识别到目标季集数")
+        self.assertEqual(
+            scope["reason"],
+            "解析不出目标季集号（含 3 个视频）：分享文件名与目录都没有 S03 的集号",
+        )
         self.assertEqual(
             probe.debugs,
-            ["目标网盘分享未识别到目标季集数：玉簟秋 (2024) S03，已跳过该资源"],
+            ["解析不出目标季集号（含 3 个视频）：分享文件名与目录都没有 S03 的集号"
+             "：玉簟秋 (2024) S03，已跳过该资源"],
         )
         _assert_mismatch_recorded(
-            self, collector, "115网盘", "目标网盘分享未识别到目标季集数"
+            self, collector, "115网盘",
+            "解析不出目标季集号（含 3 个视频）：分享文件名与目录都没有 S03 的集号",
+            kind=SkipStatsCollector.KIND_UNPARSABLE,
         )
 
         scope, collector, probe = _run_skip_branch(
@@ -700,14 +721,21 @@ class TestMismatchCollectionBranches(unittest.TestCase):
             mediainfo=SimpleNamespace(title_year="玉簟秋 (2024)"),
             season=3,
             share_url="https://pan.quark.cn/s/tv-cross",
+            kind_expr="SkipStatsCollector.KIND_UNPARSABLE",
         )
-        self.assertEqual(scope["reason"], "跨盘分享内容未被平台识别为目标媒体")
+        self.assertEqual(
+            scope["reason"],
+            "解析不出目标季集号（含 3 个视频）：跨盘分享文件名与目录都没有 S03 的集号",
+        )
         self.assertEqual(
             probe.debugs,
-            ["跨盘分享内容未被平台识别为目标媒体：玉簟秋 (2024) S03，已跳过该资源"],
+            ["解析不出目标季集号（含 3 个视频）：跨盘分享文件名与目录都没有 S03 的集号"
+             "：玉簟秋 (2024) S03，已跳过该资源"],
         )
         _assert_mismatch_recorded(
-            self, collector, "夸克网盘", "跨盘分享内容未被平台识别为目标媒体"
+            self, collector, "夸克网盘",
+            "解析不出目标季集号（含 3 个视频）：跨盘分享文件名与目录都没有 S03 的集号",
+            kind=SkipStatsCollector.KIND_UNPARSABLE,
         )
 
     def test_tv_unmatched_missing_episodes_recorded(self):
@@ -718,14 +746,20 @@ class TestMismatchCollectionBranches(unittest.TestCase):
             matched_items=[],
             resource_input_label="夸克网盘分享",
             season=3,
+            share_episodes={243, 244},
+            missing_episode_set={1, 2, 3},
             share_url="https://115.com/s/tv-no-match",
+            kind_expr="SkipStatsCollector.KIND_EPISODE_MISS",
         )
         self.assertEqual(
             probe.debugs,
-            ["该夸克网盘分享未匹配到 S3 的任何缺失剧集，可能是季数不匹配或文件名无法识别"],
+            ["该夸克网盘分享未匹配到 S3 的任何缺失剧集："
+             "资源集号与缺失不符（S03）：资源含 E243-E244，缺 E01-E03"],
         )
         _assert_mismatch_recorded(
-            self, collector, "115网盘", "未匹配到 S3 的缺失剧集"
+            self, collector, "115网盘",
+            "资源集号与缺失不符（S03）：资源含 E243-E244，缺 E01-E03",
+            kind=SkipStatsCollector.KIND_EPISODE_MISS,
         )
 
     def test_movie_magnet_priority_rule_recorded(self):
