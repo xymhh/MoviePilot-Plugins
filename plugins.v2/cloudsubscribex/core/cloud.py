@@ -7,6 +7,13 @@ from threading import BoundedSemaphore, local
 from typing import Any, Callable, ClassVar, Dict, FrozenSet, Iterable, Iterator, Mapping, Optional, Protocol, \
     runtime_checkable
 
+from .exceptions import (
+    AuthExpiredError,
+    CloudSubscribeError,
+    NetworkError,
+    ResourceInvalidError,
+)
+
 
 class CloudDriveCapability(str, Enum):
     """订阅流程可按需使用的独立网盘能力。"""
@@ -74,10 +81,12 @@ class CloudFile(Mapping[str, Any]):
     size: int = 0
     sha1: str = ""
     md5: str = ""
+    relative_path: str = ""
+    parent_path: str = ""
     playback_values: Mapping[str, str] = field(default_factory=dict)
     native: Any = field(default=None, repr=False, compare=False)
     _MAPPING_KEYS: ClassVar[tuple[str, ...]] = (
-        "id", "name", "is_dir", "size", "sha1", "md5",
+        "id", "name", "is_dir", "size", "sha1", "md5", "relative_path", "parent_path",
     )
 
     def __getitem__(self, key: str) -> Any:
@@ -93,13 +102,17 @@ class CloudFile(Mapping[str, Any]):
             return self.sha1
         if key == "md5":
             return self.md5
+        if key == "relative_path":
+            return self.relative_path or self.name
+        if key == "parent_path":
+            return self.parent_path
         raise KeyError(key)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._MAPPING_KEYS)
 
     def __len__(self) -> int:
-        return 6
+        return 8
 
     def get(self, key: str, default: Any = None) -> Any:
         try:
@@ -119,6 +132,8 @@ class CloudFile(Mapping[str, Any]):
             "size": self.size,
             "sha1": self.sha1,
             "md5": self.md5,
+            "relative_path": self.relative_path or self.name,
+            "parent_path": self.parent_path,
         })
         for key, value in self.playback_values.items():
             merged.setdefault(str(key), value)
@@ -585,3 +600,105 @@ class CloudDriveRegistry:
 
     def available(self) -> list:
         return list(self._providers.values())
+
+
+class DriveStorageAdapter:
+    """网盘存储适配器统一规范与异常映射（借鉴 Alist 驱动规范）。"""
+
+    @staticmethod
+    def normalize_cloud_file(
+        raw: Any,
+        parent_path: str = "",
+        provider: str = "",
+    ) -> Optional[CloudFile]:
+        """将各网盘异构的原始响应归一化为标准的强类型 CloudFile。
+
+        兼容字段自动识别：
+        - ID: fid, file_id, id, caID, caId, coID, coId
+        - 标题: file_name, filename, name, title
+        - 体积: size, file_size
+        - 目录: dir, is_dir, is_directory, file_type == 0
+        """
+        if isinstance(raw, CloudFile):
+            return raw
+        if not isinstance(raw, Mapping):
+            return None
+
+        file_id = (
+            raw.get("fid")
+            or raw.get("file_id")
+            or raw.get("id")
+            or raw.get("caID")
+            or raw.get("caId")
+            or raw.get("coID")
+            or raw.get("coId")
+        )
+        name = str(
+            raw.get("file_name")
+            or raw.get("name")
+            or raw.get("filename")
+            or raw.get("title")
+            or ""
+        ).strip()
+        if file_id in (None, "") or not name:
+            return None
+
+        file_type = raw.get("file_type")
+        is_directory = bool(
+            raw.get("dir")
+            or raw.get("is_dir")
+            or raw.get("is_directory")
+            or file_type == 0
+            or file_type == "0"
+        )
+        if file_type not in (None, 0, "0"):
+            is_directory = False
+
+        size_val = 0
+        if not is_directory:
+            try:
+                size_val = int(raw.get("size") or raw.get("file_size") or 0)
+            except (ValueError, TypeError):
+                size_val = 0
+
+        p_path = str(parent_path or raw.get("parent_path") or "").strip().rstrip("/")
+        rel_path = str(raw.get("relative_path") or "").strip()
+        if not rel_path:
+            rel_path = f"{p_path}/{name}".lstrip("/") if p_path else name
+
+        return CloudFile(
+            id=str(file_id),
+            name=name,
+            is_directory=is_directory,
+            size=size_val,
+            sha1=str(raw.get("sha1") or ""),
+            md5=str(raw.get("md5") or ""),
+            relative_path=rel_path,
+            parent_path=p_path,
+            playback_values=dict(raw.get("playback_values") or {}),
+            native=raw,
+        )
+
+    @staticmethod
+    def normalize_drive_exception(error: Exception, provider: str = "") -> CloudSubscribeError:
+        """将底层异构网盘异常转换为系统统一的四级结构化异常。"""
+        if isinstance(error, CloudSubscribeError):
+            return error
+
+        msg = str(error or "").strip()
+        lowered = msg.casefold()
+
+        # 鉴权过期类
+        if any(w in lowered for w in ("401", "unauthorized", "token", "cookie", "login", "auth", "凭据", "登录")):
+            return AuthExpiredError(provider=provider or "网盘", message=msg)
+
+        # 网络超时类
+        if any(w in lowered for w in ("timeout", "timed out", "connect", "reset by peer", "connection", "超时")):
+            return NetworkError(message=msg, retry_after=2.0)
+
+        # 资源失效类
+        if any(w in lowered for w in ("not found", "deleted", "expired", "cancel", "404", "不存在", "删除", "过期", "取消", "封禁", "受限")):
+            return ResourceInvalidError(share_url="", reason=msg)
+
+        return CloudSubscribeError(message=f"[{provider or '网盘'}] 操作失败：{msg}")
+
