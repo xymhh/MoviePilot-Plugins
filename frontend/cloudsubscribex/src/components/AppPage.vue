@@ -8,7 +8,13 @@
         <div class="identity-text">
           <div class="identity-title-row">
             <h1 class="text-truncate">网盘订阅助手</h1>
-            <span :class="['status-badge', active ? 'status-badge-active' : 'status-badge-idle']" :title="active ? '正在同步' : '就绪'">
+            <span
+              :class="['status-badge', 'status-badge-clickable', active ? 'status-badge-active' : 'status-badge-idle']"
+              :title="active ? '正在同步（点击体检）' : '就绪（点击体检）'"
+              role="button"
+              tabindex="0"
+              @click="doctorVisible = true"
+              @keydown.enter.prevent="doctorVisible = true">
               <span class="status-dot"></span>
               <span class="status-text">{{ active ? "同步中" : "就绪" }}</span>
             </span>
@@ -289,6 +295,7 @@
       <div v-else-if="stoppableTaskCount > 0">确认停止当前 {{ stoppableTaskCount }} 个等待或运行中的任务？</div>
       <div v-else>确认停止当前订阅任务？</div>
     </ConfirmDialog>
+    <DoctorDialog v-model="doctorVisible" :api="api" />
     <v-dialog v-model="configVisible" attach="body" max-width="62rem" :fullscreen="isMobile" class="config-dialog">
       <Config
         v-if="configVisible"
@@ -369,6 +376,7 @@ import MediaHub from "./dashboard/MediaHub.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
 import OrganizePanel from "./dashboard/OrganizePanel.vue";
 import CandidateLedgerPanel from "./dashboard/CandidateLedgerPanel.vue";
+import DoctorDialog from "./dialogs/DoctorDialog.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";
 import {CACHE_CATEGORIES, useCacheActions} from "../composables/useCacheActions.js";
@@ -409,6 +417,7 @@ const stopVisible = ref(false)
 const stoppingTask = ref(null)
 const stopping = ref(false)
 const configVisible = ref(false)
+const doctorVisible = ref(false)
 const configLoading = ref(false)
 const configData = ref({})
 const clearVisible = ref(false)
@@ -984,6 +993,13 @@ async function notifyHistory() {
   letter-spacing: 0;
   white-space: nowrap;
 }
+
+.status-badge-clickable {
+  cursor: pointer;
+  transition: filter 0.15s ease;
+}
+
+.status-badge-clickable:hover { filter: brightness(1.08); }
 
 .status-badge {
   display: inline-flex;

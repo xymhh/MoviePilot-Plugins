@@ -3,6 +3,7 @@
 from .account import AccountApi
 from .checkin import CheckinApi
 from .config import ConfigApi
+from .doctor import DoctorApi
 from .history import HistoryApi
 from .duplicate import DuplicateApi
 from .ledger import LedgerApi
@@ -21,6 +22,7 @@ __all__ = [
     "AccountApi",
     "CheckinApi",
     "ConfigApi",
+    "DoctorApi",
     "HistoryApi",
     "DuplicateApi",
     "LedgerApi",

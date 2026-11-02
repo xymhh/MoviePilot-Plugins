@@ -100,6 +100,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "获取历史记录分页数据",
             },
             {
+                "path": "/doctor",
+                "endpoint": self.api_vue_doctor,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "一键体检：网盘/搜索/TMDB/私有库/目录健康",
+            },
+            {
                 "path": "/history/summary",
                 "endpoint": self.api_vue_history_summary,
                 "methods": ["GET"],
