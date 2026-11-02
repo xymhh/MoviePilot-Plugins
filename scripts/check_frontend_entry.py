@@ -14,7 +14,7 @@ import re
 import sys
 from pathlib import Path
 
-EXPECTED_TABS = ["tasks", "history", "tg", "organize"]
+EXPECTED_TABS = ["hub", "tasks", "history", "tg", "organize"]
 
 
 def main(root: Path) -> int:
@@ -77,7 +77,7 @@ def report(errors: list[str]) -> int:
         for line in errors:
             print(f"  - {line}")
         return 1
-    print("前端单入口校验通过：AppPage 4 个页签 + 历史双子视图，Page 为转发壳")
+    print(f"前端单入口校验通过：AppPage {len(EXPECTED_TABS)} 个页签 + 历史双子视图，Page 为转发壳")
     return 0
 
 
