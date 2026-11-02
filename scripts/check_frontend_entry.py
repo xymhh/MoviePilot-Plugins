@@ -41,11 +41,9 @@ def main(root: Path) -> int:
     if "TgMonitor" not in app_text:
         errors.append("AppPage 未挂载 TgMonitor（频道监控页签会空白）")
 
-    # 1.9.0：资源账本并入历史页，必须仍挂载账本面板，否则「未转存原因」会空白
-    if "CandidateLedgerPanel" not in app_text:
-        errors.append("AppPage 未挂载 CandidateLedgerPanel（历史页的未转存原因会空白）")
-    if 'historyView === \'skipped\'' not in app_text:
-        errors.append("AppPage 缺少「未转存原因」子视图开关（historyView === 'skipped'）")
+    # 1.9.32：资源账本与历史页合二为一为「转存台账」，在台账内支持全局与单剧排障明细
+    if "CandidateLedgerPanel" not in app_text and "CandidateLedgerPanel" not in (components / "dashboard" / "HistoryTable.vue").read_text(encoding="utf-8"):
+        errors.append("AppPage / HistoryTable 未挂载 CandidateLedgerPanel（未转存账本排障会缺失）")
 
     for ref in sorted(set(re.findall(r'@click="(\w*Visible) = true"', app_text))):
         if f'v-model="{ref}"' not in app_text:
