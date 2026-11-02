@@ -18,6 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "plugins.v2" / "cloudsubscribex"
 SYNC_PY = PLUGIN / "handlers" / "sync" / "service.py"
+MEDIA_REFRESH_PY = PLUGIN / "handlers" / "sync" / "media_refresh.py"
+STRM_OPS_PY = PLUGIN / "handlers" / "sync" / "strm_ops.py"
 DOCTOR_PY = PLUGIN / "core" / "api" / "doctor.py"
 GUARD_PY = PLUGIN / "core" / "bypass_guard.py"
 
@@ -41,17 +43,25 @@ BypassGuard = guard_mod.BypassGuard
 bypass_guard = guard_mod.bypass_guard
 
 
-def extract(path: Path, names) -> dict:
-    """从源码抽取类方法/函数，返回 {name: code}。"""
+def extract(*paths: Path, names) -> dict:
+    """从若干源码文件抽取类方法/函数，返回 {name: code}（拆分后方法可能已搬家）。"""
+    found: dict = {}
+    for path in paths:
+        for name, code in _extract_one(path, names - set(found)).items():
+            found[name] = code
+    missing = set(names) - set(found)
+    if missing:
+        raise AssertionError(f"源码里找不到：{sorted(missing)}")
+    return found
+
+
+def _extract_one(path: Path, names) -> dict:
     src = path.read_text(encoding="utf-8")
     tree = ast.parse(src)
     found = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names:
             found[node.name] = textwrap.dedent(ast.get_source_segment(src, node))
-    missing = set(names) - set(found)
-    if missing:
-        raise AssertionError(f"源码里找不到：{sorted(missing)}")
     return found
 
 
@@ -113,7 +123,7 @@ except InterruptedError:
     check("4.1 InterruptedError 透传", True)
 
 # ---------------------------------------------------------------- 5. 真实接入点
-codes = extract(SYNC_PY, {
+codes = extract(SYNC_PY, MEDIA_REFRESH_PY, STRM_OPS_PY, names={
     "finish_notification_batch", "refresh_media_servers", "rebuild_strm_files",
 })
 ns = {
@@ -190,7 +200,7 @@ doctor_ns = {
     "Dict": dict, "Any": object, "int": int, "max": max, "len": len, "next": next,
     "CheckResult": tuple,
 }
-exec(extract(DOCTOR_PY, {"_check_bypass"})["_check_bypass"], doctor_ns)
+exec(extract(DOCTOR_PY, names={"_check_bypass"})["_check_bypass"], doctor_ns)
 _check_bypass = doctor_ns["_check_bypass"]
 
 status, detail, hint, _ = _check_bypass(None, {})

@@ -142,12 +142,31 @@ def set_media_type(movie: str = "movie", tv: str = "tv"):
     return media_type
 
 
+PLUGIN_ROOT = os.path.join(REPO_ROOT, "plugins.v2")
+
+
+def _bind_real_path(module, parts: list[str]) -> None:
+    """占位包的 __path__ 指向真实目录，使其下所有兄弟模块都能被正常 import。
+
+    否则 ``handlers.sync`` 这类占位包 ``__path__ == []``，service.py 里任何
+    新增的 ``from .xxx import`` 都会找不到模块（拆分重构踩过：新增
+    media_refresh / strm_ops 后 4 个用例直接 import 失败）。
+    """
+    if not parts or parts[0] != "cloudsubscribex":
+        return
+    directory = os.path.join(PLUGIN_ROOT, *parts)
+    if os.path.isdir(directory):
+        module.__path__ = [directory]
+
+
 def _ensure_parents(name: str) -> None:
     parts = name.split(".")[:-1]
     for index in range(1, len(parts) + 1):
         parent = ".".join(parts[:index])
-        if parent not in sys.modules:
-            ensure_package(parent)
+        module = sys.modules.get(parent)
+        if module is None:
+            module = ensure_package(parent)
+        _bind_real_path(module, parts[:index])
 
 
 def _register(name: str, module) -> None:
