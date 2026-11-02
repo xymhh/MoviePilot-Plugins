@@ -448,6 +448,14 @@ class SyncJobRepository(DbOper):
         result = db.execute(statement)
         return int(getattr(result, "rowcount", 0) or 0)
 
+    @db_update
+    def purge_expired(
+            self, keep_days: int = 7, db: Session = None,
+    ) -> int:
+        """按保留天数清理终态作业（默认保留 7 天）。"""
+        cutoff = int(time.time() - max(1, int(keep_days or 7)) * 86400)
+        return self.delete_terminal_before(cutoff, db=db)
+
     @db_query
     def list_by_state(
             self, states: tuple[str, ...], db: Session = None,

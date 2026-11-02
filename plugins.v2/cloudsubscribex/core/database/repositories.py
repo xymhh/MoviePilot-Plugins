@@ -1164,6 +1164,13 @@ class CandidateLedgerRepository(DbOper):
         )
         return len(rows)
 
+    @db_update
+    def purge(self, keep_days: int = 14, db: Session = None) -> int:
+        """删除 N 天前的账本记录，彻底修复此前无此方法导致的异常静默吞没。"""
+        from datetime import datetime, timedelta
+        cutoff_day = (datetime.now() - timedelta(days=max(1, int(keep_days or 14)))).strftime("%Y-%m-%d")
+        return self.purge_before(cutoff_day, db=db)
+
 
 class SourceSha1CacheRepository(DbOper):
     """源文件 SHA1 点查/写入，服务于秒传未命中后的零流量重试。"""
