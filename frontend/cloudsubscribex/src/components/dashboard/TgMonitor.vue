@@ -88,102 +88,112 @@
       </v-chip>
     </div>
 
-    <!-- 现代 Feed 卡片流列表 -->
-    <div v-if="filteredItems.length" class="tg-feed-grid mt-3">
-      <v-card
+    <!-- 紧凑单行雷达信息流 -->
+    <div v-if="filteredItems.length" class="tg-radar-stream mt-3">
+      <div
         v-for="item in pagedItems"
         :key="item.id"
-        variant="outlined"
-        class="tg-feed-card pa-3">
-        <!-- 卡片头部：频道名 + 时间 + 状态 Badge -->
-        <div class="tg-card-head d-flex align-center justify-space-between mb-2">
-          <div class="d-flex align-center ga-1 min-w-0">
-            <v-chip size="x-small" color="primary" variant="tonal" prepend-icon="mdi-bullhorn-outline" class="font-weight-medium">
-              {{ item.channel_title || "未知频道" }}
-            </v-chip>
-            <span class="text-caption text-medium-emphasis ml-1">
-              {{ formatTime(item.published_at || item.created_at) }}
-            </span>
-          </div>
-          <v-chip size="x-small" :color="statusColor(item.status)" variant="flat" class="font-weight-bold">
+        class="tg-stream-item d-flex align-center justify-space-between pa-2 px-3 rounded border">
+        
+        <!-- 左侧：状态徽标 + 频道标签 -->
+        <div class="d-flex align-center ga-2 flex-shrink-0 mr-2">
+          <v-chip size="x-small" :color="statusColor(item.status)" variant="flat" class="font-weight-bold status-pill">
             {{ statusText(item.status) }}
           </v-chip>
-        </div>
-
-        <!-- 标题主体 -->
-        <div class="tg-feed-title text-body-1 font-weight-bold mb-1" :title="item.title">
-          {{ item.title || "（无标题）" }}
-        </div>
-
-        <!-- 画质与类型标签 -->
-        <div class="d-flex flex-wrap align-center ga-1 mb-2">
-          <v-chip size="x-small" variant="tonal" color="info">
-            {{ typeText(item.types) }}
-          </v-chip>
-          <v-chip
-            v-for="tag in qualityTags(item)"
-            :key="tag"
-            size="x-small"
-            :color="tagColor(tag)"
-            variant="tonal">
-            {{ tag }}
+          <v-chip size="x-small" color="primary" variant="tonal" class="channel-pill d-none d-sm-inline-flex" prepend-icon="mdi-bullhorn-outline">
+            {{ item.channel_title || "频道" }}
           </v-chip>
         </div>
 
-        <!-- 命中订阅或原因气泡 -->
-        <div v-if="item.match_reason" class="tg-match-bubble pa-2 rounded mb-2 text-caption">
-          <v-icon icon="mdi-target" size="14" color="primary" class="mr-1" />
-          <span class="font-weight-medium">命中订阅：</span>
-          <span>{{ item.match_reason }}</span>
-        </div>
-        <div v-if="item.auto_transfer_error" class="tg-error-bubble pa-2 rounded mb-2 text-caption">
-          <v-icon icon="mdi-alert-circle-outline" size="14" color="warning" class="mr-1" />
-          <span>{{ item.status === "skipped" ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}</span>
-        </div>
-
-        <!-- 分享链接栏 -->
-        <div class="tg-links-box d-flex flex-wrap align-center ga-2 mb-3">
-          <v-btn
-            v-for="link in item.links"
-            :key="link"
-            size="x-small"
-            variant="tonal"
-            color="secondary"
-            prepend-icon="mdi-link-variant"
-            :href="link"
-            target="_blank"
-            class="text-none">
-            {{ shortLink(link) }}
-          </v-btn>
-          <v-btn
-            v-if="item.message_url"
-            size="x-small"
-            variant="text"
-            prepend-icon="mdi-send-outline"
-            :href="item.message_url"
-            target="_blank"
-            class="text-medium-emphasis text-none">
-            原消息
-          </v-btn>
-        </div>
-
-        <!-- 底部快捷动作条 -->
-        <div class="tg-card-actions d-flex align-center justify-space-between pt-2 border-t">
-          <v-btn
-            size="small"
-            color="primary"
-            variant="flat"
-            prepend-icon="mdi-cloud-upload-outline"
-            :disabled="item.status === 'transferred'"
-            @click="openTransfer(item)">
-            {{ item.status === "transferred" ? "已转存" : "一键转存" }}
-          </v-btn>
-          <div class="d-flex align-center ga-1">
-            <v-btn size="small" variant="text" @click="ignore(item)">忽略</v-btn>
-            <v-btn size="small" variant="text" color="error" icon="mdi-delete-outline" @click="remove(item)" />
+        <!-- 中部：片名主标题 + 标签 + 气泡提示 -->
+        <div class="tg-stream-body min-w-0 flex-grow-1 mr-3">
+          <div class="d-flex align-center ga-1 min-w-0 flex-wrap">
+            <span class="tg-stream-title text-body-2 font-weight-bold text-truncate" :title="item.title">
+              {{ item.title || "（无标题）" }}
+            </span>
+            <v-chip
+              v-if="typeText(item.types)"
+              size="x-small"
+              variant="tonal"
+              color="info"
+              class="quality-tag flex-shrink-0">
+              {{ typeText(item.types) }}
+            </v-chip>
+            <v-chip
+              v-for="tag in qualityTags(item).slice(0, 2)"
+              :key="tag"
+              size="x-small"
+              :color="tagColor(tag)"
+              variant="tonal"
+              class="quality-tag flex-shrink-0 d-none d-md-inline-flex">
+              {{ tag }}
+            </v-chip>
+          </div>
+          <!-- 命中说明或失败说明（紧凑辅助行） -->
+          <div v-if="item.match_reason || item.auto_transfer_error" class="tg-stream-hint text-caption text-truncate mt-0.5">
+            <span v-if="item.match_reason" class="text-primary mr-2">
+              <v-icon icon="mdi-target" size="12" class="mr-0.5" />
+              {{ item.match_reason }}
+            </span>
+            <span v-if="item.auto_transfer_error" :class="item.status === 'skipped' ? 'text-medium-emphasis' : 'text-error'">
+              <v-icon icon="mdi-alert-circle-outline" size="12" class="mr-0.5" />
+              {{ item.status === 'skipped' ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}
+            </span>
           </div>
         </div>
-      </v-card>
+
+        <!-- 右侧：外链 + 时间 + 一键转存 + 更多 -->
+        <div class="d-flex align-center ga-2 flex-shrink-0">
+          <span class="text-caption text-medium-emphasis d-none d-sm-inline">
+            {{ formatTime(item.published_at || item.created_at) }}
+          </span>
+
+          <!-- 外链图标组 -->
+          <div class="d-flex align-center ga-1">
+            <v-btn
+              v-for="link in item.links.slice(0, 1)"
+              :key="link"
+              icon="mdi-cloud-download-outline"
+              size="x-small"
+              variant="text"
+              color="secondary"
+              :href="link"
+              target="_blank"
+              title="打开网盘链接" />
+            <v-btn
+              v-if="item.message_url"
+              icon="mdi-send-outline"
+              size="x-small"
+              variant="text"
+              color="medium-emphasis"
+              :href="item.message_url"
+              target="_blank"
+              title="查看 Telegram 原消息" />
+          </div>
+
+          <!-- 一键转存 -->
+          <v-btn
+            size="small"
+            :color="item.status === 'transferred' ? 'success' : 'primary'"
+            :variant="item.status === 'transferred' ? 'tonal' : 'flat'"
+            :prepend-icon="item.status === 'transferred' ? 'mdi-check' : 'mdi-cloud-upload-outline'"
+            :disabled="item.status === 'transferred'"
+            @click="openTransfer(item)">
+            {{ item.status === "transferred" ? "已转存" : "转存" }}
+          </v-btn>
+
+          <!-- 更多操作菜单（忽略 / 删除） -->
+          <v-menu location="bottom end">
+            <template #activator="{ props: menuProps }">
+              <v-btn v-bind="menuProps" icon="mdi-dots-vertical" size="small" variant="text" />
+            </template>
+            <v-list density="compact">
+              <v-list-item prepend-icon="mdi-eye-off-outline" title="忽略此消息" @click="ignore(item)" />
+              <v-list-item prepend-icon="mdi-delete-outline" color="error" title="删除记录" @click="remove(item)" />
+            </v-list>
+          </v-menu>
+        </div>
+      </div>
     </div>
     <div v-if="filteredItems.length && pageCount > 1" class="tg-pager">
       <v-pagination
@@ -745,33 +755,40 @@ onUnmounted(() => {
   background: currentColor;
 }
 
-.tg-feed-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-  gap: 14px;
+.tg-radar-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.tg-feed-card {
-  border-radius: 10px;
-  border-color: rgba(var(--v-theme-on-surface), 0.08);
+.tg-stream-item {
   background: rgba(var(--v-theme-surface), 0.6);
-  transition: transform 0.2s, box-shadow 0.2s;
+  border-color: rgba(var(--v-theme-on-surface), 0.08) !important;
+  transition: background-color 0.15s, border-color 0.15s;
 }
 
-.tg-feed-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+.tg-stream-item:hover {
+  background: rgba(var(--v-theme-surface-variant), 0.35);
+  border-color: rgba(var(--v-theme-primary), 0.3) !important;
 }
 
-.tg-feed-title {
-  line-height: 1.4;
-  word-break: break-word;
+.tg-stream-title {
+  max-width: 580px;
 }
 
-.tg-match-bubble {
-  background: rgba(var(--v-theme-primary), 0.1);
-  color: rgb(var(--v-theme-primary));
-  border-left: 3px solid rgb(var(--v-theme-primary));
+.status-pill {
+  min-width: 52px;
+  justify-content: center;
+}
+
+.channel-pill {
+  max-width: 130px;
+}
+
+.quality-tag {
+  height: 18px !important;
+  font-size: 10px !important;
+  padding: 0 5px !important;
 }
 
 .tg-error-bubble {
@@ -789,9 +806,8 @@ onUnmounted(() => {
     align-items: stretch;
     gap: 10px;
   }
-  .tg-feed-grid {
-    grid-template-columns: 1fr;
-    gap: 10px;
+  .tg-stream-title {
+    max-width: 240px;
   }
   .tg-status {
     align-items: flex-start;
