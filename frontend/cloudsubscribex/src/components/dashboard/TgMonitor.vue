@@ -96,11 +96,11 @@
         class="tg-stream-item d-flex align-center justify-space-between pa-2 px-3 rounded border">
         
         <!-- 左侧：状态徽标 + 频道标签 -->
-        <div class="d-flex align-center ga-2 flex-shrink-0 mr-2">
+        <div class="d-flex align-center ga-2 flex-shrink-0 mr-2 tg-stream-left">
           <v-chip size="x-small" :color="statusColor(item.status)" variant="flat" class="font-weight-bold status-pill">
             {{ statusText(item.status) }}
           </v-chip>
-          <v-chip size="x-small" color="primary" variant="tonal" class="channel-pill d-none d-sm-inline-flex" prepend-icon="mdi-bullhorn-outline">
+          <v-chip size="x-small" color="primary" variant="tonal" class="channel-pill" prepend-icon="mdi-bullhorn-outline">
             {{ item.channel_title || "频道" }}
           </v-chip>
         </div>
@@ -143,7 +143,7 @@
         </div>
 
         <!-- 右侧：外链 + 时间 + 一键转存 + 更多 -->
-        <div class="d-flex align-center ga-2 flex-shrink-0">
+        <div class="d-flex align-center ga-2 flex-shrink-0 tg-stream-actions">
           <span class="text-caption text-medium-emphasis d-none d-sm-inline">
             {{ formatTime(item.published_at || item.created_at) }}
           </span>
@@ -806,8 +806,37 @@ onUnmounted(() => {
     align-items: stretch;
     gap: 10px;
   }
+  .tg-stream-item {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    padding: 10px 12px !important;
+    gap: 8px !important;
+  }
+  .tg-stream-left {
+    justify-content: flex-start;
+    margin-right: 0 !important;
+  }
+  .channel-pill {
+    max-width: 160px;
+  }
+  .tg-stream-body {
+    margin-right: 0 !important;
+    width: 100%;
+  }
   .tg-stream-title {
-    max-width: 240px;
+    max-width: 100% !important;
+    white-space: normal !important;
+    line-height: 1.4 !important;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .tg-stream-actions {
+    justify-content: space-between;
+    width: 100%;
+    padding-top: 6px;
+    border-top: 1px dashed rgba(var(--v-theme-on-surface), 0.08);
   }
   .tg-status {
     align-items: flex-start;

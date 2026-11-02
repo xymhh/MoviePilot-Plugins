@@ -1117,65 +1117,15 @@ function displayTotal(task) {
     font-size: 11px;
   }
 
-  /* 手机端搜索渠道紧凑布局，简化瘦身并自适应拉伸占满一行 */
-  .task-search-details {
-    padding: 2px 0 1px;
+  .engine-idle-banner {
+    flex-direction: column !important;
+    align-items: stretch !important;
+    gap: 10px !important;
+    padding: 10px 12px !important;
   }
 
-  .task-search-channels {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    width: 100%;
-  }
-
-  .task-channel-badge {
-    flex: 1 1 auto;
-    min-width: 0;
-    height: 22px;
-    padding: 0 6px;
-    font-size: 10.5px;
-    gap: 3px;
-    justify-content: center;
-    border-radius: 6px;
-    white-space: nowrap;
-  }
-
-  .task-channel-badge :deep(.v-icon) {
-    font-size: 11px !important;
-    margin-right: 0 !important;
-    flex-shrink: 0;
-  }
-
-  .task-channel-badge :deep(.v-progress-circular) {
-    width: 9px !important;
-    height: 9px !important;
-    margin-right: 0 !important;
-    flex-shrink: 0;
-  }
-
-  /* 驱动名称完整显示，不强制截断 */
-  .task-channel-name {
-    max-width: none !important;
-    overflow: visible !important;
-    text-overflow: clip !important;
-    white-space: nowrap !important;
-    flex-shrink: 0;
-  }
-
-  .task-channel-tag {
-    font-size: 10px;
-    margin-left: 0 !important;
-    flex-shrink: 0;
-  }
-
-  /* 手机端省略“搜索中”文本，只保留加载动效，为完整显示驱动名称腾出空间 */
-  .task-channel-tag--searching {
-    display: none !important;
-  }
-
-  .task-channel-time {
-    display: none !important; /* 手机端隐藏耗时，大幅简化并节省空间 */
+  .engine-idle-banner .v-btn {
+    width: 100% !important;
   }
 }
 </style>

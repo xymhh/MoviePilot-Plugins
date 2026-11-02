@@ -6,7 +6,7 @@
         <span class="text-subtitle-2 font-weight-bold">任务中心</span>
         <v-chip size="x-small" variant="tonal">{{ tasks.length }}</v-chip>
       </div>
-      <div class="d-flex align-center ga-2 flex-wrap">
+      <div class="d-flex align-center ga-2 flex-wrap task-head-actions">
         <v-btn-toggle
           v-model="filter"
           class="task-center-filters"
@@ -209,7 +209,7 @@ const props = defineProps({
 
 const api = props.api
 const display = useDisplay()
-const isMobile = computed(() => display.xs.value)
+const isMobile = computed(() => display.smAndDown.value || (typeof window !== "undefined" && window.innerWidth <= 768))
 const tasks = ref([])
 const loading = ref(false)
 const error = ref("")
@@ -485,5 +485,32 @@ onUnmounted(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+@media (max-width: 600px) {
+  .task-center-head {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 8px;
+  }
+  .task-head-actions {
+    width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap !important;
+    padding-bottom: 2px;
+  }
+  .task-head-actions::-webkit-scrollbar {
+    display: none;
+  }
+  .task-center-filters {
+    flex-shrink: 0;
+  }
+  .task-center-filters :deep(.v-btn) {
+    padding-inline: 8px !important;
+    font-size: 11px !important;
+    min-width: auto;
+  }
 }
 </style>

@@ -130,11 +130,11 @@
           variant="tonal"
           size="small"
           color="secondary"
-          prepend-icon="mdi-clipboard-text-search-outline"
-          class="mr-2"
+          class="ledger-entry-button mr-1"
           title="打开全网未转存候选排障账本"
           @click.stop="openGlobalLedger">
-          未转存账本
+          <v-icon icon="mdi-clipboard-text-search-outline" class="history-action-icon" />
+          <span class="history-action-label">未转存账本</span>
         </v-btn>
         <v-btn
           class="retry-batch-button"
@@ -866,7 +866,7 @@ const emit = defineEmits([
   "query-change",
 ])
 const display = useDisplay();
-const isMobile = computed(() => display.xs.value);
+const isMobile = computed(() => display.smAndDown.value || (typeof window !== "undefined" && window.innerWidth <= 768));
 const keyword = ref("");
 const appliedKeyword = ref("");
 const selectedResourceTypes = ref([]);
@@ -1931,6 +1931,14 @@ function deleteTitle(record) {
 
   .history-action-label {
     display: none;
+  }
+
+  .ledger-entry-button {
+    min-width: 32px !important;
+    width: 32px;
+    height: 32px;
+    padding: 0 !important;
+    flex: 0 0 32px;
   }
 
   .delete-selected-button {
