@@ -18,14 +18,24 @@ import time
 from threading import Lock
 from typing import Dict, Optional, Tuple
 
-# 音频 / 电子书强特征。CJK 词直接子串匹配，ASCII 标记要求独立词边界，
-# 避免「ESCAPE」被 APE 命中这类误伤。
-_CJK_MARKERS = (
-    "无损", "母带", "原声带", "原声大碟", "主题曲", "插曲", "单曲", "专辑",
-    "有声书", "有声小说", "有声剧", "广播剧", "听书", "电子书",
+# 电子书 / 有声书强特征：只可能出现在非影视资源里，命中即判。
+_CJK_STRONG = (
+    "有声书", "有声小说", "有声剧", "广播剧", "听书", "电子书", "专辑", "单曲",
 )
-_ASCII_MARKERS = (
-    "FLAC", "APE", "WAV", "MP3", "AAC", "DSD", "OST", "EPUB", "MOBI", "AZW3",
+# 音乐强特征：只可能出现在音乐分享里，命中即判。
+_ASCII_STRONG = ("EPUB", "MOBI", "AZW3")
+# 弱特征：也常作为**影视资源的音轨规格**出现在标题里
+# （`4K WEB-DL AAC`、`4K 10bit 60FPS FLAC无损HiFi声`、`1080p HDR AAC5.1`），
+# 因此只有标题里完全没有视频信号时才判非影视。
+_ASCII_WEAK = ("FLAC", "APE", "WAV", "MP3", "AAC", "DSD", "OST")
+_CJK_WEAK = ("无损", "母带", "原声带", "原声大碟", "主题曲", "插曲")
+
+# 视频信号：分辨率 / 片源 / 编码 / 集号，任一命中就认为这是影视资源。
+_VIDEO_SIGNAL = re.compile(
+    r"(?<![A-Z0-9])(?:4K|8K|2160P?|1080P?|720P?|480P?|WEB-?DL|WEBRIP|BLURAY|BDRIP|"
+    r"HDTV|HDTVRIP|REMUX|HEVC|AVC|H\.?26[45]|X26[45]|HDR|SDR|DOLBY|DV|"
+    r"S\d{1,2}\s*E\d{1,4}|E\d{1,4})(?![A-Z0-9])",
+    re.IGNORECASE,
 )
 
 _MISMATCH_TTL = 24 * 60 * 60
@@ -35,18 +45,35 @@ _mismatch_lock = Lock()
 _mismatch_records: Dict[Tuple[str, str], float] = {}
 
 
+def _has_video_signal(text: str) -> bool:
+    """标题里是否有影视信号（分辨率/片源/编码/集号）。"""
+    return bool(_VIDEO_SIGNAL.search(text))
+
+
 def non_video_reason(resource_title: str) -> Optional[str]:
-    """标题命中音频/电子书特征时返回原因，否则返回 None。"""
+    """标题命中音频/电子书特征时返回原因，否则返回 None。
+
+    强特征（FLAC/APE/DSD/电子书格式）命中即判；
+    弱特征（AAC/WAV/MP3/OST）只有在标题不含任何视频信号时才判——
+    `嫁金钗 (2026) S01E26 ✨4K WEB-DL AAC` 里的 AAC 是音轨编码，不是音频资源。
+    """
     text = str(resource_title or "").strip()
     if not text:
         return None
     upper = text.upper()
-    for marker in _ASCII_MARKERS:
+    for marker in _ASCII_STRONG:
         if re.search(rf"(?<![A-Z0-9]){marker}(?![A-Z0-9])", upper):
             return f"疑似非影视资源（{marker}）"
-    for marker in _CJK_MARKERS:
+    for marker in _CJK_STRONG:
         if marker in text:
             return f"疑似非影视资源（{marker}）"
+    if not _has_video_signal(text):
+        for marker in _ASCII_WEAK:
+            if re.search(rf"(?<![A-Z0-9]){marker}(?![A-Z0-9])", upper):
+                return f"疑似非影视资源（{marker}）"
+        for marker in _CJK_WEAK:
+            if marker in text:
+                return f"疑似非影视资源（{marker}）"
     return None
 
 

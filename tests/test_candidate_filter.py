@@ -40,6 +40,29 @@ class NonVideoReasonTest(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertIsNone(_filter.non_video_reason(title))
 
+    def test_audio_codec_on_video_title_is_kept(self):
+        """AAC/WAV/MP3/FLAC 是视频的音轨编码，不能据此判非影视（1.9.30 回归）。"""
+        for title in (
+            "📺 嫁金钗 (2026) S01E26 ✨4K WEB-DL AAC",
+            "某剧 S02E10 1080p WEB-DL AAC5.1",
+            "某电影 2026 2160p BluRay x265 WAV",
+            "某剧 E12 HDTV MP3",
+            "名称：伟大的长征(2026)4K 10bit 60FPS FLAC无损HiFi声 更至EP37",
+            "名称：现在就出发 第四季(2026)4K 10bit 60FPS FLAC无损HIFi声 更1031期",
+        ):
+            with self.subTest(title=title):
+                self.assertIsNone(_filter.non_video_reason(title))
+
+    def test_weak_marker_without_video_signal_is_rejected(self):
+        """没有视频信号时，弱特征仍然拦下（纯音乐分享）。"""
+        for title in (
+            "周杰伦 叶惠美 专辑 AAC",
+            "某歌手 单曲 MP3 320k",
+            "电影 OST 合集",
+        ):
+            with self.subTest(title=title):
+                self.assertIsNotNone(_filter.non_video_reason(title))
+
     def test_ape_marker_needs_word_boundary(self):
         # ESCAPE 里的 APE 不该被当成音频标记
         self.assertIsNone(_filter.non_video_reason("ESCAPE PLAN 2013 1080p"))
