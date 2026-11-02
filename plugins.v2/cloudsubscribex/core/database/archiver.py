@@ -4,7 +4,7 @@
 无节制膨胀的问题。定期清理过期排障数据并执行 SQLite 增量整理。
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 try:
     from app.log import logger
