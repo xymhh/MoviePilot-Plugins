@@ -904,6 +904,7 @@ async function notifyHistory() {
 </script>
 
 <style scoped>
+@import "../styles/tokens.css";
 .cloud-app-page {
   display: flex;
   box-sizing: border-box;

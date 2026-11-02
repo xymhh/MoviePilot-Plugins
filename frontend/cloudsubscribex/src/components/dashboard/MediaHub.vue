@@ -70,6 +70,12 @@
             <div v-else class="poster-badge-art">
               <span class="art-letter">{{ getInitial(group.title || group.name) }}</span>
             </div>
+            <!-- 海报右下角状态角标 -->
+            <span
+              v-if="getStatusLabel(group)"
+              :class="['poster-status-badge', statusTone(group)]">
+              {{ getStatusLabel(group) }}
+            </span>
           </div>
 
           <div class="card-body">
@@ -348,16 +354,18 @@ function getInitial(title) {
 
 .media-card {
   border-radius: 12px;
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid rgba(var(--v-theme-on-surface), 0.07);
+  background: rgba(var(--v-theme-surface), 0.6) !important;
+  border: 1px solid var(--cs-border-subtle, rgba(var(--v-border-color), 0.12));
   transition:
     border-color 0.2s ease,
-    transform 0.2s ease;
+    transform 0.2s ease,
+    background-color 0.2s ease;
   cursor: pointer;
 }
 
 .media-card:hover {
-  border-color: rgba(var(--v-theme-on-surface), 0.18);
+  border-color: var(--cs-border-active, rgba(var(--v-theme-primary), 0.4));
+  background: rgba(var(--v-theme-surface-variant), 0.25) !important;
   transform: translateY(-1px);
 }
 
@@ -377,6 +385,30 @@ function getInitial(title) {
   border-radius: 8px;
   overflow: hidden;
   background: rgba(var(--v-theme-surface-variant), 0.3);
+}
+
+.poster-status-badge {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 4px;
+  backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  letter-spacing: -0.2px;
+}
+
+.poster-status-badge.tone-warn {
+  color: #f59e0b;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.poster-status-badge.tone-ok {
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.4);
 }
 
 .poster-img {
@@ -492,28 +524,55 @@ function getInitial(title) {
   line-height: 1.2;
 }
 
-@media (max-width: 600px) {
-  .media-grid {
-    grid-template-columns: 1fr;
-    gap: 12px;
+@media (max-width: 640px) {
+  .hub-toolbar {
+    flex-direction: column;
+    align-items: stretch !important;
+    gap: 8px;
+  }
+
+  .hub-filter-chips {
+    overflow-x: auto;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    flex-wrap: nowrap !important;
+  }
+
+  .hub-filter-chips::-webkit-scrollbar {
+    display: none;
+  }
+
+  .hub-search-box {
+    width: 100%;
   }
 
   .hub-search-input {
+    width: 100% !important;
     max-width: 100%;
     flex: 1 1 auto;
   }
 
+  .media-grid {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
   .card-inner {
     gap: 12px;
-    padding: 12px;
+    padding: 10px;
   }
 
   .card-poster,
   .poster-img,
   .poster-badge-art {
-    flex-basis: 92px;
-    width: 92px;
-    height: 132px;
+    flex-basis: 80px;
+    width: 80px;
+    height: 116px;
+  }
+
+  .card-title {
+    font-size: 0.875rem !important;
+    line-height: 1.35 !important;
   }
 }
 </style>
