@@ -244,22 +244,32 @@ def _truncate(text: str, limit: int) -> str:
     return out + "…"
 
 
-def render_table(headers: List[str], rows: List[List[str]], max_width: Optional[int] = None) -> str:
-    """等宽对齐表格；超宽按终端宽度等比截断。"""
+def render_table(
+    headers: List[str],
+    rows: List[List[str]],
+    max_width: Optional[int] = None,
+    max_cols: Optional[Dict[int, int]] = None,
+) -> str:
+    """等宽对齐表格；超宽按终端宽度等比截断，max_cols 可给单列设上限。"""
     if not rows:
         return "（无数据）"
-    terminal = max_width or shutil.get_terminal_size((100, 24)).columns
+    terminal = max_width or shutil.get_terminal_size((120, 24)).columns
     columns = len(headers)
     natural = [
         max(2, _width(str(headers[i])), *(_width(str(row[i])) for row in rows))
         for i in range(columns)
     ]
-    budget = terminal - (columns - 1) * 2
-    if sum(natural) > budget:
-        ratio = budget / max(1, sum(natural))
-        widths = [max(6, int(value * ratio)) for value in natural]
-    else:
-        widths = natural
+    budget = max(20, terminal - (columns - 1) * 2)
+    widths = list(natural)
+    for index, cap in (max_cols or {}).items():
+        if 0 <= index < columns:
+            widths[index] = min(widths[index], cap)
+    # 逐格压最宽的列，短列（时间/状态）保持可读
+    while sum(widths) > budget:
+        index = max(range(columns), key=lambda i: widths[i])
+        if widths[index] <= 6:
+            break
+        widths[index] -= 1
     lines = ["  ".join(_pad(str(h), widths[i]) for i, h in enumerate(headers))]
     lines.append("  ".join("─" * widths[i] for i in range(columns)))
     for row in rows:
@@ -302,55 +312,94 @@ def _unwrap(payload: Any) -> Any:
     return payload
 
 
+STATUS_ICON = {"ok": "✔", "warn": "⚠", "error": "✖", "skip": "—"}
+
+
+def merge_episode_ranges(episodes: Any, prefix: str = "E") -> str:
+    """把 [1,2,3,7,9,10] 合成 E1-E3,E7,E9-E10。"""
+    nums = []
+    for item in episodes or []:
+        try:
+            nums.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    nums = sorted(set(nums))
+    if not nums:
+        return ""
+    segments: List[str] = []
+    start = prev = nums[0]
+    for num in nums[1:]:
+        if num == prev + 1:
+            prev = num
+            continue
+        segments.append(f"{prefix}{start}" if start == prev else f"{prefix}{start}-{prefix}{prev}")
+        start = prev = num
+    segments.append(f"{prefix}{start}" if start == prev else f"{prefix}{start}-{prefix}{prev}")
+    return ",".join(segments)
+
+
+def human_size(value: Any) -> str:
+    try:
+        size = float(value or 0)
+    except (TypeError, ValueError):
+        return "-"
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f}{unit}" if unit != "B" else f"{int(size)}B"
+        size /= 1024
+    return f"{size:.1f}TB"
+
 # ---------------------------------------------------------------- 命令实现
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
     raw = call_plugin(args, "/doctor")
-    payload = _unwrap(raw)
-    checks = payload.get("checks") if isinstance(payload, dict) else None
-    if not isinstance(checks, list):
+    payload = _unwrap(raw) or {}
+    items = payload.get("items") or []
+    counts = payload.get("counts") or {}
+    if not items:
         _emit(raw, args, render_kv(payload if isinstance(payload, dict) else {"data": payload}))
         return EXIT_OK
-
-    icons = {"ok": "✔", "pass": "✔", "green": "✔",
-             "warn": "⚠", "warning": "⚠", "yellow": "⚠",
-             "error": "✖", "fail": "✖", "red": "✖"}
     rows = []
-    for item in checks:
-        status = str(item.get("status") or item.get("level") or "").lower()
+    for item in items:
+        status = str(item.get("status") or "").lower()
         rows.append([
-            icons.get(status, "·"),
-            str(item.get("name") or item.get("title") or ""),
-            str(item.get("detail") or item.get("message") or ""),
-            str(item.get("fix") or item.get("hint") or ""),
+            STATUS_ICON.get(status, "·"),
+            str(item.get("name") or item.get("key") or ""),
+            str(item.get("detail") or ""),
+            str(item.get("hint") or ""),
         ])
-    bad = sum(1 for item in checks if str(item.get("status") or item.get("level") or "").lower()
-              in ("error", "fail", "red"))
-    warn = sum(1 for item in checks if str(item.get("status") or item.get("level") or "").lower()
-               in ("warn", "warning", "yellow"))
-    human = render_table(["", "检查项", "详情", "修复指引"], rows)
-    human += f"\n\n共 {len(checks)} 项：{len(checks) - bad - warn} 正常 / {warn} 警告 / {bad} 异常"
+    human = render_table(["", "检查项", "详情", "提示"], rows, max_cols={2: 52, 3: 30})
+    human += (
+        f"\n\n{payload.get('overall') or ''}："
+        f"{counts.get('ok', 0)} 正常 / {counts.get('warn', 0)} 警告 / "
+        f"{counts.get('error', 0)} 异常 / {counts.get('skip', 0)} 跳过"
+        f"（{payload.get('elapsed_ms', '?')} ms，{payload.get('checked_at', '')}）"
+    )
     _emit(raw, args, human)
-    return EXIT_OK if bad == 0 else EXIT_API
+    return EXIT_OK if not counts.get("error") else EXIT_API
 
 
 def cmd_overview(args: argparse.Namespace) -> int:
     raw = call_plugin(args, "/overview")
-    payload = _unwrap(raw)
+    payload = _unwrap(raw) or {}
+    lines = []
+    stats = payload.get("stats") if isinstance(payload, dict) else None
+    if isinstance(stats, list) and stats:
+        lines.append("  ".join(f"{item.get('title')} {item.get('value')}" for item in stats
+                               if isinstance(item, dict)))
     if isinstance(payload, dict):
-        flat = {}
-        for key, value in payload.items():
-            if isinstance(value, dict):
-                for sub_key, sub_value in value.items():
-                    if not isinstance(sub_value, (dict, list)):
-                        flat[f"{key}.{sub_key}"] = sub_value
-            elif not isinstance(value, list):
-                flat[key] = value
-        human = render_kv(flat)
-    else:
-        human = str(payload)
-    _emit(raw, args, human)
+        runtime = payload.get("runtime")
+        if isinstance(runtime, dict):
+            keep = {k: v for k, v in runtime.items() if not isinstance(v, (dict, list))}
+            if keep:
+                lines.append(render_kv(keep))
+        cache = payload.get("cache")
+        if isinstance(cache, dict):
+            keep = {k: v for k, v in cache.items() if not isinstance(v, (dict, list))}
+            if keep:
+                lines.append(render_kv(keep))
+    _emit(raw, args, "\n".join(lines) or render_kv(payload))
     return EXIT_OK
 
 
@@ -363,87 +412,145 @@ def cmd_history(args: argparse.Namespace) -> int:
         "sources": args.source,
     }
     raw = call_plugin(args, "/page_data", params=params)
-    payload = _unwrap(raw)
-    records = []
-    if isinstance(payload, dict):
-        records = payload.get("records") or payload.get("items") or payload.get("list") or []
-    rows = []
-    for item in records:
-        rows.append([
-            str(item.get("created_at") or item.get("time") or "")[:19],
-            str(item.get("title") or item.get("name") or ""),
-            str(item.get("episode") or item.get("episodes") or ""),
-            str(item.get("status") or ""),
-            str(item.get("source") or ""),
-        ])
-    total = payload.get("total") if isinstance(payload, dict) else None
-    human = render_table(["时间", "标题", "集", "状态", "来源"], rows)
-    if total is not None:
-        human += f"\n\n第 {args.page} 页，共 {total} 条"
+    payload = _unwrap(raw) or {}
+    page_meta = payload.get("history_page") or {}
+    groups = payload.get("history_groups") or []
+
+    if args.records:
+        rows = []
+        for group in groups:
+            for record in group.get("records") or []:
+                episode = record.get("episode")
+                rows.append([
+                    str(record.get("time") or "")[:19],
+                    str(record.get("title") or ""),
+                    f"S{record.get('season')}E{episode}" if episode is not None else "-",
+                    str(record.get("status_label") or record.get("status") or ""),
+                    human_size(record.get("file_size")),
+                    str(record.get("source") or record.get("cloud_drive_name") or ""),
+                ])
+        human = render_table(["时间", "标题", "集", "状态", "大小", "来源"], rows,
+                             max_cols={1: 28, 5: 16})
+    else:
+        rows = []
+        total = sum(len(group.get("records") or []) for group in groups)
+        for group in groups:
+            rows.append([
+                str(group.get("latest_time") or "")[:19],
+                str(group.get("title") or ""),
+                str(group.get("type") or ""),
+                f"{group.get('success_count', 0)}",
+                f"{group.get('failed_count', 0)}",
+                f"{group.get('pending_count', 0)}",
+                human_size(group.get("total_size")),
+                ",".join(f"S{s}" for s in (group.get("seasons") or [])) or "-",
+            ])
+        human = render_table(
+            ["最近时间", "标题", "类型", "成功", "失败", "待确认", "合计大小", "季"], rows,
+            max_cols={1: 30},
+        )
+        human += f"\n\n共 {len(groups)} 组（共 {total} 条流水）" if groups else ""
+    if page_meta.get("total") is not None:
+        human += (
+            f"\n第 {page_meta.get('page', args.page)}/{page_meta.get('total_pages', '?')} 页，"
+            f"共 {page_meta.get('total')} 条（加 --records 看明细）"
+        )
     _emit(raw, args, human)
     return EXIT_OK
 
 
 def cmd_progress(args: argparse.Namespace) -> int:
-    raw = call_plugin(args, "/page_data", params={"page": 1, "page_size": args.size})
-    payload = _unwrap(raw)
-    cards = []
-    if isinstance(payload, dict):
-        cards = payload.get("subscribes_progress") or []
+    raw = call_plugin(args, "/page_data", params={"page": 1, "page_size": 1})
+    payload = _unwrap(raw) or {}
+    cards = payload.get("subscribes_progress") or []
     rows = []
     for card in cards:
-        missing = card.get("missing_episodes") or card.get("lack_episode") or ""
-        if isinstance(missing, list):
-            missing = ",".join(str(x) for x in missing)
+        media_type = str(card.get("media_type") or "")
+        type_name = str(card.get("type") or "")
+        landed = card.get("library_count")
+        if landed is None:
+            landed = len(card.get("library_episodes") or [])
+        total_episodes = card.get("total_episodes") or 0
+        missing = card.get("missing_episodes") or []
+        if media_type == "movie" or type_name == "电影":
+            progress_text = "已入库" if landed else "未入库"
+            missing_text = "—"
+        else:
+            progress_text = f"{landed}/{total_episodes}" if total_episodes else str(landed)
+            missing_text = merge_episode_ranges(missing) or "齐"
+        if args.only_missing and missing_text in ("—", "齐", ""):
+            continue
         rows.append([
-            str(card.get("title") or ""),
-            f"{card.get('landed_count', card.get('landed', ''))}/{card.get('total_episodes', card.get('total', ''))}",
-            str(missing),
-            str(card.get("status") or ""),
+            str(card.get("title") or card.get("name") or ""),
+            type_name,
+            progress_text,
+            missing_text,
+            str(card.get("season") or ""),
         ])
-    human = render_table(["标题", "已入库/总集", "缺集", "状态"], rows)
-    human += f"\n\n共 {len(cards)} 部"
+    # 缺集多的排前面（-1 表示电影/已齐）
+    if args.sort == "missing":
+        cards_sorted = []
+        for row in rows:
+            seg = row[3]
+            count = 0 if seg in ("—", "齐", "") else sum(
+                1 + (int(part.split("-")[1][1:]) - int(part.split("-")[0][1:]))
+                if "-" in part else 1
+                for part in seg.split(",")
+            )
+            cards_sorted.append((count, row))
+        cards_sorted.sort(key=lambda item: -item[0])
+        rows = [row for _, row in cards_sorted]
+    rows = rows[: args.limit]
+    human = render_table(["标题", "类型", "已入库/总集", "缺集", "季"], rows,
+                         max_cols={0: 30, 3: 40})
+    human += f"\n\n展示 {len(rows)} 部 / 共 {len(cards)} 部"
     _emit(raw, args, human)
     return EXIT_OK
 
 
 def cmd_ledger(args: argparse.Namespace) -> int:
     raw = call_plugin(args, "/ledger/list", params={"limit": args.limit})
-    payload = _unwrap(raw)
+    payload = _unwrap(raw) or {}
     items = payload.get("items") if isinstance(payload, dict) else payload
     rows = []
     for item in items or []:
         if not isinstance(item, dict):
             continue
         rows.append([
-            str(item.get("created_at") or "")[:19],
-            str(item.get("file_name") or item.get("name") or ""),
-            str(item.get("state") or item.get("status") or ""),
-            str(item.get("attempts") or ""),
-            str(item.get("last_error") or "")[:40],
+            str(item.get("ts") or "")[:19],
+            str(item.get("kind") or ""),
+            str(item.get("provider") or ""),
+            str(item.get("resource_title") or "")[:36],
+            str(item.get("reason") or "")[:40],
         ])
-    human = render_table(["时间", "文件", "状态", "尝试", "最后错误"], rows)
+    human = render_table(["时间", "类型", "来源", "资源", "原因"], rows,
+                         max_cols={3: 34, 4: 40})
+    if isinstance(payload, dict) and payload.get("total") is not None:
+        human += f"\n\n共 {payload.get('total')} 条（近 {payload.get('days', '?')} 天）"
     _emit(raw, args, human)
     return EXIT_OK
 
 
 def cmd_duplicate(args: argparse.Namespace) -> int:
     raw = call_plugin(args, "/duplicate/list")
-    payload = _unwrap(raw)
+    payload = _unwrap(raw) or {}
     groups = payload.get("groups") if isinstance(payload, dict) else payload
     rows = []
     for group in groups or []:
         if not isinstance(group, dict):
             continue
-        ids = group.get("ids") or group.get("subscribe_ids") or []
+        dups = group.get("duplicates") or []
+        dup_text = ",".join(str(d.get("id")) for d in dups if isinstance(d, dict))
         rows.append([
-            str(group.get("title") or ""),
-            str(group.get("tmdb_id") or ""),
-            ",".join(str(x) for x in ids) if isinstance(ids, list) else str(ids),
-            str(group.get("reason") or ""),
+            str(group.get("name") or ""),
+            str(group.get("type") or ""),
+            str(group.get("keep_id") or ""),
+            dup_text,
+            str(group.get("season") or ""),
         ])
-    human = render_table(["标题", "TMDB", "订阅 ID", "原因"], rows)
-    human += f"\n\n共 {len(rows)} 组重复"
+    human = render_table(["名称", "类型", "保留 ID", "重复 ID", "季"], rows, max_cols={0: 30})
+    if isinstance(payload, dict):
+        human += f"\n\n共 {payload.get('duplicate_total', len(rows))} 组重复"
     _emit(raw, args, human)
     return EXIT_OK
 
@@ -541,10 +648,14 @@ def build_parser() -> argparse.ArgumentParser:
     history.add_argument("--keyword", default="", help="标题关键字")
     history.add_argument("--status", default="", help="状态过滤：success/failed/pending")
     history.add_argument("--source", default="", help="来源过滤")
+    history.add_argument("--records", action="store_true", help="展开到单条流水明细")
     history.set_defaults(func=cmd_history)
 
     progress = subparsers.add_parser("progress", parents=[common], help="追更进度表")
-    progress.add_argument("--size", type=int, default=200, help="最多展示多少部（默认 200）")
+    progress.add_argument("--limit", type=int, default=20, help="展示多少部（默认 20）")
+    progress.add_argument("--only-missing", action="store_true", help="只看有缺集的剧")
+    progress.add_argument("--sort", choices=["missing", "default"], default="default",
+                          help="missing=按缺集数从多到少")
     progress.set_defaults(func=cmd_progress)
 
     ledger = subparsers.add_parser("ledger", parents=[common], help="同步作业账本")
