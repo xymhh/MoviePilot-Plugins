@@ -12,6 +12,7 @@ from app.log import logger
 from .files import cloud_file, list_data
 from ..common import safe_int
 from ...core.cloud import ShareLinkStatus
+from ...core.share_link import canonicalize_share_url
 from ...utils.cache import create_platform_ttl_cache
 
 
@@ -131,6 +132,8 @@ class QuarkShareService:
         }
 
     def _share_access(self, share_url: str) -> tuple[Dict[str, Any], str]:
+        # 中转短链（如 pan.qoark.cn）先换成真实分享链接，否则这里的正则匹配不到 share_id。
+        share_url = canonicalize_share_url(share_url)
         info = self.extract_share_info(share_url)
         if not info:
             raise ValueError("无效的夸克分享链接")
@@ -279,6 +282,7 @@ class QuarkShareService:
                 f"夸克转存已熔断，暂不重试：{self._transfer_block_reason}"
             )
             return False
+        share_url = canonicalize_share_url(share_url)
         info = self.extract_share_info(share_url)
         if not info:
             raise ValueError("无效的夸克分享链接")
