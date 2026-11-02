@@ -413,8 +413,8 @@ class PageApi(OwnerDelegator):
         if owner and hasattr(owner, "_runtime_service"):
             try:
                 active_tasks = owner._runtime_service.get_tasks() or []
-            except Exception:
-                pass
+            except Exception as error:  # noqa: BLE001 - 任务看板不可用不该拖垮进度表
+                logger.debug(f"读取运行任务失败：{error}", exc_info=True)
 
         history_items = page_history or []
         progress_list = []
