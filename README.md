@@ -182,6 +182,8 @@ GET 失败自动退避重试 2 次，POST 不重试（避免重复转存）；to
 - [历史重试同集识别（1.7.21）](docs/summary/2026-10-20-历史重试同集识别.md) —— 重试先精确查名，未命中按 SxxExx/第N集回退匹配季目录；库里已有 `.2160p.mkv`/`.iso` 时不再去校验失效分享，直接复用实际文件名并落成功
 ## 历史决策与文档索引（按时间倒序）
 
+- [后端逻辑与架构系统重塑 · 调研（2026-11-02）](docs/plan/2026-11-02-后端架构重塑-调研.md) —— 对比 5 大成熟轮子（115-media-hub/Alist/huey/rq/alembic），选定拼装自洽架构：TaskContext 状态上下文 + 结构化异常树 + DriveStorageAdapter + SQLite 迁移器
+- [后端逻辑与架构系统重塑 · 架构规格书（2026-11-02）](docs/plan/2026-11-02-后端架构重塑-架构.md) —— 调度上下文契约、四级异常处理体系、网盘驱动接口标准化与 SQLite schema_version 规范
 - [新一代双端响应式 UI · 调研（2026-11-02）](docs/plan/2026-11-02-新一代双端UI-调研.md) —— 对比 5 大开源 Dashboard 规范（Shadcn/Tabler/Vben/Jellyfin/Vuetify3），确定「拼装」路线：以 Vuetify 3 内核 + Shadcn 极简中性风 + Tabler 单行流式响应式架构
 - [新一代双端响应式 UI · 架构规格书（2026-11-02）](docs/plan/2026-11-02-新一代双端UI-架构.md) —— Mobile-First 断点规范、四主看板设计（追更/调度/台账/雷达）、Composables 逻辑解耦协议与渐进式重塑路径
 - [同步作业状态机与目标幂等改造（ADR）](docs/plan/2026-10-20-同步作业状态机与幂等改造.md) —— 把「进程内目标锁」升级为持久化 `sync_jobs` 账本 + 统一 `TargetWriter`；P0 表/仓储/状态机、P1 转存入口接线、P2a done 目标回查已发布，P2b 统一 `TargetWriter` 随 1.7.20 发布｜[P1 总结](docs/summary/2026-10-20-同步作业账本P1.md)｜[P2a 线上缺失回查](docs/test/2026-10-20-1.7.19线上P2a缺失回查.md)｜[P2b 总结](docs/summary/2026-10-20-TargetWriterP2b.md)

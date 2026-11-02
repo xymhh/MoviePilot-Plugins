@@ -74,6 +74,16 @@
           </template>
           <v-list density="compact" class="more-action-list">
             <v-list-item
+              class="d-md-none"
+              prepend-icon="mdi-link-variant-plus"
+              title="手动添加"
+              @click="openManualDialog()" />
+            <v-list-item
+              class="d-md-none"
+              prepend-icon="mdi-cog-outline"
+              title="插件设置"
+              @click="openConfig" />
+            <v-list-item
               v-if="offlineSupported"
               prepend-icon="mdi-cloud-download-outline"
               title="离线任务"
@@ -1268,6 +1278,7 @@ async function notifyHistory() {
     overflow-y: auto;
     overscroll-behavior-y: contain;
     padding: 10px;
+    padding-bottom: 88px !important;
   }
 
   .app-header {
@@ -1321,14 +1332,21 @@ async function notifyHistory() {
     display: none;
   }
 
+  .manual-action,
+  .settings-action {
+    display: none !important;
+  }
+
   .app-actions {
-    grid-template-columns: repeat(4, 34px);
+    display: flex !important;
+    align-items: center;
+    gap: 6px;
   }
 
   .app-actions :deep(.v-btn) {
-    min-width: 34px;
-    width: 34px;
-    height: 34px;
+    min-width: 32px;
+    width: 32px;
+    height: 32px;
     padding: 0 !important;
     border-radius: 50%;
     background: transparent !important;
