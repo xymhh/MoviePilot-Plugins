@@ -730,11 +730,23 @@ class SyncHandler:
 
 
     def _stop_requested(self) -> bool:
+        if hasattr(self, "_active_task_context") and self._active_task_context:
+            if getattr(self._active_task_context, "is_cancelled", False):
+                return True
         try:
             return bool(self._should_stop and self._should_stop())
         except Exception as err:
             logger.debug(f"读取停止状态失败：{err}")
             return False
+
+    def check_task_alive(self) -> None:
+        """检查任务存活状态：若已取消或超时立即退出。"""
+        if hasattr(self, "_active_task_context") and self._active_task_context:
+            if hasattr(self._active_task_context, "check_alive"):
+                self._active_task_context.check_alive()
+        if self._stop_requested():
+            from ...core.exceptions import TaskAbortedError
+            raise TaskAbortedError("任务已停止")
 
     def _current_task_context(self) -> Tuple[str, Any]:
         if not self._task_context:
