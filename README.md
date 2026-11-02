@@ -85,6 +85,36 @@ CS 1.7.39 起自带 STRM 全量 / 增量与 Emby 302 播放，**不再需要装�
 
 10. **忽略媒体库路径**（1.6.75 起，**默认空**）：配置页「基础设置 → 提供方设置 → 忽略媒体库路径」，每行一个路径前缀（如 `/media/strm/115网盘分享`）。该路径下的 Emby 条目不再计入「已入库 / 缺集 / 洗版基线 / 榜单入库状态」；用于排除 115 STRM 助手生成的分享库，避免分享库里已有的集数掩盖目标网盘真正缺的集。MoviePilot 的 `media_exists` 会搜索整个 Emby、不遵守 `sync_libraries`，所以只能在插件侧按路径过滤
 
+## 命令行客户端（1.9.23+）
+
+不想开网页时，用 `cli.py` 直接查/控插件。零依赖（标准库），`python3 cli.py <命令>` 即可；插件侧零改动，走同一套 HTTP 接口。
+
+```bash
+export MP_URL=http://127.0.0.1:3000      # MoviePilot 地址
+export MP_TOKEN=<网页登录后拿到的 JWT>    # 或改用下面两个
+export MP_USER=<用户名> MP_PASSWORD=<密码> # 自动登录并缓存 token（~/.config/cloudsubscribex/token.json，权限 600）
+
+python3 cli.py doctor                    # 一键体检，9 项红绿灯 + 修复指引
+python3 cli.py overview                  # 订阅数 / 流水统计
+python3 cli.py history --keyword 牧神 --status failed --size 20
+python3 cli.py progress                  # 追更进度：已入库/总集、缺集范围
+python3 cli.py ledger --limit 50         # 同步作业账本
+python3 cli.py duplicate                 # 重复订阅检测
+python3 cli.py sync start --keyword 三体 # 触发同步
+python3 cli.py sync pause on             # 暂停/恢复（on|off）
+python3 cli.py raw GET /runtime --json   # 逃生口：任意插件接口
+```
+
+| 选项 | 说明 |
+| --- | --- |
+| `--json` | 输出后端原始 JSON（排障、比对用） |
+| `--quiet` | 单行 JSON，便于脚本 `$(...)` 取值 |
+| `--url` / `--token` / `--username` / `--password` | 临时覆盖环境变量 |
+| `--timeout` | 请求超时秒数（默认 30） |
+
+退出码：`0` 成功 / `1` 接口返回异常（如体检有红项）/ `2` 参数错误 / `3` 认证失败 / `4` 网络不可达。
+GET 失败自动退避重试 2 次，POST 不重试（避免重复转存）；token 过期且已配置账号密码时自动重登一次。
+
 ## 运维与排障
 
 | 现象 | 处理 |
@@ -126,6 +156,7 @@ CS 1.7.39 起自带 STRM 全量 / 增量与 Emby 302 播放，**不再需要装�
 | TG 频道监控登录失败 / 扫描不到新消息 | 1.6.57 起可用。登录失败先看「配置 → 频道监控」的 `api_id`/`api_hash` 是否已保存（页面登录依赖它们）；「会话已失效」需重新登录；私有频道要先用该账号**加入频道**再填 `-100` id 或邀请链接；「扫描完成：新增 0 条」多为消息里没有可识别的网盘链接，或被「排除关键词」挡掉；`telethon` 未装时状态会显示不可用，重装插件即自动装依赖 |
 ## 文档
 
+- [命令行客户端 CLI（1.9.23）](docs/plan/2026-11-02-CLI-调研与架构.md) —— `python3 cli.py doctor|overview|history|progress|ledger|duplicate|sync|raw`：零依赖单文件，宿主机直连插件 HTTP 接口，支持 JWT 直给或账号密码自动登录并缓存 token｜[验收](docs/test/2026-11-02-CLI-验收.md)
 - [配置向导（1.9.19）](docs/plan/2026-11-02-配置向导-架构.md) —— 配置页右上角「配置向导」：① 选网盘并登录（凭据表单随网盘切换）② 落地目录（可跳过）③ 保存并自动体检；首次安装自动进入，老用户仍是专家模式｜[调研](docs/plan/2026-11-02-配置向导-调研.md)
 - [插件体检 Doctor（1.9.18）](docs/plan/2026-11-02-Doctor体检-架构.md) —— 点工作台右上角状态胶囊即开：私有库/转存历史新鲜度/订阅缺口/搜索渠道/网盘/TMDB/整理目录/缓存 8 项红绿灯 + 修复指引，单项异常只红该行｜[调研](docs/plan/2026-11-02-Doctor体检-调研.md)
 - [任务中心 DbOper 崩溃复盘（1.8.10）](docs/summary/2026-11-01-任务中心DbOper崩溃复盘.md) —— 1.8.7 暂停开关无参 new 仓储导致 `/tasks` 整条接口失败、页面「暂无任务」；改为插件注入仓储 + 3 条回归测试
