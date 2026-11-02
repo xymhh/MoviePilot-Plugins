@@ -11,6 +11,7 @@ from app.core.context import MediaInfo
 from app.log import logger
 
 from ...core import CloudFile
+from ...core import OwnerDelegator
 from ...core.bypass_guard import bypass_guard
 from ...utils import (
     StrmTemplateError,
@@ -21,7 +22,7 @@ from ...utils import (
 from ...utils.legacy_strm import iter_strm_files, migrate_strm_content
 
 
-class StrmOpsMixin:
+class StrmOpsMixin(OwnerDelegator):
     """STRM 文件生成、清理、迁移与全量/增量重建。"""
 
     _STRM_EMPTY_STATS = {

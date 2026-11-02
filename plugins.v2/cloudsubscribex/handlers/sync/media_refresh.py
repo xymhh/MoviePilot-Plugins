@@ -10,10 +10,11 @@ from app.log import logger
 from app.schemas.types import NotificationType
 
 from ..notification import MediaServerNotifier, MediaServerResolver
+from ...core import OwnerDelegator
 from ...core.bypass_guard import bypass_guard
 
 
-class MediaRefreshMixin:
+class MediaRefreshMixin(OwnerDelegator):
     """媒体服务器刷新 + 通知聚合回调。"""
 
     def update_notification_config(

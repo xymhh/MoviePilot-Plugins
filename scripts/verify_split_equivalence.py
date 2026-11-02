@@ -68,6 +68,11 @@ def _collect(
     tree = parse(source)
     methods: dict[str, list[tuple[str, str]]] = {}
     for node in tree.body:
+        if isinstance(node, (FunctionDef, AsyncFunctionDef)):
+            # 模块级函数（如 _safe_optional_int / _staging_ref_*）同样要逐字一致
+            segment = textwrap.dedent(_slice(source, node))
+            methods.setdefault(node.name, []).append((_digest(segment), "<module>"))
+            continue
         if not isinstance(node, ClassDef):
             continue
         for item in node.body:
@@ -148,6 +153,12 @@ def main() -> int:
         help="声明式允许的文本改写（如 SyncHandler.foo=>Mixin.foo）；"
              "只有声明过的改写才被容忍，未声明的任何改动都会报 FAIL",
     )
+    parser.add_argument(
+        "--accept-change", action="append", default=[],
+        metavar="NEW",
+        help="声明式允许的方法体改动（如 TransferOpsMixin.foo）；"
+             "用于拆分时确有必要的宿主属性口径修正，未声明的一律 FAIL",
+    )
     args = parser.parse_args()
 
     before_files = args.files or DEFAULT_FILES
@@ -200,6 +211,18 @@ def main() -> int:
         print(f"新增方法：{len(added)} 个")
         for item in added[:20]:
             print(f"  + {item}")
+    accepted_changes = {item.strip() for item in args.accept_change if item.strip()}
+    if accepted_changes and changed:
+        kept = []
+        for item in changed:
+            new_name = item.split("→")[-1].strip()
+            if new_name in accepted_changes or new_name.split(".")[-1] in accepted_changes:
+                continue
+            kept.append(item)
+        print(f"\n声明式容许的方法体改动：{len(changed) - len(kept)} 个")
+        for item in sorted(accepted_changes):
+            print(f"  ~ {item}")
+        changed = kept
     if changed:
         print(f"\n[FAIL] 方法体被改动：{len(changed)} 个")
         for item in changed[:40]:

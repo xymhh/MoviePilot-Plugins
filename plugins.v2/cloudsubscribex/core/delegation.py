@@ -30,6 +30,10 @@ def get_component(owner, component_type, cache_name: str):
 def resolve_component(owner, component_types, name: str, cache_name: str):
     """从职责组件中解析宿主未直接定义的属性。"""
     for component_type in component_types:
+        # 只认真实类：被测试替身/Mock 顶替的条目 hasattr 恒为 True，
+        # 会抢在真组件前面把调用吞掉（属性改走委托后这个洞必须堵）。
+        if not isinstance(component_type, type):
+            continue
         if hasattr(component_type, name):
             component = get_component(owner, component_type, cache_name)
             return getattr(component, name)

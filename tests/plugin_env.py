@@ -30,13 +30,84 @@ class AutoMockModule(types.ModuleType):
         return value
 
 
+PLUGIN_ROOT = os.path.join(REPO_ROOT, "plugins.v2")
+
+
+def _bind_real_path(module, parts: list[str]) -> None:
+    """占位包的 __path__ 指向真实目录，使其下所有兄弟模块都能被正常 import。
+
+    否则 ``handlers.sync`` 这类占位包 ``__path__ == []``，service.py 里任何
+    新增的 ``from .xxx import`` 都会找不到模块（拆分重构踩过：新增
+    media_refresh / strm_ops 后 4 个用例直接 import 失败）。
+    """
+    if not parts or parts[0] != "cloudsubscribex":
+        return
+    directory = os.path.join(PLUGIN_ROOT, *parts)
+    if os.path.isdir(directory):
+        module.__path__ = [directory]
+
+
+def get_component(owner, component_type, cache_name: str):
+    """与 ``core/delegation.py`` 等价：按类型创建并缓存职责组件。"""
+    components = owner.__dict__.setdefault(cache_name, {})
+    component = components.get(component_type)
+    if component is None:
+        component = component_type(owner)
+        components[component_type] = component
+    return component
+
+
+def resolve_component(owner, component_types, name: str, cache_name: str):
+    """与 ``core/delegation.py`` 等价：从职责组件中解析宿主未直接定义的属性。"""
+    for component_type in component_types:
+        if not isinstance(component_type, type):
+            continue
+        if hasattr(component_type, name):
+            return getattr(get_component(owner, component_type, cache_name), name)
+    raise AttributeError(
+        f"{owner.__class__.__name__!s} object has no attribute {name!r}"
+    )
+
+
+def stub_component_method(owner, component_type, name: str, value):
+    """在职责组件实例上打桩，模拟拆分前「方法就在宿主类上」的旧结构。
+
+    拆分后方法挂在职责类上，直接给宿主赋值同名属性不会生效（类属性优先于
+    ``__getattr__`` 委托）；必须写进组件实例自己的 ``__dict__``。
+    """
+    components = owner.__dict__.setdefault("_handler_components", {})
+    component = components.get(component_type)
+    if component is None:
+        component = component_type(owner)
+        components[component_type] = component
+    object.__setattr__(component, name, value)
+    return component
+
+
+def install_core_delegation() -> None:
+    """把真实委托机制装进占位包 ``cloudsubscribex.core``。
+
+    拆分后的方法都挂在职责组件上，走 ``SyncHandler.__getattr__`` → 委托解析；
+    占位包若不装这两个函数，解析就是个 MagicMock，调用被静默吞掉。
+    """
+    core = ensure_package("cloudsubscribex.core")
+    core.OwnerDelegator = OwnerDelegator
+    core.get_component = get_component
+    core.resolve_component = resolve_component
+
+
 def ensure_package(name: str) -> AutoMockModule:
     """确保 ``name`` 已注册为占位包（保留 ``__path__`` 与既有属性）。"""
     existing = sys.modules.get(name)
     if isinstance(existing, AutoMockModule):
+        _bind_real_path(existing, name.split("."))
         return existing
     module = AutoMockModule(name)
     module.__path__ = []
+    # 插件自己的包若在磁盘上真实存在，__path__ 指向真实目录：
+    # 否则 service.py 及其兄弟模块里的 ``from ...utils.xxx import`` 一律
+    # ModuleNotFoundError（拆分新增模块时必踩，靠测试顺序碰巧通过不算数）。
+    _bind_real_path(module, name.split("."))
     if existing is not None:
         # 已被其它测试加载过的模块，保留其公开属性避免重复加载时丢失真实实现。
         for key, value in list(vars(existing).items()):
@@ -105,10 +176,12 @@ class OwnerDelegator:
         return getattr(owner, name)
 
     def __setattr__(self, name, value):
-        if name == "_owner":
+        owner = self.__dict__.get("_owner")
+        if name == "_owner" or owner is None:
+            # 没有宿主（测试里直接子类化、未调 super().__init__）时退化为普通属性
             object.__setattr__(self, name, value)
             return
-        setattr(object.__getattribute__(self, "_owner"), name, value)
+        setattr(owner, name, value)
 
 
 def _member(value):
@@ -140,23 +213,6 @@ def set_media_type(movie: str = "movie", tv: str = "tv"):
     })
     ensure_package("app.schemas.types").MediaType = media_type
     return media_type
-
-
-PLUGIN_ROOT = os.path.join(REPO_ROOT, "plugins.v2")
-
-
-def _bind_real_path(module, parts: list[str]) -> None:
-    """占位包的 __path__ 指向真实目录，使其下所有兄弟模块都能被正常 import。
-
-    否则 ``handlers.sync`` 这类占位包 ``__path__ == []``，service.py 里任何
-    新增的 ``from .xxx import`` 都会找不到模块（拆分重构踩过：新增
-    media_refresh / strm_ops 后 4 个用例直接 import 失败）。
-    """
-    if not parts or parts[0] != "cloudsubscribex":
-        return
-    directory = os.path.join(PLUGIN_ROOT, *parts)
-    if os.path.isdir(directory):
-        module.__path__ = [directory]
 
 
 def _ensure_parents(name: str) -> None:

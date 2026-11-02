@@ -3,7 +3,9 @@
 import unittest
 from unittest.mock import MagicMock
 
-from plugin_env import ensure_package, install_app_mocks, load_module
+from plugin_env import (
+    ensure_package, install_app_mocks, install_core_delegation, load_module,
+)
 
 install_app_mocks(
     "app.core", "app.core.config", "app.core.context", "app.core.metainfo",
@@ -19,11 +21,9 @@ install_app_mocks(
 )
 
 
-class OwnerDelegator:
-    pass
 
 
-ensure_package("cloudsubscribex.core").OwnerDelegator = OwnerDelegator
+install_core_delegation()
 mock_utils = ensure_package("cloudsubscribex.utils")
 
 # 加载实际的 MediaFileParser
@@ -243,7 +243,8 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         )
         self.handler._resource_provider_for_url = MagicMock(return_value=MagicMock(key="p115"))
         self.handler._cloud_drive = MagicMock(key="p115")
-        self.handler._ensure_share_transfer_available = MagicMock()
+        self.handler._share_transfer_risk_lock = MagicMock()
+        self.handler._share_transfer_blocked_until = {}
         self.handler._cross_transfer_enabled = False
         self.handler._share_transfer = MagicMock()
         # 默认 transfer_files_batch 成功返回所有 file_ids
@@ -253,6 +254,9 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         if hasattr(self.handler._share_transfer, "transfer_share"):
             delattr(self.handler._share_transfer, "transfer_share")
         self.handler._timed_sync_call = lambda name, fn, **kwargs: fn(**kwargs)
+        # __init__ 才会赋的运行时配置；__new__ 构造的实例需显式补齐，
+        # 拆分后属性统一走职责委托，缺失就是 AttributeError。
+        self.handler._upgrade_mode = "no"
         self.handler._batch_size = 20
         self.handler._batch_interval = 0.0
         self.handler._transfer_risk_cooldown = 0

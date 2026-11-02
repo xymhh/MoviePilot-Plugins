@@ -490,24 +490,24 @@ class StagingRefcountTests(unittest.TestCase):
         service_module._acquire_staging_ref(key)
         service_module._acquire_staging_ref(key)
 
-        SyncHandler._cleanup_cross_transfer_staging(source, "/staging", item)
+        service_module.TransferOpsMixin._cleanup_cross_transfer_staging(source, "/staging", item)
         self.assertEqual(source.deleted, [], "仍有引用时必须跳过删除")
 
-        SyncHandler._cleanup_cross_transfer_staging(source, "/staging", item)
+        service_module.TransferOpsMixin._cleanup_cross_transfer_staging(source, "/staging", item)
         self.assertEqual(source.deleted, ["f1"], "引用归零后按原语义删除")
         self.assertEqual(service_module._release_staging_ref(key), 0)
 
     def test_cleanup_without_refs_keeps_original_delete(self):
         source = _FakeMutationSource()
         item = SimpleNamespace(id="f2", name="2.mp4")
-        SyncHandler._cleanup_cross_transfer_staging(source, "/staging", item)
+        service_module.TransferOpsMixin._cleanup_cross_transfer_staging(source, "/staging", item)
         self.assertEqual(source.deleted, ["f2"], "无引用计数时保持原删除语义")
 
     def test_cleanup_without_item_short_circuits(self):
         source = _FakeMutationSource()
-        SyncHandler._cleanup_cross_transfer_staging(source, "/staging", None)
+        service_module.TransferOpsMixin._cleanup_cross_transfer_staging(source, "/staging", None)
         self.assertEqual(source.deleted, [], "缺 item 不做删除（原语义）")
-        SyncHandler._cleanup_cross_transfer_staging(None, "/staging",
+        service_module.TransferOpsMixin._cleanup_cross_transfer_staging(None, "/staging",
                                                     SimpleNamespace(id="f3", name="x"))
         self.assertEqual(source.deleted, [], "缺 source 不做删除（原语义）")
 

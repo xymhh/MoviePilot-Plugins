@@ -7,7 +7,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from plugin_env import ensure_package, install_app_mocks, load_module
+from plugin_env import (
+    ensure_package, install_app_mocks, install_core_delegation, load_module,
+    stub_component_method,
+)
 
 install_app_mocks(
     "app.core", "app.core.config", "app.core.context", "app.core.metainfo",
@@ -32,11 +35,9 @@ install_app_mocks(
 )
 
 
-class OwnerDelegator:
-    pass
 
 
-ensure_package("cloudsubscribex.core").OwnerDelegator = OwnerDelegator
+install_core_delegation()
 pause_module = ensure_package("cloudsubscribex.core.sync_pause")
 pause_module.is_paused = MagicMock(return_value=False)
 ensure_package("cloudsubscribex.core").sync_pause = pause_module
@@ -60,10 +61,12 @@ load_module(
     "cloudsubscribex.search.magnet",
     "plugins.v2/cloudsubscribex/search/magnet.py",
 )
-SyncHandler = load_module(
+_service_module = load_module(
     "cloudsubscribex.handlers.sync.service",
     "plugins.v2/cloudsubscribex/handlers/sync/service.py",
-).SyncHandler
+)
+SyncHandler = _service_module.SyncHandler
+TransferOpsMixin = _service_module.TransferOpsMixin
 
 
 class FakeLedger:
@@ -106,8 +109,9 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
         handler._cloud_drive = SimpleNamespace(key="115")
         handler._stop_requested = lambda: False
         handler._resource_provider_for_url = lambda url: SimpleNamespace(key="115")
-        handler._transfer_file_impl = MagicMock(
-            return_value=impl_result, side_effect=impl_error,
+        stub_component_method(
+            handler, TransferOpsMixin, "_transfer_file_impl",
+            MagicMock(return_value=impl_result, side_effect=impl_error),
         )
         ledger = FakeLedger(lease=lease, reason=reason)
         handler._sync_job_ledger_instance = ledger
@@ -142,6 +146,8 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
         core_pkg.sync_pause = pause_module
         try:
             handler = SyncHandler.__new__(SyncHandler)
+            # __init__ 才会挂的宿主插件；缺失会让暂停开关走 except 分支恒为 False
+            handler._plugin = SimpleNamespace(_sync_pause_repository=None)
             handler._sync_pause_cache = None
             pause_module.is_paused.return_value = True
             self.assertTrue(handler._sync_paused())
