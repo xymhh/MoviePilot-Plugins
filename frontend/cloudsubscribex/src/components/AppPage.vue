@@ -8,6 +8,15 @@
         <div class="identity-text">
           <div class="identity-title-row">
             <h1 class="text-truncate">网盘订阅助手</h1>
+            <v-chip
+              size="x-small"
+              variant="tonal"
+              color="primary"
+              class="version-chip font-weight-bold ml-1 cursor-pointer"
+              title="点击清除缓存并重新拉取最新前端包"
+              @click="forceReloadApp">
+              v{{ currentVersion }}
+            </v-chip>
             <span
               :class="['status-badge', 'status-badge-clickable', active ? 'status-badge-active' : 'status-badge-idle']"
               :title="active ? '正在同步（点击体检）' : '就绪（点击体检）'"
@@ -369,6 +378,22 @@ const props = defineProps({
   pluginId: { type: String, default: "CloudSubscribeX" },
   navKey: { type: String, default: "main" },
 })
+
+const currentVersion = typeof __PLUGIN_VERSION__ !== "undefined" ? __PLUGIN_VERSION__ : "1.9.36";
+
+async function forceReloadApp() {
+  if (typeof window !== "undefined") {
+    try {
+      if ("caches" in window) {
+        const keys = await window.caches.keys();
+        await Promise.all(keys.map((k) => window.caches.delete(k)));
+      }
+    } catch {}
+    const url = new URL(window.location.href);
+    url.searchParams.set("_reload", Date.now().toString());
+    window.location.replace(url.toString());
+  }
+}
 
 const api = props.api
 const display = useDisplay()
@@ -951,6 +976,13 @@ async function notifyHistory() {
   align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.version-chip {
+  flex-shrink: 0;
+  font-size: 11px !important;
+  letter-spacing: -0.2px;
+  border-radius: 4px;
 }
 
 .app-identity h1 {

@@ -3,14 +3,21 @@ import vue from "@vitejs/plugin-vue";
 import federation from "@originjs/vite-plugin-federation";
 import {resolve} from "node:path";
 import {fileURLToPath} from "node:url";
+import fs from "node:fs";
 
-const outputDir = resolve(
-    fileURLToPath(new URL(".", import.meta.url)),
-    "../../plugins.v2/cloudsubscribex/dist/assets",
-);
+const currentDir = fileURLToPath(new URL(".", import.meta.url));
+const outputDir = resolve(currentDir, "../../plugins.v2/cloudsubscribex/dist/assets");
+let pluginVersion = "1.9.36";
+try {
+    const pkgV2 = JSON.parse(fs.readFileSync(resolve(currentDir, "../../package.v2.json"), "utf-8"));
+    pluginVersion = pkgV2?.CloudSubscribeX?.version || pluginVersion;
+} catch {}
 
 export default defineConfig({
     base: "./",
+    define: {
+        __PLUGIN_VERSION__: JSON.stringify(pluginVersion),
+    },
     plugins: [
         vue(),
         federation({
