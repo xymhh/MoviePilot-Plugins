@@ -16,7 +16,7 @@
 import re
 import time
 from threading import Lock
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Set, Tuple
 
 # 电子书 / 有声书强特征：只可能出现在非影视资源里，命中即判。
 _CJK_STRONG = (
@@ -110,3 +110,54 @@ def remember_mismatch(share_url: str, resource_title: str) -> None:
             if len(_mismatch_records) >= _MISMATCH_MAXSIZE:
                 _mismatch_records.clear()
         _mismatch_records[key] = now + _MISMATCH_TTL
+
+
+_EPISODE_MISS_TTL = 6 * 60 * 60  # 6 小时负缓存
+_episode_miss_records: Dict[Tuple[str, str, int], Tuple[float, Set[int]]] = {}
+_episode_miss_lock = Lock()
+
+
+def remember_episode_miss(
+    share_url: str,
+    resource_title: str,
+    season: int,
+    available_episodes: Set[int],
+    ttl: float = _EPISODE_MISS_TTL,
+) -> None:
+    """记录一次集号差（资源含有的集数与缺失集不匹配），避免同批资源每轮扫描重复列目录。"""
+    key = (str(share_url or "").strip(), str(resource_title or "").strip(), int(season or 1))
+    if not key[0]:
+        return
+    now = time.time()
+    with _episode_miss_lock:
+        if len(_episode_miss_records) >= _MISMATCH_MAXSIZE:
+            expired = [k for k, (exp, _) in _episode_miss_records.items() if exp <= now]
+            for item in expired:
+                _episode_miss_records.pop(item, None)
+            if len(_episode_miss_records) >= _MISMATCH_MAXSIZE:
+                _episode_miss_records.clear()
+        _episode_miss_records[key] = (now + ttl, set(available_episodes or ()))
+
+
+def episode_miss_seen(
+    share_url: str,
+    resource_title: str,
+    season: int,
+    missing_episodes: Set[int],
+) -> bool:
+    """若指定 (URL, 标题, 季) 在 6h 内记录的可用集数与当前缺失集完全无交集，返回 True 跳过列目录。"""
+    key = (str(share_url or "").strip(), str(resource_title or "").strip(), int(season or 1))
+    now = time.time()
+    with _episode_miss_lock:
+        record = _episode_miss_records.get(key)
+        if record is None:
+            return False
+        expires_at, available = record
+        if expires_at <= now:
+            _episode_miss_records.pop(key, None)
+            return False
+        # 如果之前记录的可用集数与当前缺失集完全无交集，则判定为命中负缓存
+        if not (set(missing_episodes or ()) & available):
+            return True
+        return False
+

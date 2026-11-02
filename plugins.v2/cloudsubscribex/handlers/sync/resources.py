@@ -850,12 +850,26 @@ class ResourceTransferService(OwnerDelegator):
         )
         if not share_service:
             return []
-        files = self._timed_sync_call(
-            "share_listing",
-            share_service.list_share_files,
-            share_url,
-            **kwargs,
-        ) or []
+        try:
+            files = self._timed_sync_call(
+                "share_listing",
+                share_service.list_share_files,
+                share_url,
+                **kwargs,
+            ) or []
+        except Exception as err:
+            prefix = f"{log_prefix} " if log_prefix else ""
+            logger.warning(
+                f"{prefix}读取分享文件列表失败：{self._resource_log_reference(share_url)}，原因：{err}"
+            )
+            self._record_skip_candidate(
+                SkipStatsCollector.KIND_INVALID,
+                share_url,
+                reason=f"读取分享失败：{err}",
+                resource_label="分享链接",
+                resource_title=resource_title,
+            )
+            return []
         files = list(MediaFileParser.iter_files(files))
         if not files:
             label = resource_title or self._resource_log_reference(share_url)

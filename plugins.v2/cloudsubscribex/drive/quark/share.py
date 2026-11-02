@@ -217,7 +217,13 @@ class QuarkShareService:
                         info["share_id"], token, parent_id, page, self.page_size
                     )
                     if not self.client.is_success(response):
-                        return result
+                        err_msg = str(
+                            response.get("message")
+                            or response.get("msg")
+                            or response.get("errmsg")
+                            or f"接口返回错误码 {response.get('code')}"
+                        )
+                        raise RuntimeError(f"夸克获取分享文件列表失败：{err_msg}")
                     items = list_data(self.client, response)
                     for raw in items:
                         item = cloud_file(raw)
@@ -250,7 +256,7 @@ class QuarkShareService:
             return result
         except Exception as error:
             logger.warning(f"读取夸克分享文件失败：{error}")
-            return []
+            raise RuntimeError(f"读取夸克分享文件失败：{error}") from error
 
     def list_share_directory(
             self, share_url: str, parent_id: str = ""

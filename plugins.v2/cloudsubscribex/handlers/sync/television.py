@@ -8,7 +8,11 @@ from app.schemas import MediaInfo
 from app.schemas.types import MediaType
 from app.utils.string import StringUtils
 
-from .candidate_filter import remember_mismatch
+from .candidate_filter import (
+    episode_miss_seen,
+    remember_episode_miss,
+    remember_mismatch,
+)
 from .utils import normalize_season
 from ..notification import MediaServerResolver
 from ...core import OwnerDelegator
@@ -600,6 +604,16 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         selected_file_ids, selected_file_names = (
                             self._explicit_selection_values(resource)
                         )
+                        # 6h 负缓存跳过：如果该资源此前已记录过可用集数，且与当前缺失集完全无交集，免重复列目录
+                        if source != "manual" and episode_miss_seen(
+                            share_url, resource_title, season, missing_episode_set
+                        ):
+                            logger.debug(
+                                f"跳过候选：6h 内已判定集号不包含当前缺集 - "
+                                f"{resource_title or self._resource_log_reference(share_url)}"
+                            )
+                            continue
+
                         for current_url in resource_urls:
                             share_files.extend(self._validated_resource_files(
                                 current_url,
@@ -832,6 +846,10 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 matched_items.append(item_entry)
 
                         if not matched_items:
+                            # 记入 6h 负缓存，避免同一未更新资源每轮重复列目录
+                            remember_episode_miss(
+                                share_url, resource_title, season, share_episodes
+                            )
                             # 到这里说明集号解析成功、只是与缺失集没有交集，
                             # 不是「内容不匹配」——账本要能直接看出差在哪。
                             reason = (

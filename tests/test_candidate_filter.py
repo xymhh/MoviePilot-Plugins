@@ -94,5 +94,30 @@ class MismatchMemoTest(unittest.TestCase):
         self.assertLessEqual(len(_filter._mismatch_records), _filter._MISMATCH_MAXSIZE)
 
 
+class EpisodeMissMemoTest(unittest.TestCase):
+    def setUp(self):
+        _filter._episode_miss_records.clear()
+
+    def test_remember_then_seen_when_no_overlap(self):
+        url = "https://pan.quark.cn/s/wozy"
+        title = "我的有罪之人(2026)【高码 更新中】"
+        # 记录该资源只包含 1-4 集
+        _filter.remember_episode_miss(url, title, season=1, available_episodes={1, 2, 3, 4})
+        # 当前缺第 5 集：完全没有交集，应该跳过
+        self.assertTrue(_filter.episode_miss_seen(url, title, season=1, missing_episodes={5}))
+        # 当前缺第 4、5 集：与已有的第 4 集存在交集，不应跳过（放行转存第 4 集）
+        self.assertFalse(_filter.episode_miss_seen(url, title, season=1, missing_episodes={4, 5}))
+        # 换第 2 季，不应跳过
+        self.assertFalse(_filter.episode_miss_seen(url, title, season=2, missing_episodes={5}))
+
+    def test_expired_episode_miss_is_treated_as_miss(self):
+        url = "https://pan.quark.cn/s/wozy_exp"
+        title = "我的有罪之人"
+        _filter.remember_episode_miss(url, title, season=1, available_episodes={1, 2})
+        key = (url, title, 1)
+        _filter._episode_miss_records[key] = (time.time() - 1, {1, 2})
+        self.assertFalse(_filter.episode_miss_seen(url, title, season=1, missing_episodes={3}))
+
+
 if __name__ == "__main__":
     unittest.main()
