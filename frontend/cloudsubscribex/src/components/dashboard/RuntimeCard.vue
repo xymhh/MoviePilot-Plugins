@@ -98,55 +98,6 @@
           </div>
           <v-expand-transition>
             <div v-if="hasTaskDetails(task) && isTaskExpanded(task.id)" class="task-details text-caption">
-              <!-- 搜索渠道详情：全宽流式横向胶囊排布 -->
-              <div v-if="hasSearchDetails(task)" class="task-search-details">
-                <div class="task-search-channels">
-                  <div
-                    v-for="ch in task.search_channels"
-                    :key="ch.key"
-                    class="task-channel-badge"
-                    :class="[
-                      `task-channel-badge--${ch.status}`,
-                      { 'task-channel-badge--empty': ch.status === 'success' && ch.count === 0 }
-                    ]"
-                    :title="channelTooltip(task, ch)">
-                    <v-progress-circular
-                      v-if="ch.status === 'searching'"
-                      indeterminate
-                      size="10"
-                      width="1.6"
-                      class="task-channel-icon task-channel-spinner" />
-                    <v-icon v-else :icon="channelIcon(ch)" size="11" class="task-channel-icon" />
-                    <span class="task-channel-name">{{ ch.name }}</span>
-
-                    <span
-                      v-if="ch.status === 'success'"
-                      class="task-channel-tag"
-                      :class="ch.count > 0 ? 'task-channel-tag--count' : 'task-channel-tag--zero'">
-                      {{ ch.count }}条
-                    </span>
-                    <span v-else-if="ch.status === 'searching'" class="task-channel-tag task-channel-tag--searching">
-                      搜索中
-                    </span>
-                    <span v-else-if="ch.status === 'timeout'" class="task-channel-tag task-channel-tag--warn">
-                      超时
-                    </span>
-                    <span v-else-if="ch.status === 'circuit_break'" class="task-channel-tag task-channel-tag--warn">
-                      熔断
-                    </span>
-                    <span v-else-if="ch.status === 'failed'" class="task-channel-tag task-channel-tag--err">
-                      失败
-                    </span>
-                    <span v-else-if="ch.status === 'pending'" class="task-channel-tag task-channel-tag--pending">
-                      等待
-                    </span>
-
-                    <span v-if="channelDisplayElapsed(task, ch)" class="task-channel-time">
-                      {{ channelDisplayElapsed(task, ch) }}
-                    </span>
-                  </div>
-                </div>
-              </div>
               <div v-if="task.current_file" class="task-detail-row">
                 <span class="task-detail-label">当前文件</span>
                 <span class="task-current-file" :title="task.current_file">{{ task.current_file }}</span>
@@ -187,14 +138,32 @@
         <v-icon v-else :icon="resultIcon(task.status, task.task_kind)" :color="taskColor(task.status)" size="small" />
       </div>
     </div>
-    <div v-else class="idle-state text-medium-emphasis">
-      <v-progress-circular v-if="active" indeterminate size="44" width="3" color="primary" />
-      <v-icon v-else icon="mdi-check-circle-outline" color="success" size="44" />
-      <div class="text-subtitle-2 font-weight-medium mt-3">
-        {{ active ? runtime.task || "正在准备订阅任务" : "当前没有订阅任务" }}
+    <div v-else class="engine-idle-banner d-flex align-center justify-space-between pa-3 rounded-lg border">
+      <div class="d-flex align-center ga-3 min-w-0">
+        <span class="engine-status-dot" :class="active ? 'is-busy' : 'is-idle'"></span>
+        <div class="min-w-0">
+          <div class="d-flex align-center ga-2 flex-wrap">
+            <span class="text-body-2 font-weight-medium">
+              {{ active ? (runtime.task || "正在调度订阅任务...") : "同步调度引擎就绪" }}
+            </span>
+            <v-chip v-if="active" size="x-small" color="primary" variant="tonal">运行中</v-chip>
+            <v-chip v-else size="x-small" color="success" variant="tonal">就绪待命</v-chip>
+          </div>
+          <div class="text-caption text-medium-emphasis mt-0.5 text-truncate">
+            {{ active ? "实时转存与处理中" : (runtime.task || "所有队列均已处理完成，等待下一次定时扫描") }}
+          </div>
+        </div>
       </div>
-      <div class="text-caption mt-1">
-        {{ active ? "正在加载订阅任务列表" : runtime.task || "等待下一次订阅搜索" }}
+      <div class="d-flex align-center ga-2 flex-shrink-0">
+        <v-btn
+          v-if="!active"
+          size="small"
+          color="primary"
+          variant="tonal"
+          prepend-icon="mdi-magnify"
+          @click="emit('start-sync')">
+          立即扫描
+        </v-btn>
       </div>
     </div>
   </div>
@@ -206,7 +175,7 @@ const props = defineProps({
   runtime: {type: Object, required: true},
   active: Boolean,
 })
-const emit = defineEmits(["stop-task"]);
+const emit = defineEmits(["stop-task", "start-sync"]);
 const active = computed(() => props.active);
 const expandedTaskIds = ref(new Set());
 const tasks = computed(() =>
@@ -269,7 +238,7 @@ function isTransferringOrPostprocessing(task) {
 }
 
 function hasTaskDetails(task) {
-  return hasPostprocessDetails(task) || hasSearchDetails(task);
+  return hasPostprocessDetails(task);
 }
 
 function hasSearchDetails(task) {
@@ -1057,15 +1026,33 @@ function displayTotal(task) {
   }
 }
 
-.idle-state {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 220px;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  text-align: center;
+.engine-idle-banner {
+  background: rgba(var(--v-theme-surface-variant), 0.25);
+  border-color: rgba(var(--v-border-color), var(--v-border-opacity)) !important;
+}
+
+.engine-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.engine-status-dot.is-idle {
+  background-color: rgb(var(--v-theme-success));
+  box-shadow: 0 0 6px rgba(var(--v-theme-success), 0.5);
+}
+
+.engine-status-dot.is-busy {
+  background-color: rgb(var(--v-theme-primary));
+  box-shadow: 0 0 8px rgba(var(--v-theme-primary), 0.6);
+  animation: pulse-dot 1.5s infinite;
+}
+
+@keyframes pulse-dot {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.15); opacity: 1; }
+  100% { transform: scale(0.95); opacity: 0.8; }
 }
 
 .task-progress-container {

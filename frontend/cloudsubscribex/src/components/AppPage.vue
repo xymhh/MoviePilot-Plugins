@@ -135,27 +135,13 @@
             @delete="confirmDeleteHistory" />
         </div>
         <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
-          <RuntimeCard class="runtime-panel" :runtime="runtime" :active="active" @stop-task="confirmStopTask" />
-          
-          <div class="task-ledger-toggle mt-3 d-flex align-center justify-space-between px-1">
-            <span class="text-caption text-medium-emphasis">
-              <v-icon icon="mdi-information-outline" size="14" class="mr-1" />
-              当前同步运行情况如上；日常无需关注底层退避队列。
-            </span>
-            <v-btn
-              variant="text"
-              size="small"
-              color="primary"
-              :prepend-icon="showTaskCenter ? 'mdi-chevron-up' : 'mdi-chevron-down'"
-              @click="showTaskCenter = !showTaskCenter">
-              {{ showTaskCenter ? "收起底层作业表" : "展开底层作业表" }}
-            </v-btn>
-          </div>
-          <v-expand-transition>
-            <div v-show="showTaskCenter" class="mt-2">
-              <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks' && showTaskCenter" />
-            </div>
-          </v-expand-transition>
+          <RuntimeCard
+            class="runtime-panel mb-4"
+            :runtime="runtime"
+            :active="active"
+            @stop-task="confirmStopTask"
+            @start-sync="openImmediateSearchConfirm" />
+          <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks'" />
         </div>
         <div v-show="mainTab === 'tg'" class="workspace-pane tg-pane">
           <TgMonitor :api="api" :active="mainTab === 'tg'" />
