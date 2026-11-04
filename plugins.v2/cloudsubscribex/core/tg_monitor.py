@@ -256,6 +256,9 @@ def _auto_transfer_outcome(result: Any) -> Tuple[str, str]:
         transferred = 0
     if transferred > 0:
         return "transferred", ""
+    reason = str(data.get("skip_reason") or "").strip()
+    if reason:
+        return "skipped", f"未转存：{reason}"
     message = str(result.get("message") or "").strip()
     return "skipped", message or "同步完成，未转存新文件（库里已有或未匹配到可下载资源）"
 
@@ -1026,6 +1029,66 @@ class TgChannelMonitor:
         except Exception as error:  # noqa: BLE001 - 单批失败不影响后续
             return {"success": False, "message": str(error)}
 
+    def _resolve_skip_reason(
+            self, row: Dict[str, Any], fallback: str = "",
+            cache: Optional[Dict[str, Tuple[str, str]]] = None,
+    ) -> Tuple[str, str]:
+        """返回 (原因类型, 原因文案)：账本明细 > 本轮订阅级原因 > 兜底。"""
+        kind, text = self._ledger_skip_reason(row, cache)
+        if text:
+            return kind, text
+        reason = str(fallback or "").strip()
+        if reason.startswith("未转存："):
+            reason = reason[len("未转存："):].strip()
+        return "run", reason or "库中已有或未匹配到可下载资源"
+
+    def _ledger_skip_reason(
+            self, row: Dict[str, Any],
+            cache: Optional[Dict[str, Tuple[str, str]]] = None,
+    ) -> Tuple[str, str]:
+        """按分享链接查候选账本，拿到这条资源被跳过的具体原因。"""
+        links = [str(link) for link in (row.get("links") or []) if str(link)][:3]
+        if not links:
+            return "", ""
+        store = None
+        for attr in ("_get_data_store", "_storage"):
+            getter = getattr(self._owner, attr, None)
+            if not callable(getter):
+                continue
+            try:
+                store = getter().ledger_store()
+            except Exception as error:  # noqa: BLE001 - 账本只做增强
+                logger.debug(f"读取候选账本失败：{error}")
+                store = None
+            if store is not None:
+                break
+        if store is None:
+            return "", ""
+        for link in links:
+            hit = (cache or {}).get(link)
+            if hit is None:
+                hit = ("", "")
+                try:
+                    result = store.read(days=2, keyword=link, limit=10)
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(f"查询候选账本失败：{error}")
+                    result = {}
+                for record in (result.get("items") or []):
+                    if str(record.get("kind") or "") == "push_submit":
+                        continue
+                    reference = str(record.get("reference") or "")
+                    if reference and reference != link:
+                        continue
+                    reason = str(record.get("reason") or "").strip()
+                    if reason:
+                        hit = (str(record.get("kind") or ""), reason)
+                        break
+                if cache is not None:
+                    cache[link] = hit
+            if hit[1]:
+                return hit
+        return "", ""
+
     def _apply_group_outcome(
             self, item_ids: List[str], subscribe_id: int,
             outcome: str, message: str, rows: List[dict],
@@ -1048,14 +1111,25 @@ class TgChannelMonitor:
             )
             return
         if outcome == "skipped":
-            changes.update({
-                "match_status": "skipped",
-                "auto_skipped_at": now,
-                "auto_transfer_error": (message or "库中已有，未转存新文件")[:300],
-                "retry_count": 0,
-                "failure_kind": "",
-            })
-            self._mark_items(item_ids, "skipped", **changes)
+            # 逐条落「为什么没转存」：优先账本里该分享链接的真实跳过原因，
+            # 其次用本轮同步的订阅级原因（已入库/未播出/识别失败…），
+            # 最后才退回笼统文案。
+            buckets: Dict[Tuple[str, str], List[str]] = {}
+            cache: Dict[str, Tuple[str, str]] = {}
+            for row, item_id in zip(rows, item_ids):
+                kind, text = self._resolve_skip_reason(row, message, cache)
+                buckets.setdefault((kind, text), []).append(item_id)
+            for (kind, text), ids in buckets.items():
+                self._mark_items(
+                    ids, "skipped",
+                    match_status="skipped",
+                    auto_skipped_at=now,
+                    auto_transfer_error=f"未转存：{text}"[:300],
+                    skip_kind=kind,
+                    skip_reason=text[:100],
+                    retry_count=0,
+                    failure_kind="",
+                )
             return
         if _is_interrupted_message(message):
             # 1.7.114：插件更新 / 重启打断的批次回队列，别再落一条永久失败。

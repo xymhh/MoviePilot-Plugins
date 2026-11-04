@@ -80,24 +80,54 @@
       </button>
     </div>
 
-    <!-- 未转存：按订阅折叠，避免 50+ 条重复分享铺屏 -->
-    <div v-if="statusFilter === 'skipped'" class="tg-groups mt-3">
-      <div v-for="group in skippedGroups" :key="group.key" class="tg-group rounded border">
-        <button type="button" class="tg-group-head" @click="toggleGroup(group.key)">
-          <span class="tg-group-title">{{ group.name }}</span>
-          <span class="tg-group-meta">{{ group.items.length }} 个分享 · 最近 {{ formatRelative(group.latest) }}</span>
-          <v-icon :icon="expandedGroup === group.key ? 'mdi-chevron-up' : 'mdi-chevron-down'" size="18" />
+    <!-- 未转存：先按原因分类，再按订阅折叠，避免 50+ 条重复分享铺屏 -->
+    <div v-if="statusFilter === 'skipped'" class="mt-3">
+      <div v-if="skipReasonStats.length" class="tg-reasons">
+        <button
+          type="button"
+          :class="['tg-reason', { 'is-active': !reasonFilter }]"
+          @click="reasonFilter = ''">
+          全部原因 <b>{{ skippedItems.length }}</b>
         </button>
-        <div v-if="expandedGroup === group.key" class="tg-group-body">
-          <div v-for="item in group.items" :key="item.id" class="tg-group-row">
-            <span class="tg-group-row-title text-truncate">{{ item.title }}</span>
-            <span class="text-caption text-medium-emphasis flex-shrink-0">
-              {{ formatRelative(item.published_at || item.created_at) }}
+        <button
+          v-for="reason in skipReasonStats"
+          :key="reason.key"
+          type="button"
+          :class="['tg-reason', `tg-reason-${reason.tone}`, { 'is-active': reasonFilter === reason.key }]"
+          @click="reasonFilter = reasonFilter === reason.key ? '' : reason.key">
+          {{ reason.label }} <b>{{ reason.count }}</b>
+        </button>
+      </div>
+      <div class="tg-groups">
+        <div v-for="group in skippedGroups" :key="group.key" class="tg-group rounded border">
+          <button type="button" class="tg-group-head" @click="toggleGroup(group.key)">
+            <span class="tg-group-title">{{ group.name }}</span>
+            <span class="tg-group-meta">{{ group.items.length }} 个分享 · {{ group.reasonText }}</span>
+            <span class="text-caption text-medium-emphasis flex-shrink-0 d-none d-sm-inline">
+              最近 {{ formatRelative(group.latest) }}
             </span>
+            <v-icon :icon="expandedGroup === group.key ? 'mdi-chevron-up' : 'mdi-chevron-down'" size="18" />
+          </button>
+          <div v-if="expandedGroup === group.key" class="tg-group-body">
+            <div v-for="item in group.items" :key="item.id" class="tg-group-row">
+              <span class="tg-group-row-title text-truncate">{{ item.title }}</span>
+              <v-chip
+                size="x-small"
+                variant="tonal"
+                :color="reasonTone(item)"
+                class="flex-shrink-0">
+                {{ reasonLabel(item) }}
+              </v-chip>
+              <span class="text-caption text-medium-emphasis flex-shrink-0">
+                {{ formatRelative(item.published_at || item.created_at) }}
+              </span>
+            </div>
           </div>
         </div>
+        <div v-if="!skippedGroups.length" class="tg-empty">
+          {{ reasonFilter ? "这个原因下没有记录。" : "还没有「未转存」记录。" }}
+        </div>
       </div>
-      <div v-if="!skippedGroups.length" class="tg-empty">还没有「未转存」记录。</div>
     </div>
 
     <!-- 条目：默认只显示待处理 + 失败，一行一个重点 -->
@@ -292,6 +322,7 @@ const items = ref([])
 const statusFilter = ref("todo")
 const expandedItem = ref("")
 const expandedGroup = ref("")
+const reasonFilter = ref("")
 const page = ref(1)
 const PAGE_SIZE = 30
 const scanning = ref(false)
@@ -355,11 +386,55 @@ const subscribeNameById = computed(() => {
   return map
 })
 
+// 未转存的原因分类：账本明细（失效/集号不符…）> 同步给的订阅级原因 > 旧数据兜底。
+const REASON_KINDS = {
+  invalid: { label: "分享失效", tone: "error" },
+  empty: { label: "无可用文件", tone: "warning" },
+  mismatch: { label: "剧名不符", tone: "warning" },
+  episode_miss: { label: "集号不符", tone: "muted" },
+  unparsable: { label: "无法解析集号", tone: "muted" },
+}
+
+function reasonText(item) {
+  const text = String(item?.skip_reason || item?.auto_transfer_error || "")
+    .replace(/^未转存：/, "")
+    .trim()
+  if (!text || text.includes("未发现需要转存的新资源")) return "原因未记录（旧数据）"
+  return text
+}
+
+function reasonKey(item) {
+  const kind = String(item?.skip_kind || "")
+  return REASON_KINDS[kind] ? kind : reasonText(item)
+}
+
+function reasonLabel(item) {
+  const kind = String(item?.skip_kind || "")
+  return REASON_KINDS[kind]?.label || reasonText(item)
+}
+
+function reasonTone(item) {
+  return REASON_KINDS[String(item?.skip_kind || "")]?.tone || "muted"
+}
+
+const skippedItems = computed(() => (items.value || []).filter((item) => item.status === "skipped"))
+
+const skipReasonStats = computed(() => {
+  const map = new Map()
+  for (const item of skippedItems.value) {
+    const key = reasonKey(item)
+    const entry = map.get(key) || { key, label: reasonLabel(item), tone: reasonTone(item), count: 0 }
+    entry.count += 1
+    map.set(key, entry)
+  }
+  return [...map.values()].sort((a, b) => b.count - a.count)
+})
+
 // 未转存按订阅+季归并：52 条重复分享压成十几个可折叠分组。
 const skippedGroups = computed(() => {
   const groups = new Map()
-  for (const item of items.value || []) {
-    if (item.status !== "skipped") continue
+  for (const item of skippedItems.value) {
+    if (reasonFilter.value && reasonKey(item) !== reasonFilter.value) continue
     const id = Number(item.subscribe_id || item.matched_subscribe_id || 0)
     const season = Number(item.quality?.season || 0)
     const key = `${id}:${season}`
@@ -381,11 +456,18 @@ const skippedGroups = computed(() => {
     group.latest = Math.max(group.latest, Number(item.published_at || item.created_at || 0))
   }
   const rows = [...groups.values()]
-  rows.forEach((group) =>
+  rows.forEach((group) => {
+    const reasons = new Map()
+    group.items.forEach((item) => {
+      const label = reasonLabel(item)
+      reasons.set(label, (reasons.get(label) || 0) + 1)
+    })
+    const [topLabel, topCount] = [...reasons.entries()].sort((a, b) => b[1] - a[1])[0] || ["", 0]
+    group.reasonText = topLabel ? `${topLabel} ${topCount}` : ""
     group.items.sort(
       (a, b) => Number(b.published_at || b.created_at || 0) - Number(a.published_at || a.created_at || 0),
-    ),
-  )
+    )
+  })
   return rows.sort((a, b) => b.latest - a.latest)
 })
 
@@ -420,6 +502,7 @@ const pagedItems = computed(() => {
 
 function selectFilter(value) {
   statusFilter.value = value
+  reasonFilter.value = ""
   page.value = 1
 }
 
@@ -771,6 +854,51 @@ onUnmounted(() => {
   margin-top: 6px;
 }
 
+.tg-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.tg-reason {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  font-size: 12px;
+  line-height: 1.2;
+  border-radius: 999px;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.14);
+  background: transparent;
+  color: rgba(var(--v-theme-on-surface), 0.72);
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    color 0.15s,
+    background-color 0.15s;
+}
+.tg-reason b {
+  font-weight: 600;
+  opacity: 0.85;
+}
+.tg-reason:hover {
+  border-color: rgba(var(--v-theme-primary), 0.45);
+}
+.tg-reason.is-active {
+  border-color: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-primary));
+  background: rgba(var(--v-theme-primary), 0.08);
+}
+.tg-reason-error.is-active {
+  border-color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-error));
+  background: rgba(var(--v-theme-error), 0.08);
+}
+.tg-reason-warning.is-active {
+  border-color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-warning));
+  background: rgba(var(--v-theme-warning), 0.08);
+}
 .tg-groups {
   display: flex;
   flex-direction: column;

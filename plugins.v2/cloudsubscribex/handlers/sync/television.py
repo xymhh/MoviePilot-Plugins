@@ -135,8 +135,11 @@ class TelevisionSyncProcessor(OwnerDelegator):
         :return: 更新后的转存数量
         """
         track_points = not manual_resources
+        # 本轮没转存时的真实原因，供频道监控展示（不再是笼统的「未发现新资源」）。
+        self._owner._last_skip_reason = ""
         try:
             if self._stop_requested():
+                self._owner._last_skip_reason = "已手动停止"
                 return transferred_count
             # 原生 best_version 决定洗版订阅，插件范围进一步限制处理对象。
             # 无订阅绑定的手动提交（如 Emby 电影院卡片转存）没有洗版策略可继承：
@@ -183,6 +186,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
             if not mediainfo:
                 logger.warn(f"无法识别媒体信息：{subscribe.name}")
+                self._owner._last_skip_reason = "无法识别媒体信息"
                 return transferred_count
 
             self._set_task_phase(subscribe, "核对播出范围", 20)
@@ -246,6 +250,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         f"{mediainfo.title_year} S{season:02d} 无法读取媒体服务器实际数据，"
                         f"本轮跳过且不访问{cloud_drive_name}，不修改订阅进度"
                     )
+                    self._owner._last_skip_reason = "无法读取媒体服务器数据"
                     return transferred_count
             logger.debug(
                 f"媒体服务器实际存在剧集："
@@ -268,6 +273,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     f"{mediainfo.title_year} S{season:02d} 无法读取{cloud_drive_name}实际数据，"
                     "本轮跳过，不修改订阅进度"
                 )
+                self._owner._last_skip_reason = "无法读取网盘数据"
                 return transferred_count
             cloud_matched = set(cloud_episodes & expected_episodes)
             if unaired_episodes:
@@ -311,6 +317,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     f"{mediainfo.title_year} S{season:02d} "
                     f"{cloud_drive_name}已完整存在"
                 )
+                self._owner._last_skip_reason = "库中已完整存在，无需转存"
                 if not transient_target:
                     self._subscribe_handler.check_and_finish_subscribe(
                         subscribe=subscribe,
@@ -345,6 +352,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     logger.info(
                         f"{mediainfo.title_year} S{season:02d} 当前缺集均未播出，等待更新"
                     )
+                    self._owner._last_skip_reason = "缺集尚未播出，等待更新"
                     return transferred_count
 
             logger.debug(
@@ -363,6 +371,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
             if not enabled_sources:
                 logger.debug(f"没有可用的搜索源，跳过 {mediainfo.title} S{season} 的搜索")
+                self._owner._last_skip_reason = "未启用可用的搜索源"
                 return transferred_count
 
             prefetched_results = (

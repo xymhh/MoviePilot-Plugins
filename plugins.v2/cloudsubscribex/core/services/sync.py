@@ -1448,6 +1448,11 @@ class SyncExecutionService(OwnerDelegator):
             finally:
                 stop_requested = self._stop_requested()
                 run_context = dict(self._sync_context or {})
+                # 频道监控等手动提交需要知道「一条都没转存」的真实原因。
+                if not run_context.get("skip_reason"):
+                    run_context["skip_reason"] = str(
+                        getattr(self, "_last_skip_reason", "") or ""
+                    )
                 with self._sync_tasks_lock:
                     current_tasks = [
                         task for task in self._sync_tasks.values()
@@ -1566,6 +1571,7 @@ class SyncExecutionService(OwnerDelegator):
                 "transferred": int(context.get("transferred") or 0),
                 "elapsed_ms": max(0, int(elapsed_ms or 0)),
                 "stopped": bool(stopped),
+                "skip_reason": str(context.get("skip_reason") or ""),
                 "task_counts": dict(task_counts or {}),
             },
         }

@@ -44,8 +44,11 @@ class MovieSyncProcessor(OwnerDelegator):
         :return: 更新后的转存数量
         """
         track_points = not manual_resources
+        # 本轮没转存时的真实原因，供频道监控展示。
+        self._owner._last_skip_reason = ""
         try:
             if self._stop_requested():
+                self._owner._last_skip_reason = "已手动停止"
                 return transferred_count
             logger.debug(f"处理电影订阅：{subscribe.name} ({subscribe.year})")
 
@@ -89,6 +92,7 @@ class MovieSyncProcessor(OwnerDelegator):
             )
             if not mediainfo:
                 logger.warning(f"无法识别媒体信息：{subscribe.name}")
+                self._owner._last_skip_reason = "无法识别媒体信息"
                 return transferred_count
 
             # 洗版电影需要先建立现有版本基线，否则同名文件只能被当作普通订阅完成。
@@ -195,6 +199,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         f"电影 {mediainfo.title_year} 尚未上映，"
                         f"延期至 {release_date.isoformat()} 后检查"
                     )
+                    self._owner._last_skip_reason = f"电影尚未上映（{release_date.isoformat()}）"
                     return transferred_count
             self._set_task_phase(subscribe, "检查网盘内容", 25)
 
@@ -220,6 +225,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         )
                     if track_points and self._search_handler:
                         self._search_handler.clear_subscription_budgets(sub_key)
+                    self._owner._last_skip_reason = "库中已存在该电影，无需转存"
                     return transferred_count
 
             # 手动资源直接进入现有匹配转存链，否则查询搜索源。
@@ -275,6 +281,7 @@ class MovieSyncProcessor(OwnerDelegator):
                 if self._stop_requested():
                     return transferred_count
                 logger.info(f"未找到电影 {mediainfo.title} 的可处理资源")
+                self._owner._last_skip_reason = "未找到可用资源"
                 return transferred_count
 
             self._set_task_phase(subscribe, "筛选候选资源", 60)

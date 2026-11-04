@@ -603,6 +603,7 @@ class SyncRuntimeService(OwnerDelegator):
         initial_history_count = len(local_history)
         transfer_details: List[Dict[str, Any]] = []
         transferred_count = 0
+        self._last_skip_reason = ""
         direct_cloud_paths = self._direct_cloud_manual_resources(
             manual_resources
         )
@@ -661,6 +662,12 @@ class SyncRuntimeService(OwnerDelegator):
                         transient_target=transient_target,
                     )
                 transferred_count += int(task_count or 0)
+                if int(task_count or 0) <= 0:
+                    skip_reason = str(
+                        getattr(self, "_last_skip_reason", "") or ""
+                    ).strip()
+                    if skip_reason:
+                        self._last_skip_reason = skip_reason
                 stopped = bool(task_event and task_event.is_set())
                 pending_items = self._pending_finalize_items(subscribe)
                 pending_count = len(pending_items)
