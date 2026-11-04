@@ -35,36 +35,22 @@
         </v-btn>
         <v-menu location="bottom end">
           <template #activator="{ props: menuProps }">
-            <v-btn
-              v-bind="menuProps"
-              size="small"
-              variant="tonal"
-              icon="mdi-dots-vertical"
-              title="TG 账号设置" />
+            <v-btn v-bind="menuProps" size="small" variant="tonal" icon="mdi-dots-vertical" title="TG 账号设置" />
           </template>
           <v-list density="compact">
             <v-list-item
               prepend-icon="mdi-account-key-outline"
               :title="status.configured ? '重新登录 Telegram' : '登录 Telegram'"
               @click="openLogin" />
-            <v-list-item
-              v-if="status.configured"
-              prepend-icon="mdi-logout"
-              title="退出登录"
-              @click="logout" />
+            <v-list-item v-if="status.configured" prepend-icon="mdi-logout" title="退出登录" @click="logout" />
           </v-list>
         </v-menu>
       </div>
     </div>
 
-    <v-alert
-      v-if="status.restart_required"
-      type="info"
-      variant="tonal"
-      density="compact"
-      class="mt-2">
-      插件代码已更新，但进程里仍是旧模块（{{ restartDroppedText }}）。正在跑的转存可能被中断或降级，
-      重启 MoviePilot 容器后彻底生效；被中断的条目重启后会自动续跑。
+    <v-alert v-if="status.restart_required" type="info" variant="tonal" density="compact" class="mt-2">
+      插件代码已更新，但进程里仍是旧模块（{{ restartDroppedText }}）。正在跑的转存可能被中断或降级， 重启 MoviePilot
+      容器后彻底生效；被中断的条目重启后会自动续跑。
     </v-alert>
 
     <v-alert v-if="status.last_error" type="warning" variant="tonal" density="compact" class="mt-2">
@@ -74,140 +60,146 @@
       频道监控未启用：到「配置 → 频道监控」填写 TG api_id / api_hash、登录，并添加频道后启用。
     </v-alert>
 
-    <div v-if="items.length" class="tg-filter-row mt-2">
-      <v-chip
-        v-for="option in filterOptions"
-        :key="option.value"
-        size="small"
-        :variant="statusFilter === option.value ? 'flat' : 'tonal'"
-        :color="statusFilter === option.value ? 'primary' : undefined"
-        class="tg-filter-chip"
-        @click="selectFilter(option.value)">
-        {{ option.title }}
-        <span class="tg-filter-count">{{ option.count }}</span>
-      </v-chip>
+    <!-- 摘要：数字即筛选入口 -->
+    <div class="tg-stats mt-3">
+      <button
+        v-for="stat in summaryStats"
+        :key="stat.value"
+        type="button"
+        :class="['tg-stat', `tg-stat-${stat.tone}`, { 'is-active': statusFilter === stat.value }]"
+        @click="selectFilter(stat.value)">
+        <span class="tg-stat-value">{{ stat.count }}</span>
+        <span class="tg-stat-label">{{ stat.title }}</span>
+      </button>
+      <button
+        type="button"
+        :class="['tg-stat', 'tg-stat-plain', { 'is-active': statusFilter === 'all' }]"
+        @click="selectFilter('all')">
+        <span class="tg-stat-value">{{ items.length }}</span>
+        <span class="tg-stat-label">全部</span>
+      </button>
     </div>
 
-    <!-- 紧凑单行雷达信息流 -->
-    <div v-if="filteredItems.length" class="tg-radar-stream mt-3">
-      <div
-        v-for="item in pagedItems"
-        :key="item.id"
-        class="tg-stream-item d-flex align-center justify-space-between pa-2 px-3 rounded border">
-        
-        <!-- 左侧：状态徽标 + 频道标签 -->
-        <div class="d-flex align-center ga-2 flex-shrink-0 mr-2 tg-stream-left">
-          <v-chip size="x-small" :color="statusColor(item.status)" variant="flat" class="font-weight-bold status-pill">
-            {{ statusText(item.status) }}
+    <!-- 未转存：按订阅折叠，避免 50+ 条重复分享铺屏 -->
+    <div v-if="statusFilter === 'skipped'" class="tg-groups mt-3">
+      <div v-for="group in skippedGroups" :key="group.key" class="tg-group rounded border">
+        <button type="button" class="tg-group-head" @click="toggleGroup(group.key)">
+          <span class="tg-group-title">{{ group.name }}</span>
+          <span class="tg-group-meta">{{ group.items.length }} 个分享 · 最近 {{ formatRelative(group.latest) }}</span>
+          <v-icon :icon="expandedGroup === group.key ? 'mdi-chevron-up' : 'mdi-chevron-down'" size="18" />
+        </button>
+        <div v-if="expandedGroup === group.key" class="tg-group-body">
+          <div v-for="item in group.items" :key="item.id" class="tg-group-row">
+            <span class="tg-group-row-title text-truncate">{{ item.title }}</span>
+            <span class="text-caption text-medium-emphasis flex-shrink-0">
+              {{ formatRelative(item.published_at || item.created_at) }}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div v-if="!skippedGroups.length" class="tg-empty">还没有「未转存」记录。</div>
+    </div>
+
+    <!-- 条目：默认只显示待处理 + 失败，一行一个重点 -->
+    <div v-else-if="filteredItems.length" class="tg-radar-stream mt-3">
+      <div v-for="item in pagedItems" :key="item.id" class="tg-row-wrap">
+        <div class="tg-row d-flex align-center ga-2 px-3 rounded border" @click="toggleDetail(item.id)">
+          <span :class="['tg-dot', `tg-dot-${item.status}`]" />
+          <span class="tg-row-title text-body-2 font-weight-bold text-truncate">{{ item.title || "（无标题）" }}</span>
+          <v-chip v-if="qualityLabel(item)" size="x-small" variant="tonal" color="deep-purple" class="flex-shrink-0">
+            {{ qualityLabel(item) }}
           </v-chip>
-          <v-chip size="x-small" color="primary" variant="tonal" class="channel-pill" prepend-icon="mdi-bullhorn-outline">
+          <span class="tg-row-meta text-caption text-medium-emphasis d-none d-sm-inline">
             {{ item.channel_title || "频道" }}
-          </v-chip>
-        </div>
-
-        <!-- 中部：片名主标题 + 标签 + 气泡提示 -->
-        <div class="tg-stream-body min-w-0 flex-grow-1 mr-3">
-          <div class="d-flex align-center ga-1 min-w-0 flex-wrap">
-            <span class="tg-stream-title text-body-2 font-weight-bold text-truncate" :title="item.title">
-              {{ item.title || "（无标题）" }}
-            </span>
-            <v-chip
-              v-if="typeText(item.types)"
-              size="x-small"
-              variant="tonal"
-              color="info"
-              class="quality-tag flex-shrink-0">
-              {{ typeText(item.types) }}
-            </v-chip>
-            <v-chip
-              v-for="tag in qualityTags(item).slice(0, 2)"
-              :key="tag"
-              size="x-small"
-              :color="tagColor(tag)"
-              variant="tonal"
-              class="quality-tag flex-shrink-0 d-none d-md-inline-flex">
-              {{ tag }}
-            </v-chip>
-          </div>
-          <!-- 命中说明或失败说明（紧凑辅助行） -->
-          <div v-if="item.match_reason || item.auto_transfer_error" class="tg-stream-hint text-caption text-truncate mt-0.5">
-            <span v-if="item.match_reason" class="text-primary mr-2">
-              <v-icon icon="mdi-target" size="12" class="mr-0.5" />
-              {{ item.match_reason }}
-            </span>
-            <span v-if="item.auto_transfer_error" :class="item.status === 'skipped' ? 'text-medium-emphasis' : 'text-error'">
-              <v-icon icon="mdi-alert-circle-outline" size="12" class="mr-0.5" />
-              {{ item.status === 'skipped' ? `未转存：${item.auto_transfer_error}` : item.auto_transfer_error }}
-            </span>
-          </div>
-        </div>
-
-        <!-- 右侧：外链 + 时间 + 一键转存 + 更多 -->
-        <div class="d-flex align-center ga-2 flex-shrink-0 tg-stream-actions">
-          <span class="text-caption text-medium-emphasis d-none d-sm-inline">
-            {{ formatTime(item.published_at || item.created_at) }}
           </span>
-
-          <!-- 外链图标组 -->
-          <div class="d-flex align-center ga-1">
+          <span class="tg-row-meta text-caption text-medium-emphasis d-none d-md-inline">
+            {{ formatRelative(item.published_at || item.created_at) }}
+          </span>
+          <span class="flex-grow-1" />
+          <v-chip v-if="item.status === 'failed'" size="x-small" color="error" variant="flat" class="flex-shrink-0">
+            失败
+          </v-chip>
+          <v-btn
+            v-if="canTransfer(item)"
+            size="x-small"
+            color="primary"
+            variant="flat"
+            class="flex-shrink-0"
+            @click.stop="openTransfer(item)">
+            转存
+          </v-btn>
+          <v-icon v-else-if="item.status === 'transferred'" icon="mdi-check-circle" color="success" size="18" />
+          <v-icon
+            :icon="expandedItem === item.id ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+            size="18"
+            class="text-medium-emphasis" />
+        </div>
+        <div v-if="expandedItem === item.id" class="tg-detail">
+          <div class="tg-detail-line text-medium-emphasis">{{ item.title }}</div>
+          <div v-if="item.match_reason" class="tg-detail-line text-primary">
+            <v-icon icon="mdi-target" size="13" class="mr-1" />
+            {{ item.match_reason }}
+          </div>
+          <div v-if="item.auto_transfer_error" :class="['tg-detail-line', errorClass(item)]">
+            <v-icon icon="mdi-alert-circle-outline" size="13" class="mr-1" />
+            {{ item.auto_transfer_error }}
+          </div>
+          <div class="tg-detail-links">
             <v-btn
-              v-for="link in item.links.slice(0, 1)"
+              v-for="link in item.links"
               :key="link"
-              icon="mdi-cloud-download-outline"
               size="x-small"
-              variant="text"
+              variant="tonal"
               color="secondary"
               :href="link"
               target="_blank"
-              title="打开网盘链接" />
+              class="mr-1 mb-1">
+              {{ shortLink(link) }}
+            </v-btn>
             <v-btn
               v-if="item.message_url"
-              icon="mdi-send-outline"
               size="x-small"
               variant="text"
-              color="medium-emphasis"
               :href="item.message_url"
               target="_blank"
-              title="查看 Telegram 原消息" />
+              prepend-icon="mdi-send-outline">
+              TG 原消息
+            </v-btn>
           </div>
-
-          <!-- 一键转存 -->
-          <v-btn
-            size="small"
-            :color="item.status === 'transferred' ? 'success' : 'primary'"
-            :variant="item.status === 'transferred' ? 'tonal' : 'flat'"
-            :prepend-icon="item.status === 'transferred' ? 'mdi-check' : 'mdi-cloud-upload-outline'"
-            :disabled="item.status === 'transferred'"
-            @click="openTransfer(item)">
-            {{ item.status === "transferred" ? "已转存" : "转存" }}
-          </v-btn>
-
-          <!-- 更多操作菜单（忽略 / 删除） -->
-          <v-menu location="bottom end">
-            <template #activator="{ props: menuProps }">
-              <v-btn v-bind="menuProps" icon="mdi-dots-vertical" size="small" variant="text" />
-            </template>
-            <v-list density="compact">
-              <v-list-item prepend-icon="mdi-eye-off-outline" title="忽略此消息" @click="ignore(item)" />
-              <v-list-item prepend-icon="mdi-delete-outline" color="error" title="删除记录" @click="remove(item)" />
-            </v-list>
-          </v-menu>
+          <div class="tg-detail-actions">
+            <v-btn
+              v-if="canTransfer(item)"
+              size="x-small"
+              color="primary"
+              variant="flat"
+              @click.stop="openTransfer(item)">
+              转存
+            </v-btn>
+            <v-btn size="x-small" variant="text" prepend-icon="mdi-eye-off-outline" @click.stop="ignore(item)">
+              忽略
+            </v-btn>
+            <v-btn
+              size="x-small"
+              variant="text"
+              color="error"
+              prepend-icon="mdi-delete-outline"
+              @click.stop="remove(item)">
+              删除
+            </v-btn>
+          </div>
         </div>
       </div>
+      <div v-if="pageCount > 1" class="tg-pager">
+        <v-pagination v-model="page" :length="pageCount" :total-visible="5" density="compact" size="small" />
+        <span class="tg-pager-meta">第 {{ page }}/{{ pageCount }} 页 · 共 {{ filteredItems.length }} 条</span>
+      </div>
     </div>
-    <div v-if="filteredItems.length && pageCount > 1" class="tg-pager">
-      <v-pagination
-        v-model="page"
-        :length="pageCount"
-        :total-visible="5"
-        density="compact"
-        size="small" />
-      <span class="tg-pager-meta">
-        第 {{ page }}/{{ pageCount }} 页 · 共 {{ filteredItems.length }} 条
-      </span>
-    </div>
-    <div v-if="!filteredItems.length" class="tg-empty">
-      {{ items.length ? "当前筛选下没有记录，换个状态看看。" : "还没有抓到资源。启用监控后点「立即扫描」，或等后台定时任务抓取。" }}
+    <div v-else class="tg-empty">
+      {{
+        items.length
+          ? "当前筛选下没有记录，换个状态看看。"
+          : "还没有抓到资源。启用监控后点「立即扫描」，或等后台定时任务抓取。"
+      }}
     </div>
 
     <v-dialog v-model="transferVisible" max-width="560">
@@ -275,7 +267,6 @@
 </template>
 
 <script setup>
-import {STATUS, statusColor as statusColorOf, statusText as statusTextOf} from "../../utils/status.js";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue"
 
 const props = defineProps({
@@ -298,7 +289,9 @@ const status = ref({
   last_error: "",
 })
 const items = ref([])
-const statusFilter = ref("active")
+const statusFilter = ref("todo")
+const expandedItem = ref("")
+const expandedGroup = ref("")
 const page = ref(1)
 const PAGE_SIZE = 30
 const scanning = ref(false)
@@ -321,12 +314,9 @@ const hasApi = computed(() => Boolean(status.value.has_api))
 
 // 「有动作的」= 待处理 + 已转存 + 失败；未转存和已忽略属于历史/噪音，默认不展示，
 // 否则 170 条里 150 多条是这两类，真实待办的几条会被淹没。
+// 「待处理」把失败也收进来：这两类才需要人动手，其余只做历史。
 const FILTERS = [
-  { value: "active", title: "待办与已转存",
-    test: (item) =>
-      ["queued", "new", "failed", "transferred"].includes(item.status) },
-  { value: "new", title: "待处理",
-    test: (item) => ["queued", "new"].includes(item.status) },
+  { value: "todo", title: "待处理", test: (item) => ["queued", "new", "failed"].includes(item.status) },
   { value: "failed", title: "失败", test: (item) => item.status === "failed" },
   { value: "transferred", title: "已转存", test: (item) => item.status === "transferred" },
   { value: "skipped", title: "未转存", test: (item) => item.status === "skipped" },
@@ -334,18 +324,82 @@ const FILTERS = [
   { value: "all", title: "全部", test: () => true },
 ]
 
-const filterOptions = computed(() => {
+// 顶部四张卡：待处理 / 已转存 / 未转存 / 失败。数字本身就是筛选按钮。
+const summaryStats = computed(() => {
   const rows = items.value || []
-  return FILTERS.map((filter) => ({
-    value: filter.value,
-    title: filter.title,
-    count: rows.filter(filter.test).length,
-  }))
+  return [
+    {
+      value: "todo",
+      title: "待处理",
+      tone: "primary",
+      count: rows.filter((i) => ["queued", "new", "failed"].includes(i.status)).length,
+    },
+    {
+      value: "transferred",
+      title: "已转存",
+      tone: "success",
+      count: rows.filter((i) => i.status === "transferred").length,
+    },
+    { value: "skipped", title: "未转存", tone: "muted", count: rows.filter((i) => i.status === "skipped").length },
+    { value: "failed", title: "失败", tone: "error", count: rows.filter((i) => i.status === "failed").length },
+  ]
 })
 
-const failedCount = computed(
-  () => (items.value || []).filter((item) => item.status === "failed").length
-)
+const failedCount = computed(() => (items.value || []).filter((item) => item.status === "failed").length)
+
+const subscribeNameById = computed(() => {
+  const map = new Map()
+  for (const sub of subscribes.value || []) {
+    map.set(Number(sub.id), sub)
+  }
+  return map
+})
+
+// 未转存按订阅+季归并：52 条重复分享压成十几个可折叠分组。
+const skippedGroups = computed(() => {
+  const groups = new Map()
+  for (const item of items.value || []) {
+    if (item.status !== "skipped") continue
+    const id = Number(item.subscribe_id || item.matched_subscribe_id || 0)
+    const season = Number(item.quality?.season || 0)
+    const key = `${id}:${season}`
+    if (!groups.has(key)) {
+      const sub = subscribeNameById.value.get(id)
+      const reason = String(item.match_reason || "")
+      const matched = reason.match(/匹配到 #\d+ (.+?)（/)
+      const name = sub
+        ? `${sub.name}${sub.season ? ` S${String(sub.season).padStart(2, "0")}` : ""}`
+        : matched
+          ? matched[1]
+          : id
+            ? `订阅 #${id}`
+            : "未关联订阅"
+      groups.set(key, { key, name, items: [], latest: 0 })
+    }
+    const group = groups.get(key)
+    group.items.push(item)
+    group.latest = Math.max(group.latest, Number(item.published_at || item.created_at || 0))
+  }
+  const rows = [...groups.values()]
+  rows.forEach((group) =>
+    group.items.sort(
+      (a, b) => Number(b.published_at || b.created_at || 0) - Number(a.published_at || a.created_at || 0),
+    ),
+  )
+  return rows.sort((a, b) => b.latest - a.latest)
+})
+
+function toggleDetail(id) {
+  expandedItem.value = expandedItem.value === id ? "" : id
+}
+
+function toggleGroup(key) {
+  expandedGroup.value = expandedGroup.value === key ? "" : key
+}
+
+function canTransfer(item) {
+  return !["transferred", "skipped", "ignored"].includes(item?.status)
+}
 
 const restartDroppedText = computed(() => {
   const dropped = status.value.restart_dropped || []
@@ -357,9 +411,7 @@ const filteredItems = computed(() => {
   return (items.value || []).filter(active.test)
 })
 
-const pageCount = computed(() =>
-  Math.max(1, Math.ceil(filteredItems.value.length / PAGE_SIZE))
-)
+const pageCount = computed(() => Math.max(1, Math.ceil(filteredItems.value.length / PAGE_SIZE)))
 
 const pagedItems = computed(() => {
   const start = (page.value - 1) * PAGE_SIZE
@@ -395,6 +447,24 @@ function formatTime(timestamp) {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
+function formatRelative(timestamp) {
+  if (!timestamp) return "-"
+  let date
+  if (typeof timestamp === "number" || /^\d+$/.test(String(timestamp).trim())) {
+    const num = Number(timestamp)
+    date = new Date(num > 1e11 ? num : num * 1000)
+  } else {
+    date = new Date(timestamp)
+  }
+  if (isNaN(date.getTime())) return "-"
+  const diff = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000))
+  if (diff < 60) return "刚刚"
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)} 天前`
+  return formatTime(timestamp)
+}
+
 function shortLink(link) {
   try {
     const url = new URL(link)
@@ -404,60 +474,9 @@ function shortLink(link) {
   }
 }
 
-const TYPE_TEXT = {
-  quark: "夸克",
-  115: "115",
-  alipan: "阿里",
-  tianyi: "天翼",
-  baidu: "百度",
-  uc: "UC",
-  123: "123",
-  guangya: "光鸭",
-  yun139: "移动",
-  xunlei: "迅雷",
-  magnet: "磁力",
-  ed2k: "电驴",
-  pikpak: "PikPak",
-}
-function typeText(types) {
-  return (types || []).map((type) => TYPE_TEXT[type] || type).join(" / ") || "-"
-}
-
 function qualityLabel(item) {
   const label = item?.quality?.label
   return label && label !== "未知" ? label : ""
-}
-
-function qualityTags(item) {
-  const tags = item?.quality?.tags
-  if (Array.isArray(tags) && tags.length) return tags
-  const label = qualityLabel(item)
-  return label ? [label] : []
-}
-
-function tagColor(tag) {
-  if (tag === "免费") return "success"
-  if (/^(8K|4K|UHD|1080P|720P|480P)$/.test(tag)) return "deep-purple"
-  if (tag === "杜比视界" || tag === "杜比全景声") return "purple"
-  if (/^HDR|^SDR/.test(tag)) return "indigo"
-  if (tag === "中字" || tag === "内封简繁英" || tag === "内封简繁") return "info"
-  return "grey"
-}
-
-// 状态词统一走 utils/status.js，避免「排队中 / 待处理 / 未转存」各说各话。
-const STATUS_TEXT = {
-  queued: STATUS.QUEUED,
-  new: STATUS.QUEUED,
-  transferred: STATUS.SUCCESS,
-  skipped: STATUS.SKIPPED,
-  failed: STATUS.FAILED,
-  ignored: STATUS.IGNORED,
-}
-function statusText(value) {
-  return STATUS_TEXT[value] || statusTextOf(value, "-")
-}
-function statusColor(value) {
-  return statusColorOf(value)
 }
 
 function errorClass(item) {
@@ -531,11 +550,10 @@ async function ensureSubscribes() {
 async function openTransfer(item) {
   currentItem.value = item
   await ensureSubscribes()
-  const matchedId = Number(item?.matched_subscribe_id || 0)
+  const matchedId = Number(item?.matched_subscribe_id || item?.subscribe_id || 0)
   // 1.7.113：扫描阶段已经把订阅匹配好（matched_subscribe_id），订阅还在就
   // 直接用匹配结果转存，不再让人重新挑一遍；订阅被删/没匹配才弹窗手选。
-  const matchedExists =
-    matchedId > 0 && subscribes.value.some((row) => Number(row.id) === matchedId)
+  const matchedExists = matchedId > 0 && subscribes.value.some((row) => Number(row.id) === matchedId)
   targetSubscribeId.value = matchedExists ? matchedId : null
   if (matchedExists) {
     await submitTransfer()
@@ -626,6 +644,8 @@ async function logout() {
 
 onMounted(async () => {
   await refreshAll()
+  // 「未转存」折叠分组要显示订阅名，进页面时顺带取一次。
+  void ensureSubscribes()
   timer = window.setInterval(() => {
     if (props.active) void refreshAll()
   }, 60000)
@@ -636,19 +656,165 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.tg-filter-row {
+.tg-stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+.tg-stat {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-.tg-filter-chip {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  background: transparent;
   cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s;
 }
-.tg-filter-count {
-  margin-left: 6px;
-  font-size: 0.6875rem;
-  opacity: 0.72;
+.tg-stat:hover {
+  background: rgba(var(--v-theme-on-surface), 0.04);
+}
+.tg-stat.is-active {
+  border-color: rgb(var(--v-theme-primary));
+  box-shadow: inset 0 0 0 1px rgb(var(--v-theme-primary));
+}
+.tg-stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+.tg-stat-label {
+  font-size: 11px;
+  opacity: 0.65;
+}
+.tg-stat-primary .tg-stat-value {
+  color: rgb(var(--v-theme-primary));
+}
+.tg-stat-success .tg-stat-value {
+  color: rgb(var(--v-theme-success));
+}
+.tg-stat-error .tg-stat-value {
+  color: rgb(var(--v-theme-error));
+}
+.tg-stat-muted .tg-stat-value {
+  color: rgba(var(--v-theme-on-surface), 0.55);
+}
+
+.tg-row {
+  min-height: 46px;
+  background: rgba(var(--v-theme-surface), 0.6);
+  border-color: rgba(var(--v-theme-on-surface), 0.08) !important;
+  cursor: pointer;
+  transition:
+    background-color 0.15s,
+    border-color 0.15s;
+}
+.tg-row:hover {
+  background: rgba(var(--v-theme-surface-variant), 0.35);
+  border-color: rgba(var(--v-theme-primary), 0.3) !important;
+}
+.tg-row-title {
+  min-width: 0;
+  flex: 0 1 auto;
+  max-width: 62%;
+}
+.tg-row-meta {
+  white-space: nowrap;
+}
+.tg-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: rgba(var(--v-theme-on-surface), 0.3);
+}
+.tg-dot-new,
+.tg-dot-queued {
+  background: rgb(var(--v-theme-primary));
+}
+.tg-dot-transferred {
+  background: rgb(var(--v-theme-success));
+}
+.tg-dot-failed {
+  background: rgb(var(--v-theme-error));
+}
+.tg-dot-skipped {
+  background: rgba(var(--v-theme-on-surface), 0.25);
+}
+.tg-dot-ignored {
+  background: rgba(var(--v-theme-on-surface), 0.18);
+}
+
+.tg-detail {
+  margin: 2px 0 6px;
+  padding: 8px 12px;
+  border-left: 2px solid rgba(var(--v-theme-primary), 0.35);
+  background: rgba(var(--v-theme-surface-variant), 0.18);
+  border-radius: 0 6px 6px 0;
+}
+.tg-detail-line {
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.tg-detail-links {
+  margin-top: 6px;
+}
+.tg-detail-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.tg-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.tg-group {
+  background: rgba(var(--v-theme-surface), 0.6);
+  border-color: rgba(var(--v-theme-on-surface), 0.08) !important;
+}
+.tg-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+.tg-group-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.tg-group-meta {
+  margin-left: auto;
+  font-size: 11px;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+.tg-group-body {
+  border-top: 1px dashed rgba(var(--v-theme-on-surface), 0.1);
+  padding: 6px 12px 8px;
+}
+.tg-group-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 12px;
+}
+.tg-group-row-title {
+  flex: 1;
+  min-width: 0;
 }
 .tg-pager {
   display: flex;
@@ -764,7 +930,9 @@ onUnmounted(() => {
 .tg-stream-item {
   background: rgba(var(--v-theme-surface), 0.6);
   border-color: rgba(var(--v-theme-on-surface), 0.08) !important;
-  transition: background-color 0.15s, border-color 0.15s;
+  transition:
+    background-color 0.15s,
+    border-color 0.15s;
 }
 
 .tg-stream-item:hover {
@@ -800,6 +968,15 @@ onUnmounted(() => {
 @media (max-width: 600px) {
   .tg-monitor {
     padding: 10px;
+  }
+  .tg-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .tg-row {
+    min-height: 44px;
+  }
+  .tg-row-title {
+    max-width: 100%;
   }
   .tg-toolbar {
     flex-direction: column;
