@@ -1,6 +1,15 @@
 <template>
-  <div class="cloud-app-page">
+  <div :class="['cloud-app-page', { 'is-host-dialog-page': isHostDialogPage }]">
     <header class="app-header">
+      <v-btn
+        v-if="isHostDialogPage"
+        class="close-action"
+        variant="tonal"
+        color="primary"
+        icon="mdi-arrow-left"
+        title="返回"
+        aria-label="返回"
+        @click="closeHostDialog" />
       <div class="app-identity">
         <v-avatar color="primary" variant="tonal" size="38">
           <v-icon icon="mdi-cloud-sync-outline" size="20" />
@@ -387,7 +396,20 @@ const props = defineProps({
   api: { type: [Object, Function], default: () => ({}) },
   pluginId: { type: String, default: "CloudSubscribeX" },
   navKey: { type: String, default: "main" },
+  // MoviePilot 宿主以全屏弹窗打开插件页时传入；独立页面路由不传。
+  onClose: { type: Function, default: null },
 })
+
+// 宿主弹窗模式：手机端宿主弹窗盖住自己的底部导航，页面需自带返回入口。
+const isHostDialogPage = computed(() => typeof props.onClose === "function")
+
+function closeHostDialog() {
+  try {
+    props.onClose?.()
+  } catch (e) {
+    console.warn("关闭插件页失败", e)
+  }
+}
 
 const currentVersion = typeof __PLUGIN_VERSION__ !== "undefined" ? __PLUGIN_VERSION__ : "1.9.36";
 
@@ -954,6 +976,16 @@ async function notifyHistory() {
   color: rgb(var(--v-theme-on-background));
 }
 
+/* 宿主全屏弹窗内没有宿主顶栏，按整屏高度铺满，避免底部留出 64px 空白 */
+.cloud-app-page.is-host-dialog-page {
+  height: 100dvh;
+  max-height: 100dvh;
+}
+
+.close-action {
+  flex: 0 0 auto;
+}
+
 .app-header,
 .app-identity,
 .app-actions,
@@ -1279,6 +1311,11 @@ async function notifyHistory() {
     overscroll-behavior-y: contain;
     padding: 10px;
     padding-bottom: 88px !important;
+  }
+
+  /* 弹窗模式下宿主底部导航被弹窗盖住，不再为它预留 88px */
+  .cloud-app-page.is-host-dialog-page {
+    padding-bottom: calc(12px + env(safe-area-inset-bottom)) !important;
   }
 
   .app-header {
