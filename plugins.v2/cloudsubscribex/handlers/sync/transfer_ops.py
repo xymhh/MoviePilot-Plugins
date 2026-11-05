@@ -836,6 +836,7 @@ class TransferOpsMixin(OwnerDelegator):
             logger.warning(
                 f"{source.name}暂不支持分享转存，已跳过该资源：{share_url}"
             )
+            self._remember_transfer_failure(file_item, "当前网盘不支持分享转存")
             return False
         service = source.require(CloudDriveCapability.SHARE_TRANSFER) if source else self._share_transfer
         target_check_name = target_name or file_item.get("name")
@@ -853,6 +854,8 @@ class TransferOpsMixin(OwnerDelegator):
             ):
                 logger.debug(f"单文件转存返回失败但转存目录复核已存在，自愈复用：{save_path}/{target_check_name}")
                 return True
+        if not success:
+            self._remember_transfer_failure(file_item, "分享转存失败")
         return success
 
     def _ensure_share_transfer_available(self, provider_key: str) -> None:
