@@ -71,7 +71,7 @@
           @click="openConfig">
           <span class="action-label">设置</span>
         </v-btn>
-        <v-menu location="bottom end">
+        <v-menu location="bottom end" @update:model-value="handleMoreMenu">
           <template #activator="{ props: menuProps }">
             <v-btn
               v-bind="menuProps"
@@ -82,6 +82,13 @@
               title="更多工具" />
           </template>
           <v-list density="compact" class="more-action-list">
+            <v-list-item
+              :prepend-icon="transferPaused ? 'mdi-play-circle-outline' : 'mdi-pause-circle-outline'"
+              :title="transferPaused ? '恢复转存' : '暂停转存'"
+              :subtitle="transferPaused ? '已暂停：不再认领新任务' : '正在写文件不打断'"
+              :disabled="transferPauseLoading"
+              @click="toggleTransferPause" />
+            <v-divider class="my-1" />
             <v-list-item
               class="d-md-none"
               prepend-icon="mdi-link-variant-plus"
@@ -169,7 +176,6 @@
             :active="active"
             @stop-task="confirmStopTask"
             @start-sync="openImmediateSearchConfirm" />
-          <TaskCenterTable :api="api" :plugin-id="pluginId" :active="mainTab === 'tasks'" />
         </div>
         <div v-show="mainTab === 'tg'" class="workspace-pane tg-pane">
           <TgMonitor :api="api" :active="mainTab === 'tg'" />
@@ -374,7 +380,7 @@
 import {computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch} from "vue";
 import {useDisplay} from "vuetify";
 import RuntimeCard from "./dashboard/RuntimeCard.vue";
-import TaskCenterTable from "./dashboard/TaskCenterTable.vue";
+
 import HistoryTable from "./dashboard/HistoryTable.vue";
 import MediaHub from "./dashboard/MediaHub.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
@@ -413,6 +419,41 @@ function closeHostDialog() {
 
 const currentVersion = typeof __PLUGIN_VERSION__ !== "undefined" ? __PLUGIN_VERSION__ : "1.9.36";
 
+// 全局转存暂停开关（原任务中心按钮，2026-11-05 随任务中心移除后收进「更多」菜单）
+const transferPaused = ref(false)
+const transferPauseLoading = ref(false)
+
+async function loadTransferPause() {
+  try {
+    const result = await api.get(`plugin/${props.pluginId}/sync/pause`)
+    if (result?.success === false) return
+    transferPaused.value = Boolean(result?.data?.paused)
+  } catch (e) {
+    console.warn("读取转存暂停状态失败", e)
+  }
+}
+
+function handleMoreMenu(open) {
+  if (open) void loadTransferPause()
+}
+
+async function toggleTransferPause() {
+  if (transferPauseLoading.value) return
+  transferPauseLoading.value = true
+  try {
+    const result = await api.post(`plugin/${props.pluginId}/sync/pause`, {
+      paused: !transferPaused.value,
+    })
+    if (result?.success === false) throw new Error(result?.message || "切换暂停失败")
+    transferPaused.value = Boolean(result?.data?.paused)
+    notify(result?.message || (transferPaused.value ? "已暂停转存" : "已恢复转存"))
+  } catch (e) {
+    notify(e?.message || "切换暂停失败", "error")
+  } finally {
+    transferPauseLoading.value = false
+  }
+}
+
 async function forceReloadApp() {
   if (typeof window !== "undefined") {
     try {
@@ -438,7 +479,6 @@ const snackbarTextStyle = computed(() => ({
   color: `rgb(var(--v-theme-on-${fallbackType.value || "success"}))`,
 }))
 const mainTab = ref("hub")
-const showTaskCenter = ref(false)
 const historyStatuses = ref([])
 const offlineVisible = ref(false)
 const manualVisible = ref(false)
@@ -538,6 +578,7 @@ const {
 onMounted(() => {
   void loadSummary()
   void loadPage(false)
+  void loadTransferPause()
 })
 onUnmounted(() => {
   if (historyRefreshTimer !== null) window.clearTimeout(historyRefreshTimer)
@@ -1221,12 +1262,6 @@ async function notifyHistory() {
   flex: 0 0 auto;
   width: 100%;
   min-width: 0;
-}
-
-.task-pane :deep(.task-center-panel) {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
 }
 
 .history-pane {
