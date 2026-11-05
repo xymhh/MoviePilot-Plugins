@@ -111,13 +111,21 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       const result = await api.post(`plugin/${pluginId}/aired_counts`, { items });
       if (requestId !== airedRequestSequence || subscribesProgress.value !== snapshot) return;
       const counts = result?.data?.counts || {};
+      const latest = result?.data?.latest || {};
       if (!Object.keys(counts).length) return;
       subscribesProgress.value = snapshot.map((group) => {
         if (group.media_type === "movie" || !group.tmdb_id) return group;
         const season = group.season === null || group.season === undefined ? 1 : Number(group.season);
-        const value = counts[`${Number(group.tmdb_id)}:${season}`];
+        const key = `${Number(group.tmdb_id)}:${season}`;
+        const value = counts[key];
         if (value === undefined) return group;
-        return { ...group, aired_episodes: Math.max(0, Number(value) || 0) };
+        const air = latest[key] || {};
+        return {
+          ...group,
+          aired_episodes: Math.max(0, Number(value) || 0),
+          latest_air_date: air.air_date || group.latest_air_date || "",
+          latest_air_episode: Number(air.episode || group.latest_air_episode || 0),
+        };
       });
     } catch (error) {
       // 已播集数只是补充信息，TMDB 不可用时保留“—”即可，不打断主列表。

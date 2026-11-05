@@ -113,7 +113,7 @@
 
               <div class="card-time-row">
                 <span class="card-time-label">最新一集</span>
-                <span class="card-time" :title="getFullTime(group)">{{ getLatestEpisodeText(group) }}</span>
+                <span class="card-time" :title="getLatestAirTitle(group)">{{ getLatestAirText(group) }}</span>
               </div>
             </div>
           </div>
@@ -361,70 +361,28 @@ function metricNumber(value) {
   return Number.isFinite(number) && number >= 0 ? String(number) : "—"
 }
 
-function latestRecord(group) {
-  let latest = null
-  let latestTs = 0
-  for (const rec of group.records || []) {
-    if (!rec?.time) continue
-    const date = parseTime(String(rec.time))
-    const ts = date ? date.getTime() : 0
-    if (ts >= latestTs) {
-      latest = rec
-      latestTs = ts
-    }
-  }
-  return latest
-}
-
-function rawLastTime(group) {
-  const rec = latestRecord(group)
-  if (rec?.time) return String(rec.time)
-  if (group.last_updated_at) return String(group.last_updated_at)
-  const recs = group.records || []
-  return recs[0]?.time ? String(recs[0].time) : ""
-}
-
-function getLatestEpisodeText(group) {
-  const relative = getRelativeTime(group)
-  if (!relative) return "暂无记录"
-  const rec = latestRecord(group)
-  const episode = Number(rec?.episode || 0)
-  const season = Number(rec?.season || group.season || 0)
-  if (episode > 0) {
-    const prefix = season > 0 ? `S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}` : `E${episode}`
-    return `${prefix} · ${relative}`
-  }
-  return relative
-}
-
-function parseTime(value) {
-  if (!value) return null
-  const normalized = value.replace(" ", "T")
-  const date = new Date(normalized)
-  return Number.isNaN(date.getTime()) ? null : date
-}
-
-/** 相对时间：今天 11:15 / 昨天 / 3 天前 / 2026-10-28 */
-function getRelativeTime(group) {
-  const raw = rawLastTime(group)
+function formatAirDate(value) {
+  const raw = String(value || "").trim()
   if (!raw) return ""
-  const date = parseTime(raw)
-  if (!date) return ""
-  const now = new Date()
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate())
-  const diffDays = Math.floor((startOfToday - new Date(date.getFullYear(), date.getMonth(), date.getDate())) / 86400000)
-  if (diffDays === 0) {
-    const hh = String(date.getHours()).padStart(2, "0")
-    const mm = String(date.getMinutes()).padStart(2, "0")
-    return `今天 ${hh}:${mm}`
-  }
-  if (diffDays === 1) return "昨天"
-  if (diffDays > 1 && diffDays < 30) return `${diffDays} 天前`
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  return match ? `${match[1]}-${match[2]}-${match[3]}` : raw
 }
 
-function getFullTime(group) {
-  return rawLastTime(group)
+function getLatestAirText(group) {
+  const airDate = formatAirDate(group.latest_air_date)
+  if (!airDate) return "暂无开播信息"
+  const episode = Number(group.latest_air_episode || 0)
+  const season = Number(group.season || 0)
+  if (episode <= 0) return `${airDate} 开播`
+  const prefix = season > 0
+    ? `S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`
+    : `E${episode}`
+  return `${prefix} · ${airDate} 开播`
+}
+
+function getLatestAirTitle(group) {
+  const airDate = formatAirDate(group.latest_air_date)
+  return airDate ? `最新一集开播日期：${airDate}` : "暂无开播信息"
 }
 
 const imgErrors = ref({})

@@ -45,39 +45,45 @@ _RESOURCE_RECOMMEND_CACHE = create_platform_ttl_cache(
 _RESOURCE_DETAIL_CACHE = create_platform_ttl_cache(
     "resource:detail", maxsize=512, ttl=5 * 60
 )
-_AIRED_COUNT_CACHE = create_platform_ttl_cache(
+_AIRED_INFO_CACHE = create_platform_ttl_cache(
     "ui:aired", maxsize=512, ttl=6 * 60 * 60
 )
 
 
-def _aired_episode_count(tmdb_id: int, season: int, total_episodes: int = 0) -> int | None:
-    """按 TMDB 最后播出集估算当前季已播集数；失败返回 None，不阻塞页面。"""
+def _aired_episode_info(tmdb_id: int, season: int) -> dict | None:
+    """按 TMDB 本季已开播分集返回已播数量与最新一集开播日期；失败返回 None。"""
     try:
         from app.modules.themoviedb.tmdbapi import TmdbApi
 
-        info = TmdbApi().get_info(MediaType.TV, int(tmdb_id)) or {}
-        last = info.get("last_episode_to_air") or {}
-        last_season = int(last.get("season_number") or 0)
-        last_episode = int(last.get("episode_number") or 0)
-        if last_episode <= 0:
-            if str(info.get("status") or "").lower() in ("ended", "canceled"):
-                return max(0, int(total_episodes or 0))
-            return 0
-        if season > last_season:
-            return 0
-        if season < last_season:
-            season_count = 0
-            for item in info.get("seasons") or []:
-                try:
-                    if int(item.get("season_number") or -1) == int(season):
-                        season_count = int(item.get("episode_count") or 0)
-                        break
-                except (TypeError, ValueError):
-                    continue
-            return max(0, int(total_episodes or season_count or 0))
-        return max(0, min(last_episode, int(total_episodes or last_episode)))
-    except Exception as err:  # noqa: BLE001 - TMDB 不可用时只隐藏已播数字
-        logger.debug(f"查询已播集数失败 tmdb={tmdb_id} season={season}: {err}", exc_info=True)
+        detail = TmdbApi().get_tv_season_detail(int(tmdb_id), int(season)) or {}
+        today = datetime.date.today().isoformat()
+        aired: list[tuple[str, int]] = []
+        for item in detail.get("episodes") or []:
+            if not isinstance(item, dict):
+                continue
+            air_date = str(item.get("air_date") or "").strip()
+            if not air_date or air_date > today:
+                continue
+            try:
+                episode = int(item.get("episode_number") or 0)
+            except (TypeError, ValueError):
+                episode = 0
+            if episode > 0:
+                aired.append((air_date, episode))
+        if not aired:
+            return {"aired": 0, "episode": 0, "air_date": ""}
+        aired.sort(key=lambda item: (item[0], item[1]))
+        latest_date, latest_episode = aired[-1]
+        return {
+            "aired": len(aired),
+            "episode": latest_episode,
+            "air_date": latest_date,
+        }
+    except Exception as err:  # noqa: BLE001 - TMDB 不可用时只隐藏已播信息
+        logger.debug(
+            f"查询已播集数失败 tmdb={tmdb_id} season={season}: {err}",
+            exc_info=True,
+        )
         return None
 
 
@@ -351,9 +357,9 @@ class PageApi(OwnerDelegator):
         }
 
     def api_vue_aired_counts(self, payload: dict) -> dict:
-        """批量查询订阅的已播集数：前端先渲染列表，再异步补齐这一列。"""
+        """批量查询订阅的已播集数与最新一集开播日期：前端先渲染列表，再异步补齐。"""
         raw_items = (payload or {}).get("items") if isinstance(payload, dict) else []
-        entries: dict[str, tuple[int, int, int]] = {}
+        entries: dict[str, tuple[int, int]] = {}
         for item in raw_items or []:
             if not isinstance(item, dict):
                 continue
@@ -361,21 +367,28 @@ class PageApi(OwnerDelegator):
                 tmdb_id = int(item.get("tmdb_id") or 0)
                 raw_season = item.get("season")
                 season = 1 if raw_season in (None, "") else int(raw_season)
-                total_episodes = int(item.get("total_episodes") or 0)
             except (TypeError, ValueError):
                 continue
             if tmdb_id <= 0 or season < 0:
                 continue
-            entries[f"{tmdb_id}:{season}"] = (tmdb_id, season, total_episodes)
+            entries[f"{tmdb_id}:{season}"] = (tmdb_id, season)
 
         counts: dict[str, int] = {}
-        pending: list[tuple[str, int, int, int]] = []
-        for key, (tmdb_id, season, total_episodes) in entries.items():
-            cached = _AIRED_COUNT_CACHE.get(key)
-            if cached is not None:
+        latest: dict[str, dict] = {}
+        pending: list[tuple[str, int, int]] = []
+        for key, (tmdb_id, season) in entries.items():
+            cached = _AIRED_INFO_CACHE.get(key)
+            if isinstance(cached, dict):
+                counts[key] = max(0, int(cached.get("aired") or 0))
+                if cached.get("air_date"):
+                    latest[key] = {
+                        "episode": int(cached.get("episode") or 0),
+                        "air_date": str(cached.get("air_date")),
+                    }
+            elif cached is not None:
                 counts[key] = max(0, int(cached))
             else:
-                pending.append((key, tmdb_id, season, total_episodes))
+                pending.append((key, tmdb_id, season))
 
         if pending:
             from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -383,26 +396,32 @@ class PageApi(OwnerDelegator):
             executor = ThreadPoolExecutor(max_workers=min(6, len(pending)))
             futures = {
                 executor.submit(
-                    _aired_episode_count, tmdb_id, season, total_episodes
+                    _aired_episode_info, tmdb_id, season
                 ): key
-                for key, tmdb_id, season, total_episodes in pending
+                for key, tmdb_id, season in pending
             }
             try:
                 for future in as_completed(futures, timeout=8):
                     key = futures[future]
                     try:
-                        value = future.result()
+                        info = future.result()
                     except Exception:  # noqa: BLE001 - 单条失败不影响其它订阅
-                        value = None
-                    if value is not None:
-                        counts[key] = max(0, int(value))
-                        _AIRED_COUNT_CACHE.set(key, counts[key])
+                        info = None
+                    if not isinstance(info, dict):
+                        continue
+                    counts[key] = max(0, int(info.get("aired") or 0))
+                    if info.get("air_date"):
+                        latest[key] = {
+                            "episode": int(info.get("episode") or 0),
+                            "air_date": str(info.get("air_date")),
+                        }
+                    _AIRED_INFO_CACHE.set(key, info)
             except Exception as err:  # noqa: BLE001 - 超时后保留已有结果
                 logger.debug(f"批量查询已播集数超时：{err}", exc_info=True)
             finally:
                 executor.shutdown(wait=False)
 
-        return {"success": True, "data": {"counts": counts}}
+        return {"success": True, "data": {"counts": counts, "latest": latest}}
 
     def api_vue_image_proxy(self, url: str):
         """插件内置图片代理：由服务端容器拉取外部 TMDB 海报并缓存，绕过浏览器网络阻断与 401。"""
