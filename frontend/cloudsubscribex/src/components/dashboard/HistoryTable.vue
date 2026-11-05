@@ -322,7 +322,10 @@
               <span class="text-warning">待确认 {{ item.unverified_count }}</span>
             </template>
           </div>
-          <div v-if="failureReasonText(item)" class="failure-reason-summary text-caption text-error mt-1">
+          <div
+            v-if="failureReasonText(item)"
+            class="failure-reason-summary text-caption text-error mt-1"
+            :title="failureReasonTooltip(item)">
             {{ failureReasonText(item) }}
           </div>
         </template>
@@ -647,7 +650,10 @@
                       {{ item.latest_time || "-" }}
                     </span>
                   </div>
-                  <div v-if="failureReasonText(item)" class="history-mobile-failure text-caption text-error mt-1">
+                  <div
+                    v-if="failureReasonText(item)"
+                    class="history-mobile-failure text-caption text-error mt-1"
+                    :title="failureReasonTooltip(item)">
                     {{ failureReasonText(item) }}
                   </div>
                 </div>
@@ -1092,15 +1098,34 @@ function skipReasonText(item) {
 function failureReasonText(item) {
   const reasons = item?.failure_reasons;
   if (!reasons || typeof reasons !== "object") return "";
+  const entries = Object.entries(reasons)
+    .filter(([, count]) => Number(count) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]));
+  if (!entries.length) return "";
+  const head = entries
+    .slice(0, 2)
+    .map(([label, count]) => `${label} ×${count}`)
+    .join(" · ");
+  return entries.length > 2 ? `${head} 等` : head;
+}
+
+function failureReasonTooltip(item) {
+  const reasons = item?.failure_reasons;
+  if (!reasons || typeof reasons !== "object") return "";
   return Object.entries(reasons)
     .filter(([, count]) => Number(count) > 0)
+    .sort((a, b) => Number(b[1]) - Number(a[1]))
     .map(([label, count]) => `${label} ×${count}`)
     .join(" · ");
 }
 
 function recordFailureReason(record) {
   if (!record || record.status !== "失败") return "";
-  return String(record.failure_reason || record.failure_label || "未记录原因").trim();
+  const label = String(record.failure_label || "").trim();
+  if (label) return label;
+  const raw = String(record.failure_reason || "").trim();
+  if (!raw) return "未记录原因";
+  return raw.length > 16 ? `${raw.slice(0, 16)}…` : raw;
 }
 
 function resourceTypeColor(value) {

@@ -892,17 +892,18 @@ class HistoryService(OwnerDelegator):
     def _aggregate_failure_reasons(
             records: List[Dict[str, Any]]
     ) -> Dict[str, int]:
-        """失败原因分布：优先原始原因，缺原因时用分类标签兜底。"""
+        """失败原因分布：用短标签聚合，避免历史页展示过长。"""
         reasons: Dict[str, int] = {}
         for record in records or []:
             if str(record.get("status") or "") != "失败":
                 continue
-            label = (
-                str(record.get("failure_reason") or "").strip()
-                or str(record.get("failure_label") or "").strip()
-                or "未记录原因"
+            label = str(record.get("failure_label") or "").strip()
+            if not label:
+                raw = str(record.get("failure_reason") or "").strip()
+                label = (raw[:16] + "…") if len(raw) > 16 else raw
+            reasons[label or "未记录原因"] = (
+                reasons.get(label or "未记录原因", 0) + 1
             )
-            reasons[label] = reasons.get(label, 0) + 1
         return reasons
 
     @staticmethod

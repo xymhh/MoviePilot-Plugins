@@ -131,10 +131,6 @@
           <v-tab value="hub">
             <v-icon icon="mdi-filmstrip-box" size="small" class="mr-2" />
             追更工作台
-          </v-tab>
-          <v-tab value="tasks">
-            <v-icon icon="mdi-format-list-checks" size="small" class="mr-2" />
-            任务调度
             <v-chip v-if="activeTaskCount" size="x-small" class="ml-2">
               {{ activeTaskCount }}
             </v-chip>
@@ -159,6 +155,13 @@
 
       <div class="workspace-window">
         <div v-show="mainTab === 'hub'" class="workspace-pane hub-pane">
+          <RuntimeCard
+            v-if="activeTaskCount"
+            class="runtime-panel"
+            :runtime="runtime"
+            :active="active"
+            @stop-task="confirmStopTask"
+            @start-sync="openImmediateSearchConfirm" />
           <MediaHub
             :items="subscribesProgress.length ? subscribesProgress : historyGroups"
             :is-subscribe-mode="Boolean(subscribesProgress.length)"
@@ -168,14 +171,6 @@
             @retry="confirmRetryHistory"
             @retry-failed="confirmRetryFailedHistory"
             @delete="confirmDeleteHistory" />
-        </div>
-        <div v-show="mainTab === 'tasks'" class="workspace-pane task-pane">
-          <RuntimeCard
-            class="runtime-panel mb-4"
-            :runtime="runtime"
-            :active="active"
-            @stop-task="confirmStopTask"
-            @start-sync="openImmediateSearchConfirm" />
         </div>
         <div v-show="mainTab === 'tg'" class="workspace-pane tg-pane">
           <TgMonitor :api="api" :active="mainTab === 'tg'" />
@@ -1250,11 +1245,16 @@ async function notifyHistory() {
   overflow: hidden;
 }
 
-.task-pane {
+.hub-pane {
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 12px;
+}
+
+.hub-pane :deep(.media-hub-root) {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .runtime-panel {
@@ -1461,9 +1461,9 @@ async function notifyHistory() {
     overflow: visible;
   }
 
-  .task-pane :deep(.runtime-panel),
+  .hub-pane :deep(.runtime-panel),
   .history-view-switch,
-  .task-pane :deep(.task-list),
+  .hub-pane :deep(.task-list),
   .workspace-history .history-pane :deep(.history-table-root),
   .workspace-history .history-pane :deep(.history-mobile-list),
   .workspace-history .history-pane :deep(.history-mobile-scroll) {
@@ -1480,7 +1480,7 @@ async function notifyHistory() {
     max-width: 100%;
   }
 
-  .task-pane :deep(.runtime-panel) {
+  .hub-pane :deep(.runtime-panel) {
     display: flex;
     width: 100%;
     min-height: 0;
@@ -1513,7 +1513,7 @@ async function notifyHistory() {
     text-transform: none;
   }
 
-  .task-pane {
+  .hub-pane {
     padding: 8px;
   }
 }
