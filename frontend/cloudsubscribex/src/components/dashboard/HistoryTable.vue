@@ -528,7 +528,7 @@
                   </td>
                 </tr>
                 <tr v-if="item.skipped_count" class="bg-surface-variant-subtle">
-                  <td colspan="8" class="pa-3">
+                  <td colspan="10" class="pa-3">
                     <div class="d-flex align-center justify-space-between flex-wrap ga-2">
                       <div class="d-flex align-center ga-2 text-caption">
                         <v-icon icon="mdi-information-outline" color="warning" size="16" />
