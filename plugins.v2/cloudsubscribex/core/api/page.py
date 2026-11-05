@@ -45,6 +45,40 @@ _RESOURCE_RECOMMEND_CACHE = create_platform_ttl_cache(
 _RESOURCE_DETAIL_CACHE = create_platform_ttl_cache(
     "resource:detail", maxsize=512, ttl=5 * 60
 )
+_AIRED_COUNT_CACHE = create_platform_ttl_cache(
+    "ui:aired", maxsize=512, ttl=6 * 60 * 60
+)
+
+
+def _aired_episode_count(tmdb_id: int, season: int, total_episodes: int = 0) -> int | None:
+    """按 TMDB 最后播出集估算当前季已播集数；失败返回 None，不阻塞页面。"""
+    try:
+        from app.modules.themoviedb.tmdbapi import TmdbApi
+
+        info = TmdbApi().get_info(MediaType.TV, int(tmdb_id)) or {}
+        last = info.get("last_episode_to_air") or {}
+        last_season = int(last.get("season_number") or 0)
+        last_episode = int(last.get("episode_number") or 0)
+        if last_episode <= 0:
+            if str(info.get("status") or "").lower() in ("ended", "canceled"):
+                return max(0, int(total_episodes or 0))
+            return 0
+        if season > last_season:
+            return 0
+        if season < last_season:
+            season_count = 0
+            for item in info.get("seasons") or []:
+                try:
+                    if int(item.get("season_number") or -1) == int(season):
+                        season_count = int(item.get("episode_count") or 0)
+                        break
+                except (TypeError, ValueError):
+                    continue
+            return max(0, int(total_episodes or season_count or 0))
+        return max(0, min(last_episode, int(total_episodes or last_episode)))
+    except Exception as err:  # noqa: BLE001 - TMDB 不可用时只隐藏已播数字
+        logger.debug(f"查询已播集数失败 tmdb={tmdb_id} season={season}: {err}", exc_info=True)
+        return None
 
 
 def _recognized_season_counts(recognized) -> dict[int, int]:
@@ -315,6 +349,60 @@ class PageApi(OwnerDelegator):
             "success": True,
             "data": self._build_subscribes_progress([]),
         }
+
+    def api_vue_aired_counts(self, payload: dict) -> dict:
+        """批量查询订阅的已播集数：前端先渲染列表，再异步补齐这一列。"""
+        raw_items = (payload or {}).get("items") if isinstance(payload, dict) else []
+        entries: dict[str, tuple[int, int, int]] = {}
+        for item in raw_items or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                tmdb_id = int(item.get("tmdb_id") or 0)
+                raw_season = item.get("season")
+                season = 1 if raw_season in (None, "") else int(raw_season)
+                total_episodes = int(item.get("total_episodes") or 0)
+            except (TypeError, ValueError):
+                continue
+            if tmdb_id <= 0 or season < 0:
+                continue
+            entries[f"{tmdb_id}:{season}"] = (tmdb_id, season, total_episodes)
+
+        counts: dict[str, int] = {}
+        pending: list[tuple[str, int, int, int]] = []
+        for key, (tmdb_id, season, total_episodes) in entries.items():
+            cached = _AIRED_COUNT_CACHE.get(key)
+            if cached is not None:
+                counts[key] = max(0, int(cached))
+            else:
+                pending.append((key, tmdb_id, season, total_episodes))
+
+        if pending:
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            executor = ThreadPoolExecutor(max_workers=min(6, len(pending)))
+            futures = {
+                executor.submit(
+                    _aired_episode_count, tmdb_id, season, total_episodes
+                ): key
+                for key, tmdb_id, season, total_episodes in pending
+            }
+            try:
+                for future in as_completed(futures, timeout=8):
+                    key = futures[future]
+                    try:
+                        value = future.result()
+                    except Exception:  # noqa: BLE001 - 单条失败不影响其它订阅
+                        value = None
+                    if value is not None:
+                        counts[key] = max(0, int(value))
+                        _AIRED_COUNT_CACHE.set(key, counts[key])
+            except Exception as err:  # noqa: BLE001 - 超时后保留已有结果
+                logger.debug(f"批量查询已播集数超时：{err}", exc_info=True)
+            finally:
+                executor.shutdown(wait=False)
+
+        return {"success": True, "data": {"counts": counts}}
 
     def api_vue_image_proxy(self, url: str):
         """插件内置图片代理：由服务端容器拉取外部 TMDB 海报并缓存，绕过浏览器网络阻断与 401。"""

@@ -40,7 +40,7 @@
     <!-- 加载中状态 -->
     <div v-if="loading && (!items || !items.length)" class="d-flex flex-column align-center justify-center py-12">
       <v-progress-circular indeterminate color="primary" size="40" />
-      <span class="text-caption text-medium-emphasis mt-2">正在从 MoviePilot 同步追更进度大屏...</span>
+      <span class="text-caption text-medium-emphasis mt-2">正在从 MoviePilot 同步追更列表...</span>
     </div>
 
     <!-- 空数据提示 -->
@@ -85,17 +85,37 @@
             </h3>
             <p class="card-sub">{{ getSubline(group) }}</p>
 
-            <div class="card-progress">
-              <div class="progress-head">
-                <span class="progress-count">{{ getProgressCount(group) }}</span>
-                <span :class="['progress-status', statusTone(group)]">{{ getStatusLabel(group) }}</span>
+            <div class="card-footer">
+              <div v-if="!isMovie(group)" class="card-metrics">
+                <div class="metric">
+                  <span class="metric-value">{{ metricNumber(group.total_episodes) }}</span>
+                  <span class="metric-label">全集</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-value is-aired">{{ metricNumber(group.aired_episodes) }}</span>
+                  <span class="metric-label">已播</span>
+                </div>
+                <div class="metric">
+                  <span class="metric-value is-success">{{ metricNumber(libraryCount(group)) }}</span>
+                  <span class="metric-label">入库</span>
+                </div>
               </div>
-              <div class="progress-track">
-                <div class="progress-fill" :class="statusTone(group)" :style="{ width: `${calcLibraryPct(group)}%` }" />
+
+              <div class="card-progress">
+                <div class="progress-head">
+                  <span class="progress-count">{{ getProgressCount(group) }}</span>
+                  <span :class="['progress-status', statusTone(group)]">{{ getStatusLabel(group) }}</span>
+                </div>
+                <div class="progress-track">
+                  <div class="progress-fill" :class="statusTone(group)" :style="{ width: `${calcLibraryPct(group)}%` }" />
+                </div>
+              </div>
+
+              <div class="card-time-row">
+                <span class="card-time-label">最新一集</span>
+                <span class="card-time" :title="getFullTime(group)">{{ getLatestEpisodeText(group) }}</span>
               </div>
             </div>
-
-            <span class="card-time" :title="getFullTime(group)">{{ getRelativeTime(group) }}</span>
           </div>
         </div>
       </v-card>
@@ -114,7 +134,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from "vue"
+import { ref, computed, watch } from "vue"
 import MediaDrawer from "./MediaDrawer.vue"
 import {
   isTaskActive,
@@ -156,6 +176,23 @@ const taskIndex = computed(() => {
 })
 
 const selectedTask = computed(() => taskForGroup(selectedGroup.value))
+
+watch(
+  () => props.items,
+  (items) => {
+    if (!selectedGroup.value) return
+    const current = selectedGroup.value
+    const next = (items || []).find(
+      (item) =>
+        (current.subscribe_id !== undefined &&
+          current.subscribe_id !== null &&
+          item.subscribe_id === current.subscribe_id) ||
+        (normalizeTitle(item.title || item.name) === normalizeTitle(current.title || current.name) &&
+          Number(item.season || 0) === Number(current.season || 0)),
+    )
+    if (next) selectedGroup.value = next
+  },
+)
 
 function normalizeTitle(value) {
   return String(value || "").trim().toLowerCase().replace(/\s+/g, "")
@@ -318,10 +355,46 @@ function formatMissingRange(episodes) {
   return `${ranges.slice(0, 3).join(",")} 等 ${ranges.length} 段`
 }
 
+function metricNumber(value) {
+  if (value === null || value === undefined || value === "") return "—"
+  const number = Number(value)
+  return Number.isFinite(number) && number >= 0 ? String(number) : "—"
+}
+
+function latestRecord(group) {
+  let latest = null
+  let latestTs = 0
+  for (const rec of group.records || []) {
+    if (!rec?.time) continue
+    const date = parseTime(String(rec.time))
+    const ts = date ? date.getTime() : 0
+    if (ts >= latestTs) {
+      latest = rec
+      latestTs = ts
+    }
+  }
+  return latest
+}
+
 function rawLastTime(group) {
+  const rec = latestRecord(group)
+  if (rec?.time) return String(rec.time)
   if (group.last_updated_at) return String(group.last_updated_at)
   const recs = group.records || []
   return recs[0]?.time ? String(recs[0].time) : ""
+}
+
+function getLatestEpisodeText(group) {
+  const relative = getRelativeTime(group)
+  if (!relative) return "暂无记录"
+  const rec = latestRecord(group)
+  const episode = Number(rec?.episode || 0)
+  const season = Number(rec?.season || group.season || 0)
+  if (episode > 0) {
+    const prefix = season > 0 ? `S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}` : `E${episode}`
+    return `${prefix} · ${relative}`
+  }
+  return relative
 }
 
 function parseTime(value) {
@@ -552,8 +625,7 @@ function getInitial(title) {
 }
 
 .card-progress {
-  margin-top: auto;
-  padding-top: 12px;
+  margin-top: 10px;
 }
 
 .progress-head {
@@ -645,11 +717,72 @@ function getInitial(title) {
   background: rgba(var(--v-theme-on-surface), 0.4);
 }
 
-.card-time {
+.card-footer {
+  margin-top: auto;
+}
+
+.card-metrics {
+  display: flex;
+  gap: 6px;
+}
+
+.metric {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 5px 4px 4px;
+  border-radius: 7px;
+  background: rgba(var(--v-theme-on-surface), 0.045);
+  text-align: center;
+}
+
+.metric-value {
+  display: block;
+  color: rgb(var(--v-theme-on-surface));
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+
+.metric-value.is-aired {
+  color: rgb(var(--v-theme-info));
+}
+
+.metric-value.is-success {
+  color: rgb(var(--v-theme-success));
+}
+
+.metric-label {
+  display: block;
+  margin-top: 2px;
+  color: rgba(var(--v-theme-on-surface), 0.5);
+  font-size: 0.625rem;
+  line-height: 1;
+}
+
+.card-time-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   margin-top: 8px;
-  color: rgba(var(--v-theme-on-surface), 0.4);
+  min-width: 0;
+}
+
+.card-time-label {
+  flex: 0 0 auto;
+  color: rgba(var(--v-theme-on-surface), 0.42);
   font-size: 0.6875rem;
   line-height: 1.2;
+}
+
+.card-time {
+  min-width: 0;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 640px) {

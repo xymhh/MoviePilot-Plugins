@@ -42,6 +42,9 @@
             <v-chip v-else-if="group.subscribe_id" size="x-small" color="info" variant="tonal">
               监控中
             </v-chip>
+            <v-chip v-if="airedCount !== null" size="x-small" variant="tonal" color="info">
+              已播 {{ airedCount }} 集
+            </v-chip>
             <v-chip size="x-small" variant="tonal" color="success">
               已入库 {{ libraryCount }} 集
             </v-chip>
@@ -166,10 +169,11 @@
           </v-expand-transition>
         </div>
 
-        <!-- 2. 转存流水记录（如存在） -->
+        <!-- 2. 追更记录：成功 / 跳过 / 失败都在同一条时间线上 -->
         <div v-if="(group.records || []).length" class="records-log-section mt-4">
           <div class="d-flex align-center justify-space-between mb-2">
-            <span class="text-subtitle-2 font-weight-bold">转存流水与跳过原因 ({{ (group.records || []).length }})</span>
+            <span class="text-subtitle-2 font-weight-bold">追更记录 ({{ (group.records || []).length }})</span>
+            <span class="text-caption text-medium-emphasis">成功绿色 · 失败红色</span>
           </div>
 
           <div class="record-list">
@@ -177,38 +181,65 @@
               v-for="(rec, idx) in group.records || []"
               :key="recordKey(rec, idx)"
               variant="outlined"
-              class="record-item mb-2 pa-3">
-              <div class="d-flex align-start justify-space-between ga-2">
+              :class="['record-item', 'mb-2', 'pa-3', recordToneClass(rec)]">
+              <div class="record-layout">
                 <div class="record-main min-w-0">
-                  <div class="d-flex align-center ga-2 mb-1">
+                  <div class="record-head">
                     <v-chip
                       size="x-small"
                       :color="recordStatusColor(rec)"
                       variant="tonal"
-                      class="font-weight-medium">
-                      {{ rec.status || "已转存" }}
+                      class="font-weight-bold record-status-chip">
+                      {{ recordStatusLabel(rec) }}
                     </v-chip>
-                    <span v-if="rec.season || rec.episode" class="text-caption font-weight-bold text-primary">
+                    <span v-if="rec.season || rec.episode" class="record-ep">
                       {{ formatSeasonEpisode(rec) }}
                     </span>
-                    <span class="text-caption text-medium-emphasis">
-                      {{ rec.time || "-" }}
+                    <span class="record-time">{{ rec.time || "-" }}</span>
+                    <v-spacer />
+                    <span v-if="rec.size" class="record-size">{{ formatSize(rec.size) }}</span>
+                  </div>
+
+                  <div class="record-filename text-body-2" :title="rec.file_name || rec.title">
+                    {{ rec.file_name || rec.title || "未知文件" }}
+                  </div>
+
+                  <div class="record-meta">
+                    <span v-if="sourceLabel(rec)" class="record-meta-item">
+                      <v-icon icon="mdi-source-branch" size="12" class="mr-1" />
+                      {{ sourceLabel(rec) }}
                     </span>
+                    <span v-if="rec.resource_type" class="record-meta-item">
+                      <v-icon icon="mdi-cloud-outline" size="12" class="mr-1" />
+                      {{ resourceTypeLabel(rec.resource_type) }}
+                    </span>
+                    <a
+                      v-if="rec.source_link"
+                      :href="rec.source_link"
+                      target="_blank"
+                      rel="noopener"
+                      class="record-meta-link"
+                      @click.stop>
+                      查看来源
+                    </a>
+                    <a
+                      v-if="rec.share_url"
+                      :href="rec.share_url"
+                      target="_blank"
+                      rel="noopener"
+                      class="record-meta-link"
+                      @click.stop>
+                      打开分享
+                    </a>
                   </div>
-                  <div class="record-filename text-body-2 text-truncate" :title="rec.file_name">
-                    {{ rec.file_name || "未知文件" }}
-                  </div>
-                  <div class="record-meta mt-1 d-flex align-center ga-2 text-caption text-medium-emphasis">
-                    <span v-if="rec.size">{{ formatSize(rec.size) }}</span>
-                    <span v-if="rec.source_type || rec.source">来源: {{ rec.source_type || rec.source }}</span>
-                    <span v-if="rec.resource_type">网盘: {{ resourceTypeLabel(rec.resource_type) }}</span>
-                  </div>
-                  <div v-if="rec.reason" class="record-reason text-caption text-warning mt-1">
-                    ⚠️ 原因: {{ rec.reason }}
+
+                  <div v-if="rec.reason" :class="['record-reason', recordReasonTone(rec)]">
+                    <v-icon :icon="recordReasonIcon(rec)" size="13" class="mr-1" />
+                    <span>{{ rec.reason }}</span>
                   </div>
                 </div>
 
-                <div class="record-actions d-flex align-center ga-1">
+                <div class="record-actions d-flex flex-column ga-1">
                   <v-btn
                     icon="mdi-refresh"
                     size="x-small"
@@ -233,7 +264,7 @@
         <!-- 3. 空提示（如果既无分集也无流水） -->
         <div v-else-if="!episodesList.length" class="empty-drawer text-center py-8 text-medium-emphasis">
           <v-icon icon="mdi-information-outline" size="40" class="mb-2" />
-          <div>该订阅当前没有分集与转存记录</div>
+          <div>该订阅当前没有分集与追更记录</div>
         </div>
       </v-card-text>
 
@@ -337,6 +368,13 @@ const totalCount = computed(() => {
     return Number(props.group.total_episodes) || 0
   }
   return (props.group?.records || []).length
+})
+
+const airedCount = computed(() => {
+  const value = props.group?.aired_episodes
+  if (value === null || value === undefined || value === "") return null
+  const number = Number(value)
+  return Number.isFinite(number) ? Math.max(0, number) : null
 })
 
 const libraryCount = computed(() => {
@@ -449,11 +487,65 @@ function formatSeasonEpisode(rec) {
   return parts.join("")
 }
 
+function isRecordSuccess(rec) {
+  const status = String(rec?.status || "").trim()
+  return !status || status === "成功" || status === "完成"
+}
+
+function isRecordSkipped(rec) {
+  const status = String(rec?.status || "")
+  return status.includes("跳过") || status.includes("未命中")
+}
+
 function recordStatusColor(rec) {
-  const status = rec.status
-  if (!status || status === "成功" || status === "完成") return "success"
-  if (status.includes("跳过") || status.includes("未命中")) return "warning"
+  if (isRecordSuccess(rec)) return "success"
+  if (isRecordSkipped(rec)) return "warning"
   return "error"
+}
+
+function recordStatusLabel(rec) {
+  const status = String(rec?.status || "").trim()
+  if (!status) return "已转存"
+  if (status === "完成") return "成功"
+  return status
+}
+
+function recordToneClass(rec) {
+  if (isRecordSuccess(rec)) return "is-success"
+  if (isRecordSkipped(rec)) return "is-warning"
+  return "is-error"
+}
+
+function recordReasonTone(rec) {
+  return recordToneClass(rec)
+}
+
+function recordReasonIcon(rec) {
+  if (isRecordSuccess(rec)) return "mdi-check-circle-outline"
+  if (isRecordSkipped(rec)) return "mdi-skip-next-circle-outline"
+  return "mdi-alert-circle-outline"
+}
+
+function sourceLabel(rec) {
+  const raw = String(rec?.source_type || rec?.source || "").trim()
+  const lower = raw.toLowerCase()
+  const via = String(rec?.discovered_via || "").trim()
+  const viaLower = via.toLowerCase()
+  if (lower === "tg" || viaLower.startsWith("tg:")) {
+    const detail = via.replace(/^tg:/i, "")
+    const [channel, messageId] = detail.split("/")
+    const channelText = channel ? `TG频道 ${channel}` : "TG频道"
+    return messageId ? `${channelText} · 消息 ${messageId}` : channelText
+  }
+  if (["manual", "手动添加", "手动资源"].includes(lower)) return "TG频道"
+  if (lower === "push") return "频道推送"
+  if (lower === "subscribe" || lower.startsWith("subscribe|")) {
+    const name = raw.split("|")[1]
+    return name ? `订阅自动 · ${name}` : "订阅自动"
+  }
+  if (lower === "moviepilot") return "MoviePilot"
+  if (lower === "hdhive") return "HDHive"
+  return raw
 }
 
 function resourceTypeLabel(type) {
@@ -629,13 +721,128 @@ function retryKey(rec) {
 
 .record-item {
   border-color: rgba(var(--v-theme-on-surface), 0.12);
+  border-left-width: 3px;
   background: rgba(var(--v-theme-surface-variant), 0.25);
   border-radius: 8px;
 }
 
+.record-item.is-success {
+  border-left-color: rgba(var(--v-theme-success), 0.85);
+}
+
+.record-item.is-warning {
+  border-left-color: rgba(var(--v-theme-warning), 0.85);
+}
+
+.record-item.is-error {
+  border-left-color: rgba(var(--v-theme-error), 0.85);
+}
+
+.record-layout {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.record-main {
+  flex: 1 1 auto;
+}
+
+.record-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-bottom: 4px;
+}
+
+.record-status-chip {
+  letter-spacing: 0;
+}
+
+.record-ep {
+  color: rgb(var(--v-theme-primary));
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.record-time,
+.record-size {
+  color: rgba(var(--v-theme-on-surface), 0.5);
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.record-size {
+  margin-left: auto;
+}
+
 .record-filename {
+  display: -webkit-box;
+  overflow: hidden;
+  color: rgba(var(--v-theme-on-surface), 0.86);
   font-weight: 500;
+  line-height: 1.35;
   word-break: break-all;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.record-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 10px;
+  margin-top: 5px;
+  color: rgba(var(--v-theme-on-surface), 0.55);
+  font-size: 0.7rem;
+}
+
+.record-meta-item {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.record-meta-link {
+  color: rgb(var(--v-theme-primary));
+  font-size: 0.7rem;
+  text-decoration: none;
+}
+
+.record-meta-link:hover {
+  text-decoration: underline;
+}
+
+.record-reason {
+  display: flex;
+  align-items: flex-start;
+  gap: 2px;
+  margin-top: 6px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.record-reason.is-success {
+  color: rgb(var(--v-theme-success));
+  background: rgba(var(--v-theme-success), 0.09);
+}
+
+.record-reason.is-warning {
+  color: rgb(var(--v-theme-warning));
+  background: rgba(var(--v-theme-warning), 0.09);
+}
+
+.record-reason.is-error {
+  color: rgb(var(--v-theme-error));
+  background: rgba(var(--v-theme-error), 0.09);
+}
+
+.record-actions {
+  flex: 0 0 auto;
 }
 
 .max-w-300 {

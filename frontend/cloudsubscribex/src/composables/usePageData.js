@@ -65,6 +65,7 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
 
   let pageRequestSequence = 0;
   let summaryRequestSequence = 0;
+  let airedRequestSequence = 0;
 
   function normalizeQueryList(value) {
     return [...new Set((Array.isArray(value) ? value : []).map((item) => String(item || "").trim()).filter(Boolean))];
@@ -87,6 +88,43 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     return query.toString();
   }
 
+  async function loadAiredCounts() {
+    const snapshot = subscribesProgress.value;
+    const items = [];
+    const seen = new Set();
+    for (const group of snapshot) {
+      if (group.media_type === "movie") continue;
+      const tmdbId = Number(group.tmdb_id || 0);
+      if (!tmdbId) continue;
+      const season = group.season === null || group.season === undefined ? 1 : Number(group.season);
+      const totalEpisodes = Number(group.total_episodes || 0);
+      if (!Number.isFinite(season) || season < 0) continue;
+      const key = `${tmdbId}:${season}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({ tmdb_id: tmdbId, season, total_episodes: totalEpisodes });
+    }
+    if (!items.length) return;
+
+    const requestId = ++airedRequestSequence;
+    try {
+      const result = await api.post(`plugin/${pluginId}/aired_counts`, { items });
+      if (requestId !== airedRequestSequence || subscribesProgress.value !== snapshot) return;
+      const counts = result?.data?.counts || {};
+      if (!Object.keys(counts).length) return;
+      subscribesProgress.value = snapshot.map((group) => {
+        if (group.media_type === "movie" || !group.tmdb_id) return group;
+        const season = group.season === null || group.season === undefined ? 1 : Number(group.season);
+        const value = counts[`${Number(group.tmdb_id)}:${season}`];
+        if (value === undefined) return group;
+        return { ...group, aired_episodes: Math.max(0, Number(value) || 0) };
+      });
+    } catch (error) {
+      // 已播集数只是补充信息，TMDB 不可用时保留“—”即可，不打断主列表。
+      console.debug("加载已播集数失败", error);
+    }
+  }
+
   async function loadPage(showLoading = true) {
     const requestId = ++pageRequestSequence;
     if (showLoading) loading.value = true;
@@ -99,6 +137,7 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       const pageData = data.history_page || {};
       historyGroups.value = Array.isArray(data.history_groups) ? data.history_groups : [];
       subscribesProgress.value = Array.isArray(data.subscribes_progress) ? data.subscribes_progress : [];
+      void loadAiredCounts();
       embyPlayItems.value = data.emby_play_items || {};
       Object.assign(historyPage, {
         page: Math.max(1, Number(pageData.page || 1)),

@@ -130,7 +130,7 @@
         <v-tabs v-model="mainTab" color="primary" class="workspace-tabs">
           <v-tab value="hub">
             <v-icon icon="mdi-filmstrip-box" size="small" class="mr-2" />
-            追更工作台
+            追更列表
             <v-chip v-if="activeTaskCount" size="x-small" class="ml-2">
               {{ activeTaskCount }}
             </v-chip>
