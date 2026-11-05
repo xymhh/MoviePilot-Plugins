@@ -100,6 +100,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "获取历史记录分页数据",
             },
             {
+                "path": "/aired_counts",
+                "endpoint": self.api_vue_aired_counts,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "批量查询订阅已播集数与最新开播日期",
+            },
+            {
                 "path": "/doctor",
                 "endpoint": self.api_vue_doctor,
                 "methods": ["GET"],
