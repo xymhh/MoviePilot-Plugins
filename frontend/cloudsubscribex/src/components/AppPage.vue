@@ -141,7 +141,7 @@
           </v-tab>
           <v-tab value="history">
             <v-icon icon="mdi-clipboard-text-clock-outline" size="small" class="mr-2" />
-            转存台账
+            历史记录
             <v-chip v-if="historyStats.total" size="x-small" class="ml-2">
               {{ historyStats.total }}
             </v-chip>
@@ -385,7 +385,6 @@ import HistoryTable from "./dashboard/HistoryTable.vue";
 import MediaHub from "./dashboard/MediaHub.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
 import OrganizePanel from "./dashboard/OrganizePanel.vue";
-import CandidateLedgerPanel from "./dashboard/CandidateLedgerPanel.vue";
 import DoctorDialog from "./dialogs/DoctorDialog.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";
@@ -1279,14 +1278,9 @@ async function notifyHistory() {
   padding: 4px 2px 0;
 }
 
-.history-pane :deep(.history-table-root),
-.history-pane :deep(.history-ledger) {
+.history-pane :deep(.history-table-root) {
   flex: 1 1 auto;
   min-height: 0;
-}
-
-.history-ledger {
-  overflow: auto;
 }
 
 :global(html:has(.cloud-app-page)),

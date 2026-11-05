@@ -274,6 +274,7 @@ export const getResourceTypeIcon = getResourceTabIcon;
 // 但目录里没有对应渠道，不补显示名就会直接把英文 key 露在界面上。
 const EXTRA_SOURCE_META = {
   manual: {key: "manual", name: "手动添加", icon: "mdi-pencil", color: "grey"},
+  tg: {key: "tg", name: "TG频道", icon: "mdi-television-guide", color: "cyan"},
   unknown: {key: "unknown", name: "未知来源", icon: "mdi-help-circle-outline", color: "grey"},
   quark: {key: "quark", name: "夸克（历史来源）", icon: "mdi-cloud", color: "blue"},
 };

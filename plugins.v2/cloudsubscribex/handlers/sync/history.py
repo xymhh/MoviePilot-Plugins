@@ -889,6 +889,32 @@ class HistoryService(OwnerDelegator):
         return reasons
 
     @staticmethod
+    def _aggregate_failure_reasons(
+            records: List[Dict[str, Any]]
+    ) -> Dict[str, int]:
+        """失败原因分布：优先原始原因，缺原因时用分类标签兜底。"""
+        reasons: Dict[str, int] = {}
+        for record in records or []:
+            if str(record.get("status") or "") != "失败":
+                continue
+            label = (
+                str(record.get("failure_reason") or "").strip()
+                or str(record.get("failure_label") or "").strip()
+                or "未记录原因"
+            )
+            reasons[label] = reasons.get(label, 0) + 1
+        return reasons
+
+    @staticmethod
+    def _group_source(record: Dict[str, Any]) -> str:
+        """历史分组来源：频道推送的 manual 记录归为 tg。"""
+        source = str(record.get("source") or "unknown").strip().casefold()
+        if source in {"manual", "手动添加", "手动资源"}:
+            via = str(record.get("discovered_via") or "").strip().lower()
+            return "tg" if via.startswith("tg:") else "manual"
+        return source
+
+    @staticmethod
     def _landed_result_fields(info: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         """把落盘自检结果转成历史字段；拿不到实测数据时不加字段（维持旧行为）。"""
         if not isinstance(info, dict) or info.get("landed") is None:
@@ -957,6 +983,9 @@ class HistoryService(OwnerDelegator):
             1 for r in records if r.get("status") == "待确认"
         )
         prepared["skip_reasons"] = HistoryService._aggregate_skip_reasons(records)
+        prepared["failure_reasons"] = HistoryService._aggregate_failure_reasons(
+            records
+        )
         prepared["unverified_records"] = [
             {
                 "season": int(r.get("season") or 0),
@@ -997,10 +1026,7 @@ class HistoryService(OwnerDelegator):
             )),
         })
         prepared["sources"] = list(dict.fromkeys(
-            "manual"
-            if str(record.get("source") or "").strip().casefold()
-               in {"manual", "手动添加", "手动资源"}
-            else str(record.get("source") or "unknown").strip().casefold()
+            HistoryService._group_source(record)
             for record in records
         ))
         prepared["source_items"] = [

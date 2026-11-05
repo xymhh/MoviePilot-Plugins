@@ -134,7 +134,12 @@ class HistoryRepository(DbOper):
     @staticmethod
     def _source(record: Dict[str, Any]) -> str:
         source = str(record.get("source") or "unknown").strip().lower()
-        return "manual" if source in {"manual", "手动添加", "手动资源"} else source
+        if source in {"manual", "手动添加", "手动资源"}:
+            # 频道推送的候选复用手动转存链路，但来源应显示为 TG 频道，
+            # 不能再混进「手动添加」。
+            via = str(record.get("discovered_via") or "").strip().lower()
+            return "tg" if via.startswith("tg:") else "manual"
+        return source
 
     @staticmethod
     def _resource_type(record: Dict[str, Any]) -> str:
@@ -267,6 +272,23 @@ class HistoryRepository(DbOper):
             })
             row.update(db, {"payload": payload})
             repaired += 1
+        return repaired
+
+    @db_update
+    def repair_tg_sources(self, db: Session = None) -> int:
+        """把频道推送的历史记录来源从 manual 回填为 tg（幂等）。"""
+        repaired = 0
+        for row in db.scalars(
+            select(HistoryRecord).where(HistoryRecord.source == "manual")
+        ).all():
+            payload = row.payload or {}
+            via = str(payload.get("discovered_via") or "").strip().lower()
+            if not via.startswith("tg:"):
+                continue
+            row.update(db, {"source": "tg"})
+            repaired += 1
+        if repaired:
+            self._invalidate_filter_options()
         return repaired
 
     @db_query

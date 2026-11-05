@@ -117,5 +117,62 @@ class HistoryPageFieldsTest(unittest.TestCase):
         self.assertEqual(fields["status_label"], "秒传失败")
 
 
+class HistoryGroupSummaryTest(unittest.TestCase):
+    @staticmethod
+    def _group(records):
+        return HistoryService.prepare_history_group({
+            "records": records,
+            "type": "电视剧",
+        })
+
+    def test_failure_reasons_aggregated_by_raw_reason(self):
+        group = self._group([
+            {"status": "失败", "failure_reason": "未命中秒传",
+             "file_name": "a.mkv", "type": "电视剧", "season": 1,
+             "episode": 1},
+            {"status": "失败", "failure_reason": "未命中秒传",
+             "file_name": "b.mkv", "type": "电视剧", "season": 1,
+             "episode": 2},
+            {"status": "成功", "file_name": "c.mkv", "type": "电视剧",
+             "season": 1, "episode": 3},
+        ])
+        self.assertEqual(group["failure_reasons"], {"未命中秒传": 2})
+
+    def test_failure_reason_falls_back_to_label(self):
+        group = self._group([{
+            "status": "失败",
+            "failure_kind": failure.KIND_CHECKSUM_MISS,
+            "failure_label": "秒传未命中",
+            "file_name": "a.mkv",
+            "type": "电视剧",
+            "season": 1,
+            "episode": 1,
+        }])
+        self.assertEqual(group["failure_reasons"], {"秒传未命中": 1})
+
+    def test_failure_without_reason_is_marked(self):
+        group = self._group([{
+            "status": "失败", "file_name": "a.mkv", "type": "电视剧",
+            "season": 1, "episode": 1,
+        }])
+        self.assertEqual(group["failure_reasons"], {"未记录原因": 1})
+
+    def test_tg_discovered_manual_record_shows_tg_source(self):
+        group = self._group([
+            {"status": "成功", "source": "manual",
+             "discovered_via": "tg:@QukanMovie/12281",
+             "file_name": "a.mkv", "type": "电视剧", "season": 1,
+             "episode": 1},
+            {"status": "成功", "source": "manual",
+             "file_name": "b.mkv", "type": "电视剧", "season": 1,
+             "episode": 2},
+        ])
+        self.assertEqual(group["sources"], ["tg", "manual"])
+        self.assertEqual(
+            group["source_items"],
+            [{"value": "tg"}, {"value": "manual"}],
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

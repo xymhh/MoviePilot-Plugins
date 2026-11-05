@@ -127,16 +127,6 @@
         </div>
         <v-spacer />
         <v-btn
-          variant="tonal"
-          size="small"
-          color="secondary"
-          class="ledger-entry-button mr-1"
-          title="打开全网未转存候选排障账本"
-          @click.stop="openGlobalLedger">
-          <v-icon icon="mdi-clipboard-text-search-outline" class="history-action-icon" />
-          <span class="history-action-label">未转存账本</span>
-        </v-btn>
-        <v-btn
           class="retry-batch-button"
           color="primary"
           variant="text"
@@ -332,6 +322,9 @@
               <span class="text-warning">待确认 {{ item.unverified_count }}</span>
             </template>
           </div>
+          <div v-if="failureReasonText(item)" class="failure-reason-summary text-caption text-error mt-1">
+            {{ failureReasonText(item) }}
+          </div>
         </template>
 
         <template #item.latest_time="{ item }">
@@ -387,6 +380,7 @@
                   <th>资源</th>
                   <th>大小</th>
                   <th>状态</th>
+                  <th>失败原因</th>
                   <th>时间</th>
                   <th class="action-column">操作</th>
                 </tr>
@@ -492,6 +486,14 @@
                       {{ record.stage_label }}
                     </div>
                   </td>
+                  <td class="failure-reason-cell">
+                    <span
+                      v-if="recordFailureReason(record)"
+                      :title="record.failure_reason || record.failure_label || ''">
+                      {{ recordFailureReason(record) }}
+                    </span>
+                    <span v-else class="text-medium-emphasis">-</span>
+                  </td>
                   <td class="text-no-wrap">{{ record.time || "-" }}</td>
                   <td class="action-column">
                     <div class="action-buttons">
@@ -526,21 +528,13 @@
                   </td>
                 </tr>
                 <tr v-if="item.skipped_count" class="bg-surface-variant-subtle">
-                  <td colspan="7" class="pa-3">
+                  <td colspan="8" class="pa-3">
                     <div class="d-flex align-center justify-space-between flex-wrap ga-2">
                       <div class="d-flex align-center ga-2 text-caption">
                         <v-icon icon="mdi-information-outline" color="warning" size="16" />
                         <span class="font-weight-medium text-warning">本剧另有 {{ item.skipped_count }} 次候选被跳过：</span>
                         <span class="text-medium-emphasis">{{ skipReasonText(item) }}</span>
                       </div>
-                      <v-btn
-                        size="x-small"
-                        variant="tonal"
-                        color="primary"
-                        prepend-icon="mdi-magnify"
-                        @click.stop="openItemLedger(item)">
-                        查看本剧跳过明细
-                      </v-btn>
                     </div>
                   </td>
                 </tr>
@@ -653,6 +647,9 @@
                       {{ item.latest_time || "-" }}
                     </span>
                   </div>
+                  <div v-if="failureReasonText(item)" class="history-mobile-failure text-caption text-error mt-1">
+                    {{ failureReasonText(item) }}
+                  </div>
                 </div>
               </v-expansion-panel-title>
               <v-expansion-panel-text class="history-mobile-details">
@@ -727,6 +724,9 @@
                     :title="record.title || item.title || '-'">
                     {{ record.title || item.title || "-" }}
                   </div>
+                  <div v-if="recordFailureReason(record)" class="history-mobile-failure text-caption text-error">
+                    失败原因：{{ recordFailureReason(record) }}
+                  </div>
                   <div class="history-mobile-record-footer">
                     <div class="history-mobile-record-meta text-caption text-medium-emphasis">
                       <span>{{ resourceTypeLabel(resourceType(record)) }}</span>
@@ -766,15 +766,6 @@
                     <span>本剧另有 {{ item.skipped_count }} 次候选被跳过</span>
                   </div>
                   <div class="text-medium-emphasis mb-2">{{ skipReasonText(item) }}</div>
-                  <v-btn
-                    size="x-small"
-                    variant="tonal"
-                    color="primary"
-                    prepend-icon="mdi-magnify"
-                    block
-                    @click.stop="openItemLedger(item)">
-                    查看本剧跳过明细
-                  </v-btn>
                 </div>
               </v-expansion-panel-text>
             </v-expansion-panel>
@@ -790,32 +781,12 @@
           @update:model-value="changePage" />
       </div>
     </div>
-
-    <!-- 全局未转存排障账本弹窗 -->
-    <v-dialog v-model="showGlobalLedger" max-width="1100" scrollable>
-      <v-card class="pa-2">
-        <v-card-title class="d-flex align-center justify-space-between pb-1">
-          <div class="d-flex align-center ga-2">
-            <v-icon icon="mdi-clipboard-text-search-outline" color="primary" />
-            <span class="text-subtitle-1 font-weight-bold">
-              {{ ledgerTargetKeyword ? `《${ledgerTargetKeyword}》未转存排障明细` : "全网候选未转存账本" }}
-            </span>
-          </div>
-          <v-btn icon="mdi-close" variant="text" size="small" @click="showGlobalLedger = false" />
-        </v-card-title>
-        <v-divider />
-        <v-card-text class="pa-0">
-          <CandidateLedgerPanel :api="props.api" :initial-keyword="ledgerTargetKeyword" class="pa-3" />
-        </v-card-text>
-      </v-card>
-    </v-dialog>
   </div>
 </template>
 
 <script setup>
 import {computed, ref, watch} from "vue";
 import {useDisplay} from "vuetify";
-import CandidateLedgerPanel from "./CandidateLedgerPanel.vue";
 import {
   getResourceTypeName,
   getSourceColor,
@@ -877,18 +848,6 @@ const expanded = ref([]);
 const selectedGroupKeys = ref([]);
 const filtersVisible = ref(false);
 const searchVisible = ref(false);
-const showGlobalLedger = ref(false);
-const ledgerTargetKeyword = ref("");
-
-function openGlobalLedger() {
-  ledgerTargetKeyword.value = "";
-  showGlobalLedger.value = true;
-}
-
-function openItemLedger(item) {
-  ledgerTargetKeyword.value = item?.title || "";
-  showGlobalLedger.value = true;
-}
 let lastQuerySignature = "";
 
 const statusOptions = HISTORY_STATUS_OPTIONS;
@@ -1128,6 +1087,20 @@ function skipReasonText(item) {
     .filter(([, count]) => Number(count) > 0)
     .map(([label, count]) => `${label} ${count}`)
     .join("、");
+}
+
+function failureReasonText(item) {
+  const reasons = item?.failure_reasons;
+  if (!reasons || typeof reasons !== "object") return "";
+  return Object.entries(reasons)
+    .filter(([, count]) => Number(count) > 0)
+    .map(([label, count]) => `${label} ×${count}`)
+    .join(" · ");
+}
+
+function recordFailureReason(record) {
+  if (!record || record.status !== "失败") return "";
+  return String(record.failure_reason || record.failure_label || "未记录原因").trim();
 }
 
 function resourceTypeColor(value) {
@@ -1589,36 +1562,41 @@ function deleteTitle(record) {
 
 .detail-table :deep(th:nth-child(2)),
 .detail-table :deep(td:nth-child(2)) {
-  width: 10%;
+  width: 8%;
 }
 
 .detail-table :deep(th:nth-child(3)),
 .detail-table :deep(td:nth-child(3)) {
-  width: 8%;
+  width: 6%;
 }
 
 .detail-table :deep(th:nth-child(4)),
 .detail-table :deep(td:nth-child(4)) {
-  width: 12%;
+  width: 10%;
 }
 
 .detail-table :deep(th:nth-child(5)),
 .detail-table :deep(td:nth-child(5)) {
-  width: 10%;
+  width: 8%;
 }
 
 .detail-table :deep(th:nth-child(6)),
 .detail-table :deep(td:nth-child(6)) {
-  width: 10%;
+  width: 8%;
 }
 
 .detail-table :deep(th:nth-child(7)),
 .detail-table :deep(td:nth-child(7)) {
-  width: 9%;
+  width: 8%;
 }
 
 .detail-table :deep(th:nth-child(8)),
 .detail-table :deep(td:nth-child(8)) {
+  width: 18%;
+}
+
+.detail-table :deep(th:nth-child(9)),
+.detail-table :deep(td:nth-child(9)) {
   width: 140px;
 }
 
@@ -1626,6 +1604,20 @@ function deleteTitle(record) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.failure-reason-cell {
+  color: rgb(var(--v-theme-error));
+}
+
+.failure-reason-summary {
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+.history-mobile-failure {
+  margin-top: 2px;
+  line-height: 1.3;
 }
 
 .action-column {
@@ -1931,14 +1923,6 @@ function deleteTitle(record) {
 
   .history-action-label {
     display: none;
-  }
-
-  .ledger-entry-button {
-    min-width: 32px !important;
-    width: 32px;
-    height: 32px;
-    padding: 0 !important;
-    flex: 0 0 32px;
   }
 
   .delete-selected-button {
