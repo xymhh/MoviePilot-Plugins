@@ -72,9 +72,10 @@
             </div>
             <!-- 海报右下角状态角标 -->
             <span
-              v-if="getStatusLabel(group)"
-              :class="['poster-status-badge', statusTone(group)]">
-              {{ getStatusLabel(group) }}
+              v-if="cardStatusLabel(group)"
+              :class="['poster-status-badge', cardStatusTone(group)]"
+              :title="cardStatusTitle(group)">
+              {{ cardStatusLabel(group) }}
             </span>
           </div>
 
@@ -104,6 +105,7 @@
     <MediaDrawer
       v-model="drawerVisible"
       :group="selectedGroup"
+      :task="selectedTask"
       :retrying-key="retryingKey"
       @retry="(rec) => $emit('retry', rec)"
       @retry-failed="(grp) => $emit('retry-failed', grp)"
@@ -114,9 +116,16 @@
 <script setup>
 import { ref, computed } from "vue"
 import MediaDrawer from "./MediaDrawer.vue"
+import {
+  isTaskActive,
+  taskPhaseText,
+  taskStatusColor,
+  taskStatusLabel,
+} from "../../utils/taskUtils.js"
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
+  tasks: { type: Array, default: () => [] },
   isSubscribeMode: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   retryingKey: { type: String, default: "" },
@@ -128,6 +137,63 @@ const filterStatus = ref("all")
 const searchKeyword = ref("")
 const drawerVisible = ref(false)
 const selectedGroup = ref(null)
+
+const activeTasks = computed(() => (props.tasks || []).filter(isTaskActive))
+
+const taskIndex = computed(() => {
+  const byId = new Map()
+  const byTitle = new Map()
+  for (const task of activeTasks.value) {
+    if (task.subscribe_id !== null && task.subscribe_id !== undefined) {
+      byId.set(String(task.subscribe_id), task)
+    }
+    const title = normalizeTitle(task.title)
+    if (title) {
+      byTitle.set(`${title}|${Number(task.season || 0)}`, task)
+    }
+  }
+  return { byId, byTitle }
+})
+
+const selectedTask = computed(() => taskForGroup(selectedGroup.value))
+
+function normalizeTitle(value) {
+  return String(value || "").trim().toLowerCase().replace(/\s+/g, "")
+}
+
+function taskForGroup(group) {
+  if (!group) return null
+  const ids = [group.subscribe_id, ...(group.duplicate_subscribe_ids || [])]
+    .filter((id) => id !== null && id !== undefined && id !== "")
+    .map(String)
+  for (const id of ids) {
+    const task = taskIndex.value.byId.get(id)
+    if (task) return task
+  }
+  const title = normalizeTitle(group.title || group.name)
+  if (!title) return null
+  return taskIndex.value.byTitle.get(`${title}|${Number(group.season || 0)}`) || null
+}
+
+function cardStatusLabel(group) {
+  const task = taskForGroup(group)
+  if (task) return taskStatusLabel(task, { withProgress: true })
+  if (props.isSubscribeMode) return "监控中"
+  return getStatusLabel(group)
+}
+
+function cardStatusTone(group) {
+  const task = taskForGroup(group)
+  if (task) return `is-${taskStatusColor(task)}`
+  if (props.isSubscribeMode) return "is-active"
+  return statusTone(group)
+}
+
+function cardStatusTitle(group) {
+  const task = taskForGroup(group)
+  if (task) return taskPhaseText(task) || taskStatusLabel(task)
+  return props.isSubscribeMode ? "订阅监控中，点击查看详情" : ""
+}
 
 const filteredGroups = computed(() => props.items || [])
 
@@ -401,14 +467,39 @@ function getInitial(title) {
   letter-spacing: -0.2px;
 }
 
-.poster-status-badge.tone-warn {
+.poster-status-badge.is-success {
+  color: #10b981;
+  border: 1px solid rgba(16, 185, 129, 0.4);
+}
+
+.poster-status-badge.is-warning {
   color: #f59e0b;
   border: 1px solid rgba(245, 158, 11, 0.4);
 }
 
-.poster-status-badge.tone-ok {
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.4);
+.poster-status-badge.is-info {
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.4);
+}
+
+.poster-status-badge.is-primary {
+  color: #a78bfa;
+  border: 1px solid rgba(167, 139, 250, 0.4);
+}
+
+.poster-status-badge.is-error {
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+}
+
+.poster-status-badge.is-secondary {
+  color: #cbd5e1;
+  border: 1px solid rgba(203, 213, 225, 0.35);
+}
+
+.poster-status-badge.is-active {
+  color: #22d3ee;
+  border: 1px solid rgba(34, 211, 238, 0.45);
 }
 
 .poster-img {
@@ -496,6 +587,26 @@ function getInitial(title) {
   color: rgb(var(--v-theme-warning));
 }
 
+.progress-status.is-info {
+  color: rgb(var(--v-theme-info));
+}
+
+.progress-status.is-primary {
+  color: rgb(var(--v-theme-primary));
+}
+
+.progress-status.is-error {
+  color: rgb(var(--v-theme-error));
+}
+
+.progress-status.is-active {
+  color: rgb(var(--v-theme-info));
+}
+
+.progress-status.is-secondary {
+  color: rgba(var(--v-theme-on-surface), 0.6);
+}
+
 .progress-track {
   height: 3px;
   border-radius: 999px;
@@ -515,6 +626,23 @@ function getInitial(title) {
 
 .progress-fill.is-warning {
   background: rgb(var(--v-theme-warning));
+}
+
+.progress-fill.is-info,
+.progress-fill.is-active {
+  background: rgb(var(--v-theme-info));
+}
+
+.progress-fill.is-primary {
+  background: rgb(var(--v-theme-primary));
+}
+
+.progress-fill.is-error {
+  background: rgb(var(--v-theme-error));
+}
+
+.progress-fill.is-secondary {
+  background: rgba(var(--v-theme-on-surface), 0.4);
 }
 
 .card-time {

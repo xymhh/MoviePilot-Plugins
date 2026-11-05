@@ -36,6 +36,12 @@
             <v-chip v-if="group.season" size="x-small" color="info" variant="tonal">
               第 {{ group.season }} 季
             </v-chip>
+            <v-chip v-if="task" size="x-small" :color="taskStatusColor(task)" variant="tonal" class="font-weight-bold">
+              {{ taskStatusLabel(task, { withProgress: true }) }}
+            </v-chip>
+            <v-chip v-else-if="group.subscribe_id" size="x-small" color="info" variant="tonal">
+              监控中
+            </v-chip>
             <v-chip size="x-small" variant="tonal" color="success">
               已入库 {{ libraryCount }} 集
             </v-chip>
@@ -76,6 +82,35 @@
 
       <!-- 主体内容 -->
       <v-card-text class="drawer-body pa-4" style="max-height: 65vh;">
+        <div v-if="task" class="task-progress-panel mb-4 pa-3 rounded border">
+          <div class="d-flex align-center flex-wrap ga-2">
+            <v-chip size="small" :color="taskStatusColor(task)" variant="tonal" class="font-weight-bold">
+              {{ taskStatusLabel(task, { withProgress: true }) }}
+            </v-chip>
+            <span class="text-caption text-medium-emphasis">{{ taskPhaseText(task) }}</span>
+            <v-spacer />
+            <span v-if="taskPercent > 0" class="text-caption font-weight-medium">{{ taskPercent }}%</span>
+          </div>
+          <v-progress-linear
+            v-if="showTaskProgress"
+            class="mt-2"
+            :model-value="taskPercent"
+            :color="taskStatusColor(task)"
+            height="6"
+            rounded />
+          <div class="d-flex flex-wrap align-center ga-4 mt-2 text-caption text-medium-emphasis">
+            <span v-if="taskSizeText">已转 {{ taskSizeText }}</span>
+            <span v-if="taskSpeedText">{{ taskSpeedText }}</span>
+            <span
+              v-if="task.current_file"
+              class="text-truncate task-current-file"
+              :title="task.current_file">
+              当前：{{ task.current_file }}
+            </span>
+          </div>
+          <div v-if="task.error" class="text-caption text-error mt-1">失败原因：{{ task.error }}</div>
+        </div>
+
         <!-- 1. 分集选集方块矩阵 (B站/爱奇艺风格) -->
         <div v-if="episodesList.length" class="episode-matrix-section mb-4">
           <div class="d-flex align-center justify-space-between mb-2">
@@ -212,10 +247,22 @@
 
 <script setup>
 import { ref, computed } from "vue"
+import {
+  displayTotal,
+  displayTransferred,
+  formatSize as formatTaskSize,
+  formatSpeed,
+  hasDeterminateProgress,
+  taskPhaseText,
+  taskProgress,
+  taskStatusColor,
+  taskStatusLabel,
+} from "../../utils/taskUtils.js"
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   group: { type: Object, default: null },
+  task: { type: Object, default: null },
   retrying: { type: Boolean, default: false },
   retryingKey: { type: String, default: "" },
 })
@@ -224,6 +271,18 @@ const emit = defineEmits(["update:modelValue", "retry", "retry-failed", "delete"
 
 const selectedEpisode = ref(null)
 const coverError = ref(false)
+
+const taskPercent = computed(() => Math.round(taskProgress(props.task)))
+const showTaskProgress = computed(() => Boolean(props.task) && hasDeterminateProgress(props.task) && taskPercent.value > 0)
+const taskSizeText = computed(() => {
+  const total = displayTotal(props.task)
+  if (!total) return ""
+  return `${formatTaskSize(displayTransferred(props.task))} / ${formatTaskSize(total)}`
+})
+const taskSpeedText = computed(() => {
+  const speed = Number(props.task?.speed_bytes_per_second || props.task?.upload_speed || 0)
+  return speed > 0 ? formatSpeed(speed) : ""
+})
 
 const visible = computed({
   get: () => props.modelValue,
@@ -418,6 +477,15 @@ function retryKey(rec) {
 </script>
 
 <style scoped>
+.task-progress-panel {
+  background: rgba(var(--v-theme-primary), 0.04);
+}
+
+.task-current-file {
+  max-width: 100%;
+  min-width: 0;
+}
+
 .drawer-header {
   border-bottom: 1px solid rgba(var(--v-theme-on-surface), 0.08);
 }

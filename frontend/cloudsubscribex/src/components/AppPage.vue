@@ -155,15 +155,9 @@
 
       <div class="workspace-window">
         <div v-show="mainTab === 'hub'" class="workspace-pane hub-pane">
-          <RuntimeCard
-            v-if="activeTaskCount"
-            class="runtime-panel"
-            :runtime="runtime"
-            :active="active"
-            @stop-task="confirmStopTask"
-            @start-sync="openImmediateSearchConfirm" />
           <MediaHub
             :items="subscribesProgress.length ? subscribesProgress : historyGroups"
+            :tasks="runtime.tasks"
             :is-subscribe-mode="Boolean(subscribesProgress.length)"
             :loading="loading"
             :retrying-key="retryingHistoryKey"
@@ -374,7 +368,6 @@
 <script setup>
 import {computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch} from "vue";
 import {useDisplay} from "vuetify";
-import RuntimeCard from "./dashboard/RuntimeCard.vue";
 
 import HistoryTable from "./dashboard/HistoryTable.vue";
 import MediaHub from "./dashboard/MediaHub.vue";
@@ -651,13 +644,6 @@ function openManualDialog(mode = "links", media = null) {
 
 function confirmStopSync() {
   stoppingTask.value = null
-  stopVisible.value = true
-}
-
-function confirmStopTask(taskId) {
-  const task = (runtime.tasks || []).find((item) => item.id === taskId)
-  if (!task) return
-  stoppingTask.value = task
   stopVisible.value = true
 }
 
