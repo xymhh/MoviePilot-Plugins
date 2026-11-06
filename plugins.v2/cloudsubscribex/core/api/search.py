@@ -1185,27 +1185,32 @@ class SearchApi(OwnerDelegator):
         if not available_channels_meta:
             logger.warning("[网盘资源嗅探] 当前无可用的已注册搜索渠道")
             return {"success": True, "message": "暂无可用搜索渠道",
-                    "data": {"items": [], "sources": [], "available_sources": []}}
+                    "data": {"items": [], "sources": [], "available_sources": [],
+                             "enabled_sources": []}}
 
         registered_sources = [s["key"] for s in available_channels_meta]
         source_display_names = {s["key"]: s["name"] for s in available_channels_meta}
 
-        # 只走后台「搜索渠道优先级」里真正启用的渠道，和订阅搜索保持同一口径；
-        # 未启用的渠道不做无谓请求，前端 Tabs 也只展示启用的。
+        # 网盘资源页沿用上游口径：所有已注册渠道都展示、都能搜（前端按渠道分 Tab）。
+        # 只有追更列表抽屉（enabled_only=true）才只查后台「搜索渠道优先级」里启用的渠道。
         get_enabled = getattr(handler, "get_enabled_sources", None)
         enabled_sources = (
             [str(key).lower() for key in (get_enabled(media_type) or [])]
             if callable(get_enabled) else []
         )
-        if enabled_sources:
-            available_channels_meta = filter_source_meta_by_enabled(
-                available_channels_meta, enabled_sources
-            )
-            registered_sources = [s["key"] for s in available_channels_meta]
-            source_display_names = {
-                s["key"]: s["name"] for s in available_channels_meta
-            }
-            if not available_channels_meta:
+        enabled_channels_meta = filter_source_meta_by_enabled(
+            available_channels_meta, enabled_sources
+        )
+        if bool(data.get("enabled_only")):
+            if not enabled_sources:
+                logger.warning("[网盘资源嗅探] 后台未启用任何搜索渠道")
+                return {
+                    "success": True,
+                    "message": "后台未启用搜索渠道，请先在插件设置里选择渠道",
+                    "data": {"items": [], "sources": [], "available_sources": [],
+                             "enabled_sources": []},
+                }
+            if not enabled_channels_meta:
                 logger.warning(
                     "[网盘资源嗅探] 后台启用的搜索渠道均不可用："
                     f"{', '.join(enabled_sources)}"
@@ -1213,14 +1218,13 @@ class SearchApi(OwnerDelegator):
                 return {
                     "success": True,
                     "message": "后台启用的搜索渠道当前不可用，请检查渠道账户配置",
-                    "data": {"items": [], "sources": [], "available_sources": []},
+                    "data": {"items": [], "sources": [], "available_sources": [],
+                             "enabled_sources": []},
                 }
-        elif not getattr(handler, "_search_source_order", None):
-            logger.warning("[网盘资源嗅探] 后台未启用任何搜索渠道")
-            return {
-                "success": True,
-                "message": "后台未启用搜索渠道，请先在插件设置里选择渠道",
-                "data": {"items": [], "sources": [], "available_sources": []},
+            available_channels_meta = enabled_channels_meta
+            registered_sources = [s["key"] for s in available_channels_meta]
+            source_display_names = {
+                s["key"]: s["name"] for s in available_channels_meta
             }
 
         req_source = str(data.get("source") or "").strip().lower()
@@ -1231,7 +1235,8 @@ class SearchApi(OwnerDelegator):
                 return {
                     "success": True,
                     "message": f"渠道 {source_display_names.get(req_source, req_source)} 暂不可用",
-                    "data": {"items": [], "sources": [], "available_sources": available_channels_meta},
+                    "data": {"items": [], "sources": [], "available_sources": available_channels_meta,
+                              "enabled_sources": enabled_channels_meta},
                 }
             sources_to_search = [req_source]
         else:
@@ -1367,6 +1372,7 @@ class SearchApi(OwnerDelegator):
                 "items": all_items,
                 "sources": sources_to_search,
                 "available_sources": available_channels_meta,
+                "enabled_sources": enabled_channels_meta,
                 "resource_types": resource_types_list,
                 "available_drives": available_drives,
                 "main_cloud_drive": getattr(getattr(self, "_cloud_drive", None), "key", "115"),

@@ -119,12 +119,26 @@
             </v-chip>
           </div>
 
+          <!-- 搜索源切换：默认「全部」混排，点某个渠道只看它 -->
+          <div v-if="searchSourceTabs.length > 1" class="search-source-tabs mt-2 d-flex align-center flex-wrap ga-1">
+            <span class="text-caption text-medium-emphasis">搜索源：</span>
+            <v-chip
+              v-for="tab in searchSourceTabs"
+              :key="tab.key"
+              size="x-small"
+              :variant="activeSearchSource === tab.key ? 'flat' : 'tonal'"
+              :color="activeSearchSource === tab.key ? 'primary' : undefined"
+              @click="activeSearchSource = tab.key">
+              {{ tab.name }}<span class="source-count"> {{ tab.count }}</span>
+            </v-chip>
+          </div>
+
           <div v-if="searching" class="text-caption text-medium-emphasis mt-2">搜索中…只查后台启用的渠道，首次可能 1-2 分钟，之后走缓存很快</div>
           <div v-else-if="searchError" class="text-caption text-error mt-2">{{ searchError }}</div>
           <div v-else-if="searchNote" class="text-caption text-medium-emphasis mt-2">{{ searchNote }}</div>
 
-          <div v-if="searchItems.length" class="search-results mt-3">
-            <div v-for="(item, idx) in searchItems" :key="item.url || idx" class="search-result-item">
+          <div v-if="visibleSearchItems.length" class="search-results mt-3">
+            <div v-for="(item, idx) in visibleSearchItems" :key="item.url || idx" class="search-result-item">
               <div class="result-main">
                 <div class="result-title" :title="item.title">{{ item.title }}</div>
                 <div class="result-meta">
@@ -571,6 +585,10 @@ const searchOpen = ref(false)
 const searchKeyword = ref("")
 const searching = ref(false)
 const searchItems = ref([])
+/** 后台启用的渠道（后端 enabled_sources 下发），用于「搜索源」切换 */
+const searchSources = ref([])
+/** all = 混排；其它值 = 只看该渠道 */
+const activeSearchSource = ref("all")
 const searchError = ref("")
 const searchNote = ref("")
 const transferringUrl = ref("")
@@ -593,6 +611,38 @@ const pendingEpisodeNumbers = computed(() =>
   episodesList.value.filter((ep) => ep.status === "missing").map((ep) => ep.number),
 )
 
+/** 每个渠道在当前结果里的条数，用于「搜索源」标签上的计数 */
+const searchSourceCounts = computed(() => {
+  const counts = {}
+  for (const item of searchItems.value) {
+    const key = String(item?.source || "").trim().toLowerCase()
+    if (!key) continue
+    counts[key] = (counts[key] || 0) + 1
+  }
+  return counts
+})
+
+/** 「全部 + 有结果的渠道」切换标签；只有一个渠道时不显示（没得切） */
+const searchSourceTabs = computed(() => {
+  const tabs = searchSources.value.map((src) => ({
+    key: src.key,
+    name: src.name || src.key,
+    count: searchSourceCounts.value[src.key] || 0,
+  }))
+  if (tabs.length <= 1) return []
+  return [
+    { key: "all", name: "全部", count: searchItems.value.length },
+    ...tabs,
+  ]
+})
+
+const visibleSearchItems = computed(() => {
+  if (activeSearchSource.value === "all") return searchItems.value
+  return searchItems.value.filter(
+    (item) => String(item?.source || "").trim().toLowerCase() === activeSearchSource.value,
+  )
+})
+
 function groupTitle() {
   return String(props.group?.title || props.group?.name || "").trim()
 }
@@ -612,6 +662,8 @@ watch(
   () => {
     searchKeyword.value = searchOpen.value ? defaultKeyword() : ""
     searchItems.value = []
+    searchSources.value = []
+    activeSearchSource.value = "all"
     searchError.value = ""
     searchNote.value = ""
     transferringUrl.value = ""
@@ -648,6 +700,7 @@ async function runSearch() {
   searchError.value = ""
   searchNote.value = ""
   searchItems.value = []
+  activeSearchSource.value = "all"
   try {
     const result = await props.api.post(`plugin/${PLUGIN_ID}/resource/search_resources`, {
       title: keyword,
@@ -655,12 +708,19 @@ async function runSearch() {
       media_type: isMovieGroup.value ? "movie" : "tv",
       season: isMovieGroup.value ? undefined : seasonNumber.value,
       tmdb_id: props.group?.tmdb_id || undefined,
+      // 追更列表只看后台「搜索渠道优先级」里启用的渠道（资源页不受影响）
+      enabled_only: true,
     })
     if (!result?.success) {
       searchError.value = result?.message || "搜索失败"
       return
     }
     const items = result?.data?.items || []
+    const enabledMeta = result?.data?.enabled_sources
+    searchSources.value = Array.isArray(enabledMeta)
+      ? enabledMeta.map((src) => ({key: String(src?.key || ""), name: src?.name || src?.key || ""}))
+        .filter((src) => src.key)
+      : []
     searchItems.value = items.slice(0, 20)
     searchNote.value = items.length
       ? (result?.message || `共 ${items.length} 条候选`)
@@ -1013,6 +1073,11 @@ function retryKey(rec) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.search-source-tabs .source-count {
+  opacity: 0.6;
+  font-size: 10px;
 }
 
 .result-meta {

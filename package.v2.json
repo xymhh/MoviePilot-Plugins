@@ -3,13 +3,14 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.9.63",
+    "version": "1.9.64",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
     "release": true,
     "system_version": ">=2.14.6",
     "history": {
+      "v1.9.64": "搜索口径拆分：① 网盘资源页恢复上游逻辑——所有已注册渠道照常展示与搜索，前端仍按渠道分 Tab，不再受「搜索渠道优先级」影响；② 只有追更列表抽屉（enabled_only=true）继续只查后台启用的渠道；③ 抽屉搜索面板新增「搜索源」切换（全部 / 各渠道 + 条数），结果不再混在一起，点渠道只看该站候选；④ 接口在 data 里统一补 enabled_sources（key/name/icon/color）供前端渲染切换标签。",
       "v1.9.63": "SeedHub 渠道修复：① 站点 2026-11 起整站迁到 sidhub.cc（旧域名 302），新增 search/seedhub/urls.py 统一把 seedhub.cc/.top/.pro/.icu 归一到 https://sidhub.cc，默认地址与设置页占位同步更新；② Cloudflare 防护升级为交互式 Turnstile，原来的一次性浏览器快照只会拿回质询页，改为先用常驻反盾浏览器（会点验证框并等待 cf_clearance）过盾、失败再退回旧快照；③ 指纹复用放宽同站别名域名，跳转域名下拿到的 Cookie 不再被丢弃；④ 失败提示改为「被 Cloudflare 人机验证拦截，可给 SeedHub 配代理或稍后重试」。实测站点可用（搜索页 8 条候选、详情页 348 处网盘中转项）。新增 4 条地址归一单测。",
       "v1.9.62": "搜索口径与渠道标识：① 抽屉搜索只查后台「搜索渠道优先级」里启用的渠道（此前调 get_available_sources_meta 返回全部已注册渠道，后台只开 PanSou 却把 HDHive/Dian115 一起搜了，106 条候选里 56 条无直链、点转存只会报错）；② 结果卡片新增渠道标签（如 PanSou / HDHive）与免费·N 积分类标签，`source_name`、`unlock_points`、`cost_label` 由后端随候选下发；③ 未解锁的付费资源点转存不再报「请填写资源链接或选择网盘路径」，改为明示「HDHive 需 8 积分，解锁后才能取得分享链接」；④ 搜索提示同步为「只查后台启用的渠道」，返回消息带本次实际渠道与耗时。新增 5 条渠道过滤单测。",
       "v1.9.61": "修复抽屉搜索串剧：切换订阅/季时清空上次关键词与结果（改回当前剧的「剧名 S01」），同时清掉选中集与封面错误态。以 subscribe_id|tmdb_id|season|title 为 key 做 watch。",
@@ -298,7 +299,7 @@
       "1.7.98": "持久化统一入库（不再写 JSON 状态文件）：① 源文件 SHA1 缓存从 source_sha1_cache.json 迁到同库表 source_sha1_cache，原子 upsert + 30 天 TTL + 2000 条上限；② TG 频道监控池/游标/状态从 tg_monitor/*.json 迁到 runtime_records 表；③ STRM 分批续扫断点从 strm_scan_state.json 迁到 runtime_records，写入改走数据库事务（旧实现非原子写，断电会留半截文件）；④ 候选账本从按天 JSONL 迁到 candidate_ledger_entries 表，删掉 ledger/.purged 标记文件。老文件首次启动自动导入并改名 *.migrated，不丢历史数据。新增 20 条单测，全量 865 通过 / 1 存量失败 / 4 条环境性收集错误，lint 0 error。"
     }
   },
-  "version": "1.9.63",
+  "version": "1.9.64",
   "history": {
     "v1.9.62": "搜索口径与渠道标识：① 抽屉搜索只查后台「搜索渠道优先级」里启用的渠道（此前调 get_available_sources_meta 返回全部已注册渠道，后台只开 PanSou 却把 HDHive/Dian115 一起搜了，106 条候选里 56 条无直链、点转存只会报错）；② 结果卡片新增渠道标签（如 PanSou / HDHive）与免费·N 积分类标签，`source_name`、`unlock_points`、`cost_label` 由后端随候选下发；③ 未解锁的付费资源点转存不再报「请填写资源链接或选择网盘路径」，改为明示「HDHive 需 8 积分，解锁后才能取得分享链接」；④ 搜索提示同步为「只查后台启用的渠道」，返回消息带本次实际渠道与耗时。新增 5 条渠道过滤单测。",
     "v1.9.61": "修复抽屉搜索串剧：切换订阅/季时清空上次关键词与结果（改回当前剧的「剧名 S01」），同时清掉选中集与封面错误态。以 subscribe_id|tmdb_id|season|title 为 key 做 watch。",
