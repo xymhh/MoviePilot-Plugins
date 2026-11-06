@@ -680,6 +680,33 @@ class SyncApi(OwnerDelegator):
             if lookup.directory_id is None:
                 return {"success": False, "message": "所选网盘资源路径不存在"}
         if not links and not cloud_path:
+            # 付费渠道（HDHive / Dian115 等）的候选只有 resource_ref，链接要解锁后
+            # 才下发。这时说「请填写资源链接」会让人以为是自己没填，改成说清楚
+            # 需要多少积分解锁。
+            locked = []
+            for item in resource_items:
+                try:
+                    points = max(0, int(item.get("unlock_points") or 0))
+                except (TypeError, ValueError):
+                    points = 0
+                if points <= 0 or item.get("is_unlocked"):
+                    continue
+                label = str(
+                    item.get("source_name")
+                    or item.get("source")
+                    or "该渠道"
+                ).strip()
+                locked.append(f"{label} 需 {points} 积分")
+            if locked:
+                unique_locked = list(dict.fromkeys(locked))
+                return {
+                    "success": False,
+                    "message": (
+                        "该资源尚未解锁，无法直接转存："
+                        + "；".join(unique_locked[:3])
+                        + "（解锁后才能取得分享链接）"
+                    ),
+                }
             return {"success": False, "message": "请填写资源链接或选择网盘路径"}
 
         subscribe = None

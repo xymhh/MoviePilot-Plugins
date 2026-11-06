@@ -119,7 +119,7 @@
             </v-chip>
           </div>
 
-          <div v-if="searching" class="text-caption text-medium-emphasis mt-2">搜索中…首次全渠道约 1-2 分钟，之后走缓存很快</div>
+          <div v-if="searching" class="text-caption text-medium-emphasis mt-2">搜索中…只查后台启用的渠道，首次可能 1-2 分钟，之后走缓存很快</div>
           <div v-else-if="searchError" class="text-caption text-error mt-2">{{ searchError }}</div>
           <div v-else-if="searchNote" class="text-caption text-medium-emphasis mt-2">{{ searchNote }}</div>
 
@@ -128,9 +128,16 @@
               <div class="result-main">
                 <div class="result-title" :title="item.title">{{ item.title }}</div>
                 <div class="result-meta">
+                  <span v-if="item.source_name || item.source" class="meta-source">{{ item.source_name || item.source }}</span>
                   <span v-if="item.resource_type_name" class="meta-pan">{{ item.resource_type_name }}</span>
                   <span v-if="item.size_formatted">{{ item.size_formatted }}</span>
                   <span v-if="item.seeders">{{ item.seeders }} 做种</span>
+                  <span
+                    v-if="item.cost_label"
+                    class="meta-cost"
+                    :class="{ 'meta-cost--paid': Number(item.unlock_points) > 0 && !item.is_unlocked }">
+                    {{ item.cost_label }}
+                  </span>
                 </div>
               </div>
               <v-btn
@@ -1013,10 +1020,26 @@ function retryKey(rec) {
   gap: 8px;
   font-size: 11px;
   opacity: 0.72;
+  flex-wrap: wrap;
 }
 
 .meta-pan {
   font-weight: 600;
+}
+
+/* 渠道标签：与后台启用的渠道一一对应，一眼看出这条来自哪个站 */
+.meta-source {
+  font-weight: 600;
+  color: rgb(var(--v-theme-primary));
+}
+
+.meta-cost {
+  font-weight: 600;
+  color: rgb(var(--v-theme-success));
+}
+
+.meta-cost--paid {
+  color: rgb(var(--v-theme-warning));
 }
 
 @media (max-width: 640px) {

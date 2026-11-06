@@ -13,6 +13,7 @@ from app.schemas.types import MediaType
 from app.utils.string import StringUtils
 
 from .page import _platform_image_url
+from .source_filter import filter_source_meta_by_enabled
 from .. import OwnerDelegator, SearchCapability
 from ..cloud import CloudDriveCapability
 from ..config import UIConfig
@@ -1189,6 +1190,39 @@ class SearchApi(OwnerDelegator):
         registered_sources = [s["key"] for s in available_channels_meta]
         source_display_names = {s["key"]: s["name"] for s in available_channels_meta}
 
+        # 只走后台「搜索渠道优先级」里真正启用的渠道，和订阅搜索保持同一口径；
+        # 未启用的渠道不做无谓请求，前端 Tabs 也只展示启用的。
+        get_enabled = getattr(handler, "get_enabled_sources", None)
+        enabled_sources = (
+            [str(key).lower() for key in (get_enabled(media_type) or [])]
+            if callable(get_enabled) else []
+        )
+        if enabled_sources:
+            available_channels_meta = filter_source_meta_by_enabled(
+                available_channels_meta, enabled_sources
+            )
+            registered_sources = [s["key"] for s in available_channels_meta]
+            source_display_names = {
+                s["key"]: s["name"] for s in available_channels_meta
+            }
+            if not available_channels_meta:
+                logger.warning(
+                    "[网盘资源嗅探] 后台启用的搜索渠道均不可用："
+                    f"{', '.join(enabled_sources)}"
+                )
+                return {
+                    "success": True,
+                    "message": "后台启用的搜索渠道当前不可用，请检查渠道账户配置",
+                    "data": {"items": [], "sources": [], "available_sources": []},
+                }
+        elif not getattr(handler, "_search_source_order", None):
+            logger.warning("[网盘资源嗅探] 后台未启用任何搜索渠道")
+            return {
+                "success": True,
+                "message": "后台未启用搜索渠道，请先在插件设置里选择渠道",
+                "data": {"items": [], "sources": [], "available_sources": []},
+            }
+
         req_source = str(data.get("source") or "").strip().lower()
         force_refresh = bool(data.get("force") or data.get("force_refresh"))
         if req_source:
@@ -1248,6 +1282,17 @@ class SearchApi(OwnerDelegator):
 
                 item_copy = dict(item)
                 item_copy["source"] = src
+                item_copy["source_name"] = source_display_names.get(src, src)
+                try:
+                    cost_points = max(0, int(item.get("unlock_points") or 0))
+                except (TypeError, ValueError):
+                    cost_points = 0
+                item_copy["unlock_points"] = cost_points
+                item_copy["cost_label"] = (
+                    f"{cost_points} 积分"
+                    if cost_points > 0 and not item.get("is_unlocked")
+                    else ("已解锁" if cost_points > 0 else "免费")
+                )
                 item_copy["resource_type"] = r_type
                 item_copy["resource_type_name"] = resource_type_name(
                     r_type, r_type.upper() if r_type else "未知"
@@ -1313,7 +1358,11 @@ class SearchApi(OwnerDelegator):
 
         return {
             "success": True,
-            "message": f"共检索到 {len(all_items)} 条候选资源 (耗时 {elapsed}s)",
+            "message": (
+                f"共检索到 {len(all_items)} 条候选资源"
+                f"（渠道：{'、'.join(source_display_names.get(s, s) for s in sources_to_search)}"
+                f"｜耗时 {elapsed}s）"
+            ),
             "data": {
                 "items": all_items,
                 "sources": sources_to_search,
