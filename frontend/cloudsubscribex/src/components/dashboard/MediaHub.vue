@@ -18,6 +18,21 @@
             正在转存 ({{ transferringCountTotal }})
           </v-chip>
         </v-chip-group>
+
+        <!-- 追更日历：未来 7 天待更新，点某天只看当天要播的剧 -->
+        <div v-if="calendarTotal > 0" class="release-strip">
+          <span class="release-strip-title">追更日历</span>
+          <button
+            v-for="day in calendarDays"
+            :key="day.iso"
+            type="button"
+            :class="['release-day', { 'is-active': calendarDay === day.offset, 'is-empty': !day.count }]"
+            :title="day.count ? `${day.dateLabel} 待更新 ${day.count} 部` : `${day.dateLabel} 无更新`"
+            @click="toggleCalendarDay(day.offset)">
+            <span class="release-day-label">{{ day.label }}</span>
+            <span class="release-day-count">{{ day.count || "—" }}</span>
+          </button>
+        </div>
       </div>
 
       <div class="hub-search-box d-flex align-center ga-2">
@@ -116,6 +131,7 @@
               </div>
 
               <div class="card-time-row">
+                <span v-if="todayEpisodeLabel(group)" class="card-today-chip">{{ todayEpisodeLabel(group) }}</span>
                 <span class="card-time-label">最新一集</span>
                 <span class="card-time" :title="getLatestAirTitle(group)">{{ getLatestAirText(group) }}</span>
               </div>
@@ -161,6 +177,8 @@ const filterStatus = ref("all")
 const searchKeyword = ref("")
 const drawerVisible = ref(false)
 const selectedGroup = ref(null)
+/** 追更日历选中的天（null=不筛选，0=今天） */
+const calendarDay = ref(null)
 
 const activeTasks = computed(() => (props.tasks || []).filter(isTaskActive))
 
@@ -249,8 +267,68 @@ function isTransferring(group) {
 
 const transferringCountTotal = computed(() => (props.items || []).filter(isTransferring).length)
 
+function toISODate(date) {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, "0")
+  const d = String(date.getDate()).padStart(2, "0")
+  return `${y}-${m}-${d}`
+}
+
+function weekdayLabel(date) {
+  return ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][date.getDay()]
+}
+
+/** 该订阅在某天要更新的集（TMDB 只给日期，没有钟点） */
+function episodesOn(group, iso) {
+  return (group.upcoming_episodes || []).filter((ep) => ep && ep.air_date === iso)
+}
+
+const calendarDays = computed(() => {
+  const base = new Date()
+  base.setHours(0, 0, 0, 0)
+  const items = props.items || []
+  const days = []
+  for (let offset = 0; offset < 7; offset += 1) {
+    const date = new Date(base)
+    date.setDate(base.getDate() + offset)
+    const iso = toISODate(date)
+    const groups = items.filter((group) => episodesOn(group, iso).length > 0)
+    days.push({
+      offset,
+      iso,
+      label: offset === 0 ? "今天" : weekdayLabel(date),
+      dateLabel: `${date.getMonth() + 1}/${date.getDate()} ${weekdayLabel(date)}`,
+      count: groups.length,
+    })
+  }
+  return days
+})
+
+const calendarTotal = computed(() => calendarDays.value.reduce((total, day) => total + day.count, 0))
+
+const selectedCalendarISO = computed(() => {
+  if (calendarDay.value === null) return ""
+  return calendarDays.value[calendarDay.value]?.iso || ""
+})
+
+function toggleCalendarDay(offset) {
+  calendarDay.value = calendarDay.value === offset ? null : offset
+}
+
+/** 今天要更新的集：卡片上给一个「今日 E05」的提示 */
+function todayEpisodeLabel(group) {
+  const episodes = episodesOn(group, toISODate(new Date()))
+  if (!episodes.length) return ""
+  const numbers = episodes.map((ep) => `E${String(ep.episode).padStart(2, "0")}`)
+  return `今日 ${numbers.join("/")}`
+}
+
 const displayedGroups = computed(() => {
   let list = filteredGroups.value
+  const calendarISO = selectedCalendarISO.value
+  if (calendarISO) {
+    list = list.filter((group) => episodesOn(group, calendarISO).length > 0)
+  }
   if (filterStatus.value === "complete") {
     list = list.filter((g) => !hasMissing(g))
   } else if (filterStatus.value === "missing") {
@@ -454,6 +532,72 @@ function getInitial(title) {
 
 .hub-search-input {
   width: 220px;
+}
+
+/* 追更日历横条：未来 7 天每天有多少部要更新 */
+.release-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  padding-bottom: 2px;
+  overflow-x: auto;
+}
+
+.release-strip-title {
+  flex: 0 0 auto;
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.72;
+}
+
+.release-day {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 56px;
+  padding: 6px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(148, 163, 184, 0.08);
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.release-day:hover {
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.release-day.is-empty {
+  opacity: 0.45;
+}
+
+.release-day.is-active {
+  border-color: #2563eb;
+  background: rgba(37, 99, 235, 0.18);
+}
+
+.release-day-label {
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.release-day-count {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.card-today-chip {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #2563eb;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
 }
 
 /* 内容优先：更大的卡片、更松的间距 */

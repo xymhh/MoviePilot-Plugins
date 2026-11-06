@@ -53,6 +53,8 @@ _AIRED_INFO_CACHE = create_platform_ttl_cache(
 
 # 本地媒体库（STRM 落盘目录）索引：追更进度里的「已入库」必须反映磁盘上真实存在的集，
 # 只看订阅 note 会漏掉「订阅开始前就已入库」的集（例如订阅 start_episode=3 时 E1/E2 永远补不上）。
+# 追更日历：只展示未来 N 天内的待更新集（TMDB 只有日期，没有钟点）
+_CALENDAR_HORIZON_DAYS = 30
 _LOCAL_LIBRARY_TTL = 60.0
 _LOCAL_LIBRARY_STATE: dict[str, Any] = {"at": 0.0, "root": "", "index": {}}
 _SEASON_DIR_PATTERN = re.compile(r"^(?:season[\s._-]*|s)(\d{1,2})$|^第\s*(\d{1,2})\s*季$", re.IGNORECASE)
@@ -121,33 +123,46 @@ def _parse_episodes_from_names(file_names, season: int) -> set[int]:
 
 
 def _aired_episode_info(tmdb_id: int, season: int) -> dict | None:
-    """按 TMDB 本季已开播分集返回已播数量与最新一集开播日期；失败返回 None。"""
+    """按 TMDB 本季分集返回已播数量、最新已播日期，以及未来待更新的集（追更日历数据）。
+
+    TMDB 只给日期没有钟点，所以日历只到「哪天播」，不编造时间。
+    未来集与已播集来自同一次 season detail 请求，不额外增加 API 调用。
+    """
     try:
         from app.modules.themoviedb.tmdbapi import TmdbApi
 
         detail = TmdbApi().get_tv_season_detail(int(tmdb_id), int(season)) or {}
-        today = datetime.date.today().isoformat()
+        today_date = datetime.date.today()
+        today = today_date.isoformat()
+        horizon = (today_date + datetime.timedelta(days=_CALENDAR_HORIZON_DAYS)).isoformat()
         aired: list[tuple[str, int]] = []
+        upcoming: list[dict[str, Any]] = []
         for item in detail.get("episodes") or []:
             if not isinstance(item, dict):
                 continue
             air_date = str(item.get("air_date") or "").strip()
-            if not air_date or air_date > today:
+            if not air_date:
                 continue
             try:
                 episode = int(item.get("episode_number") or 0)
             except (TypeError, ValueError):
                 episode = 0
-            if episode > 0:
+            if episode <= 0:
+                continue
+            if air_date <= today:
                 aired.append((air_date, episode))
+            elif air_date <= horizon:
+                upcoming.append({"episode": episode, "air_date": air_date})
+        upcoming.sort(key=lambda item: (item["air_date"], item["episode"]))
         if not aired:
-            return {"aired": 0, "episode": 0, "air_date": ""}
+            return {"aired": 0, "episode": 0, "air_date": "", "upcoming": upcoming}
         aired.sort(key=lambda item: (item[0], item[1]))
         latest_date, latest_episode = aired[-1]
         return {
             "aired": len(aired),
             "episode": latest_episode,
             "air_date": latest_date,
+            "upcoming": upcoming,
         }
     except Exception as err:  # noqa: BLE001 - TMDB 不可用时只隐藏已播信息
         logger.debug(
@@ -445,6 +460,7 @@ class PageApi(OwnerDelegator):
 
         counts: dict[str, int] = {}
         latest: dict[str, dict] = {}
+        upcoming: dict[str, list] = {}
         pending: list[tuple[str, int, int]] = []
         for key, (tmdb_id, season) in entries.items():
             cached = _AIRED_INFO_CACHE.get(key)
@@ -455,6 +471,8 @@ class PageApi(OwnerDelegator):
                         "episode": int(cached.get("episode") or 0),
                         "air_date": str(cached.get("air_date")),
                     }
+                if cached.get("upcoming"):
+                    upcoming[key] = list(cached.get("upcoming") or [])
             elif cached is not None:
                 counts[key] = max(0, int(cached))
             else:
@@ -485,13 +503,15 @@ class PageApi(OwnerDelegator):
                             "episode": int(info.get("episode") or 0),
                             "air_date": str(info.get("air_date")),
                         }
+                    if info.get("upcoming"):
+                        upcoming[key] = list(info.get("upcoming") or [])
                     _AIRED_INFO_CACHE.set(key, info)
             except Exception as err:  # noqa: BLE001 - 超时后保留已有结果
                 logger.debug(f"批量查询已播集数超时：{err}", exc_info=True)
             finally:
                 executor.shutdown(wait=False)
 
-        return {"success": True, "data": {"counts": counts, "latest": latest}}
+        return {"success": True, "data": {"counts": counts, "latest": latest, "upcoming": upcoming}}
 
     def api_vue_image_proxy(self, url: str):
         """插件内置图片代理：由服务端容器拉取外部 TMDB 海报并缓存，绕过浏览器网络阻断与 401。"""

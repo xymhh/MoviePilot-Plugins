@@ -153,5 +153,76 @@ class TestLocalLibraryEpisodes(unittest.TestCase):
         self.assertEqual(api._local_library_episodes(298852, "律界战争", "2026", 1), set())
 
 
+class TestAiredCalendarUpcoming(unittest.TestCase):
+    """追更日历：未来 30 天内的待更新集来自同一次 season detail，不额外请求 TMDB。"""
+
+    def _run_with_episodes(self, episodes):
+        import datetime
+        import types
+
+        calls = []
+
+        class _TmdbApi:
+            def get_tv_season_detail(self, tmdb_id, season):
+                calls.append((tmdb_id, season))
+                return {"episodes": episodes}
+
+        module = types.ModuleType("app.modules.themoviedb.tmdbapi")
+        module.TmdbApi = _TmdbApi
+        saved = {name: sys.modules.get(name) for name in (
+            "app.modules", "app.modules.themoviedb", "app.modules.themoviedb.tmdbapi"
+        )}
+        sys.modules["app.modules"] = types.ModuleType("app.modules")
+        sys.modules["app.modules.themoviedb"] = types.ModuleType("app.modules.themoviedb")
+        sys.modules["app.modules.themoviedb.tmdbapi"] = module
+        try:
+            info = page_module._aired_episode_info(298852, 1)
+        finally:
+            for name, old in saved.items():
+                if old is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = old
+        return info, calls
+
+    def test_upcoming_window_and_ordering(self):
+        import datetime
+
+        today = datetime.date.today()
+        episodes = []
+        for number in range(1, 7):
+            episodes.append({
+                "episode_number": number,
+                "air_date": (today - datetime.timedelta(days=7 * (6 - number))).isoformat(),
+            })
+        episodes.append({"episode_number": 7, "air_date": (today + datetime.timedelta(days=3)).isoformat()})
+        episodes.append({"episode_number": 8, "air_date": (today + datetime.timedelta(days=10)).isoformat()})
+        episodes.append({"episode_number": 9, "air_date": (today + datetime.timedelta(days=45)).isoformat()})
+        episodes.append({"episode_number": 10, "air_date": ""})
+
+        info, calls = self._run_with_episodes(episodes)
+        self.assertEqual(len(calls), 1, "日历数据必须复用同一次 season detail 请求")
+        self.assertEqual(info["aired"], 6)
+        self.assertEqual(info["episode"], 6)
+        self.assertEqual([item["episode"] for item in info["upcoming"]], [7, 8])
+
+    def test_no_upcoming_when_all_aired(self):
+        import datetime
+
+        today = datetime.date.today()
+        info, _ = self._run_with_episodes([
+            {"episode_number": 1, "air_date": (today - datetime.timedelta(days=2)).isoformat()},
+        ])
+        self.assertEqual(info["upcoming"], [])
+
+    def test_missing_air_date_not_in_calendar(self):
+        info, _ = self._run_with_episodes([
+            {"episode_number": 1, "air_date": ""},
+            {"episode_number": 2, "air_date": None},
+        ])
+        self.assertEqual(info["aired"], 0)
+        self.assertEqual(info["upcoming"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

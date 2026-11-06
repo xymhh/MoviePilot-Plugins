@@ -112,19 +112,23 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       if (requestId !== airedRequestSequence || subscribesProgress.value !== snapshot) return;
       const counts = result?.data?.counts || {};
       const latest = result?.data?.latest || {};
-      if (!Object.keys(counts).length) return;
+      const upcoming = result?.data?.upcoming || {};
+      if (!Object.keys(counts).length && !Object.keys(upcoming).length) return;
       subscribesProgress.value = snapshot.map((group) => {
         if (group.media_type === "movie" || !group.tmdb_id) return group;
         const season = group.season === null || group.season === undefined ? 1 : Number(group.season);
         const key = `${Number(group.tmdb_id)}:${season}`;
         const value = counts[key];
-        if (value === undefined) return group;
+        const nextEps = upcoming[key] || [];
+        if (value === undefined && !nextEps.length) return group;
         const air = latest[key] || {};
         return {
           ...group,
-          aired_episodes: Math.max(0, Number(value) || 0),
+          aired_episodes: Math.max(0, Number(value ?? group.aired_episodes ?? 0) || 0),
           latest_air_date: air.air_date || group.latest_air_date || "",
           latest_air_episode: Number(air.episode || group.latest_air_episode || 0),
+          // 追更日历数据：未来 30 天内待更新的集（TMDB 只有日期，没有钟点）
+          upcoming_episodes: nextEps,
         };
       });
     } catch (error) {
