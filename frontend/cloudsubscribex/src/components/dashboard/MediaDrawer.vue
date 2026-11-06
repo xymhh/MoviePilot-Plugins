@@ -31,28 +31,22 @@
 
           <div class="drawer-meta-tags mt-2 d-flex flex-wrap align-center ga-1">
             <v-chip size="x-small" color="primary" variant="tonal">
-              {{ group.type || (group.season ? `S${String(group.season).padStart(2, '0')}` : "电视剧") }}
+              {{ group.type || "电视剧" }}<template v-if="group.season"> · S{{ String(group.season).padStart(2, "0") }}</template>
             </v-chip>
-            <v-chip v-if="group.season" size="x-small" color="info" variant="tonal">
-              第 {{ group.season }} 季
+            <v-chip v-if="airedCount !== null" size="x-small" variant="tonal" color="info">
+              已播 {{ airedCount }}<template v-if="totalCount > 0"> / 共 {{ totalCount }}</template> 集
             </v-chip>
-            <v-chip v-if="task" size="x-small" :color="taskStatusColor(task)" variant="tonal" class="font-weight-bold">
+            <v-chip v-if="task" size="x-small" :color="taskStatusColor(task)" variant="flat" class="font-weight-bold">
               {{ taskStatusLabel(task, { withProgress: true }) }}
             </v-chip>
             <v-chip v-else-if="group.subscribe_id" size="x-small" color="info" variant="tonal">
               监控中
             </v-chip>
-            <v-chip v-if="airedCount !== null" size="x-small" variant="tonal" color="info">
-              已播 {{ airedCount }} 集
+            <v-chip size="x-small" variant="flat" color="success" class="font-weight-bold">
+              已入库 {{ libraryCount }}
             </v-chip>
-            <v-chip size="x-small" variant="tonal" color="success">
-              已入库 {{ libraryCount }} 集
-            </v-chip>
-            <v-chip v-if="missingCount > 0" size="x-small" variant="tonal" color="warning">
-              待补齐 {{ missingCount }} 集
-            </v-chip>
-            <v-chip v-if="totalCount > 0" size="x-small" variant="tonal" color="secondary">
-              全剧共 {{ totalCount }} 集
+            <v-chip v-if="missingCount > 0" size="x-small" variant="flat" color="warning" class="font-weight-bold">
+              缺 {{ missingCount }}
             </v-chip>
           </div>
 
@@ -118,8 +112,8 @@
         <div v-if="episodesList.length" class="episode-matrix-section mb-4">
           <div class="d-flex align-center justify-space-between mb-2">
             <div class="d-flex align-center ga-2">
-              <span class="text-subtitle-2 font-weight-bold">选集追更全景矩阵</span>
-              <span class="text-caption text-medium-emphasis">（点击单集查看详情与状态）</span>
+              <span class="text-subtitle-2 font-weight-bold">选集进度</span>
+              <span class="text-caption text-medium-emphasis">点单集看状态</span>
             </div>
             <!-- 状态图例 -->
             <div class="matrix-legend d-flex align-center ga-2 text-caption">
@@ -173,7 +167,7 @@
         <div v-if="(group.records || []).length" class="records-log-section mt-4">
           <div class="d-flex align-center justify-space-between mb-2">
             <span class="text-subtitle-2 font-weight-bold">追更记录 ({{ (group.records || []).length }})</span>
-            <span class="text-caption text-medium-emphasis">成功绿色 · 失败红色</span>
+            <span class="text-caption text-medium-emphasis">点单集可重新转存</span>
           </div>
 
           <div class="record-list">
@@ -188,7 +182,7 @@
                     <v-chip
                       size="x-small"
                       :color="recordStatusColor(rec)"
-                      variant="tonal"
+                      variant="flat"
                       class="font-weight-bold record-status-chip">
                       {{ recordStatusLabel(rec) }}
                     </v-chip>

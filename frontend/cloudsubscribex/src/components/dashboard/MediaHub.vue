@@ -13,6 +13,10 @@
             <v-icon icon="mdi-check-circle-outline" size="14" class="mr-1" />
             已全部入库
           </v-chip>
+          <v-chip value="transferring" size="small" variant="tonal" color="info">
+            <v-icon icon="mdi-progress-download" size="14" class="mr-1" />
+            正在转存 ({{ transferringCountTotal }})
+          </v-chip>
         </v-chip-group>
       </div>
 
@@ -236,12 +240,23 @@ const filteredGroups = computed(() => props.items || [])
 
 const missingCountTotal = computed(() => (props.items || []).filter((g) => hasMissing(g)).length)
 
+/** 正在转存：要么有活跃任务，要么接口标记了转存中的集 */
+function isTransferring(group) {
+  if (taskForGroup(group)) return true
+  if (Number(group.transferring_count || 0) > 0) return true
+  return (group.transferring_episodes || []).length > 0
+}
+
+const transferringCountTotal = computed(() => (props.items || []).filter(isTransferring).length)
+
 const displayedGroups = computed(() => {
   let list = filteredGroups.value
   if (filterStatus.value === "complete") {
     list = list.filter((g) => !hasMissing(g))
   } else if (filterStatus.value === "missing") {
     list = list.filter((g) => hasMissing(g))
+  } else if (filterStatus.value === "transferring") {
+    list = list.filter(isTransferring)
   }
   const kw = searchKeyword.value.trim().toLowerCase()
   if (kw) {
@@ -445,11 +460,16 @@ function getInitial(title) {
 .media-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  /* 行高必须由内容决定：auto 行 + 子元素 height:100% 会在确定高度的滚动容器里
+     形成「行高 0 → 卡片 0 → 子元素 100% = 0」的循环，PC 端整列塌成 2px 横线 */
+  grid-auto-rows: max-content;
+  align-content: start;
   gap: 20px;
   overflow-y: auto;
 }
 
 .media-card {
+  display: flex;
   border-radius: 12px;
   background: rgba(var(--v-theme-surface), 0.6) !important;
   border: 1px solid var(--cs-border-subtle, rgba(var(--v-border-color), 0.12));
@@ -468,9 +488,11 @@ function getInitial(title) {
 
 .card-inner {
   display: flex;
+  flex: 1 1 auto;
   gap: 16px;
   padding: 16px;
-  height: 100%;
+  /* 高度交给卡片内容撑开，禁止百分比（见 .media-grid 的注释） */
+  height: auto;
 }
 
 /* 海报主导：80×116 → 112×162 */
@@ -488,49 +510,43 @@ function getInitial(title) {
   position: absolute;
   right: 4px;
   bottom: 4px;
-  padding: 1px 5px;
+  padding: 1px 6px;
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 700;
   border-radius: 4px;
-  backdrop-filter: blur(8px);
-  background: rgba(0, 0, 0, 0.65);
   color: #fff;
   letter-spacing: -0.2px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
 }
 
+/* 状态直接靠实心底色表达，不再依赖文字色或文字说明 */
 .poster-status-badge.is-success {
-  color: #10b981;
-  border: 1px solid rgba(16, 185, 129, 0.4);
+  background: #10b981;
 }
 
 .poster-status-badge.is-warning {
-  color: #f59e0b;
-  border: 1px solid rgba(245, 158, 11, 0.4);
+  background: #f59e0b;
+  color: #1f2937;
 }
 
 .poster-status-badge.is-info {
-  color: #38bdf8;
-  border: 1px solid rgba(56, 189, 248, 0.4);
+  background: #3b82f6;
 }
 
 .poster-status-badge.is-primary {
-  color: #a78bfa;
-  border: 1px solid rgba(167, 139, 250, 0.4);
+  background: #8b5cf6;
 }
 
 .poster-status-badge.is-error {
-  color: #f87171;
-  border: 1px solid rgba(248, 113, 113, 0.4);
+  background: #ef4444;
 }
 
 .poster-status-badge.is-secondary {
-  color: #cbd5e1;
-  border: 1px solid rgba(203, 213, 225, 0.35);
+  background: #64748b;
 }
 
 .poster-status-badge.is-active {
-  color: #22d3ee;
-  border: 1px solid rgba(34, 211, 238, 0.45);
+  background: #06b6d4;
 }
 
 .poster-img {

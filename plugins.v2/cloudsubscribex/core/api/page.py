@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import datetime
+import os
 import re
+import time
 from typing import Any, Dict
 from urllib.parse import quote, urlencode
 import pytz
@@ -48,6 +50,74 @@ _RESOURCE_DETAIL_CACHE = create_platform_ttl_cache(
 _AIRED_INFO_CACHE = create_platform_ttl_cache(
     "ui:aired", maxsize=512, ttl=6 * 60 * 60
 )
+
+# 本地媒体库（STRM 落盘目录）索引：追更进度里的「已入库」必须反映磁盘上真实存在的集，
+# 只看订阅 note 会漏掉「订阅开始前就已入库」的集（例如订阅 start_episode=3 时 E1/E2 永远补不上）。
+_LOCAL_LIBRARY_TTL = 60.0
+_LOCAL_LIBRARY_STATE: dict[str, Any] = {"at": 0.0, "root": "", "index": {}}
+_SEASON_DIR_PATTERN = re.compile(r"^(?:season[\s._-]*|s)(\d{1,2})$|^第\s*(\d{1,2})\s*季$", re.IGNORECASE)
+_TMDB_TAG_PATTERN = re.compile(r"\{tmdb[-_]?(\d+)\}", re.IGNORECASE)
+_YEAR_TAG_PATTERN = re.compile(r"[（(](\d{4})[)）]")
+_EPISODE_TAG_PATTERN = re.compile(r"[Ss](\d{1,2})[\s._-]*[Ee](\d{1,4})")
+_CN_EPISODE_PATTERN = re.compile(r"第\s*(\d{1,4})\s*[集话話]")
+_VIDEO_SUFFIXES = {".strm", ".mp4", ".mkv", ".ts", ".avi", ".mov", ".wmv", ".flv", ".m2ts", ".iso"}
+
+
+def _match_season_dir(dir_name: str) -> int | None:
+    """识别 `Season 1` / `S01` / `第1季` 形式的季目录。"""
+    match = _SEASON_DIR_PATTERN.match((dir_name or "").strip())
+    if not match:
+        return None
+    number = match.group(1) or match.group(2)
+    try:
+        season = int(number)
+    except (TypeError, ValueError):
+        return None
+    return season if 0 < season < 100 else None
+
+
+def _normalize_media_name(value: str) -> str:
+    """媒体目录名归一化：去掉 tmdb 标签、年份与标点，便于按片名兜底匹配。"""
+    text = _TMDB_TAG_PATTERN.sub(" ", str(value or ""))
+    text = _YEAR_TAG_PATTERN.sub(" ", text)
+    text = re.sub(r"[\[\]【】{}()（）._·:：!！?？,，、\-—~]+", " ", text)
+    text = re.sub(r"\s+", "", text)
+    return text.strip().lower()
+
+
+def _parse_episodes_from_names(file_names, season: int) -> set[int]:
+    """从文件名解析目标季的集号；只认已存在的文件，多版本同集只算一次。"""
+    episodes: set[int] = set()
+    for raw_name in file_names:
+        name = str(raw_name or "")
+        if not name:
+            continue
+        suffix = os.path.splitext(name)[1].lower()
+        if suffix and suffix not in _VIDEO_SUFFIXES:
+            continue
+        tagged = False
+        for tag in _EPISODE_TAG_PATTERN.finditer(name):
+            tagged = True
+            try:
+                file_season = int(tag.group(1))
+                episode = int(tag.group(2))
+            except (TypeError, ValueError):
+                continue
+            if file_season != season or episode <= 0:
+                continue
+            episodes.add(episode)
+        # 只有完全没有 SxxExx 标签时才回退中文集号，避免把「第2集」这类
+        # 描述性文字误判成集号（例如 S01E02 与 S02E01 混在同一目录时）
+        if tagged:
+            continue
+        for tag in _CN_EPISODE_PATTERN.finditer(name):
+            try:
+                episode = int(tag.group(1))
+            except (TypeError, ValueError):
+                continue
+            if episode > 0:
+                episodes.add(episode)
+    return episodes
 
 
 def _aired_episode_info(tmdb_id: int, season: int) -> dict | None:
@@ -456,6 +526,85 @@ class PageApi(OwnerDelegator):
             logger.debug(f"代理拉取海报失败 {target}: {err}")
             return Response(status_code=502, content=b"Failed to fetch image")
 
+    def _local_library_index(self) -> dict[tuple, set[int]]:
+        """扫描本地媒体库根目录，建立「tmdb/片名 + 季 → 磁盘上真实存在的集号」索引。"""
+        root = str(getattr(self._owner, "_local_resource_path", "") or "").strip()
+        if not root or not os.path.isdir(root):
+            return {}
+        now = time.monotonic()
+        state = _LOCAL_LIBRARY_STATE
+        if state.get("root") == root and state.get("index") and now - float(state.get("at") or 0) < _LOCAL_LIBRARY_TTL:
+            return state["index"]
+
+        index: dict[tuple, set[int]] = {}
+        try:
+            for dir_path, dir_names, file_names in os.walk(root):
+                relative = dir_path[len(root):].strip(os.sep)
+                # 媒体库结构最多到 类型/分类/媒体目录/季目录 这一层，再深不再遍历
+                if relative and relative.count(os.sep) > 4:
+                    dir_names[:] = []
+                    continue
+                season = _match_season_dir(os.path.basename(dir_path))
+                if season is None:
+                    continue
+                dir_names[:] = []
+                episodes = _parse_episodes_from_names(file_names, season)
+                if not episodes:
+                    continue
+                media_dir = os.path.basename(os.path.dirname(dir_path))
+                tmdb_match = _TMDB_TAG_PATTERN.search(media_dir)
+                if tmdb_match:
+                    index.setdefault(("tmdb", tmdb_match.group(1), season), set()).update(episodes)
+                media_name = _normalize_media_name(media_dir)
+                if media_name:
+                    year_match = _YEAR_TAG_PATTERN.search(media_dir)
+                    year = int(year_match.group(1)) if year_match else 0
+                    index.setdefault(("title", media_name, year, season), set()).update(episodes)
+        except OSError as error:
+            logger.debug(f"本地媒体库索引构建失败：{error}")
+            return {}
+
+        _LOCAL_LIBRARY_STATE.update({"at": now, "root": root, "index": index})
+        if index:
+            logger.debug(f"本地媒体库索引已刷新：{len(index)} 条季记录，根目录 {root}")
+        return index
+
+    def _local_library_episodes(
+            self,
+            tmdb_id: Any,
+            title: Any,
+            year: Any,
+            season: Any,
+    ) -> set[int]:
+        """取本地媒体库中该季真实存在的集号；无索引或未命中返回空集。"""
+        index = self._local_library_index()
+        if not index:
+            return set()
+        try:
+            season_no = int(season or 1)
+        except (TypeError, ValueError):
+            season_no = 1
+        if tmdb_id:
+            hit = index.get(("tmdb", str(tmdb_id), season_no))
+            if hit:
+                return set(hit)
+        media_name = _normalize_media_name(title)
+        if not media_name:
+            return set()
+        try:
+            year_no = int(year or 0)
+        except (TypeError, ValueError):
+            year_no = 0
+        hit = index.get(("title", media_name, year_no, season_no))
+        if hit:
+            return set(hit)
+        # 年份标签缺失或写法不同（如目录只写片名）时，按片名兜底合并
+        merged: set[int] = set()
+        for key, episodes in index.items():
+            if key[0] == "title" and key[1] == media_name and key[3] == season_no:
+                merged.update(episodes)
+        return merged
+
     def _build_subscribes_progress(self, page_history: list[dict[str, Any]] = None) -> list[dict[str, Any]]:
         """构建以 MoviePilot 订阅为核心的追更进度大屏数据。"""
         subscribes = []
@@ -567,6 +716,13 @@ class PageApi(OwnerDelegator):
                         f"title:{name}:{eff_season}", set()
                     )
                 library_episodes = sorted(library_episodes | history_eps)
+
+                # 媒体库实测优先：磁盘上真实存在的集一定算已入库。
+                # 订阅 note 只记录 MoviePilot 下载过的集，订阅从第 N 集开始时早期集永远补不上。
+                if not is_movie:
+                    local_episodes = self._local_library_episodes(tmdb_id, name, year, eff_season)
+                    if local_episodes:
+                        library_episodes = sorted(set(library_episodes) | local_episodes)
 
                 # 海报多级回查与增强
                 poster = str(getattr(sub, "poster", "") or getattr(sub, "backdrop", "") or "")
