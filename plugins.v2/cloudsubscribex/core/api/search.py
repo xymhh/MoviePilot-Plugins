@@ -14,6 +14,7 @@ from app.utils.string import StringUtils
 
 from .page import _platform_image_url
 from .source_filter import filter_source_meta_by_enabled
+from .title_parse import split_title_season
 from .. import OwnerDelegator, SearchCapability
 from ..cloud import CloudDriveCapability
 from ..config import UIConfig
@@ -1078,6 +1079,7 @@ class SearchApi(OwnerDelegator):
         title = str(data.get("title") or "").strip()
         if not title:
             return {"success": False, "message": "媒体标题不能为空", "data": {"items": [], "sources": []}}
+        title, title_season = split_title_season(title)
 
         original_title = str(data.get("original_title") or "").strip()
         year = str(data.get("year") or "").strip()
@@ -1089,6 +1091,8 @@ class SearchApi(OwnerDelegator):
                 season = int(season)
             except (ValueError, TypeError):
                 season = None
+        if season is None and title_season is not None:
+            season = title_season
 
         mediainfo = MediaInfo()
         mediainfo.title = title
