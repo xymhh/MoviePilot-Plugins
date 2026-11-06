@@ -18,22 +18,6 @@
             正在转存 ({{ transferringCountTotal }})
           </v-chip>
         </v-chip-group>
-
-        <!-- 追更日历：未来 7 天待更新，点某天只看当天要播的剧 -->
-        <div v-if="hasTvGroups" class="release-strip">
-          <span class="release-strip-title">追更日历</span>
-          <button
-            v-for="day in calendarDays"
-            :key="day.iso"
-            type="button"
-            :class="['release-day', { 'is-active': calendarDay === day.offset, 'is-empty': !day.count }]"
-            :title="day.count ? `${day.dateLabel} 待更新 ${day.count} 部` : `${day.dateLabel} 无更新`"
-            @click="toggleCalendarDay(day.offset)">
-            <span class="release-day-label">{{ day.label }}</span>
-            <span class="release-day-count">{{ day.count || "—" }}</span>
-          </button>
-          <span v-if="!calendarTotal" class="release-empty">TMDB 暂无未来排期</span>
-        </div>
       </div>
 
       <div class="hub-search-box d-flex align-center ga-2">
@@ -54,6 +38,24 @@
           title="刷新订阅进度"
           :loading="loading"
           @click="$emit('refresh')" />
+      </div>
+    </div>
+
+    <!-- 追更日历：未来 7 天待更新，点某天只看当天要播的剧（独立一行，手机上横向滑动） -->
+    <div v-if="hasTvGroups" class="release-strip">
+      <span class="release-strip-title">追更日历</span>
+      <div class="release-days">
+        <button
+          v-for="day in calendarDays"
+          :key="day.iso"
+          type="button"
+          :class="['release-day', { 'is-active': calendarDay === day.offset, 'is-empty': !day.count }]"
+          :title="day.count ? `${day.dateLabel} 待更新 ${day.count} 部` : `${day.dateLabel} 无更新`"
+          @click="toggleCalendarDay(day.offset)">
+          <span class="release-day-label">{{ day.label }}</span>
+          <span class="release-day-count">{{ day.count || "—" }}</span>
+        </button>
+        <span v-if="!calendarTotal" class="release-empty">TMDB 暂无未来排期</span>
       </div>
     </div>
 
@@ -543,9 +545,25 @@ function getInitial(title) {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 12px;
-  padding-bottom: 2px;
+  margin: -4px 0 16px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.release-days {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
   overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+.release-days::-webkit-scrollbar {
+  display: none;
 }
 
 .release-strip-title {
@@ -914,6 +932,41 @@ function getInitial(title) {
 }
 
 @media (max-width: 640px) {
+  .release-strip {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 6px;
+    margin: 0 0 14px;
+  }
+
+  .release-days {
+    width: 100%;
+  }
+
+  .release-days {
+    gap: 6px;
+  }
+
+  /* 7 格在 320px 屏也一屏放得下（7*38 + 6*6 = 302） */
+  .release-day {
+    flex: 1 1 0;
+    min-width: 38px;
+    padding: 5px 4px;
+  }
+
+  .release-day-label {
+    font-size: 10px;
+  }
+
+  .release-day-count {
+    font-size: 13px;
+  }
+
+  .card-time-row {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
   .hub-toolbar {
     flex-direction: column;
     align-items: stretch !important;
