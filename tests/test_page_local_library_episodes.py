@@ -157,7 +157,6 @@ class TestAiredCalendarUpcoming(unittest.TestCase):
     """追更日历：未来 30 天内的待更新集来自同一次 season detail，不额外请求 TMDB。"""
 
     def _run_with_episodes(self, episodes):
-        import datetime
         import types
 
         calls = []
