@@ -20,7 +20,7 @@
         </v-chip-group>
 
         <!-- 追更日历：未来 7 天待更新，点某天只看当天要播的剧 -->
-        <div v-if="calendarTotal > 0" class="release-strip">
+        <div v-if="hasTvGroups" class="release-strip">
           <span class="release-strip-title">追更日历</span>
           <button
             v-for="day in calendarDays"
@@ -32,6 +32,7 @@
             <span class="release-day-label">{{ day.label }}</span>
             <span class="release-day-count">{{ day.count || "—" }}</span>
           </button>
+          <span v-if="!calendarTotal" class="release-empty">TMDB 暂无未来排期</span>
         </div>
       </div>
 
@@ -305,6 +306,9 @@ const calendarDays = computed(() => {
 })
 
 const calendarTotal = computed(() => calendarDays.value.reduce((total, day) => total + day.count, 0))
+
+/** 有剧集订阅才显示日历条（纯电影库不显示） */
+const hasTvGroups = computed(() => (props.items || []).some((group) => !isMovie(group)))
 
 const selectedCalendarISO = computed(() => {
   if (calendarDay.value === null) return ""
@@ -588,6 +592,12 @@ function getInitial(title) {
 .release-day-count {
   font-size: 14px;
   font-weight: 700;
+}
+
+.release-empty {
+  flex: 0 0 auto;
+  font-size: 11px;
+  opacity: 0.55;
 }
 
 .card-today-chip {

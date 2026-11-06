@@ -47,8 +47,9 @@ _RESOURCE_RECOMMEND_CACHE = create_platform_ttl_cache(
 _RESOURCE_DETAIL_CACHE = create_platform_ttl_cache(
     "resource:detail", maxsize=512, ttl=5 * 60
 )
+# key 带版本号：平台 TTL 缓存跨插件重载存活，换结构时必须换前缀，否则旧条目缺字段
 _AIRED_INFO_CACHE = create_platform_ttl_cache(
-    "ui:aired", maxsize=512, ttl=6 * 60 * 60
+    "ui:aired:v2", maxsize=512, ttl=6 * 60 * 60
 )
 
 # 本地媒体库（STRM 落盘目录）索引：追更进度里的「已入库」必须反映磁盘上真实存在的集，
@@ -464,7 +465,8 @@ class PageApi(OwnerDelegator):
         pending: list[tuple[str, int, int]] = []
         for key, (tmdb_id, season) in entries.items():
             cached = _AIRED_INFO_CACHE.get(key)
-            if isinstance(cached, dict):
+            # 旧结构（无 upcoming 字段）视为未命中，升级后自动补齐日历数据
+            if isinstance(cached, dict) and "upcoming" in cached:
                 counts[key] = max(0, int(cached.get("aired") or 0))
                 if cached.get("air_date"):
                     latest[key] = {
