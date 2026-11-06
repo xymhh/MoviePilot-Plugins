@@ -150,9 +150,11 @@
       :group="selectedGroup"
       :task="selectedTask"
       :retrying-key="retryingKey"
+      :api="api"
       @retry="(rec) => $emit('retry', rec)"
       @retry-failed="(grp) => $emit('retry-failed', grp)"
-      @delete="(rec) => $emit('delete', rec)" />
+      @delete="(rec) => $emit('delete', rec)"
+      @refresh="$emit('refresh')" />
   </div>
 </template>
 
@@ -172,6 +174,7 @@ const props = defineProps({
   isSubscribeMode: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   retryingKey: { type: String, default: "" },
+  api: { type: Object, default: null },
 })
 
 defineEmits(["refresh", "retry", "retry-failed", "delete"])

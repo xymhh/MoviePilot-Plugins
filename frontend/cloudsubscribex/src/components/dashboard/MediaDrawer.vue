@@ -65,6 +65,15 @@
               重试失败集
             </v-btn>
             <v-btn
+              v-if="api"
+              size="small"
+              color="primary"
+              variant="tonal"
+              prepend-icon="mdi-magnify"
+              @click="openSearch()">
+              搜索资源
+            </v-btn>
+            <v-btn
               v-if="mediaDetailLink"
               size="small"
               variant="text"
@@ -82,6 +91,61 @@
 
       <!-- 主体内容 -->
       <v-card-text class="drawer-body pa-4" style="max-height: 65vh;">
+        <!-- 资源搜索：按剧名或 SxxExx 精确搜，结果可一键转存 -->
+        <div v-if="searchOpen" class="resource-search-panel mb-4 pa-3 rounded border">
+          <div class="search-bar d-flex align-center ga-2 flex-wrap">
+            <v-text-field
+              v-model="searchKeyword"
+              density="compact"
+              variant="outlined"
+              hide-details
+              placeholder="剧名 或 剧名 S01E07"
+              class="search-keyword"
+              @keyup.enter="runSearch" />
+            <v-btn size="small" color="primary" variant="flat" :loading="searching" @click="runSearch">搜索</v-btn>
+            <v-btn size="small" variant="text" @click="closeSearch">收起</v-btn>
+          </div>
+
+          <div v-if="pendingEpisodeNumbers.length" class="search-ep-chips mt-2 d-flex align-center flex-wrap ga-1">
+            <span class="text-caption text-medium-emphasis">按集搜：</span>
+            <v-chip
+              v-for="ep in pendingEpisodeNumbers.slice(0, 15)"
+              :key="ep"
+              size="x-small"
+              variant="tonal"
+              color="primary"
+              @click="searchEpisode(ep)">
+              E{{ String(ep).padStart(2, "0") }}
+            </v-chip>
+          </div>
+
+          <div v-if="searching" class="text-caption text-medium-emphasis mt-2">搜索中…首次全渠道约 1-2 分钟，之后走缓存很快</div>
+          <div v-else-if="searchError" class="text-caption text-error mt-2">{{ searchError }}</div>
+          <div v-else-if="searchNote" class="text-caption text-medium-emphasis mt-2">{{ searchNote }}</div>
+
+          <div v-if="searchItems.length" class="search-results mt-3">
+            <div v-for="(item, idx) in searchItems" :key="item.url || idx" class="search-result-item">
+              <div class="result-main">
+                <div class="result-title" :title="item.title">{{ item.title }}</div>
+                <div class="result-meta">
+                  <span v-if="item.resource_type_name" class="meta-pan">{{ item.resource_type_name }}</span>
+                  <span v-if="item.size_formatted">{{ item.size_formatted }}</span>
+                  <span v-if="item.seeders">{{ item.seeders }} 做种</span>
+                </div>
+              </div>
+              <v-btn
+                size="x-small"
+                color="primary"
+                variant="flat"
+                :loading="transferringUrl === (item.url || item.resource_ref)"
+                :disabled="!item.url && !item.resource_ref"
+                @click="transferItem(item)">
+                转存
+              </v-btn>
+            </div>
+          </div>
+        </div>
+
         <div v-if="task" class="task-progress-panel mb-4 pa-3 rounded border">
           <div class="d-flex align-center flex-wrap ga-2">
             <v-chip size="small" :color="taskStatusColor(task)" variant="tonal" class="font-weight-bold">
@@ -294,9 +358,10 @@ const props = defineProps({
   task: { type: Object, default: null },
   retrying: { type: Boolean, default: false },
   retryingKey: { type: String, default: "" },
+  api: { type: Object, default: null },
 })
 
-const emit = defineEmits(["update:modelValue", "retry", "retry-failed", "delete"])
+const emit = defineEmits(["update:modelValue", "retry", "retry-failed", "delete", "refresh"])
 
 const selectedEpisode = ref(null)
 const coverError = ref(false)
@@ -491,6 +556,132 @@ const selectedEpData = computed(() => {
 
 function onSelectEp(ep) {
   selectedEpisode.value = selectedEpisode.value === ep.number ? null : ep.number
+}
+
+// ---------------- 资源搜索 / 一键转存 ----------------
+const PLUGIN_ID = "CloudSubscribeX"
+const searchOpen = ref(false)
+const searchKeyword = ref("")
+const searching = ref(false)
+const searchItems = ref([])
+const searchError = ref("")
+const searchNote = ref("")
+const transferringUrl = ref("")
+const transferredUrl = ref("")
+
+const isMovieGroup = computed(() => {
+  const type = String(props.group?.media_type || props.group?.type || "")
+  return type === "movie" || type === "电影"
+})
+
+const seasonNumber = computed(() => {
+  const value = props.group?.season
+  if (value === null || value === undefined || value === "") return 1
+  const season = Number(value)
+  return Number.isFinite(season) && season > 0 ? season : 1
+})
+
+/** 真该补的集号（已播但没入库），用于「按集搜」快捷按钮 */
+const pendingEpisodeNumbers = computed(() =>
+  episodesList.value.filter((ep) => ep.status === "missing").map((ep) => ep.number),
+)
+
+function groupTitle() {
+  return String(props.group?.title || props.group?.name || "").trim()
+}
+
+function seasonTag() {
+  if (isMovieGroup.value) return ""
+  return ` S${String(seasonNumber.value).padStart(2, "0")}`
+}
+
+function defaultKeyword() {
+  return `${groupTitle()}${seasonTag()}`.trim()
+}
+
+function closeSearch() {
+  searchOpen.value = false
+}
+
+function openSearch() {
+  searchOpen.value = true
+  if (!searchKeyword.value) searchKeyword.value = defaultKeyword()
+  // 不自动搜：全渠道首搜约 1-2 分钟，交给用户自己按「搜索」或点集号
+}
+
+function searchEpisode(episode) {
+  searchOpen.value = true
+  searchKeyword.value = `${groupTitle()}${seasonTag()}E${String(episode).padStart(2, "0")}`.trim()
+  runSearch()
+}
+
+async function runSearch() {
+  if (!props.api || searching.value) return
+  const keyword = String(searchKeyword.value || "").trim()
+  if (!keyword) {
+    searchError.value = "请输入关键词"
+    return
+  }
+  searching.value = true
+  searchError.value = ""
+  searchNote.value = ""
+  searchItems.value = []
+  try {
+    const result = await props.api.post(`plugin/${PLUGIN_ID}/resource/search_resources`, {
+      title: keyword,
+      year: props.group?.year || "",
+      media_type: isMovieGroup.value ? "movie" : "tv",
+      season: isMovieGroup.value ? undefined : seasonNumber.value,
+      tmdb_id: props.group?.tmdb_id || undefined,
+    })
+    if (!result?.success) {
+      searchError.value = result?.message || "搜索失败"
+      return
+    }
+    const items = result?.data?.items || []
+    searchItems.value = items.slice(0, 20)
+    searchNote.value = items.length
+      ? (result?.message || `共 ${items.length} 条候选`)
+      : (result?.message || "没搜到资源，换个关键词试试")
+  } catch (error) {
+    searchError.value = `搜索出错：${error?.message || error}`
+  } finally {
+    searching.value = false
+  }
+}
+
+async function transferItem(item) {
+  if (!props.api) return
+  const key = item?.url || item?.resource_ref || ""
+  if (!key) return
+  transferringUrl.value = key
+  transferredUrl.value = ""
+  searchError.value = ""
+  try {
+    const payload = {
+      subscribe_id: Number(props.group?.subscribe_id || 0),
+      media: {
+        tmdb_id: props.group?.tmdb_id || undefined,
+        media_type: isMovieGroup.value ? "movie" : "tv",
+        title: groupTitle(),
+        year: props.group?.year || undefined,
+        seasons: isMovieGroup.value ? [] : [seasonNumber.value],
+      },
+      resources: [item],
+    }
+    const result = await props.api.post(`plugin/${PLUGIN_ID}/sync/manual`, payload)
+    if (result?.success) {
+      transferredUrl.value = key
+      searchNote.value = result?.message || "已提交转存"
+      emit("refresh")
+    } else {
+      searchError.value = result?.message || "转存失败"
+    }
+  } catch (error) {
+    searchError.value = `转存出错：${error?.message || error}`
+  } finally {
+    transferringUrl.value = ""
+  }
 }
 
 function formatSize(bytes) {
@@ -762,6 +953,68 @@ function retryKey(rec) {
 .ep-dot-unaired {
   background: transparent;
   border: 1px dashed rgba(var(--v-theme-on-surface), 0.45);
+}
+
+.resource-search-panel {
+  border-color: rgba(148, 163, 184, 0.35) !important;
+}
+
+.search-keyword {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.search-result-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.08);
+}
+
+.result-main {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.result-title {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.result-meta {
+  display: flex;
+  gap: 8px;
+  font-size: 11px;
+  opacity: 0.72;
+}
+
+.meta-pan {
+  font-weight: 600;
+}
+
+@media (max-width: 640px) {
+  .search-results {
+    max-height: 200px;
+  }
+
+  .result-title {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
 }
 
 /* 未播的集：虚线边框 + 降透明度，一眼看出不是「该补没补」 */

@@ -159,6 +159,7 @@
             :items="subscribesProgress.length ? subscribesProgress : historyGroups"
             :tasks="runtime.tasks"
             :is-subscribe-mode="Boolean(subscribesProgress.length)"
+            :api="api"
             :loading="loading"
             :retrying-key="retryingHistoryKey"
             @refresh="loadPage"
