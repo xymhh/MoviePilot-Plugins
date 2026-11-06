@@ -14,7 +14,8 @@ import re
 import sys
 from pathlib import Path
 
-EXPECTED_TABS = ["hub", "tasks", "history", "tg", "organize"]
+# 1.9.44 移除任务中心页签（用户反馈「看着多余」），任务状态只跟随订阅卡展示
+EXPECTED_TABS = ["hub", "history", "tg", "organize"]
 
 
 def main(root: Path) -> int:
@@ -41,9 +42,7 @@ def main(root: Path) -> int:
     if "TgMonitor" not in app_text:
         errors.append("AppPage 未挂载 TgMonitor（频道监控页签会空白）")
 
-    # 1.9.32：资源账本与历史页合二为一为「转存台账」，在台账内支持全局与单剧排障明细
-    if "CandidateLedgerPanel" not in app_text and "CandidateLedgerPanel" not in (components / "dashboard" / "HistoryTable.vue").read_text(encoding="utf-8"):
-        errors.append("AppPage / HistoryTable 未挂载 CandidateLedgerPanel（未转存账本排障会缺失）")
+    # 1.9.45 移除「未转存账本」入口与前端组件（后端账本接口保留），不再要求挂载 CandidateLedgerPanel
 
     for ref in sorted(set(re.findall(r'@click="(\w*Visible) = true"', app_text))):
         if f'v-model="{ref}"' not in app_text:
