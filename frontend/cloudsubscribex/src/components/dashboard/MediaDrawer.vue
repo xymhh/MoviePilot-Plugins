@@ -339,7 +339,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from "vue"
+import { ref, computed, watch } from "vue"
 import {
   displayTotal,
   displayTransferred,
@@ -598,6 +598,21 @@ function seasonTag() {
 function defaultKeyword() {
   return `${groupTitle()}${seasonTag()}`.trim()
 }
+
+/** 换剧（或换季）时把搜索状态清干净，否则关键词还停在上一步那部剧 */
+watch(
+  () => `${props.group?.subscribe_id || 0}|${props.group?.tmdb_id || 0}|${props.group?.season ?? ""}|${props.group?.title || ""}`,
+  () => {
+    searchKeyword.value = searchOpen.value ? defaultKeyword() : ""
+    searchItems.value = []
+    searchError.value = ""
+    searchNote.value = ""
+    transferringUrl.value = ""
+    transferredUrl.value = ""
+    selectedEpisode.value = null
+    coverError.value = false
+  },
+)
 
 function closeSearch() {
   searchOpen.value = false
