@@ -10,12 +10,18 @@
 """
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock
 
 from plugin_env import OwnerDelegator, load_module, register_mock, register_module
+
+# 这里注册的是 placeholders；加载完 page.py 必须把它们从 sys.modules 里撤掉，
+# 否则同进程内后续用例（如 test_subscribe_media_type_filter）拿到的是缺属性的
+# 假 config，`from ..config import DEFAULT_AUTO_SUBSCRIBE_USERNAME` 会 ImportError。
+_MODULES_BEFORE_STUBS = set(sys.modules)
 
 register_module("pytz", timezone=MagicMock(), utc=MagicMock())
 register_module("app", package=True)
@@ -66,6 +72,11 @@ page_module = load_module(
     "cloudsubscribex.core.api.page",
     "plugins.v2/cloudsubscribex/core/api/page.py",
 )
+
+# 撤掉本文件注册的占位模块（保留已加载的 page 模块），恢复对其它用例的零污染
+for _name in [name for name in sys.modules if name not in _MODULES_BEFORE_STUBS]:
+    if _name != "cloudsubscribex.core.api.page":
+        sys.modules.pop(_name, None)
 
 
 class _Owner:
