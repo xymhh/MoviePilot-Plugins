@@ -139,22 +139,12 @@
                   :loading="refreshingAccounts.includes(field.accountKey)"
                   :refreshable="Boolean(field.accountKey)"
                   @refresh="emit('refresh-account', field.accountKey)" />
-                <v-expansion-panels
-                  v-else-if="field.type === 'info'"
-                  variant="accordion"
-                  flat
-                  class="info-panel">
-                  <v-expansion-panel>
-                    <v-expansion-panel-title class="text-body-2 py-2">
-                      {{ field.label }}
-                    </v-expansion-panel-title>
-                    <v-expansion-panel-text>
-                      <div v-for="line in field.lines || []" :key="line" class="text-caption mb-1">
-                        • {{ line }}
-                      </div>
-                    </v-expansion-panel-text>
-                  </v-expansion-panel>
-                </v-expansion-panels>
+                <v-alert v-else-if="field.type === 'info'" type="info" variant="tonal" density="compact">
+                  <div class="text-body-2 font-weight-medium mb-1">
+                    {{ field.label }}
+                  </div>
+                  <div v-for="line in field.lines || []" :key="line" class="text-caption mb-1">• {{ line }}</div>
+                </v-alert>
                 <div v-else-if="field.type === 'media-library-webhook'" class="media-library-webhook">
                   <v-alert
                     v-if="!(field.items || []).length"
@@ -1509,14 +1499,5 @@ function mediaLibraryWebhookUrl(field, serverName) {
   -webkit-box-shadow: 0 0 0 1000px rgb(var(--v-theme-surface)) inset !important;
   -webkit-text-fill-color: rgb(var(--v-theme-on-surface)) !important;
   transition: background-color 5000s ease-in-out 0s;
-}
-
-.info-panel {
-  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  border-radius: 6px;
-}
-
-.info-panel :deep(.v-expansion-panel-title) {
-  min-height: 36px;
 }
 </style>

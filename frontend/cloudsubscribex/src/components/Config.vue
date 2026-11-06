@@ -913,7 +913,7 @@ try {
 }
 const isMobile = computed(() => (display?.smAndDown?.value ?? false) || (typeof window !== "undefined" && window.innerWidth <= 768));
 const config = reactive(JSON.parse(JSON.stringify(props.initialConfig || {})))
-const activeTab = ref("overview")
+const activeTab = ref("basic")
 
 function onNavClick(val, event) {
   activeTab.value = val;
@@ -922,13 +922,13 @@ function onNavClick(val, event) {
   }
 }
 const optionScopeByTab = Object.freeze({
-  overview: ["base"],
-  storage: ["drive"],
-  subscribe: ["base"],
-  search: ["search"],
-  transfer: ["subscriptions"],
-  playback: ["base"],
-  notify: ["checkin", "notify"],
+  basic: "base",
+  transfer: "subscriptions",
+  upgrade: "subscriptions",
+  drive: "drive",
+  search: "search",
+  checkin: "checkin",
+  notify: "notify",
 })
 const loadedOptionScopes = new Set()
 const optionScopeRequests = new Map()
@@ -1006,16 +1006,6 @@ const options = reactive({
   rsshubLoading: false,
 })
 const sections = computed(() => createConfigSections(options, config))
-watch(
-  sections,
-  (list) => {
-    if (!list?.length) return
-    if (!list.some((section) => section.value === activeTab.value)) {
-      activeTab.value = list[0].value
-    }
-  },
-  {immediate: true},
-)
 
 // ---------------------------------------------------------------- 配置向导
 // 只做「必填三件事」：选网盘并登录 → 落地目录 → 保存并体检。
@@ -1127,13 +1117,22 @@ const navGroups = computed(() => {
   const map = new Map(all.map((s) => [s.value, s]));
   const groups = [
     {
-      name: "常用",
-      items: ["overview", "storage", "subscribe", "search"]
+      name: "核心配置",
+      items: ["basic", "transfer", "organize", "subscribe", "upgrade"]
         .map((v) => map.get(v)).filter(Boolean),
     },
     {
-      name: "运行与通知",
-      items: ["transfer", "playback", "notify"].map((v) => map.get(v)).filter(Boolean),
+      name: "渠道配置",
+      items: ["tg", "drive", "search"].map((v) => map.get(v)).filter(Boolean),
+    },
+    {
+      // 1.7.43：navGroups 是白名单，新增 section 必须登记，否则导航不渲染
+      name: "播放与媒体",
+      items: ["strm", "emby"].map((v) => map.get(v)).filter(Boolean),
+    },
+    {
+      name: "服务通知",
+      items: ["checkin", "notify"].map((v) => map.get(v)).filter(Boolean),
     },
   ];
   return groups.filter((g) => g.items.length > 0);
@@ -1780,14 +1779,8 @@ function selectDirectory(path) {
   directoryVisible.value = false
 }
 
-function optionScopesForTab(tab = activeTab.value) {
-  const scopes = optionScopeByTab[String(tab || "overview")]
-  if (Array.isArray(scopes)) return scopes
-  return [typeof scopes === "string" ? scopes : "base"]
-}
-
 function optionScopeForTab(tab = activeTab.value) {
-  return optionScopesForTab(tab)[0] || "base"
+  return optionScopeByTab[String(tab || "basic")] || "base"
 }
 
 async function loadOptions(scope = "base", {force = false, refresh = false} = {}) {
@@ -2145,10 +2138,9 @@ onMounted(async () => {
 })
 
 watch(activeTab, (tab) => {
-  optionScopesForTab(tab).forEach((scope) => {
-    loadOptions(scope).catch((error) => {
-      notify(`加载配置选项失败：${error.message || error}`, "warning")
-    })
+  const scope = optionScopeForTab(tab);
+  loadOptions(scope).catch((error) => {
+    notify(`加载配置选项失败：${error.message || error}`, "warning")
   })
 })
 

@@ -15,7 +15,7 @@ export function createEmbyProxySection() {
             key: "emby_proxy_enabled",
             label: "启用内置反代",
             type: "switch",
-            hint: "302 到网盘 CDN，不占服务器带宽；先改 Emby 入口",
+            hint: "播放 STRM 时把客户端 302 到网盘 CDN，客户端直连、不占服务器带宽。开启前先把 Emby 的访问入口指到本反代端口",
             cols: 12,
           },
           {

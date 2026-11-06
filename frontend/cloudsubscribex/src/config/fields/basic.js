@@ -34,7 +34,7 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             key: "title_subscribe_enabled",
             label: "片名自动订阅",
             type: "switch",
-            hint: "发片名由平台出候选，点选后建订阅并搜索",
+            hint: "对话框发片名先由平台出候选，选定后按选定项建订阅并搜索（发片名后只要还有未消费的登记，点选即接入）",
             cols: 4,
           },
           {
@@ -153,7 +153,7 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             label: "期集换算规则",
             type: "textarea",
             placeholder: "现在就出发 = 2",
-            hint: "每行「节目名 = 每期集数」，如 现在就出发 = 2；留空按期号=集号",
+            hint: "每行一条「节目名 = 每期集数」，用于文件名只写「第N期（上/下）」的综艺：填 2 时 第3期上 → E05、第3期下 → E06。留空表示期号就是集号（原行为）；文件名里已有 SxxExx 的以明确标记为准",
             cols: 12,
           },
           {
@@ -161,7 +161,7 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             label: "忽略媒体库路径",
             type: "textarea",
             placeholder: "/media/strm/115网盘分享",
-            hint: "每行一个前缀，排除分享 STRM 库对缺集判断的干扰",
+            hint: "每行一个路径前缀；该路径下的条目不计入已入库和缺集判断（用于排除分享 STRM 库）",
             cols: 12,
           },
         ],

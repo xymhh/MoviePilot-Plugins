@@ -10,7 +10,7 @@ export function createOrganizeSection() {
       {
         title: "整理范围",
         icon: "mdi-folder-search-outline",
-        hint: "扫描只读；执行只重命名+移动，不删文件",
+        hint: "扫描只读；执行时只重命名和移动，不删除任何网盘文件。目标路径复用当前媒体库分类与重命名模板。",
         fields: [
           {
             key: "organize_source_path",
@@ -68,7 +68,7 @@ export function createOrganizeSection() {
       {
         title: "定时整理",
         icon: "mdi-calendar-clock-outline",
-        hint: "按 Cron 扫描目录；可只预览或自动执行",
+        hint: "默认关闭。开启后按 Cron 扫描上面的目录；可只预览，也可自动执行 ready 分组。",
         fields: [
           {
             key: "organize_schedule_enabled",
