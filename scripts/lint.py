@@ -155,7 +155,7 @@ SILENT_DEBUG_BUDGET = 0
 PLUGIN_SOURCES = Path("plugins.v2")
 
 
-# 检查范围：本仓库自己维护的 Python。plugins.v3/p115strmhelper 是另一个插件的历史目录，
+# 检查范围：本仓库自己维护的 Python（V2 插件线）。
 # 有大量自带的 stub 噪声，不在本脚本射程内。
 RUFF_TARGETS = ("plugins.v2", "tests", "scripts", ".github/scripts")
 
