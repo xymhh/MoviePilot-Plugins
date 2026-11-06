@@ -652,8 +652,9 @@ function seasonTag() {
   return ` S${String(seasonNumber.value).padStart(2, "0")}`
 }
 
+/** 默认关键词只用剧名：带季号会被各站拼成「剧名 S01」而搜不到东西 */
 function defaultKeyword() {
-  return `${groupTitle()}${seasonTag()}`.trim()
+  return groupTitle()
 }
 
 /** 换剧（或换季）时把搜索状态清干净，否则关键词还停在上一步那部剧 */
