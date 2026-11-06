@@ -9,7 +9,6 @@
 （不改变原有结果、不把不存在的集算进来）。
 """
 
-import os
 import sys
 import tempfile
 import unittest
