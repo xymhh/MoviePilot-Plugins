@@ -45,8 +45,11 @@
             <v-chip size="x-small" variant="flat" color="success" :class="['font-weight-bold', solidChipClass('success')]">
               已入库 {{ libraryCount }}
             </v-chip>
-            <v-chip v-if="missingCount > 0" size="x-small" variant="flat" color="warning" :class="['font-weight-bold', solidChipClass('warning')]">
-              缺 {{ missingCount }}
+            <v-chip v-if="pendingMissingCount > 0" size="x-small" variant="flat" color="warning" :class="['font-weight-bold', solidChipClass('warning')]">
+              待补 {{ pendingMissingCount }}
+            </v-chip>
+            <v-chip v-if="unairedCount > 0" size="x-small" variant="tonal" color="info">
+              未播 {{ unairedCount }}
             </v-chip>
           </div>
 
@@ -120,6 +123,7 @@
               <span class="legend-item"><span class="legend-dot bg-success"></span>已入库</span>
               <span class="legend-item"><span class="legend-dot bg-warning"></span>转存中</span>
               <span class="legend-item"><span class="legend-dot bg-surface-variant border"></span>待补齐</span>
+              <span class="legend-item"><span class="legend-dot ep-dot-unaired"></span>未播</span>
             </div>
           </div>
 
@@ -385,6 +389,30 @@ const missingCount = computed(() => {
   return (props.group?.records || []).filter((r) => r.status && r.status !== "成功" && r.status !== "完成").length
 })
 
+/** 已播到第几集：优先用最新已播集号，其次用已播集数；0 表示 TMDB 还没给数据 */
+const airedBoundary = computed(() => {
+  const latest = Number(props.group?.latest_air_episode || 0)
+  const aired = Number(props.group?.aired_episodes || 0)
+  return Math.max(latest, aired)
+})
+
+/** 还没播出的集数：总集数里超过已播边界、且本地确实没有的部分 */
+const unairedCount = computed(() => {
+  const total = totalCount.value
+  const boundary = airedBoundary.value
+  if (total <= 0 || boundary <= 0) return 0
+  const libSet = new Set(props.group?.library_episodes || [])
+  const transferringSet = new Set(props.group?.transferring_episodes || [])
+  let count = 0
+  for (let i = boundary + 1; i <= total; i += 1) {
+    if (!libSet.has(i) && !transferringSet.has(i)) count += 1
+  }
+  return count
+})
+
+/** 真该补的：缺集里已经播出的部分 */
+const pendingMissingCount = computed(() => Math.max(0, missingCount.value - unairedCount.value))
+
 const hasFailedRecords = computed(() => {
   return (props.group?.records || []).some((r) => r.status && r.status !== "成功" && r.status !== "完成")
 })
@@ -400,6 +428,7 @@ const episodesList = computed(() => {
   // 有后端聚合口径（total_episodes）时，已入库只认 library_episodes，
   // 否则会出现「头部说缺 17 集、矩阵却把 93-106 全涂成已入库」的分裂。
   const aggregateMode = total > 0
+  const boundary = airedBoundary.value
   // 聚合模式下集数上界就是全剧集数；否则按流水里的最大集号推断
   const maxEp = aggregateMode ? total : Math.max(0, ...recs.map((r) => Number(r.episode || 0)))
   if (maxEp <= 0) return []
@@ -415,6 +444,10 @@ const episodesList = computed(() => {
     } else if (transferringSet.has(i)) {
       status = "transferring"
       statusText = "转存中"
+    } else if (boundary > 0 && i > boundary) {
+      // TMDB 说这一集还没播：不算待补，标「未播」
+      status = "unaired"
+      statusText = "未播"
     } else {
       // 检查 records 中是否有该集的记录
       const rec = recs.find((r) => Number(r.episode) === i)
@@ -723,6 +756,18 @@ function retryKey(rec) {
   height: 8px;
   border-radius: 50%;
   margin-right: 4px;
+}
+
+/* 未播：虚线圆点 + 半透明，与「待补齐」实心区分 */
+.ep-dot-unaired {
+  background: transparent;
+  border: 1px dashed rgba(var(--v-theme-on-surface), 0.45);
+}
+
+/* 未播的集：虚线边框 + 降透明度，一眼看出不是「该补没补」 */
+.ep-box--unaired {
+  border-style: dashed;
+  opacity: 0.55;
 }
 
 .record-item {

@@ -368,9 +368,37 @@ function movieLanded(group) {
   return (group.records || []).some((r) => !r.status || r.status === "成功" || r.status === "完成")
 }
 
+/** 已播到第几集：优先最新已播集号，其次已播集数；0 = TMDB 还没数据 */
+function airedBoundary(group) {
+  return Math.max(Number(group.latest_air_episode || 0), Number(group.aired_episodes || 0))
+}
+
+/** 还没播出的集数（总集数里超过已播边界、且本地没有的） */
+function unairedCount(group) {
+  if (isMovie(group)) return 0
+  const total = Number(group.total_episodes || 0)
+  const boundary = airedBoundary(group)
+  if (total <= 0 || boundary <= 0) return 0
+  const libSet = new Set(group.library_episodes || [])
+  const transferringSet = new Set(group.transferring_episodes || [])
+  let count = 0
+  for (let i = boundary + 1; i <= total; i += 1) {
+    if (!libSet.has(i) && !transferringSet.has(i)) count += 1
+  }
+  return count
+}
+
+/** 真该补的缺集数：缺集总数减去未播部分 */
+function pendingMissingCount(group) {
+  if (isMovie(group)) return movieLanded(group) ? 0 : 1
+  const missing = Number(group.missing_count || 0)
+  if (!missing) return 0
+  return Math.max(0, missing - unairedCount(group))
+}
+
 function hasMissing(group) {
   if (isMovie(group)) return !movieLanded(group)
-  if (group.missing_count !== undefined) return Number(group.missing_count) > 0
+  if (group.missing_count !== undefined) return pendingMissingCount(group) > 0
   const recs = group.records || []
   return recs.some((r) => r.status && r.status !== "成功" && r.status !== "完成")
 }
@@ -407,17 +435,24 @@ function getProgressCount(group) {
 /** 状态：一句话，不重复「未入库」 */
 function getStatusLabel(group) {
   if (isMovie(group)) return movieLanded(group) ? "已入库" : "待入库"
-  if (Number(group.missing_count || 0) > 0) {
-    const ranges = formatMissingRange(group.missing_episodes)
-    return ranges ? `缺 ${ranges}` : "待补齐"
+  const pending = pendingMissingCount(group)
+  if (pending > 0) {
+    const boundary = airedBoundary(group)
+    const pendingEpisodes = (group.missing_episodes || []).filter((ep) => !boundary || Number(ep) <= boundary)
+    const ranges = formatMissingRange(pendingEpisodes)
+    return ranges ? `待补 ${ranges}` : `待补 ${pending} 集`
   }
+  const unaired = unairedCount(group)
+  if (unaired > 0) return `未播 ${unaired} 集`
   if (group.total_episodes !== undefined) return "已齐"
   return hasMissing(group) ? "有待补" : "已全集"
 }
 
 function statusTone(group) {
   if (isMovie(group)) return movieLanded(group) ? "is-success" : "is-warning"
-  return Number(group.missing_count || 0) > 0 || hasMissing(group) ? "is-warning" : "is-success"
+  if (pendingMissingCount(group) > 0 || hasMissing(group)) return "is-warning"
+  // 只是没播完，不是缺漏：用信息色，别给警告
+  return unairedCount(group) > 0 ? "is-info" : "is-success"
 }
 
 function calcLibraryPct(group) {
