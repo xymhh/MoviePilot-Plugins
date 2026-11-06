@@ -21,7 +21,7 @@ from plugin_env import OwnerDelegator, load_module, register_mock, register_modu
 # 这里注册的是 placeholders；加载完 page.py 必须把它们从 sys.modules 里撤掉，
 # 否则同进程内后续用例（如 test_subscribe_media_type_filter）拿到的是缺属性的
 # 假 config，`from ..config import DEFAULT_AUTO_SUBSCRIBE_USERNAME` 会 ImportError。
-_MODULES_BEFORE_STUBS = set(sys.modules)
+_MODULES_BEFORE_STUBS = dict(sys.modules)
 
 register_module("pytz", timezone=MagicMock(), utc=MagicMock())
 register_module("app", package=True)
@@ -73,10 +73,23 @@ page_module = load_module(
     "plugins.v2/cloudsubscribex/core/api/page.py",
 )
 
-# 撤掉本文件注册的占位模块（保留已加载的 page 模块），恢复对其它用例的零污染
-for _name in [name for name in sys.modules if name not in _MODULES_BEFORE_STUBS]:
-    if _name != "cloudsubscribex.core.api.page":
+# 还原被占位模块顶替/新增的条目（保留已加载的 page 模块），对其它用例零污染。
+# 只删新增的还不够：真实 config 可能在本文件之前就被别的用例加载过，
+# 这里把它替换成了缺属性的假模块，必须放回原对象。
+for _name, _module in list(sys.modules.items()):
+    if _name == "cloudsubscribex.core.api.page":
+        continue
+    _original = _MODULES_BEFORE_STUBS.get(_name)
+    if _original is None:
         sys.modules.pop(_name, None)
+        continue
+    if _module is _original:
+        continue
+    sys.modules[_name] = _original
+    _parent_name, _, _child = _name.rpartition(".")
+    _parent = sys.modules.get(_parent_name)
+    if _parent is not None:
+        setattr(_parent, _child, _original)
 
 
 class _Owner:
