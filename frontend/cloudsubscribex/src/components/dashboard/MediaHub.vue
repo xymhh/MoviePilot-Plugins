@@ -521,7 +521,7 @@ function getInitial(title) {
 
 /* 状态直接靠实心底色表达，不再依赖文字色或文字说明 */
 .poster-status-badge.is-success {
-  background: #10b981;
+  background: #059669;
 }
 
 .poster-status-badge.is-warning {
@@ -530,23 +530,23 @@ function getInitial(title) {
 }
 
 .poster-status-badge.is-info {
-  background: #3b82f6;
+  background: #2563eb;
 }
 
 .poster-status-badge.is-primary {
-  background: #8b5cf6;
+  background: #7c3aed;
 }
 
 .poster-status-badge.is-error {
-  background: #ef4444;
+  background: #dc2626;
 }
 
 .poster-status-badge.is-secondary {
-  background: #64748b;
+  background: #475569;
 }
 
 .poster-status-badge.is-active {
-  background: #06b6d4;
+  background: #0891b2;
 }
 
 .poster-img {

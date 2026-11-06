@@ -36,16 +36,16 @@
             <v-chip v-if="airedCount !== null" size="x-small" variant="tonal" color="info">
               已播 {{ airedCount }}<template v-if="totalCount > 0"> / 共 {{ totalCount }}</template> 集
             </v-chip>
-            <v-chip v-if="task" size="x-small" :color="taskStatusColor(task)" variant="flat" class="font-weight-bold">
+            <v-chip v-if="task" size="x-small" :color="taskStatusColor(task)" variant="flat" :class="['font-weight-bold', solidChipClass(taskStatusColor(task))]">
               {{ taskStatusLabel(task, { withProgress: true }) }}
             </v-chip>
             <v-chip v-else-if="group.subscribe_id" size="x-small" color="info" variant="tonal">
               监控中
             </v-chip>
-            <v-chip size="x-small" variant="flat" color="success" class="font-weight-bold">
+            <v-chip size="x-small" variant="flat" color="success" :class="['font-weight-bold', solidChipClass('success')]">
               已入库 {{ libraryCount }}
             </v-chip>
-            <v-chip v-if="missingCount > 0" size="x-small" variant="flat" color="warning" class="font-weight-bold">
+            <v-chip v-if="missingCount > 0" size="x-small" variant="flat" color="warning" :class="['font-weight-bold', solidChipClass('warning')]">
               缺 {{ missingCount }}
             </v-chip>
           </div>
@@ -138,16 +138,16 @@
           <!-- 选中某一集后的快捷卡片 -->
           <v-expand-transition>
             <div v-if="selectedEpData" class="selected-ep-card mt-3 pa-3 rounded border">
-              <div class="d-flex align-center justify-space-between">
-                <div class="d-flex align-center ga-2">
+              <div class="selected-ep-row">
+                <div class="selected-ep-main">
                   <v-chip size="small" :color="selectedEpData.statusColor" variant="tonal" class="font-weight-bold">
                     第 {{ selectedEpData.number }} 集 · {{ selectedEpData.statusText }}
                   </v-chip>
-                  <span v-if="selectedEpData.matchedRecord?.file_name" class="text-caption text-truncate max-w-300" :title="selectedEpData.matchedRecord.file_name">
+                  <span v-if="selectedEpData.matchedRecord?.file_name" class="text-caption ep-file-name" :title="selectedEpData.matchedRecord.file_name">
                     {{ selectedEpData.matchedRecord.file_name }}
                   </span>
                 </div>
-                <div class="d-flex align-center ga-1">
+                <div class="selected-ep-actions">
                   <v-btn
                     v-if="selectedEpData.matchedRecord"
                     size="x-small"
@@ -183,7 +183,7 @@
                       size="x-small"
                       :color="recordStatusColor(rec)"
                       variant="flat"
-                      class="font-weight-bold record-status-chip">
+                      :class="['font-weight-bold', 'record-status-chip', solidChipClass(recordStatusColor(rec))]">
                       {{ recordStatusLabel(rec) }}
                     </v-chip>
                     <span v-if="rec.season || rec.episode" class="record-ep">
@@ -497,6 +497,16 @@ function recordStatusColor(rec) {
   return "error"
 }
 
+/**
+ * 实心徽标的可读性类名。
+ * Vuetify 实心 chip 的前景色取自主题的 on-* 色，暗色主题下 on-success 会被算成深色，
+ * 于是绿底上出现黑字（对比度不足）。这里强制按底色反算：亮底用深字，暗底用白字。
+ */
+function solidChipClass(color) {
+  const name = String(color || "success").trim().toLowerCase()
+  return `solid-chip-${name}`
+}
+
 function recordStatusLabel(rec) {
   const status = String(rec?.status || "").trim()
   if (!status) return "已转存"
@@ -634,6 +644,8 @@ function retryKey(rec) {
 
 .drawer-body {
   overflow-y: auto;
+  /* 长文件名/长链接一律不撑破弹窗宽度 */
+  overflow-x: hidden;
 }
 
 /* 选集网格 */
@@ -754,6 +766,85 @@ function retryKey(rec) {
   letter-spacing: 0;
 }
 
+/* 实心徽标前景色：暗色主题下 Vuetify 会把 on-success 算成深色，绿底黑字看不清。
+   这里按底色反算——深底白字、亮底（琥珀）深字。 */
+/* 底色也自己定：主题里的 success 是亮绿（#4CAF50），白字对比只有 2.8:1，
+   黑字虽够但用户反馈「暗色主题下看不清」，所以直接用深一档的实心色 + 白字，
+   与海报角标保持同一套色板，不受主题明暗影响。 */
+.solid-chip-success {
+  background: #059669 !important;
+  color: #ffffff !important;
+}
+
+.solid-chip-error {
+  background: #dc2626 !important;
+  color: #ffffff !important;
+}
+
+.solid-chip-info {
+  background: #2563eb !important;
+  color: #ffffff !important;
+}
+
+.solid-chip-primary {
+  background: #7c3aed !important;
+  color: #ffffff !important;
+}
+
+.solid-chip-secondary {
+  background: #475569 !important;
+  color: #ffffff !important;
+}
+
+.solid-chip-active {
+  background: #0891b2 !important;
+  color: #ffffff !important;
+}
+
+.solid-chip-warning {
+  background: #f59e0b !important;
+  color: #1f2937 !important;
+}
+
+/* 选中单集的快捷卡片：文件名单行省略，按钮不换行，整块不横向溢出 */
+.selected-ep-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.selected-ep-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+/* 状态徽标不许被文件名挤扁（挤扁会让文字换行溢出卡片） */
+.selected-ep-main > .v-chip {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.selected-ep-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.ep-file-name {
+  display: block;
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .record-ep {
   color: rgb(var(--v-theme-primary));
   font-size: 0.75rem;
@@ -802,6 +893,10 @@ function retryKey(rec) {
   color: rgb(var(--v-theme-primary));
   font-size: 0.7rem;
   text-decoration: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .record-meta-link:hover {
