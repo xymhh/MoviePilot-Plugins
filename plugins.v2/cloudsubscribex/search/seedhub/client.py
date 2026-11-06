@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 from .security import SeedHubSecurity
+from .urls import DEFAULT_BASE_URL, normalize_base_url
 from ..http_client import RequestGate, normalize_proxies
 from ..matching import extract_year
 from ..types import resource_type_from_url
@@ -99,12 +100,12 @@ class SeedHubClient:
 
     def __init__(
             self,
-            base_url: str = "https://www.seedhub.cc",
+            base_url: str = DEFAULT_BASE_URL,
             proxy: Any = None,
             request_timeout: int = 20,
             request_interval: float = 0.3,
     ):
-        self.base_url = str(base_url or "https://www.seedhub.cc").rstrip("/")
+        self.base_url = normalize_base_url(base_url)
         self._proxies = normalize_proxies(proxy)
         self._request_timeout = max(5, min(int(request_timeout or 20), 60))
         self._magnet_cache = create_platform_ttl_cache(

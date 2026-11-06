@@ -23,7 +23,7 @@ class SeedHubSourceDefinition(SearchSourceDefinition):
     def create_client(cls, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         return SeedHubClient(
             base_url=str(
-                cls.config_value(config, "seedhub_base_url", "https://www.seedhub.cc") or "https://www.seedhub.cc"),
+                cls.config_value(config, "seedhub_base_url", "https://sidhub.cc") or "https://sidhub.cc"),
             proxy=(context or {}).get("proxy"),
             request_timeout=int(cls.config_value(config, "seedhub_timeout", 60) or 60),
             request_interval=float(cls.config_value(config, "seedhub_request_interval", 0.3) or 0.3),
@@ -40,8 +40,8 @@ class SeedHubSourceDefinition(SearchSourceDefinition):
                     FieldSpec(
                         key="seedhub_base_url",
                         label="服务地址",
-                        placeholder="https://www.seedhub.cc",
-                        default="https://www.seedhub.cc",
+                        placeholder="https://sidhub.cc",
+                        default="https://sidhub.cc",
                         cols=12,
                     ),
                     FieldSpec(
