@@ -98,6 +98,42 @@ def scan_share(
     return result
 
 
+def recognition_mode(
+        work_id: Optional[int] = None,
+        season: Optional[int] = None,
+        explicit_selection: bool = False,
+) -> str:
+    """要不要用识别计划接管这次转存。
+
+    ``off``：用户手选了文件（人工优先）、没有 TMDB 身份、或不知道季号（电影/无季
+    分享）——维持现有管线，识别层不介入；
+    ``plan``：剧集且有身份与季号，按计划收敛文件。
+    """
+    if explicit_selection:
+        return "off"
+    if not work_id or not season:
+        return "off"
+    return "plan"
+
+
+def plan_action(plan: Dict[str, Any]) -> str:
+    """计划允许的动作：``block``（不转）/ ``apply``（只转 selected）。"""
+    if str((plan or {}).get("status") or "") in {"skip", "review"}:
+        return "block"
+    return "apply"
+
+
+def filter_by_plan(
+        files: Iterable[Dict[str, Any]],
+        plan: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    """按计划的 ``selected`` 过滤原始文件列表（保留原条目，供转存用）。"""
+    selected = {str(path) for path in (plan or {}).get("selected") or []}
+    if not selected:
+        return []
+    return [item for item in files or [] if entry_path(item) in selected]
+
+
 def summarize(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     """给日志用的轻量统计：文件数、总体积、一级目录数。"""
     files = [e for e in entries or [] if not e.get("is_dir")]

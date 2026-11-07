@@ -886,13 +886,16 @@ class ResourceTransferService(OwnerDelegator):
                 resource_title=resource_title,
             )
             return files
-        self._log_share_recognition(
+        files = self._apply_share_recognition(
             files,
             resource_title=resource_title,
             work_id=recognition_work_id,
             season=recognition_season,
+            explicit_selection=bool(target_file_ids or target_file_names),
             log_prefix=log_prefix,
         )
+        if not files:
+            return files
         return self._filter_files_by_explicit_selection(
             files,
             target_file_ids,
@@ -900,52 +903,67 @@ class ResourceTransferService(OwnerDelegator):
             log_prefix=log_prefix,
         )
 
-    def _log_share_recognition(
+    def _apply_share_recognition(
             self,
             files: List[Dict[str, Any]],
             resource_title: str = "",
             work_id: Optional[int] = None,
             season: Optional[int] = None,
+            explicit_selection: bool = False,
             log_prefix: str = "",
-    ) -> None:
-        """M2 影子识别：整棵树算出计划，只记日志，不改动转存。
+    ) -> List[Dict[str, Any]]:
+        """按识别计划收敛文件（M2-4）。
 
-        等真实日志确认「计划选中集」与现有管线一致后，下一里程碑才让转存
-        吃 ``Plan.selected``。任何异常都只记 debug，绝不影响原有流程。
+        只接管「剧集 + 有 TMDB 身份 + 知道季号 + 用户没手选文件」这一种情况：
+
+        * ``skip`` / ``review``：一个文件都不转（R6：后两种绝不产生转存动作）；
+        * ``ready``：只保留计划选中的媒体与同目录字幕；
+        * 其余情况（电影、无身份、手选文件）原样返回，维持现有管线；
+        * 任何异常只记 debug，原样返回（识别层不许成为新的失败点）。
         """
+        prefix = f"{log_prefix} " if log_prefix else ""
         try:
             from ...utils.share_identity import plan_for_share
-            from ...utils.share_scan import normalize_entries, summarize
+            from ...utils.share_scan import (
+                filter_by_plan,
+                normalize_entries,
+                plan_action,
+                recognition_mode,
+                summarize,
+            )
 
+            if recognition_mode(work_id, season, explicit_selection) != "plan":
+                return files
             entries = normalize_entries(files)
             if not entries:
-                return
-            plan = plan_for_share(
-                entries,
-                work_id=work_id,
-                season=season,
-                season_total_hint=None,
-            )
+                return files
+            plan = plan_for_share(entries, work_id=work_id, season=season)
             stats = summarize(entries)
-            media_selected = sum(
-                1 for path in plan["selected"]
-                if str(path).lower().rsplit(".", 1)[-1] in {
-                    "mkv", "mp4", "ts", "m2ts", "mts", "avi", "mov",
-                    "wmv", "flv", "rmvb", "rm", "m4v", "mpg", "mpeg", "webm",
-                }
-            )
-            missing = plan.get("missing") or []
-            prefix = f"{log_prefix} " if log_prefix else ""
+            label = (resource_title or "")[:40]
+            if plan_action(plan) == "block":
+                logger.info(
+                    f"{prefix}识别计划[{plan['status']}:{plan['reason']}] 不转存"
+                    f"（文件 {stats['files']}，主版本 {plan.get('group') or '-'}）"
+                    f" - {label}"
+                )
+                return []
+            selected = filter_by_plan(files, plan)
+            if not selected:
+                logger.warning(
+                    f"{prefix}识别计划选中 0 个文件（路径映射失败），保守回退整包"
+                    f" - {label}"
+                )
+                return files
+            dropped = len(files) - len(selected)
             logger.info(
-                f"{prefix}影子识别[{plan['status']}]{'' if plan['reason'] else ''}"
-                f" 文件 {stats['files']} / 主版本 {plan['group'] or '-'}"
-                f"（{media_selected} 集{'+补齐' if plan['mixed_quality'] else ''}）"
-                f" / 缺 {len(missing)}"
-                f"{('：' + ','.join(str(ep) for ep in missing[:8])) if missing else ''}"
-                f" - {(resource_title or '')[:40]}"
+                f"{prefix}识别计划[ready] 转 {len(selected)} 个 / 丢 {dropped} 个"
+                f"（文件 {stats['files']}，主版本 {plan.get('group') or '-'}"
+                f"{'，含补齐' if plan.get('mixed_quality') else ''}） - {label}"
             )
-        except Exception:  # noqa: BLE001 - 影子识别不许影响主流程
-            logger.debug("影子识别失败（不影响转存）", exc_info=True)
+            return selected
+        except Exception:  # noqa: BLE001 - 识别层不许影响主流程
+            logger.debug("识别计划失败（回退现有管线）", exc_info=True)
+            return files
 
 
     def preview_resource_files(self, share_url: str) -> List[Dict[str, Any]]:

@@ -147,5 +147,55 @@ class PlanForShareTest(unittest.TestCase):
         self.assertEqual(plan["reason"], recognize_mod.NO_IDENTITY)
 
 
+class RecognitionGateTest(unittest.TestCase):
+    """M2-4：识别计划什么时候接管转存（纯函数口径）。"""
+
+    def test_mode_off_for_movie_or_unknown_identity(self):
+        self.assertEqual(scan_mod.recognition_mode(None, 1), "off")
+        self.assertEqual(scan_mod.recognition_mode(1, None), "off")
+        self.assertEqual(scan_mod.recognition_mode(1, 1), "plan")
+
+    def test_manual_selection_wins(self):
+        self.assertEqual(scan_mod.recognition_mode(1, 1, explicit_selection=True), "off")
+
+    def test_skip_and_review_block(self):
+        for status in ("skip", "review"):
+            self.assertEqual(scan_mod.plan_action({"status": status}), "block")
+        self.assertEqual(scan_mod.plan_action({"status": "ready"}), "apply")
+
+    def test_filter_keeps_original_entries(self):
+        files = [
+            {"relative_path": "剧/01.mkv", "size": 1, "id": "a"},
+            {"relative_path": "剧/02.mkv", "size": 1, "id": "b"},
+        ]
+        plan = {"selected": ["剧/01.mkv"]}
+        kept = scan_mod.filter_by_plan(files, plan)
+        self.assertEqual([item["id"] for item in kept], ["a"])
+        # 保留原字典，转存需要的 id/size 字段不能丢
+        self.assertIs(kept[0], files[0])
+
+
+class WiringTest(unittest.TestCase):
+    """漏斗确实接上了识别计划（静态接线检查）。"""
+
+    def test_validated_resource_files_applies_plan(self):
+        import ast
+
+        path = os.path.join(PKG, "handlers", "sync", "resources.py")
+        with open(path, encoding="utf-8") as handle:
+            tree = ast.parse(handle.read())
+        called = False
+        guarded = False
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or node.name != "_validated_resource_files":
+                continue
+            source = ast.dump(node)
+            called = "_apply_share_recognition" in source
+            # 必须显式判断「识别后为空就不往下走」
+            guarded = "if not files" in ast.unparse(node) or "if not files" in source
+        self.assertTrue(called, "漏斗没有调用 _apply_share_recognition")
+        self.assertTrue(guarded, "识别后返回空列表时缺少提前返回")
+
+
 if __name__ == "__main__":
     unittest.main()
