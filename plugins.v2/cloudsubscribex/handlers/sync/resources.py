@@ -800,6 +800,8 @@ class ResourceTransferService(OwnerDelegator):
             log_prefix: str = "",
             target_file_ids: Optional[List[str]] = None,
             target_file_names: Optional[List[str]] = None,
+            recognition_work_id: Optional[int] = None,
+            recognition_season: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """校验分享并读取文件列表，供电影、剧集和洗版共同使用。"""
         share_url = canonicalize_share_url(share_url)
@@ -884,12 +886,66 @@ class ResourceTransferService(OwnerDelegator):
                 resource_title=resource_title,
             )
             return files
+        self._log_share_recognition(
+            files,
+            resource_title=resource_title,
+            work_id=recognition_work_id,
+            season=recognition_season,
+            log_prefix=log_prefix,
+        )
         return self._filter_files_by_explicit_selection(
             files,
             target_file_ids,
             target_file_names,
             log_prefix=log_prefix,
         )
+
+    def _log_share_recognition(
+            self,
+            files: List[Dict[str, Any]],
+            resource_title: str = "",
+            work_id: Optional[int] = None,
+            season: Optional[int] = None,
+            log_prefix: str = "",
+    ) -> None:
+        """M2 影子识别：整棵树算出计划，只记日志，不改动转存。
+
+        等真实日志确认「计划选中集」与现有管线一致后，下一里程碑才让转存
+        吃 ``Plan.selected``。任何异常都只记 debug，绝不影响原有流程。
+        """
+        try:
+            from ...utils.share_identity import plan_for_share
+            from ...utils.share_scan import normalize_entries, summarize
+
+            entries = normalize_entries(files)
+            if not entries:
+                return
+            plan = plan_for_share(
+                entries,
+                work_id=work_id,
+                season=season,
+                season_total_hint=None,
+            )
+            stats = summarize(entries)
+            media_selected = sum(
+                1 for path in plan["selected"]
+                if str(path).lower().rsplit(".", 1)[-1] in {
+                    "mkv", "mp4", "ts", "m2ts", "mts", "avi", "mov",
+                    "wmv", "flv", "rmvb", "rm", "m4v", "mpg", "mpeg", "webm",
+                }
+            )
+            missing = plan.get("missing") or []
+            prefix = f"{log_prefix} " if log_prefix else ""
+            logger.info(
+                f"{prefix}影子识别[{plan['status']}]{'' if plan['reason'] else ''}"
+                f" 文件 {stats['files']} / 主版本 {plan['group'] or '-'}"
+                f"（{media_selected} 集{'+补齐' if plan['mixed_quality'] else ''}）"
+                f" / 缺 {len(missing)}"
+                f"{('：' + ','.join(str(ep) for ep in missing[:8])) if missing else ''}"
+                f" - {(resource_title or '')[:40]}"
+            )
+        except Exception:  # noqa: BLE001 - 影子识别不许影响主流程
+            logger.debug("影子识别失败（不影响转存）", exc_info=True)
 
 
     def preview_resource_files(self, share_url: str) -> List[Dict[str, Any]]:

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import re
 import statistics
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from .file_parser import MediaFileParser
 
@@ -161,6 +161,16 @@ def _group_views(files: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         view["median"] = _median(f["size"] for f in view["files"])
         view["rank"] = _label_rank(view["group"])
     return groups
+
+
+def episode_universe(
+        entries: Iterable[Dict[str, Any]],
+        treat_iso: bool = False,
+) -> Set[int]:
+    """整棵分享里出现过的集号集合（不看季、不看组），供身份层反推季。"""
+    raw = [e for e in (entries or []) if not e.get("is_dir")]
+    files = [classify_path(e.get("path", ""), e.get("size", 0), treat_iso) for e in raw]
+    return {int(f["ep"]) for f in files if f["kind"] == "media" and f["ep"]}
 
 
 def build_plan(

@@ -193,9 +193,10 @@ class FakeOwner:
         return files
 
     def _validated_resource_files(self, url, resource_title="", target_season=None, log_prefix="",
-                                  target_file_ids=None, target_file_names=None):
-        # 签名对齐真实实现 plugins.v2/cloudsubscribex/handlers/sync/resources.py:746
-        # （新增 target_file_ids / target_file_names，用于预览面板按勾选收敛文件）。
+                                  target_file_ids=None, target_file_names=None,
+                                  recognition_work_id=None, recognition_season=None):
+        # 签名对齐真实实现 plugins.v2/cloudsubscribex/handlers/sync/resources.py:795
+        # （target_file_ids/names 用于按勾选收敛文件；recognition_* 供 M2 影子识别）。
         return _share_files()
 
     def _summarize_share_episodes(self, files, season, mediainfo=None):

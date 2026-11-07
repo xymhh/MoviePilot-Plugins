@@ -631,6 +631,8 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 log_prefix=search_prefix,
                                 target_file_ids=selected_file_ids,
                                 target_file_names=selected_file_names,
+                                recognition_work_id=getattr(mediainfo, "tmdb_id", None),
+                                recognition_season=season,
                             ))
                         if not share_files:
                             continue

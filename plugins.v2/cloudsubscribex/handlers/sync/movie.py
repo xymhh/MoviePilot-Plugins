@@ -477,6 +477,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         resource_title=resource_title,
                         target_file_ids=selected_file_ids,
                         target_file_names=selected_file_names,
+                        recognition_work_id=tmdb_id_of(mediainfo) or None,
                     )
                     if not share_files:
                         continue
