@@ -41,6 +41,11 @@ class ResourceTransferService(OwnerDelegator):
         r"第\s*0*(\d{1,3})\s*季"
     )
 
+    #: 单集视频体积下限：低于它的「剧集」基本都是预告/花絮/假种。
+    #: 2026-11-08 谷雨事故：标称「完结」的分享里 E09-E30 全是 60-85 秒、
+    #: 5-19MB 的碎片，被按文件名改号入库。字幕/NFO/图片不受此限制。
+    MIN_EPISODE_BYTES = 100 * 1024 * 1024
+
     @staticmethod
     def _is_cloud_resource_url(value: str) -> bool:
         return str(value or "").strip().lower().startswith("cloud://")
@@ -886,6 +891,25 @@ class ResourceTransferService(OwnerDelegator):
                 resource_title=resource_title,
             )
             return files
+        files = self._drop_undersized_media(
+            files,
+            log_prefix=log_prefix,
+            resource_title=resource_title,
+        )
+        if not files:
+            label = resource_title or self._resource_log_reference(share_url)
+            logger.info(
+                f"{log_prefix + ' ' if log_prefix else ''}"
+                f"分享链接内视频体积全部异常，跳过：{label}"
+            )
+            self._record_skip_candidate(
+                SkipStatsCollector.KIND_INVALID,
+                share_url,
+                reason="视频体积异常（疑似预告/花絮/假种）",
+                resource_label="分享链接",
+                resource_title=resource_title,
+            )
+            return files
         files = self._apply_share_recognition(
             files,
             resource_title=resource_title,
@@ -902,6 +926,40 @@ class ResourceTransferService(OwnerDelegator):
             target_file_names,
             log_prefix=log_prefix,
         )
+
+    def _drop_undersized_media(
+            self,
+            files: List[Dict[str, Any]],
+            log_prefix: str = "",
+            resource_title: str = "",
+    ) -> List[Dict[str, Any]]:
+        """丢弃体积明显不足的视频文件（字幕/NFO/图片等非视频一律保留）。
+
+        体积未知（``size <= 0``）时不做判断，避免误伤不返回大小的驱动。
+        """
+        from ...utils.organize_plan import is_video
+
+        kept: List[Dict[str, Any]] = []
+        dropped: List[str] = []
+        for item in files or []:
+            if not isinstance(item, dict) or item.get("is_dir"):
+                kept.append(item)
+                continue
+            name = str(item.get("name") or item.get("file_name") or "")
+            size = int(item.get("size") or item.get("file_size") or 0)
+            if size > 0 and is_video(name) and size < self.MIN_EPISODE_BYTES:
+                dropped.append(f"{name}({size / 1024 / 1024:.1f}MB)")
+                continue
+            kept.append(item)
+        if dropped:
+            prefix = f"{log_prefix} " if log_prefix else ""
+            logger.warning(
+                f"{prefix}丢弃 {len(dropped)} 个体积异常的视频文件"
+                f"（<{self.MIN_EPISODE_BYTES // 1024 // 1024}MB）："
+                f"{'、'.join(dropped[:3])}{' 等' if len(dropped) > 3 else ''}"
+                f" - {resource_title or '分享链接'}"
+            )
+        return kept
 
     def _apply_share_recognition(
             self,

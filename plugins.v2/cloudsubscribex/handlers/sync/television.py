@@ -223,11 +223,19 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 mediainfo, season
             )
             today = date.today().isoformat()
-            unaired_episodes = {
-                episode for episode in expected_episodes
-                if target_episode_air_dates.get(episode)
-                and target_episode_air_dates[episode] > today
-            }
+            # TMDB 没给播出日期的集同样算「未播出」：空日期不是已播出的证据。
+            # 2026-11-08 谷雨事故：E11-E30 的 air_date 为 null，旧逻辑当成已播出，
+            # 结果一个标称「完结」的假资源把 22 集碎片直接塞进了媒体库。
+            # 整季一条日期都没有时（TMDB 无分集数据）无从判断，退回旧口径，
+            # 否则该剧会永远卡在「缺集尚未播出」。
+            if target_episode_air_dates:
+                unaired_episodes = {
+                    episode for episode in expected_episodes
+                    if not target_episode_air_dates.get(episode)
+                    or target_episode_air_dates[episode] > today
+                }
+            else:
+                unaired_episodes = set()
             # 1. 先读取媒体服务器实际剧集，不混入订阅 note。
             self._set_task_phase(subscribe, "检查媒体库内容", 30)
             media_server_valid, media_server_episodes = self._timed_sync_call(
@@ -340,9 +348,17 @@ class TelevisionSyncProcessor(OwnerDelegator):
             if unaired_episodes:
                 skipped = set(missing_episodes) & unaired_episodes
                 if skipped:
+                    undated = {
+                        episode for episode in skipped
+                        if not target_episode_air_dates.get(episode)
+                    }
+                    detail = (
+                        f"（其中 {len(undated)} 集 TMDB 无播出日期）"
+                        if undated else ""
+                    )
                     logger.info(
                         f"{mediainfo.title_year} S{season:02d} 跳过未播出剧集："
-                        f"{self._format_episode_ranges(skipped)}"
+                        f"{self._format_episode_ranges(skipped)}{detail}"
                     )
                     missing_episodes = [
                         episode for episode in missing_episodes
