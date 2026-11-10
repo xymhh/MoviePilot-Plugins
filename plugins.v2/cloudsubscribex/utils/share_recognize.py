@@ -163,6 +163,56 @@ def _group_views(files: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     return groups
 
 
+#: 兜底：中文名与集号紧贴、无任何分隔符（黑色五叶草078.mp4）。
+#: MP 宿主的 MetaVideo 也要求数字前有空格/短横/下划线才认，这类分享会整批判无集号。
+#: 末尾数字前不能是 ASCII 字母（排除 078v2 / Part2 这种）。
+_TAIL_EPISODE_RE = re.compile(r"(?<![0-9A-Za-z])(\d{1,3})$")
+
+
+def _outline_hits(groups: Dict[str, Dict[str, Any]]) -> List[Tuple[Dict[str, Any], int]]:
+    """在每组内找「末尾紧贴数字」的文件，命中率不足 80% 的组整组放弃。"""
+    hits: List[Tuple[Dict[str, Any], int]] = []
+    for view in groups.values():
+        candidates: List[Tuple[Dict[str, Any], int]] = []
+        for item in view["files"]:
+            if item["ep"]:
+                continue
+            stem = str(item["name"])
+            if "." in stem:
+                stem = stem.rsplit(".", 1)[0]
+            match = _TAIL_EPISODE_RE.search(stem)
+            if not match:
+                continue
+            value = int(match.group(1))
+            if value <= 0 or value in _NOT_EPISODE:
+                continue
+            candidates.append((item, value))
+        if not candidates:
+            continue
+        # 命中率太低说明这一组文件名里混着别的数字（版本、年份），宁可不算。
+        if len(candidates) / max(len(view["files"]), 1) < 0.8:
+            continue
+        hits.extend(candidates)
+    return hits
+
+
+def _rescue_tail_episodes(groups: Dict[str, Dict[str, Any]]) -> bool:
+    """整批一个集号都没解析出来时的兜底：只在证据充分时采信「末尾数字=集号」。
+
+    门槛（任一不满足就放弃，宁可留 review 也不乱转）：
+    - 命中文件 >= 3；
+    - 集号去重 >= 3；
+    - 集号不能是年份（4 位由正则长度天然排除）或分辨率。
+    """
+    hits = _outline_hits(groups)
+    episodes = {value for _, value in hits}
+    if len(hits) < 3 or len(episodes) < 3:
+        return False
+    for item, value in hits:
+        item["ep"] = value
+    return True
+
+
 def episode_universe(
         entries: Iterable[Dict[str, Any]],
         treat_iso: bool = False,
@@ -215,6 +265,10 @@ def build_plan(
         plan.update(status=SKIP, reason=NO_MEDIA)
         return plan
     episodes = {ep for view in groups.values() for ep in view["by_ep"]}
+    if not episodes and _rescue_tail_episodes(groups):
+        # 兜底命中：重建分组，让去重与中位数走正常路径。
+        groups = _group_views(files)
+        episodes = {ep for view in groups.values() for ep in view["by_ep"]}
     if not episodes:
         plan.update(status=REVIEW, reason=NO_EPISODES)
         plan["skipped"] = [(f["path"], "no_episode") for f in media]
