@@ -117,6 +117,9 @@
       </div>
     </header>
 
+    <!-- 全局运行中任务：非订阅影视手动转存没有订阅卡/历史卡可挂，靠这条浮条看进度 -->
+    <RuntimeTaskStrip :tasks="runtime.tasks" />
+
     <section class="overview-band" aria-label="转存统计">
       <div class="overview-title d-flex align-center ga-2 mb-2">
         <v-icon icon="mdi-chart-box-outline" color="primary" size="small" />
@@ -374,6 +377,7 @@ import HistoryTable from "./dashboard/HistoryTable.vue";
 import MediaHub from "./dashboard/MediaHub.vue";
 import StatsGrid from "./dashboard/StatsGrid.vue";
 import OrganizePanel from "./dashboard/OrganizePanel.vue";
+import RuntimeTaskStrip from "./RuntimeTaskStrip.vue";
 import DoctorDialog from "./dialogs/DoctorDialog.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";

@@ -17,6 +17,8 @@
       :active-count="activeMediaFilterCount"
       @reset="resetMediaFilters" />
 
+    <RuntimeTaskStrip :tasks="runtimeTasks" />
+
     <div v-if="isSearchMode" class="search-tip-bar">
       <span>
         正在展示
@@ -146,6 +148,8 @@ import DetailDialog from "./resource/DetailDialog.vue";
 import PreviewDialog from "./resource/PreviewDialog.vue";
 import UnlockDialog from "./resource/UnlockDialog.vue";
 import CrossTransferDialog from "./resource/CrossTransferDialog.vue";
+import RuntimeTaskStrip from "./RuntimeTaskStrip.vue";
+import {useRuntimeTasks} from "../composables/useRuntimeTasks.js";
 import {useMediaDetail} from "../composables/useMediaDetail";
 import {useMediaData} from "../composables/useMediaData";
 import {useSnackbar} from "../composables/useSnackbar";
@@ -169,6 +173,8 @@ const props = defineProps({
 
 const resourceApi = computed(() => props.api);
 const resourcePluginId = computed(() => props.pluginId);
+// 非订阅影视手动转存没有订阅卡/历史卡可挂，进度只能靠这条全局浮条呈现
+const {tasks: runtimeTasks} = useRuntimeTasks(props.api, props.pluginId);
 const {snackbarVisible, snackbarText, snackbarColor, showMessage} = useSnackbar();
 
 const snackbarTextStyle = computed(() => ({
