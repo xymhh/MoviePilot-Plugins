@@ -7,6 +7,7 @@ from app.core.metainfo import MetaInfo
 from app.log import logger
 
 from .file_parser import MediaFileParser
+from .share_recognize import _tail_episode_from_name
 from ..search.matching import normalize_title, title_matches
 
 
@@ -862,7 +863,7 @@ class FileMatcher:
             for episode in episode_list
         }
         total_files = 0
-
+        entries: List[tuple] = []
         for item in MediaFileParser.iter_files(files):
             file_name = str(item.get("name") or "")
             total_files += 1
@@ -877,12 +878,38 @@ class FileMatcher:
                     conflict_path, season, found_season
                 )
                 continue
-            found_episode = FileMatcher.episode_from_file(item, season, mediainfo)
+            entries.append((
+                item,
+                file_name,
+                FileMatcher.episode_from_file(item, season, mediainfo),
+            ))
+
+        # 整批一个集号都解析不出时（「黑色五叶草078.mp4」这类标题与数字紧贴的命名），
+        # 复用识别阶段的末尾数字兜底；门槛同 rescue_tail_episodes_from_names：
+        # 命中 >=3、集号去重 >=3、命中率 >=80%，否则宁可漏转也不错转。
+        rescued: Dict[int, int] = {}
+        if entries and all(episode is None for _, _, episode in entries):
+            tail_hits = [
+                (index, tail)
+                for index, (_, file_name, _) in enumerate(entries)
+                for tail in (_tail_episode_from_name(file_name),)
+                if tail is not None
+            ]
+            if (
+                    len(tail_hits) >= 3
+                    and len({tail for _, tail in tail_hits}) >= 3
+                    and len(tail_hits) / len(entries) >= 0.8
+            ):
+                rescued = dict(tail_hits)
+
+        for index, (item, file_name, found_episode) in enumerate(entries):
+            if found_episode is None:
+                found_episode = rescued.get(index)
             if found_episode is not None:
                 if found_episode in target_episodes:
                     strict_matches[found_episode].append(item)
                 continue
-            # 有目标媒体时，平台无法识别标题或季集的文件不能进入转存。
+            # 有目标媒体时，平台识别不出标题或季集、也没有兜底证据的文件不能进入转存。
             if mediainfo is not None:
                 continue
             matches_season = MediaFileParser.matches_target_season(file_name, season)
