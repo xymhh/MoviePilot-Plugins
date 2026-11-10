@@ -372,6 +372,7 @@ import {
   taskStatusColor,
   taskStatusLabel,
 } from "../../utils/taskUtils.js"
+import { getSourceName } from "../../composables/resourceUtils.js"
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -837,18 +838,37 @@ function recordReasonIcon(rec) {
   return "mdi-alert-circle-outline"
 }
 
+function tgChannelText(channel) {
+  const text = String(channel || "").trim()
+  if (!text) return "TG频道"
+  if (/^https?:\/\//i.test(text)) {
+    // 频道配置允许直接填 t.me 链接，取不到可读频道名时统一显示「私有频道」，
+    // 否则会把 "https:" 当成频道名显示出来。
+    const invite = text.match(/t\.me\/\+([^/?#]+)/i)
+    if (invite) return "TG频道 私有频道"
+    const named = text.match(/t\.me\/([^/?#]+)/i)
+    return named ? `TG频道 @${named[1]}` : "TG频道"
+  }
+  return `TG频道 ${text}`
+}
+
 function sourceLabel(rec) {
   const raw = String(rec?.source_type || rec?.source || "").trim()
   const lower = raw.toLowerCase()
   const via = String(rec?.discovered_via || "").trim()
   const viaLower = via.toLowerCase()
-  if (lower === "tg" || viaLower.startsWith("tg:")) {
+  // 频道推送的候选复用手动转存链路（source=manual），只有带 tg: 前缀才是 TG 来源；
+  // 具体搜索渠道（pansou/seedhub…）即使带 discovered_via 也要显示自己的名字。
+  const manualLike = ["", "manual", "手动添加", "手动资源"].includes(lower)
+  if (viaLower.startsWith("tg:") && (manualLike || lower === "tg")) {
     const detail = via.replace(/^tg:/i, "")
-    const [channel, messageId] = detail.split("/")
-    const channelText = channel ? `TG频道 ${channel}` : "TG频道"
+    const messageId = (detail.match(/(\d+)\s*$/) || [])[1] || ""
+    const channel = detail.replace(/\/+\d+\s*$/, "").replace(/^\/+/, "")
+    const channelText = tgChannelText(channel)
     return messageId ? `${channelText} · 消息 ${messageId}` : channelText
   }
-  if (["manual", "手动添加", "手动资源"].includes(lower)) return "TG频道"
+  if (lower === "tg") return "TG频道"
+  if (["manual", "手动添加", "手动资源"].includes(lower)) return "手动添加"
   if (lower === "push") return "频道推送"
   if (lower === "subscribe" || lower.startsWith("subscribe|")) {
     const name = raw.split("|")[1]
@@ -856,7 +876,7 @@ function sourceLabel(rec) {
   }
   if (lower === "moviepilot") return "MoviePilot"
   if (lower === "hdhive") return "HDHive"
-  return raw
+  return raw ? getSourceName(raw) : ""
 }
 
 function resourceTypeLabel(type) {
