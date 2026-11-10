@@ -395,12 +395,44 @@ const REASON_KINDS = {
   unparsable: { label: "无法解析集号", tone: "muted" },
 }
 
+// 历史数据里存的是长文案，这里按同一套规则压成「定性词 · 证据」短句。
+const LEGACY_EPISODE_MISS = /资源集号与缺失不符（S\d+）：资源含 (.*?)，缺 (.*)$/
+
+// 「缺哪些集」永远完整，被压缩的是前面「有哪些集」。
+function formatEpisodeMiss(have, miss) {
+  const head = "集号不符 · "
+  const list = String(have).trim()
+  const first = list.split(/[、，,]/)[0].trim()
+  const haveShort = first === list ? list : `${first} 等`
+  for (const candidate of [`${head}有 ${haveShort}，缺 ${miss}`, `${head}缺 ${miss}`]) {
+    if (candidate.length <= 26) return candidate
+  }
+  return `${head}缺 ${miss}`.slice(0, 24) + "…"
+}
+
+const LEGACY_REASON_RULES = [
+  [/分享根目录与订阅标题不符（根目录：(.*?)）/, "剧名不符 · 分享是《$1》"],
+  [/解析不出目标季集号（含 (\d+) 个视频）/, "认不出集号 · $1 个视频"],
+  [/未发现需要转存的新资源/, "本轮无新集"],
+  [/库中已完整存在，无需转存/, "已入库"],
+  [/分享地址已失效/, "分享失效"],
+  [/库中已有或未匹配到可下载资源/, "无可用资源"],
+]
+
 function reasonText(item) {
-  const text = String(item?.skip_reason || item?.auto_transfer_error || "")
+  let text = String(item?.skip_reason || item?.auto_transfer_error || "")
     .replace(/^未转存：/, "")
     .trim()
-  if (!text || text.includes("未发现需要转存的新资源")) return "原因未记录（旧数据）"
-  return text
+  if (!text) return "无原因"
+  const episode = text.match(LEGACY_EPISODE_MISS)
+  if (episode) return formatEpisodeMiss(episode[1], episode[2])
+  for (const [pattern, replacement] of LEGACY_REASON_RULES) {
+    if (pattern.test(text)) {
+      text = text.replace(pattern, replacement)
+      break
+    }
+  }
+  return text.length > 26 ? `${text.slice(0, 24)}…` : text
 }
 
 function reasonKey(item) {

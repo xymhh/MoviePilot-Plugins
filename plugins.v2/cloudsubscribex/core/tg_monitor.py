@@ -1029,6 +1029,62 @@ class TgChannelMonitor:
         except Exception as error:  # noqa: BLE001 - 单批失败不影响后续
             return {"success": False, "message": str(error)}
 
+    _SHORT_REASON_RULES: tuple[tuple[Any, str], ...] = (
+        (
+            re.compile(r"分享根目录与订阅标题不符（根目录：(.*?)）"),
+            r"剧名不符 · 分享是《\1》",
+        ),
+        (
+            re.compile(r"解析不出目标季集号（含 (\d+) 个视频）"),
+            r"认不出集号 · \1 个视频",
+        ),
+        (re.compile(r"未发现需要转存的新资源"), "本轮无新集"),
+        (re.compile(r"订阅搜索已停止"), "搜索已停止"),
+        (re.compile(r"库中已有或未匹配到可下载资源"), "无可用资源"),
+        (re.compile(r"分享地址已失效"), "分享失效"),
+        (re.compile(r"库中已完整存在，无需转存"), "已入库"),
+    )
+
+    _EPISODE_MISS_RE = re.compile(
+        r"资源集号与缺失不符（S(\d+)）：资源含 (.*?)，缺 (.*)$"
+    )
+
+    @staticmethod
+    def _format_episode_miss(have: str, miss: str) -> str:
+        """「缺哪些集」永远完整保留，被压缩的是前面「有哪些集」。"""
+        head = "集号不符 · "
+        have = have.strip()
+        first = re.split(r"[、，,]", have)[0].strip()
+        have_short = have if first == have else f"{first} 等"
+        for candidate in (f"{head}有 {have_short}，缺 {miss}", f"{head}缺 {miss}"):
+            if len(candidate) <= 26:
+                return candidate
+        return f"{head}缺 {miss}"[:24] + "…"
+
+    @classmethod
+    def _shorten_skip_reason(cls, text: str) -> str:
+        """把长原因压成「定性词 · 证据」的短句（≤26 字），历史长文案也一并兼容。"""
+        raw = str(text or "").strip()
+        if raw.startswith("未转存："):
+            raw = raw[len("未转存："):].strip()
+        if not raw:
+            return "无可用资源"
+        episode = cls._EPISODE_MISS_RE.search(raw)
+        if episode:
+            return cls._format_episode_miss(episode.group(2), episode.group(3))
+        for pattern, template in cls._SHORT_REASON_RULES:
+            match = pattern.search(raw)
+            if match:
+                try:
+                    short = match.expand(template)
+                except (re.error, IndexError):
+                    short = template
+                short = short.strip()
+                if len(short) <= 26:
+                    return short
+                return short[:24] + "…"
+        return raw if len(raw) <= 26 else raw[:24] + "…"
+
     def _resolve_skip_reason(
             self, row: Dict[str, Any], fallback: str = "",
             cache: Optional[Dict[str, Tuple[str, str]]] = None,
@@ -1036,11 +1092,8 @@ class TgChannelMonitor:
         """返回 (原因类型, 原因文案)：账本明细 > 本轮订阅级原因 > 兜底。"""
         kind, text = self._ledger_skip_reason(row, cache)
         if text:
-            return kind, text
-        reason = str(fallback or "").strip()
-        if reason.startswith("未转存："):
-            reason = reason[len("未转存："):].strip()
-        return "run", reason or "库中已有或未匹配到可下载资源"
+            return kind, self._shorten_skip_reason(text)
+        return "run", self._shorten_skip_reason(fallback)
 
     def _ledger_skip_reason(
             self, row: Dict[str, Any],

@@ -700,16 +700,16 @@ class TestMismatchCollectionBranches(unittest.TestCase):
         )
         self.assertEqual(
             scope["reason"],
-            "解析不出目标季集号（含 3 个视频）：分享文件名与目录都没有 S03 的集号",
+            "认不出集号 · 3 个视频无 S03",
         )
         self.assertEqual(
             probe.debugs,
-            ["解析不出目标季集号（含 3 个视频）：分享文件名与目录都没有 S03 的集号"
+            ["认不出集号 · 3 个视频无 S03"
              "：玉簟秋 (2024) S03，已跳过该资源"],
         )
         _assert_mismatch_recorded(
             self, collector, "115网盘",
-            "解析不出目标季集号（含 3 个视频）：分享文件名与目录都没有 S03 的集号",
+            "认不出集号 · 3 个视频无 S03",
             kind=SkipStatsCollector.KIND_UNPARSABLE,
         )
 
@@ -727,16 +727,16 @@ class TestMismatchCollectionBranches(unittest.TestCase):
         )
         self.assertEqual(
             scope["reason"],
-            "解析不出目标季集号（含 3 个视频）：跨盘分享文件名与目录都没有 S03 的集号",
+            "认不出集号 · 3 个视频无 S03",
         )
         self.assertEqual(
             probe.debugs,
-            ["解析不出目标季集号（含 3 个视频）：跨盘分享文件名与目录都没有 S03 的集号"
+            ["认不出集号 · 3 个视频无 S03"
              "：玉簟秋 (2024) S03，已跳过该资源"],
         )
         _assert_mismatch_recorded(
             self, collector, "夸克网盘",
-            "解析不出目标季集号（含 3 个视频）：跨盘分享文件名与目录都没有 S03 的集号",
+            "认不出集号 · 3 个视频无 S03",
             kind=SkipStatsCollector.KIND_UNPARSABLE,
         )
 
@@ -756,11 +756,11 @@ class TestMismatchCollectionBranches(unittest.TestCase):
         self.assertEqual(
             probe.debugs,
             ["该夸克网盘分享未匹配到 S3 的任何缺失剧集："
-             "资源集号与缺失不符（S03）：资源含 E243-E244，缺 E01-E03"],
+             "集号不符 · 有 E243-E244，缺 E01-E03"],
         )
         _assert_mismatch_recorded(
             self, collector, "115网盘",
-            "资源集号与缺失不符（S03）：资源含 E243-E244，缺 E01-E03",
+            "集号不符 · 有 E243-E244，缺 E01-E03",
             kind=SkipStatsCollector.KIND_EPISODE_MISS,
         )
 

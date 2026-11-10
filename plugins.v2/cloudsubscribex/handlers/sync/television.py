@@ -657,7 +657,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         if source != "manual" and self._share_title_mismatch(
                                 share_files, mediainfo, resource_title, season
                         ):
-                            reason = "分享根目录与订阅标题不符"
+                            reason = "剧名不符"
                             # 只打印「真正导致拦截」的根目录：原先打印
                             # sorted(roots)[:3] 会把 06.mkv / 基德盘搜安卓app.apk
                             # 这类无关名字排在前面，凶手常被截掉，排障只能靠猜。
@@ -673,11 +673,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 )
                                 _roots = []
                             if _roots:
+                                # 短句优先：定性词 + 一个可核对的证据，完整根目录留给日志。
+                                extra = " 等 %d 个" % len(_roots) if len(_roots) > 3 else ""
                                 reason = (
-                                    "分享根目录与订阅标题不符（根目录："
-                                    + " / ".join(root[:60] for root in _roots[:3])
-                                    + (" 等 %d 个" % len(_roots) if len(_roots) > 3 else "")
-                                    + "）"
+                                    "剧名不符 · 分享是《"
+                                    + _roots[0][:20]
+                                    + "》"
+                                    + extra
                                 )
                             # 记下 (链接, 标题)，24h 内不再为它重复读分享目录。
                             remember_mismatch(share_url, resource_title)
@@ -715,11 +717,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             f"当前缺失中可用：{self._format_episode_ranges(matched_episode_numbers)}"
                         )
                         if video_count and not share_episodes:
-                            reason = (
-                                f"解析不出目标季集号（含 {video_count} 个视频）"
-                                f"：{'跨盘分享' if is_cross_batch else '分享'}"
-                                f"文件名与目录都没有 S{season:02d} 的集号"
-                            )
+                            reason = f"认不出集号 · {video_count} 个视频无 S{season:02d}"
                             logger.debug(
                                 f"{reason}：{mediainfo.title_year} "
                                 f"S{season:02d}，已跳过该资源"
@@ -880,10 +878,10 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             # 到这里说明集号解析成功、只是与缺失集没有交集，
                             # 不是「内容不匹配」——账本要能直接看出差在哪。
                             reason = (
-                                f"资源集号与缺失不符（S{season:02d}）：资源含 "
+                                f"集号不符 · 有 "
                                 f"{self._format_episode_ranges(share_episodes) or '无'}，"
                                 f"缺 {self._format_episode_ranges(missing_episode_set) or '无'}"
-                            )[:180]
+                            )[:100]
                             logger.debug(
                                 f"该{resource_input_label}未匹配到 S{season} 的任何缺失剧集："
                                 f"{reason}"
