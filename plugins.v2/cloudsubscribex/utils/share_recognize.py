@@ -169,6 +169,40 @@ def _group_views(files: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
 _TAIL_EPISODE_RE = re.compile(r"(?<![0-9A-Za-z])(\d{1,3})$")
 
 
+def _tail_episode_from_name(name: str) -> Optional[int]:
+    """只认「末尾紧贴的数字」：黑色五叶草078.mp4 → 78；认不出返回 None。"""
+    stem = str(name or "")
+    if "." in stem:
+        stem = stem.rsplit(".", 1)[0]
+    match = _TAIL_EPISODE_RE.search(stem)
+    if not match:
+        return None
+    value = int(match.group(1))
+    if value <= 0 or value in _NOT_EPISODE:
+        return None
+    return value
+
+
+def rescue_tail_episodes_from_names(names: Iterable[str]) -> Set[int]:
+    """整批文件名都解析不出集号时的兜底（识别阶段与转存阶段共用）。
+
+    门槛与 `_rescue_tail_episodes` 一致：命中 >= 3、集号去重 >= 3、命中率 >= 80%。
+    任一不满足就返回空集合，宁可留 review 也不乱转。
+    """
+    name_list = [str(name or "") for name in names]
+    values: List[int] = []
+    for name in name_list:
+        episode = _tail_episode_from_name(name)
+        if episode is not None:
+            values.append(episode)
+    unique = set(values)
+    if len(values) < 3 or len(unique) < 3:
+        return set()
+    if len(values) / max(len(name_list), 1) < 0.8:
+        return set()
+    return unique
+
+
 def _outline_hits(groups: Dict[str, Dict[str, Any]]) -> List[Tuple[Dict[str, Any], int]]:
     """在每组内找「末尾紧贴数字」的文件，命中率不足 80% 的组整组放弃。"""
     hits: List[Tuple[Dict[str, Any], int]] = []
@@ -177,14 +211,8 @@ def _outline_hits(groups: Dict[str, Dict[str, Any]]) -> List[Tuple[Dict[str, Any
         for item in view["files"]:
             if item["ep"]:
                 continue
-            stem = str(item["name"])
-            if "." in stem:
-                stem = stem.rsplit(".", 1)[0]
-            match = _TAIL_EPISODE_RE.search(stem)
-            if not match:
-                continue
-            value = int(match.group(1))
-            if value <= 0 or value in _NOT_EPISODE:
+            value = _tail_episode_from_name(str(item["name"]))
+            if value is None:
                 continue
             candidates.append((item, value))
         if not candidates:

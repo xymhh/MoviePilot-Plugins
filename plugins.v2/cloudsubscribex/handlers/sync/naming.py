@@ -34,6 +34,7 @@ except Exception:
 from ...core import CloudFile, OwnerDelegator
 from ...core.media import media_identity
 from ...utils import FileMatcher, MediaFileParser
+from ...utils.share_recognize import rescue_tail_episodes_from_names
 from .baseline import normalize_platform_cache_key
 from .utils import format_episode_ranges
 
@@ -643,6 +644,7 @@ class SyncNamingService(OwnerDelegator):
         """递归统计分享中的实际视频数量和目标季集数。"""
         video_count = 0
         episodes = set()
+        unresolved: List[str] = []
 
         def walk(items: List[dict]):
             nonlocal video_count
@@ -657,8 +659,13 @@ class SyncNamingService(OwnerDelegator):
                 episode = FileMatcher.episode_from_file(item, season, mediainfo)
                 if episode is not None:
                     episodes.add(episode)
+                else:
+                    unresolved.append(name)
 
         walk(files)
+        if not episodes:
+            # 识别阶段已有兜底，转存阶段也必须走同一套，否则计划 ready 仍会在此处判无集号。
+            episodes = rescue_tail_episodes_from_names(unresolved)
         return video_count, episodes
 
     @staticmethod
