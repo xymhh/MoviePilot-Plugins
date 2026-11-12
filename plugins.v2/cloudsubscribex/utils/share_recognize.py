@@ -183,6 +183,20 @@ def _tail_episode_from_name(name: str) -> Optional[int]:
     return value
 
 
+def episode_from_name(name: str, season: Optional[int] = None) -> Optional[int]:
+    """对外暴露与 :func:`classify_path` 同源的集号解析，供转存阶段复用。
+
+    与 ``rescue_tail_episodes_from_names`` 不同：本函数单文件即可判定，不设「命中 >= 3」
+    门槛。仍复用 ``_NOT_EPISODE`` 排除年份/分辨率，避免 ``2024.mkv`` / ``2160p.mkv``
+    被当集号；TMDB 整季无分集数据的旧口径由调用方自行保留。
+
+    背景（2026-11-13 玫瑰战争事故）：识别计划用本函数口径认出 ``14 DV.mkv → E14``，
+    而转存阶段 ``FileMatcher.episode_from_file`` 认不出该文件、``rescue_tail_episodes_from_names``
+    只认「末尾紧贴数字」，导致 ``share_episodes={1..13}``，``missing={14}`` 交集为空 → 转存 0 个文件。
+    """
+    return _episode_from_name(str(name or ""), season)
+
+
 def rescue_tail_episodes_from_names(names: Iterable[str]) -> Set[int]:
     """整批文件名都解析不出集号时的兜底（识别阶段与转存阶段共用）。
 

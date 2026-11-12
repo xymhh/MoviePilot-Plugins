@@ -34,7 +34,7 @@ except Exception:
 from ...core import CloudFile, OwnerDelegator
 from ...core.media import media_identity
 from ...utils import FileMatcher, MediaFileParser
-from ...utils.share_recognize import rescue_tail_episodes_from_names
+from ...utils.share_recognize import episode_from_name, rescue_tail_episodes_from_names
 from .baseline import normalize_platform_cache_key
 from .utils import format_episode_ranges
 
@@ -666,6 +666,15 @@ class SyncNamingService(OwnerDelegator):
         if not episodes:
             # 识别阶段已有兜底，转存阶段也必须走同一套，否则计划 ready 仍会在此处判无集号。
             episodes = rescue_tail_episodes_from_names(unresolved)
+        elif unresolved:
+            # 2026-11-13：识别计划（classify_path）用「开头数字 + 空格 + 画质词」口径，
+            # 例如 `14 DV.mkv → E14`；FileMatcher 认不出时不能只在「整批都无集号」时才兜底，
+            # 否则计划 ready 选中的 E14 会在此处凭空消失（share_episodes 只到 E13）。
+            # 单文件补判复用同源解析，仍排除年份/分辨率；rescue 的 3 集门槛保持不动。
+            for name in unresolved:
+                episode = episode_from_name(name, season)
+                if episode is not None:
+                    episodes.add(episode)
         return video_count, episodes
 
     @staticmethod

@@ -264,6 +264,20 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 f"媒体服务器实际存在剧集："
                 f"{self._format_episode_ranges(media_server_episodes & expected_episodes)}"
             )
+            # 2026-11-13：物理事实优先。TMDB 分集日期可能错位或缺失（例如
+            # 玫瑰战争 E05 已在库里却被无 air_date 判为「未播出」，订阅 note 被剔除），
+            # 媒体库已存在的集显然已播出，不应被未播出守卫挡掉。
+            # 谷雨事故防护不变：TMDB 整季无分集数据时 unaired_episodes 为空，旧口径照旧；
+            # 库里没有的集仍按 TMDB 日期判定，泄露版/假资源照样挡。
+            if unaired_episodes and media_server_valid and media_server_episodes:
+                library_episodes = set(media_server_episodes) & expected_episodes
+                if library_episodes:
+                    unaired_episodes -= library_episodes
+                    logger.debug(
+                        f"{mediainfo.title_year} S{season:02d} "
+                        f"媒体库已存在的 {self._format_episode_ranges(library_episodes)} "
+                        f"按已播出处理（TMDB 日期错位不覆盖物理事实）"
+                    )
 
             # 2. 再读取目标网盘目录；不扫描本地 STRM 路径。
             self._set_task_phase(subscribe, "检查网盘内容", 40)
