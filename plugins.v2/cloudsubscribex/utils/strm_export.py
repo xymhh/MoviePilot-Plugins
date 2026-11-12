@@ -15,7 +15,12 @@ from typing import Callable, Dict, Iterable, List, Optional
 
 from app.log import logger
 
-from ..core.cloud import CloudDriveCapability
+# 不能在模块级 import core.*：core/__init__.py 会 import utils/__init__，
+# 而 utils/__init__ 又 import 本模块——若本模块反向 import core.cloud，
+# core 尚未初始化完就递归拿同一把模块锁，MP 热重载报
+# `deadlock detected by _ModuleLock('app.plugins.cloudsubscribex.core.api.sync')`
+# （2026-11-12 真机 13:51 / 16:38 两次复现，导致插件更新失败）。
+# 改为函数内延迟 import，此时 core 包已完全初始化。
 
 
 def _strip_duplicated_prefix(root_path: str, relative: str) -> str:
@@ -56,6 +61,8 @@ def _directory_ops(provider):
     ``list_directory``，必须用 ``require(DIRECTORY_READ)`` 拿到带 IO 限流的服务对象；
     直接传入服务对象（测试与内部直调）时原样返回。
     """
+    from ..core.cloud import CloudDriveCapability
+
     require = getattr(provider, "require", None)
     if callable(require) and hasattr(provider, "supports"):
         try:
@@ -87,6 +94,8 @@ def rebuild_strm_by_export_tree(
         "errors": 0,
         "exported": 0,
     }
+    from ..core.cloud import CloudDriveCapability
+
     if not provider.supports(CloudDriveCapability.STRM_EXPORT):
         stats["errors"] += 1
         logger.warning("STRM 增量：当前网盘不支持导出目录树")

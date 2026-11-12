@@ -19,7 +19,14 @@ from .strm import (
 )
 from .strm_scan import rebuild_strm_tree
 from .strm_export import rebuild_strm_by_export_tree
-from ..core.media import media_identity
+
+# 注意：这里**不能**写 `from ..core.media import media_identity`。
+# core/__init__.py 会 import utils（notify_template），而 core.api.sync 又
+# `from .. import ...` 回到 core 包——若 utils 再反向 import core.media，
+# 同一线程递归拿同一把模块锁，MP 热重载时报
+# `deadlock detected by _ModuleLock('app.plugins.cloudsubscribex.core.api.sync')`
+# （2026-11-12 真机 13:51 / 16:38 两次复现，导致插件更新失败）。
+# 需要 media_identity 的模块一律直接 `from ...core.media import media_identity`。
 
 __all__ = [
     "FileMatcher",
@@ -36,5 +43,4 @@ __all__ = [
     "cached_resource_call",
     "create_platform_ttl_cache",
     "normalize_platform_cache_key",
-    "media_identity",
 ]
