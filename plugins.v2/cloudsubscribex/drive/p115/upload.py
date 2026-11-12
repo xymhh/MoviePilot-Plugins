@@ -335,6 +335,9 @@ class P115UploadService(OwnerDelegator):
         try:
             file_size = source.stat().st_size
             part_size = upload_part_size(file_size)
+            # p115oss.upload_file 会把 request_kwargs 透传给 OSS 分片 PUT，
+            # 在这里传 session=<ProxyManager> 才能真正让上传数据走代理。
+            upload_kwargs = dict(self._oss_proxy_kwargs(), max_retries=0)
             if progress_callback:
                 with source.open("rb") as file:
                     response = self._rate_limited_call(
@@ -345,7 +348,7 @@ class P115UploadService(OwnerDelegator):
                         filesha1=checksum,
                         filesize=file_size,
                         partsize=part_size,
-                        max_retries=0,
+                        **upload_kwargs,
                     )
             else:
                 response = self._rate_limited_call(
@@ -356,7 +359,7 @@ class P115UploadService(OwnerDelegator):
                     filesha1=checksum,
                     filesize=file_size,
                     partsize=part_size,
-                    max_retries=0,
+                    **upload_kwargs,
                 )
             check_response(response)
             self._target_file_cache.clear()
@@ -471,7 +474,7 @@ class P115UploadService(OwnerDelegator):
                 filesize=file_size,
                 partsize=part_size,
                 reporthook=report,
-                max_retries=0,
+                **dict(self._oss_proxy_kwargs(), max_retries=0),
             )
             check_response(response)
             self._target_file_cache.clear()

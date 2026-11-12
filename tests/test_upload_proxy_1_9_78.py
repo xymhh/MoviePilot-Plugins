@@ -91,6 +91,64 @@ class TestUploadWiring(unittest.TestCase):
         self.assertIn("**proxy_kwargs,", self.upload)
         self.assertGreaterEqual(self.upload.count("**proxy_kwargs"), 4)
 
+    def test_upload_file_main_path_carries_proxy(self):
+        """1.9.79：线上实际走的 p115oss.upload_file 主路径也必须带代理。
+
+        1.9.78 只覆盖了插件自写的 oss_multipart_* 分片；p115oss 缺失或走顺序上传时
+        用的是 self.client.upload_file，那条路不传 session 就仍直连。
+        注意调用形态是 `self._rate_limited_call(self.client.upload_file, ...)`，
+        所以 upload_file 出现在**参数**位置，按 Call 找会漏。
+        """
+        import ast
+
+        tree = ast.parse(self.upload)
+        call_sites = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            for arg in list(node.args) + [kw.value for kw in node.keywords]:
+                if (
+                    isinstance(arg, ast.Attribute)
+                    and arg.attr == "upload_file"
+                    and isinstance(arg.value, ast.Attribute)
+                    and arg.value.attr == "client"
+                ):
+                    call_sites.append(node)
+                    break
+        self.assertEqual(
+            len(call_sites), 3, f"预期 3 处 upload_file 调用，实际 {len(call_sites)}"
+        )
+        # 收集函数内所有「变量名 -> 赋值表达式源码」，用于追溯 splat 的来源
+        assignments = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1:
+                target = node.targets[0]
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = ast.unparse(node.value)
+        for call in call_sites:
+            splats = [kw for kw in call.keywords if kw.arg is None]
+            self.assertTrue(
+                splats,
+                f"第 {call.lineno} 行的 upload_file 调用没有 **kwargs 透传代理",
+            )
+            traced = False
+            for kw in splats:
+                source = ast.unparse(kw.value)
+                if "_oss_proxy_kwargs" in source:
+                    traced = True
+                    break
+                # **upload_kwargs 这类，回溯变量赋值来源
+                if isinstance(kw.value, ast.Name):
+                    assigned = assignments.get(kw.value.id, "")
+                    if "_oss_proxy_kwargs" in assigned:
+                        traced = True
+                        break
+            self.assertTrue(
+                traced,
+                f"第 {call.lineno} 行的 upload_file 调用**未**透传代理参数"
+                f"（splat 来源里没有 _oss_proxy_kwargs）",
+            )
+
     def test_helper_reads_owner_proxy(self):
         self.assertIn("def _oss_proxy_kwargs(self)", self.upload)
         self.assertIn("_cross_transfer_upload_proxy", self.upload)
@@ -105,7 +163,13 @@ class TestUploadWiring(unittest.TestCase):
         self.assertIn("插件没填时回落到 MP", self.init)
 
     def test_version(self):
-        self.assertIn('plugin_version = "1.9.78"', self.init)
+        import re
+
+        match = re.search(r'plugin_version = "(\d+)\.(\d+)\.(\d+)"', self.init)
+        self.assertIsNotNone(match, "未找到 plugin_version")
+        self.assertGreaterEqual(
+            tuple(int(part) for part in match.groups()), (1, 9, 78)
+        )
 
 
 if __name__ == "__main__":
