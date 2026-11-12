@@ -118,7 +118,7 @@
     </header>
 
     <!-- 全局运行中任务：非订阅影视手动转存没有订阅卡/历史卡可挂，靠这条浮条看进度 -->
-    <RuntimeTaskStrip :tasks="runtime.tasks" />
+    <RuntimeTaskStrip :tasks="runtime.tasks" @stop-task="stopRuntimeTask" />
 
     <section class="overview-band" aria-label="转存统计">
       <div class="overview-title d-flex align-center ga-2 mb-2">
@@ -664,6 +664,13 @@ async function stopConfirmed() {
   } finally {
     stopping.value = false
   }
+}
+
+// 任务卡片上的「停止此任务」：跳过确认弹窗，直接停这一个任务
+function stopRuntimeTask(task) {
+  const taskId = String(task?.id || "").trim()
+  if (!taskId) return
+  void stopTaskRequest(taskId)
 }
 
 async function openConfig() {

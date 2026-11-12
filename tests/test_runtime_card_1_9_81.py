@@ -177,6 +177,25 @@ class TestStripTemplate(unittest.TestCase):
         self.assertIn('emit("stop-task"', self.source)
         self.assertIn("canStop(task)", self.source)
 
+    def test_stop_event_is_wired_by_mount_points(self):
+        """回归：emit 了但没人监听 = 按钮点了没反应（本次真机前发现）。"""
+        for name in ("AppPage.vue", "AppPageResource.vue"):
+            page = read(os.path.join(FRONTEND, "src", "components", name))
+            self.assertIn(
+                '@stop-task="stopRuntimeTask"', page,
+                f"{name} 没有监听 stop-task 事件",
+            )
+            self.assertIn(
+                "function stopRuntimeTask(task)", page,
+                f"{name} 缺少 stopRuntimeTask 处理函数",
+            )
+
+    def test_resource_page_hook_exposes_stop_task(self):
+        hook = read(os.path.join(FRONTEND, "src", "composables", "useRuntimeTasks.js"))
+        self.assertIn("async function stopTask(taskId)", hook)
+        self.assertIn("sync/task/stop", hook)
+        self.assertIn("stopTask}", hook, "useRuntimeTasks 必须把 stopTask 导出")
+
     def test_timer_cleaned_on_unmount(self):
         self.assertIn("onBeforeUnmount", self.source)
         self.assertIn("clearInterval", self.source)

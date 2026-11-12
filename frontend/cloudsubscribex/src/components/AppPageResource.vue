@@ -17,7 +17,7 @@
       :active-count="activeMediaFilterCount"
       @reset="resetMediaFilters" />
 
-    <RuntimeTaskStrip :tasks="runtimeTasks" />
+    <RuntimeTaskStrip :tasks="runtimeTasks" @stop-task="stopRuntimeTask" />
 
     <div v-if="isSearchMode" class="search-tip-bar">
       <span>
@@ -174,7 +174,14 @@ const props = defineProps({
 const resourceApi = computed(() => props.api);
 const resourcePluginId = computed(() => props.pluginId);
 // 非订阅影视手动转存没有订阅卡/历史卡可挂，进度只能靠这条全局浮条呈现
-const {tasks: runtimeTasks} = useRuntimeTasks(props.api, props.pluginId);
+const {tasks: runtimeTasks, stopTask: stopRuntimeTaskRequest} = useRuntimeTasks(props.api, props.pluginId);
+
+// 任务卡片停止按钮：直接调 /sync/task/stop，失败也不打断页面
+function stopRuntimeTask(task) {
+  const taskId = String(task?.id || "").trim();
+  if (!taskId) return;
+  void stopRuntimeTaskRequest(taskId);
+}
 const {snackbarVisible, snackbarText, snackbarColor, showMessage} = useSnackbar();
 
 const snackbarTextStyle = computed(() => ({

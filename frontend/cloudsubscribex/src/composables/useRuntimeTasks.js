@@ -103,6 +103,25 @@ export function useRuntimeTasks(api, pluginId = "CloudSubscribeX") {
     }
   }
 
+  async function stopTask(taskId) {
+    try {
+      const task = (tasks.value || []).find((item) => item.id === taskId);
+      if (task) {
+        task.status = "stopping";
+        task.phase = "等待安全停止";
+      }
+      const result = await api.post(`plugin/${pluginId}/sync/task/stop`, {
+        task_id: taskId,
+      });
+      if (!result?.success) throw new Error(result?.message || "停止任务失败");
+      await load();
+      return true;
+    } catch (error) {
+      await load();
+      return false;
+    }
+  }
+
   function handleVisibilityChange() {
     if (!isPageVisible()) {
       clearFallback();
@@ -127,5 +146,5 @@ export function useRuntimeTasks(api, pluginId = "CloudSubscribeX") {
     closeStream();
   });
 
-  return {tasks, activeTasks, running, status, ready, load};
+  return {tasks, activeTasks, running, status, ready, load, stopTask};
 }
