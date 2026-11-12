@@ -71,10 +71,32 @@ class P115ClientWithTimeout(P115Client if PAVAILABLE else object):
             cookies: str,
             default_timeout: Optional[Dict[str, float]] = None,
             slow_timeout: Optional[Dict[str, float]] = None,
+            proxies: Optional[Dict[str, str]] = None,
     ):
         super().__init__(cookies)
         self._default_timeout = self._parse_timeout(default_timeout)
         self._slow_timeout = self._parse_timeout(slow_timeout)
+        if proxies:
+            self._apply_upload_proxies(proxies)
+
+    def _apply_upload_proxies(self, proxies: Dict[str, str]) -> None:
+        """把代理注入 p115client 底层会话；注入不了就回落直连，不阻断上传。"""
+        for attr in ("session", "client", "_session", "http"):
+            session = getattr(self, attr, None)
+            if session is None:
+                continue
+            try:
+                current = getattr(session, "proxies", None)
+                if isinstance(current, dict):
+                    current.update(proxies)
+                else:
+                    setattr(session, "proxies", dict(proxies))
+                return
+            except Exception:
+                continue
+        logger.warning(
+            "115 上传代理已配置，但 p115client 未暴露可注入的会话，保持直连"
+        )
 
     @staticmethod
     def _parse_timeout(timeout_spec: Any) -> Any:
@@ -257,6 +279,7 @@ class P115ClientManager:
             timeout_enabled: bool = True,
             default_timeout: Optional[Dict[str, float]] = None,
             slow_timeout: Optional[Dict[str, float]] = None,
+            proxies: Optional[Dict[str, str]] = None,
     ):
         """
         初始化115客户端
@@ -267,6 +290,7 @@ class P115ClientManager:
         :param path_cache_ttl: 路径缓存过期时间（秒），默认 3600
         """
         self.cookies = cookies
+        self._upload_proxies = proxies or None
         cache_scope = hashlib.sha1(cookies.encode("utf-8")).hexdigest()[:12]
         self.user_agent = user_agent or "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         self.client: Optional[Any] = None
@@ -359,6 +383,7 @@ class P115ClientManager:
                     cookies,
                     default_timeout=default_timeout if timeout_enabled else None,
                     slow_timeout=slow_timeout if timeout_enabled else None,
+                    proxies=self._upload_proxies,
                 )
             except Exception as e:
                 logger.error(f"初始化 P115Client 失败: {e}")

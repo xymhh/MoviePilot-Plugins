@@ -212,6 +212,12 @@ class UIConfig:
             "cross_transfer_direct_stream": True,
             "cross_transfer_upload_concurrency": 4,
             "cross_transfer_rapid_miss_action": "abort",
+            # 真实上传 115 的代理（空=直连，只作用于 115 上传/API）
+            "cross_transfer_upload_proxy": "",
+            "cross_transfer_upload_proxy_username": "",
+            "cross_transfer_upload_proxy_password": "",
+            # 每日真实上传字节上限（GB），硬 clamp 1..900；秒传命中 0 字节不计数
+            "cross_transfer_daily_upload_limit_gb": 900,
             "cross_transfer_residue_cleanup": True,
             # 跨盘中继缓存：保留期（小时，默认 6）、清理间隔（小时，默认 6）、
             # 磁盘剩余比例低于该百分比时按最老优先强制清理（0 关闭，默认 10）。

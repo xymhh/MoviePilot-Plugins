@@ -43,6 +43,7 @@ class CloudDriveManager:
             rapid_miss_action=getattr(
                 self._plugin, "_cross_transfer_rapid_miss_action", "abort"
             ),
+            quota=getattr(self._plugin, "_upload_quota", None),
             on_change=getattr(self._plugin, "_mark_runtime_changed", None),
             hash_cache_get=getattr(
                 self._plugin, "get_cached_source_sha1", None

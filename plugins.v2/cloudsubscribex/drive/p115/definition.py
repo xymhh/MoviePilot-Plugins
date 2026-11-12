@@ -199,9 +199,12 @@ class P115DriverDefinition(DriverDefinition):
         ctx = context or {}
         cookies = str(config.get("_cookies") or config.get("cookies") or "").strip()
         share_cache_ttl = int(config.get("_search_cache_ttl_minutes") or 30)
+        from ...utils.http_client import normalize_proxies
+        proxies = normalize_proxies(config.get("_cross_transfer_upload_proxy"))
         return P115ClientManager(
             cookies=cookies,
             share_cache_ttl_minutes=share_cache_ttl,
+            proxies=proxies,
             **dict(ctx.get("timeout_kwargs") or {}),
         )
 

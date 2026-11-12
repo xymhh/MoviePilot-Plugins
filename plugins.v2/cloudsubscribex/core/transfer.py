@@ -815,8 +815,10 @@ class CrossTransferTaskManager:
                  hash_cache_get: Optional[Callable[[str], Optional[dict]]] = None,
                  hash_cache_put: Optional[Callable[[str, dict], None]] = None,
                  miss_cache_get: Optional[Callable[[str, str], int]] = None,
-                 miss_cache_put: Optional[Callable[[str, str], None]] = None):
+                 miss_cache_put: Optional[Callable[[str, str], None]] = None,
+                 quota: object = None):
         self._provider_resolver = provider_resolver
+        self._quota = quota
         self._target_writer = TargetWriter(provider_resolver)
         self._download_path = str(download_path or "").strip()
         self._download_threads = max(1, min(int(download_threads or 5), 256))
@@ -1320,6 +1322,13 @@ class CrossTransferTaskManager:
                 task["updated_at"] = time.time()
                 changed = True
         if changed:
+            # 每日额度只累加「真实上传」字节：秒传命中(rapid)/复用(reuse) 不计
+            if (
+                    values.get("status") == "success"
+                    and self._quota is not None
+                    and str(values.get("method") or "") not in ("rapid", "reuse")
+            ):
+                self._quota.add(int(values.get("uploaded_bytes") or 0))
             self._notify_change()
 
     @staticmethod
@@ -1538,6 +1547,20 @@ class CrossTransferTaskManager:
             target_key, target_path = task["target_provider"], task["target_path"]
             target_name, algorithm = task["title"], task["algorithm"]
             fallback = task["fallback"]
+        # 每日上传额度预检：超限直接跳过本次，不下载、不占本地缓存，等次日恢复
+        if self._quota is not None:
+            allowed, quota_reason = self._quota.can_start(
+                int(task.get("total") or 0)
+            )
+            if not allowed:
+                self._update(
+                    task_id, status="skipped", phase="done", progress=100,
+                    message=quota_reason, error=quota_reason,
+                    finished_at=time.time(),
+                )
+                self._release_cache_ref(cache_key)
+                self._transfer_slots.release()
+                return
         if not checksum and not algorithm:
             # 上次下载过但秒传未命中：本地文件已删，哈希还在。
             # 用缓存的 SHA1 直接做零流量探测，命中就成功、未命中也不重复下载。

@@ -89,6 +89,7 @@ from .subscribe import (  # noqa: F401 - 导入即注册自动订阅渠道
 from .utils import FileMatcher, configure_magnet_metadata_url
 from .utils.file_parser import MediaFileParser
 from .utils.http_client import build_proxy_url, validate_proxy_address
+from .core.services.upload_quota import UploadQuota, clamp_limit_gb
 
 _COMPONENT_TYPES = (
     PageApi,
@@ -184,7 +185,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.74"
+    plugin_version = "1.9.75"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -241,6 +242,10 @@ class CloudSubscribeX(_PluginBase):
     _search_proxy_address: str = ""
     _search_proxy_username: str = ""
     _search_proxy_password: str = ""
+    # 真实上传 115 的代理（空=直连）与每日字节额度（硬上限 900GB）
+    _cross_transfer_upload_proxy: str = ""
+    _cross_transfer_daily_upload_limit_gb: int = 900
+    _upload_quota: Any = None
     _search_cache_enabled: bool = True
     _search_cache_ttl_minutes: int = 30
     _search_concurrency: int = 2
@@ -1922,6 +1927,31 @@ class CloudSubscribeX(_PluginBase):
             logger.error(f"搜索渠道代理配置无效，本次使用直连：{error}")
             self._search_proxy_address = raw_search_proxy
             self._search_proxy = ""
+
+        # 真实上传 115 的代理（只作用于 115 上传/API，源盘下载保持直连）
+        raw_upload_proxy = str(
+            config.get("cross_transfer_upload_proxy", "") or ""
+        ).strip()
+        upload_proxy_user = str(
+            config.get("cross_transfer_upload_proxy_username", "") or ""
+        ).strip()
+        upload_proxy_pwd = str(
+            config.get("cross_transfer_upload_proxy_password", "") or ""
+        )
+        try:
+            upload_proxy_addr = validate_proxy_address(raw_upload_proxy)
+            self._cross_transfer_upload_proxy = build_proxy_url(
+                upload_proxy_addr, upload_proxy_user, upload_proxy_pwd,
+            )
+        except ValueError as error:
+            logger.warning(f"115 上传代理配置无效，本次使用直连：{error}")
+            self._cross_transfer_upload_proxy = ""
+        self._cross_transfer_daily_upload_limit_gb = clamp_limit_gb(
+            config.get("cross_transfer_daily_upload_limit_gb", 900)
+        )
+        self._upload_quota = UploadQuota(
+            self, self._cross_transfer_daily_upload_limit_gb
+        )
 
         configured_resource_order = config.get("resource_type_order", ["115", "ed2k"])
         if not isinstance(configured_resource_order, list):
