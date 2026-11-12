@@ -185,7 +185,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.75"
+    plugin_version = "1.9.76"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -2047,6 +2047,12 @@ class CloudSubscribeX(_PluginBase):
         self._cross_transfer_rapid_miss_action = (
             rapid_miss_action if rapid_miss_action in {"fallback", "abort"} else "fallback"
         )
+        # 改配置后立即同步到已存在的跨盘任务管理器（旧实现只在 initialize 时传一次，
+        # 导致切到「回落普通上传」后运行期仍是 abort，1.9.76 修复）。
+        manager = getattr(self, "_cross_transfer_manager", None)
+        setter = getattr(manager, "set_rapid_miss_action", None)
+        if callable(setter):
+            setter(self._cross_transfer_rapid_miss_action)
         self._apply_tg_monitor_config(config)
         self._residue_cleanup = bool(
             config.get("cross_transfer_residue_cleanup", True)

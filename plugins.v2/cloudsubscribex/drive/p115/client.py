@@ -80,7 +80,26 @@ class P115ClientWithTimeout(P115Client if PAVAILABLE else object):
             self._apply_upload_proxies(proxies)
 
     def _apply_upload_proxies(self, proxies: Dict[str, str]) -> None:
-        """把代理注入 p115client 底层会话；注入不了就回落直连，不阻断上传。"""
+        """把代理注入 p115client 的 request 层（1.9.76）。
+
+        线上 p115client 走 urllib3_future_request 的模块级 request callable，
+        并没有 session/client/_session/http 这些属性；1.9.75 按属性名找一遍全部落空，
+        真机日志显示代理配置被跳过、回落直连。改为包装 self.request，
+        每次请求把 proxies 透传进 request_kwargs。
+        """
+        import types
+
+        original = getattr(self, "request", None)
+        if not callable(original):
+            logger.warning("115 上传代理已配置，但 p115client 无 request 方法，保持直连")
+            return
+
+        def wrapped(client_self, *args, **kwargs):
+            kwargs.setdefault("proxies", proxies)
+            return original(*args, **kwargs)
+
+        self.request = types.MethodType(wrapped, self)
+        # 兼容旧版本：若实例上确实存在可写 session.proxies，也一并设置
         for attr in ("session", "client", "_session", "http"):
             session = getattr(self, attr, None)
             if session is None:
@@ -91,12 +110,9 @@ class P115ClientWithTimeout(P115Client if PAVAILABLE else object):
                     current.update(proxies)
                 else:
                     setattr(session, "proxies", dict(proxies))
-                return
             except Exception:
                 continue
-        logger.warning(
-            "115 上传代理已配置，但 p115client 未暴露可注入的会话，保持直连"
-        )
+        logger.info("115 上传代理已生效（request 层注入，作用域：115 上传/API）")
 
     @staticmethod
     def _parse_timeout(timeout_spec: Any) -> Any:

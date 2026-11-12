@@ -60,7 +60,15 @@ class _RangeDownloadUnsupported(RuntimeError):
 
 
 class RapidMissAborted(RuntimeError):
-    """秒传未命中且用户设置为「中止并清理」：不真实上传、不留缓存。"""
+    """秒传未命中且用户设置为「中止并清理」：不真实上传、不留缓存。
+
+    from_cache=True 表示这次是命中 24h 负缓存被跳过，不是新探测到的未命中；
+    except 分支据此避免反复刷新 TTL（否则负缓存永远不会过期）。
+    """
+
+    def __init__(self, message: str = "", from_cache: bool = False):
+        super().__init__(message)
+        self.from_cache = bool(from_cache)
 
 
 class _RemoteSha1RangeReader:
@@ -894,6 +902,12 @@ class CrossTransferTaskManager:
                 return digest
         return ""
 
+    def set_rapid_miss_action(self, action: str) -> None:
+        """配置变更后同步运行期动作，无需重建整个驱动管理器（1.9.76）。"""
+        self._rapid_miss_action = (
+            "abort" if str(action or "").strip().lower() == "abort" else "fallback"
+        )
+
     def _rapid_miss_at(self, target_key: str, sha1: str) -> int:
         """同一 (目标盘, SHA1) 的秒传未命中时间；0 表示没有记录或已过期。"""
         if not self._miss_cache_get or not sha1:
@@ -1595,7 +1609,12 @@ class CrossTransferTaskManager:
                 str(checksum or "").strip().upper()
                 if str(algorithm or "").strip().lower() == "sha1" else ""
             )
-            if known_sha1 and target_name and not source_path:
+            # 负缓存只服务 abort 模式：fallback（回落普通上传）必须放行去下载+上传，
+            # 否则历史 abort 留下的记录会让文件永远被跳过（1.9.76 真机事故）。
+            if (
+                    self._rapid_miss_action == "abort"
+                    and known_sha1 and target_name and not source_path
+            ):
                 missed_at = self._rapid_miss_at(target_key, known_sha1)
                 if missed_at:
                     age_minutes = max(0, int((time.time() - missed_at) / 60))
@@ -1604,7 +1623,8 @@ class CrossTransferTaskManager:
                         f"（{target_key}），{self._miss_cache_ttl_seconds // 3600} 小时内不再下载"
                     )
                     raise RapidMissAborted(
-                        f"{target_key} 已确认无此哈希，跳过下载"
+                        f"{target_key} 已确认无此哈希，跳过下载",
+                        from_cache=True,
                     )
             target = self._provider_resolver(target_key)
             target_name_text = str(
@@ -2132,7 +2152,7 @@ class CrossTransferTaskManager:
                          if retained else "任务已取消并已清理中继缓存"),
                 speed_bytes_per_second=0.0, finished_at=time.time(),
             )
-        except RapidMissAborted:
+        except RapidMissAborted as rapid_miss_error:
             # abort 模式（秒传未命中即中止）：无条件清理本任务中继缓存——即使
             # cache_complete 为真也不保留（与 fallback 保留完整缓存供重试不同）；
             # 探测在下载前发生时 temporary_path 尚未赋值，无需清理。
@@ -2143,8 +2163,13 @@ class CrossTransferTaskManager:
                 str(checksum or "").strip().upper()
                 if str(algorithm or "").strip().lower() == "sha1" else ""
             )
-            if miss_sha1:
-                # 记负缓存：下次同一哈希 24 小时内直接跳过，不再下 5GB 验一遍
+            if (
+                    miss_sha1
+                    and self._rapid_miss_action == "abort"
+                    and not getattr(rapid_miss_error, "from_cache", False)
+            ):
+                # 只在 abort 模式记录真实探测到的未命中；命中负缓存被跳过时不再
+                # 刷新时间戳，否则 TTL 自我续期，24 小时永远等不到（1.9.76）。
                 self._remember_rapid_miss(target_key, miss_sha1)
             logger.info(
                 "秒传未命中：已清理中继缓存并记录 SHA1"
