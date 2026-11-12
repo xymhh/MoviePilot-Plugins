@@ -9,13 +9,14 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from queue import Queue
 from threading import Lock
-from typing import Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 import requests
 from app.log import logger
 from requests.adapters import HTTPAdapter
 
 from .files import P115DirectoryReader, P115FileService
+from .upload_proxy import oss_request_kwargs
 from ...core import OwnerDelegator
 
 try:
@@ -201,6 +202,16 @@ class P115UploadService(OwnerDelegator):
 
     rapid_requires_local_file = True
 
+    def _oss_proxy_kwargs(self) -> Dict[str, Any]:
+        """OSS 数据面（分片 PUT / 元数据）的代理参数；未配置时为空字典。"""
+        try:
+            proxy = str(
+                getattr(self._owner, "_cross_transfer_upload_proxy", "") or ""
+            ).strip()
+        except Exception:
+            return {}
+        return oss_request_kwargs(proxy)
+
     @staticmethod
     def _file_sha1(path: Path) -> str:
         digest = hashlib.sha1()
@@ -285,8 +296,7 @@ class P115UploadService(OwnerDelegator):
         self._cancel_probe_residue(response)
         return False
 
-    @staticmethod
-    def _cancel_probe_residue(response: Mapping) -> None:
+    def _cancel_probe_residue(self, response: Mapping) -> None:
         """探测未命中后清理 115 侧可能的上传会话；没有残留就跳过。"""
         data = (response or {}).get("data") or {}
         upload_id = data.get("upload_id") or data.get("UploadId")
@@ -294,7 +304,9 @@ class P115UploadService(OwnerDelegator):
         if not (upload_id and target and P115OSS_AVAILABLE):
             return
         with contextlib.suppress(Exception):
-            oss_multipart_upload_cancel(target, upload_id)
+            oss_multipart_upload_cancel(
+                target, upload_id, **self._oss_proxy_kwargs()
+            )
 
     def upload_file(
             self,
@@ -524,7 +536,8 @@ class P115UploadService(OwnerDelegator):
         parts_total = int(math.ceil(total / size))
         workers = max(1, min(int(concurrency or P115_DEFAULT_UPLOAD_CONCURRENCY),
                              P115_MAX_UPLOAD_CONCURRENCY, parts_total))
-        upload_id = oss_multipart_upload_init(target)
+        proxy_kwargs = self._oss_proxy_kwargs()
+        upload_id = oss_multipart_upload_init(target, **proxy_kwargs)
         if not upload_id:
             raise RuntimeError("115 分块上传初始化失败")
         link = _SourceLink(source_url, source_headers, refresh_link)
@@ -568,6 +581,7 @@ class P115UploadService(OwnerDelegator):
                             reporthook=lambda count, number=part_number: report(
                                 number, count
                             ),
+                            **proxy_kwargs,
                         )
                     except InterruptedError:
                         raise
@@ -605,13 +619,13 @@ class P115UploadService(OwnerDelegator):
                 )
             parts.sort(key=lambda part: int(part["PartNumber"]))
             response = oss_multipart_upload_complete(
-                target, upload_id, parts, callback
+                target, upload_id, parts, callback, **proxy_kwargs
             )
             if P115_AVAILABLE:
                 check_response(response)
         except BaseException:
             with contextlib.suppress(Exception):
-                oss_multipart_upload_cancel(target, upload_id)
+                oss_multipart_upload_cancel(target, upload_id, **proxy_kwargs)
             raise
         finally:
             for reader in readers:

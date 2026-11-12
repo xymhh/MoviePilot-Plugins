@@ -73,11 +73,10 @@ class TestNegativeCacheWiring(unittest.TestCase):
         self.assertIn("setter(self._cross_transfer_rapid_miss_action)", self.init)
         self.assertIn("_cross_transfer_manager", self.init)
 
-    def test_proxy_injected_at_request_layer(self):
-        self.assertIn("types.MethodType", self.client)
-        self.assertIn('kwargs.setdefault("proxies", proxies)', self.client)
-        self.assertIn("115 上传代理已生效", self.client)
-        self.assertNotIn("未暴露可注入的会话", self.client)
+    def test_proxy_no_longer_fake_wraps_request_layer(self):
+        """1.9.78 真机核实 request 层包装无效，已移除；注入改到 OSS 数据面。"""
+        self.assertNotIn("types.MethodType", self.client)
+        self.assertNotIn("115 上传代理已生效（request 层注入", self.client)
 
     def test_version_not_below_1_9_76(self):
         """1.9.76 起版本号只会往上走，这里只校验不低于修复版本。"""

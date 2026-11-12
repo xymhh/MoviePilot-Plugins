@@ -61,9 +61,15 @@ class TestPhaseLabels(unittest.TestCase):
     def test_format_size_reused_not_rewritten(self):
         self.assertIn("export function formatSize(value)", self.utils)
 
-    def test_version_bumped(self):
-        self.assertIn('plugin_version = "1.9.77"', self.init)
-        self.assertIn('"version": "1.9.77"', self.package)
+    def test_version_not_below_1_9_77(self):
+        """1.9.77 起版本只往上走，这里只校验不低于本版。"""
+        import re
+
+        match = re.search(r'plugin_version = "(\d+)\.(\d+)\.(\d+)"', self.init)
+        self.assertIsNotNone(match, "未找到 plugin_version")
+        self.assertGreaterEqual(
+            tuple(int(part) for part in match.groups()), (1, 9, 77)
+        )
         self.assertIn('"v1.9.77":', self.package)
 
 

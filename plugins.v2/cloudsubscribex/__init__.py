@@ -185,7 +185,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.77"
+    plugin_version = "1.9.78"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1932,6 +1932,9 @@ class CloudSubscribeX(_PluginBase):
         raw_upload_proxy = str(
             config.get("cross_transfer_upload_proxy", "") or ""
         ).strip()
+        # 插件没填时回落到 MP 自己的「网络设置」（PROXY_HOST），一处配置全站可用
+        if not raw_upload_proxy:
+            raw_upload_proxy = str(getattr(settings, "PROXY_HOST", "") or "").strip()
         upload_proxy_user = str(
             config.get("cross_transfer_upload_proxy_username", "") or ""
         ).strip()

@@ -80,26 +80,14 @@ class P115ClientWithTimeout(P115Client if PAVAILABLE else object):
             self._apply_upload_proxies(proxies)
 
     def _apply_upload_proxies(self, proxies: Dict[str, str]) -> None:
-        """把代理注入 p115client 的 request 层（1.9.76）。
+        """记录上传代理；真正的注入在 OSS 数据面（见 upload_proxy.py，1.9.78）。
 
-        线上 p115client 走 urllib3_future_request 的模块级 request callable，
-        并没有 session/client/_session/http 这些属性；1.9.75 按属性名找一遍全部落空，
-        真机日志显示代理配置被跳过、回落直连。改为包装 self.request，
-        每次请求把 proxies 透传进 request_kwargs。
+        1.9.75/1.9.76 试图包装 p115client 的 request 层，真机核实无效：
+        `ClientRequestMixin.request` 内部用模块级 `urllib3_future_request.request`，
+        `p115oss` 的 OSS 请求同样自己 import，两者都不经过实例方法。
+        因此这里只保留连接池可写时的兼容设置，不再打「已生效」的假日志；
+        真实生效点由 `P115UploadService._oss_proxy_kwargs()` 显式传 session。
         """
-        import types
-
-        original = getattr(self, "request", None)
-        if not callable(original):
-            logger.warning("115 上传代理已配置，但 p115client 无 request 方法，保持直连")
-            return
-
-        def wrapped(client_self, *args, **kwargs):
-            kwargs.setdefault("proxies", proxies)
-            return original(*args, **kwargs)
-
-        self.request = types.MethodType(wrapped, self)
-        # 兼容旧版本：若实例上确实存在可写 session.proxies，也一并设置
         for attr in ("session", "client", "_session", "http"):
             session = getattr(self, attr, None)
             if session is None:
@@ -112,7 +100,6 @@ class P115ClientWithTimeout(P115Client if PAVAILABLE else object):
                     setattr(session, "proxies", dict(proxies))
             except Exception:
                 continue
-        logger.info("115 上传代理已生效（request 层注入，作用域：115 上传/API）")
 
     @staticmethod
     def _parse_timeout(timeout_spec: Any) -> Any:
