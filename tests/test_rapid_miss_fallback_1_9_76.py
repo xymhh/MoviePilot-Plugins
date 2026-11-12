@@ -5,6 +5,7 @@
 """
 import ast
 import os
+import re
 import unittest
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -78,8 +79,12 @@ class TestNegativeCacheWiring(unittest.TestCase):
         self.assertIn("115 上传代理已生效", self.client)
         self.assertNotIn("未暴露可注入的会话", self.client)
 
-    def test_version_bumped(self):
-        self.assertIn('plugin_version = "1.9.76"', self.init)
+    def test_version_not_below_1_9_76(self):
+        """1.9.76 起版本号只会往上走，这里只校验不低于修复版本。"""
+        match = re.search(r'plugin_version = "(\d+)\.(\d+)\.(\d+)"', self.init)
+        self.assertIsNotNone(match, "未找到 plugin_version")
+        version = tuple(int(part) for part in match.groups())
+        self.assertGreaterEqual(version, (1, 9, 76))
 
 
 if __name__ == "__main__":

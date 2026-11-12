@@ -49,6 +49,7 @@ import {computed, ref} from "vue";
 import {
   displayTotal,
   displayTransferred,
+  formatSize,
   hasDeterminateProgress,
   isTaskActive,
   taskPhaseText,
@@ -87,7 +88,9 @@ function subText(task) {
   const phase = String(taskPhaseText(task) || "").trim();
   const total = displayTotal(task);
   const transferred = displayTransferred(task);
-  const countText = total > 0 ? `已处理 ${transferred}/${total}` : "";
+  const countText = total > 0
+    ? `已处理 ${formatSize(transferred)} / ${formatSize(total)}`
+    : "";
   return [phase, countText].filter(Boolean).join(" · ");
 }
 </script>

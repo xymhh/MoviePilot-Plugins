@@ -66,11 +66,27 @@ export function taskStatusColor(task) {
   }[task.status] || "secondary"
 }
 
+// 后端运行时 phase 是英文标识，UI 统一显示中文；未知/已中文化的值原样保留。
+const PHASE_LABELS = {
+  downloading: "下载中",
+  uploading: "上传中",
+  streaming: "边下边传",
+  rapid_upload: "秒传中",
+  hashing: "校验中",
+  cache_ready: "缓存就绪",
+  pending: "等待中",
+  stopping: "停止中",
+  done: "已完成",
+  aborted: "已中止",
+  canceled: "已取消",
+  failed: "失败",
+}
+
 export function taskPhaseText(task) {
   if (!task) return ""
   if (task.error) return task.error
   const phase = String(task.phase || "").trim()
-  if (phase && phase !== "等待调度") return phase
+  if (phase && phase !== "等待调度") return PHASE_LABELS[phase] || phase
   if (task.status === "downloading") {
     const pending = Number(task.download_pending_count || 0)
     return pending > 0 ? `等待离线下载 ${pending} 个文件` : "等待离线下载"
