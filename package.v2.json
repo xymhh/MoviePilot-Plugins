@@ -3,13 +3,14 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.9.81",
+    "version": "1.9.82",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
     "release": true,
     "system_version": ">=2.14.6",
     "history": {
+      "v1.9.82": "修复 1.9.81 的两个真机缺陷：① 任务卡片「停止此任务」按钮 emit 了 stop-task 但 AppPage/AppPageResource 两个挂载点都没监听，点了没反应——现已接上，useRuntimeTasks 补 stopTask（POST /sync/task/stop）让资源页也能停；② taskElapsedSeconds 把后端秒级 started_at 当毫秒用，耗时永远显示 0。另修 channelLabel 空渠道对象会渲染出 [object Object]。新增回归单测锁定「emit 必须有监听者」与「hook 必须导出 stopTask」，变异反证可抓出。",
       "v1.9.81": "任务列表 UI 升级为完整卡片（对齐上游 RuntimeCard）：① 状态图标 + 标题 + 媒体类型 chip + 状态 chip（搜索中带转圈）；② 阶段文案 + 实时耗时（每秒刷新，卸载即清定时器）；③ 搜索渠道明细胶囊——逐渠道显示名称/图标/状态（转圈·✓·✗·⏱·熔断）/结果数/耗时，悬浮显示错误原因；④ 进度条区分确定与不确定（搜索阶段 indeterminate）+ 百分比；⑤ 可展开明细：当前文件、后处理分步（已完成/进行中/待办）、已处理字节、下载/上传速度；⑥ 单任务停止按钮；⑦ 空态。数据源全部复用已有后端字段（core/services/runtime.py 的 _idle_search_state/_idle_postprocess_state、handlers/search/service.py 的 channels_state），**后端一行未改**。历史记录不动（已对齐上游且多出重试全部/标记成功）。新增 18 例单测 + 3 处变异反证。",
       "v1.9.80": "修复「插件没法更新」的真因：utils 包在模块级反向 import core 造成循环导入，MP 热重载时报 deadlock detected by _ModuleLock('app.plugins.cloudsubscribex.core.api.sync')（2026-11-12 真机 13:51 / 16:38 两次复现，更新后回退旧版本）。两条环路：① core/__init__.py → utils/__init__.py 的 `from ..core.media import media_identity`；② core/__init__.py → utils/__init__.py → utils/strm_export.py 的 `from ..core.cloud import CloudDriveCapability`。修法：utils 侧全部改为函数内延迟 import，core 不再被 utils 反向依赖，环路断开；新增 3 例环路回归单测（覆盖全部 utils/*.py，两处变异反证均能抓出）。",
       "v1.9.79": "补齐上传代理漏掉的主路径：1.9.78 只给插件自写的分片并发上传（oss_multipart_*）注入了代理，而线上 p115oss 缺失时实际走的是 p115client.upload_file（单连接顺序上传），这条路没传 session，所以真机仍然直连。现在 upload_file 的两处调用（本地上传 + Range 直传回退）都把 session=<ProxyManager> 透传进 p115oss.upload_file，其内部的分片 PUT 才会真正走代理。",
@@ -315,7 +316,7 @@
       "1.7.98": "持久化统一入库（不再写 JSON 状态文件）：① 源文件 SHA1 缓存从 source_sha1_cache.json 迁到同库表 source_sha1_cache，原子 upsert + 30 天 TTL + 2000 条上限；② TG 频道监控池/游标/状态从 tg_monitor/*.json 迁到 runtime_records 表；③ STRM 分批续扫断点从 strm_scan_state.json 迁到 runtime_records，写入改走数据库事务（旧实现非原子写，断电会留半截文件）；④ 候选账本从按天 JSONL 迁到 candidate_ledger_entries 表，删掉 ledger/.purged 标记文件。老文件首次启动自动导入并改名 *.migrated，不丢历史数据。新增 20 条单测，全量 865 通过 / 1 存量失败 / 4 条环境性收集错误，lint 0 error。"
     }
   },
-  "version": "1.9.81",
+  "version": "1.9.82",
   "history": {
     "v1.9.68": "修复假资源入库（2026-11-08 谷雨事故）：① 播出日期门——TMDB `air_date` 为空的集一律按未播出处理（整季一条日期都没有时退回旧口径），标称「完结/全集」的假分享不再把未播集改名塞进媒体库；② 体积门——转存前丢弃单集 <100MB 的视频文件（字幕/NFO/图片等非视频不受限，size 未知不判断），识别计划同样生效；全部视频都异常时记「视频体积异常」跳过原因。",
     "v1.9.67": "分享识别重构（整棵树识别）：① 分享一律递归到底拿全量文件，只认媒体后缀，字幕/外挂音轨不参与识别但跟随选中媒体一起转；② 一级目录=版本组，按组内文件体积中位数选主版本（并列按 DV>HDR>SDR>无标签），缺集按组体积从大到小补齐并标记 mixed_quality，补满即停不洗版；③ 剧集有 TMDB 身份与季号时由识别计划接管转存：计划 ready 只转选中版本，skip（无媒体/纯压缩包）与 review（无集号/身份不明）一律不转；电影与手选文件维持原管线；④ 无季号分享按「某季集数区间能完整容纳全部集号」反推季，拿不准不猜。新增 40 条单测（含两个真实分享样本回归）。",
