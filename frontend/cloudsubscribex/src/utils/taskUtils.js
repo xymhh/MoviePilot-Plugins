@@ -165,3 +165,138 @@ export function formatSize(value) {
 export function formatSpeed(value) {
   return `${formatSize(value)}/s`
 }
+
+// ── 1.9.81 任务卡片增强：耗时 / 搜索渠道 / 后处理分步 ────────────────
+// 后端字段早已存在（core/services/runtime.py 的 _idle_search_state /
+// _idle_postprocess_state、handlers/search/service.py 的 channels_state），
+// 这里只做展示层格式化，不改后端。
+
+export function formatDuration(seconds) {
+  const sec = Math.max(0, Number(seconds || 0))
+  if (!Number.isFinite(sec) || sec <= 0) return ""
+  if (sec < 60) return `${sec < 10 ? sec.toFixed(1) : Math.round(sec)}s`
+  const mins = Math.floor(sec / 60)
+  const remainSec = Math.round(sec % 60)
+  if (mins < 60) return `${mins}m ${remainSec}s`
+  const hours = Math.floor(mins / 60)
+  return `${hours}h ${mins % 60}m`
+}
+
+export function formatChannelElapsed(ms) {
+  const value = Math.max(0, Number(ms || 0))
+  if (value <= 0) return ""
+  if (value < 1000) return `${Math.round(value)}ms`
+  return `${(value / 1000).toFixed(1)}s`
+}
+
+// 渠道 key -> 展示名；未知渠道回落大写 key（与后端 get_source_display_name 口径一致）
+const CHANNEL_LABELS = {
+  quark: "夸克网盘",
+  alipan: "阿里云盘",
+  "115": "115网盘",
+  xunlei: "迅雷云盘",
+  uc: "UC网盘",
+  pansou: "盘搜",
+  tg: "Telegram",
+  mikan: "蜜柑计划",
+  animegarden: "动漫花园",
+  manual: "手动资源",
+  seedhub: "SeedHub",
+  hdhive: "HDHive",
+  dian115: "Dian115",
+}
+
+export function channelLabel(channel) {
+  // 允许传渠道对象或纯 key 字符串；空对象/空串一律返回空，避免 String({}) 得到 "[object Object]"
+  const raw = typeof channel === "string" ? channel : channel?.key
+  const key = String(raw || "").trim()
+  if (!key) return ""
+  const named = typeof channel === "object" ? String(channel?.name || "").trim() : ""
+  return named || CHANNEL_LABELS[key.toLowerCase()] || key.toUpperCase()
+}
+
+export function channelIcon(channel) {
+  const status = String(channel?.status || "").trim()
+  if (status === "success") {
+    return Number(channel?.count || 0) > 0 ? "mdi-check-circle" : "mdi-minus-circle-outline"
+  }
+  if (status === "searching") return "mdi-magnify"
+  if (status === "timeout") return "mdi-clock-alert-outline"
+  if (status === "circuit_break") return "mdi-flash-off"
+  if (status === "failed") return "mdi-alert-circle-outline"
+  return "mdi-clock-outline"
+}
+
+export function channelColor(channel) {
+  const status = String(channel?.status || "").trim()
+  if (status === "success") return Number(channel?.count || 0) > 0 ? "success" : "secondary"
+  if (status === "searching") return "info"
+  if (status === "timeout") return "warning"
+  if (status === "circuit_break") return "warning"
+  if (status === "failed") return "error"
+  return "secondary"
+}
+
+export function channelTooltip(channel) {
+  if (!channel) return ""
+  const name = channelLabel(channel)
+  const status = String(channel?.status || "").trim()
+  const parts = [name]
+  if (status === "success") {
+    parts.push(Number(channel?.count || 0) > 0 ? `找到 ${channel.count} 条` : "无结果")
+  } else if (status === "searching") {
+    parts.push("搜索中")
+  } else if (status === "failed") {
+    parts.push("失败")
+  } else if (status === "timeout") {
+    parts.push("超时")
+  } else if (status === "circuit_break") {
+    parts.push("熔断冷却")
+  } else if (status === "skipped") {
+    parts.push("已跳过")
+  } else {
+    parts.push("等待中")
+  }
+  const elapsed = formatChannelElapsed(channel?.elapsed_ms)
+  if (elapsed) parts.push(elapsed)
+  const error = String(channel?.error || "").trim()
+  if (error) parts.push(error)
+  return parts.join(" · ")
+}
+
+export function searchChannelsOf(task) {
+  const channels = task?.search_channels
+  return Array.isArray(channels) ? channels.filter((item) => item && item.key) : []
+}
+
+export function postprocessStepsOf(task) {
+  const steps = task?.postprocess_steps
+  return Array.isArray(steps) ? steps.filter((step) => step?.key && step?.label) : []
+}
+
+export function postprocessStepState(task, index) {
+  const currentIndex = Math.max(0, Number(task?.postprocess_step_index || 0))
+  const position = Math.max(0, Number(index || 0))
+  if (position < currentIndex) return "completed"
+  if (position === currentIndex) {
+    return String(task?.postprocess_step || "") ? "active" : "pending"
+  }
+  return "pending"
+}
+
+export function postprocessStepIcon(task, index) {
+  const state = postprocessStepState(task, index)
+  if (state === "completed") return "mdi-check-circle"
+  if (state === "active") return "mdi-progress-clock"
+  return "mdi-circle-outline"
+}
+
+export function taskElapsedSeconds(task, nowMs = Date.now()) {
+  const explicit = Number(task?.elapsed_seconds)
+  if (Number.isFinite(explicit) && explicit > 0) return explicit
+  // 后端 started_at / queued_at 是**秒**级时间戳（time.time()），不能当毫秒用
+  const started = Number(task?.started_at || task?.queued_at || 0)
+  if (!started) return 0
+  const current = Number(nowMs || 0) / 1000
+  return Math.max(0, current - started)
+}

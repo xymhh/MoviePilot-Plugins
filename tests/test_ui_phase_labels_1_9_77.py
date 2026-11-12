@@ -54,9 +54,17 @@ class TestPhaseLabels(unittest.TestCase):
         self.assertIn("if (task.error) return task.error", self.utils)
 
     def test_sub_text_uses_format_size(self):
+        """进度必须用 formatSize 转成易读体积。
+
+        1.9.81 把这段从 `subText()` 挪到 `bytesText()`（卡片重写），
+        能力不变：仍是 `${formatSize(transferred)} / ${formatSize(total)}`。
+        """
         self.assertIn("formatSize,", self.strip)
-        self.assertIn("`已处理 ${formatSize(transferred)} / ${formatSize(total)}`", self.strip)
-        self.assertNotIn("`已处理 ${transferred}/${total}`", self.strip)
+        self.assertIn(
+            "`${formatSize(transferred)} / ${formatSize(total)}`", self.strip
+        )
+        # 不得退化成裸字节数
+        self.assertNotIn("${transferred}/${total}", self.strip)
 
     def test_format_size_reused_not_rewritten(self):
         self.assertIn("export function formatSize(value)", self.utils)
