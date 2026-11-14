@@ -151,61 +151,43 @@ class TestElapsedSeconds(unittest.TestCase):
         self.assertEqual(run_node("return u.taskElapsedSeconds({})"), 0)
 
 
-class TestStripTemplate(unittest.TestCase):
-    """静态断言：模板必须真的渲染这些能力，防止后续重构删掉。"""
+class TestStripRemoved(unittest.TestCase):
+    """1.9.86：任务进度脱离自有 UI，改走下载管理页独立标签。
 
-    def setUp(self):
-        self.source = read(STRIP)
+    RuntimeTaskStrip / useRuntimeTasks 已删除；两处挂载点不再引用它，
+    实时进度改由后端 list_torrents 投影到下载页。
+    """
 
-    def test_renders_search_channels(self):
-        self.assertIn("channelsOf(task)", self.source)
-        self.assertIn("channel-badge", self.source)
-        self.assertIn("channelTooltip(channel)", self.source)
-        self.assertIn("channelIcon(channel)", self.source)
+    def test_strip_component_and_hook_deleted(self):
+        self.assertFalse(os.path.exists(STRIP), "RuntimeTaskStrip.vue 应已删除")
+        self.assertFalse(
+            os.path.exists(
+                os.path.join(FRONTEND, "src", "composables", "useRuntimeTasks.js")
+            ),
+            "useRuntimeTasks.js 应已删除",
+        )
 
-    def test_renders_postprocess_steps(self):
-        self.assertIn("stepsOf(task)", self.source)
-        self.assertIn("postprocessStepState(task, index)", self.source)
-        self.assertIn("postprocessStepIcon(task, index)", self.source)
-
-    def test_renders_elapsed_and_progress(self):
-        self.assertIn("elapsedText(task)", self.source)
-        self.assertIn("formatDuration", self.source)
-        self.assertIn("item-percent", self.source)
-
-    def test_renders_stop_button(self):
-        self.assertIn('emit("stop-task"', self.source)
-        self.assertIn("canStop(task)", self.source)
-
-    def test_stop_event_is_wired_by_mount_points(self):
-        """回归：emit 了但没人监听 = 按钮点了没反应（本次真机前发现）。"""
+    def test_no_mount_points_reference_strip(self):
         for name in ("AppPage.vue", "AppPageResource.vue"):
             page = read(os.path.join(FRONTEND, "src", "components", name))
-            self.assertIn(
-                '@stop-task="stopRuntimeTask"', page,
-                f"{name} 没有监听 stop-task 事件",
+            self.assertNotIn("RuntimeTaskStrip", page, f"{name} 不应再挂载任务条")
+            self.assertNotIn("stopRuntimeTask", page, f"{name} 不应再有条带停止函数")
+
+    def test_downloader_projection_replaces_strip(self):
+        backend = read(
+            os.path.join(
+                project_root, "plugins.v2", "cloudsubscribex", "__init__.py"
             )
-            self.assertIn(
-                "function stopRuntimeTask(task)", page,
-                f"{name} 缺少 stopRuntimeTask 处理函数",
-            )
-
-    def test_resource_page_hook_exposes_stop_task(self):
-        hook = read(os.path.join(FRONTEND, "src", "composables", "useRuntimeTasks.js"))
-        self.assertIn("async function stopTask(taskId)", hook)
-        self.assertIn("sync/task/stop", hook)
-        self.assertIn("stopTask}", hook, "useRuntimeTasks 必须把 stopTask 导出")
-
-    def test_timer_cleaned_on_unmount(self):
-        self.assertIn("onBeforeUnmount", self.source)
-        self.assertIn("clearInterval", self.source)
-
-
-class TestNoBackendChange(unittest.TestCase):
-    def test_strip_does_not_import_backend_modules(self):
-        source = read(STRIP)
-        for forbidden in ("fetch(", "axios", "api."):
-            self.assertNotIn(forbidden, source, f"卡片不应直接发请求：{forbidden}")
+        )
+        for token in (
+            "def list_torrents",
+            "def stop_torrents",
+            "def remove_torrents",
+            "def torrent_files",
+            "_ensure_downloader_entry",
+            "_remove_downloader_entry",
+        ):
+            self.assertIn(token, backend, f"后端缺少下载器投影方法：{token}")
 
 
 if __name__ == "__main__":

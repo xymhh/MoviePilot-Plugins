@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as ThreadEvent, Lock, RLock, local, Thread
-from typing import Optional, Any, List, Dict, Tuple, Callable
+from typing import Optional, Any, List, Dict, Tuple, Callable, Union
 
 import pytz
 from app.api.endpoints.plugin import register_plugin_api
@@ -17,8 +17,14 @@ from app.core.config import settings
 from app.core.event import Event, eventmanager
 from app.log import logger
 from app.plugins import _PluginBase
-from app.schemas import Notification
-from app.schemas.types import ChainEventType, EventType, NotificationType
+from app.schemas import DownloaderFile, DownloaderTorrent, Notification
+from app.schemas.types import (
+    ChainEventType,
+    EventType,
+    NotificationType,
+    SystemConfigKey,
+    TorrentQueryStatus,
+)
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -73,6 +79,15 @@ from .core.storage import CloudSubscribeDataStore
 from .core.retry_policy import is_dead_letter
 from .core.task_center import collect_tasks
 from .core import sync_pause
+from .core.downloader_view import (
+    DOWNLOADER_NAME,
+    DOWNLOADER_TYPE,
+    ensure_downloader_entry,
+    project_tasks,
+    remove_downloader_entry,
+    resolve_task_id,
+    task_to_files,
+)
 from .core.subscribe import AutoSubscribeService
 from .drive.scanner import DriverRegistry
 from .handlers import SearchHandler, SyncHandler, SubscribeHandler, WebhookHandler
@@ -185,7 +200,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.85"
+    plugin_version = "1.9.86"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -713,6 +728,8 @@ class CloudSubscribeX(_PluginBase):
             start_emby_proxy(self)
         except Exception as error:  # noqa: BLE001 - 反代失败不得影响插件主流程
             logger.error(f"Emby 302 反代初始化失败：{error}")
+        # 在下载管理页登记独立标签，任务进度改走下载页展示。
+        self._ensure_downloader_entry()
 
     def _ensure_notify_template_defaults(self, config: Optional[dict]) -> None:
         """把缺失的通知模板默认值写回配置。
@@ -2314,6 +2331,177 @@ class CloudSubscribeX(_PluginBase):
         except Exception as error:
             logger.error(f"榜单自动订阅立即执行失败：{error}")
 
+    # ---------- 下载器投影：任务进度改走 MP 下载管理页 ----------
+
+    def _downloader_name(self) -> str:
+        """下载管理页的标签名。"""
+        return DOWNLOADER_NAME
+
+    def _ensure_downloader_entry(self) -> None:
+        """在系统下载器配置里登记本插件，让下载页出现独立标签。
+
+        MoviePilot 的下载页按系统配置里的下载器名称分标签，type 必须等于
+        插件类名（宿主按 type == 服务名匹配下载器服务），实际任务由本插件
+        自己的 list_torrents 返回。实现与网盘直链频道同款。
+        """
+        name = self._downloader_name()
+        try:
+            current = self.systemconfig.get(SystemConfigKey.Downloaders) or []
+        except Exception as error:  # noqa: BLE001 - 配置读取失败不应阻断插件
+            logger.warning(f"读取下载器配置失败：{error}")
+            return
+        updated = ensure_downloader_entry(
+            list(current), name=name, type_name=DOWNLOADER_TYPE
+        )
+        if updated == [dict(item) for item in current if isinstance(item, dict)]:
+            return
+        try:
+            self.systemconfig.set(SystemConfigKey.Downloaders, updated)
+            logger.info(f"已登记下载器条目：{name}")
+        except Exception as error:  # noqa: BLE001 - 登记失败时仅影响界面展示
+            logger.warning(f"登记下载器条目失败：{error}")
+
+    def _remove_downloader_entry(self) -> None:
+        """移除本插件登记的下载器条目，避免停用/卸载后下载页留一个空标签。"""
+        name = self._downloader_name()
+        try:
+            current = self.systemconfig.get(SystemConfigKey.Downloaders) or []
+        except Exception as error:  # noqa: BLE001 - 配置读取失败不阻断停机
+            logger.warning(f"读取下载器配置失败：{error}")
+            return
+        kept = remove_downloader_entry(
+            list(current), name=name, type_name=DOWNLOADER_TYPE
+        )
+        if len(kept) == len([item for item in current if isinstance(item, dict)]):
+            return
+        try:
+            self.systemconfig.set(SystemConfigKey.Downloaders, kept)
+            logger.info(f"已移除下载器条目：{name}")
+        except Exception as error:  # noqa: BLE001 - 移除失败时仅影响界面展示
+            logger.warning(f"移除下载器条目失败：{error}")
+
+    def _runtime_tasks_for_downloader(self) -> List[Dict[str, Any]]:
+        """取运行时任务快照；运行态未就绪时返回空列表。"""
+        try:
+            tasks = self._serialize_runtime_tasks()
+        except Exception as error:  # noqa: BLE001 - 运行态异常不影响下载页
+            logger.debug(f"读取运行时任务失败：{type(error).__name__}: {error}")
+            return []
+        return list(tasks or [])
+
+    def list_torrents(self, status: Optional[Union[str, TorrentQueryStatus]] = None,
+                      hashs: Optional[Union[list[str], str]] = None,
+                      downloader: Optional[str] = None,
+                      include_all_tags: bool = False) -> list[DownloaderTorrent]:
+        """把运行时任务投影成下载页的任务列表（口径与网盘直链一致）。"""
+        return project_tasks(
+            self._runtime_tasks_for_downloader(),
+            status=status,
+            hashs=hashs,
+            downloader=downloader,
+            own_name=self._downloader_name(),
+            torrent_cls=DownloaderTorrent,
+        )
+
+    def torrent_files(self, tid: Optional[str] = None, downloader: Optional[str] = None,
+                      **kwargs: Any) -> list[DownloaderFile]:
+        """返回任务文件清单与单文件进度；没有文件明细时返回 []。"""
+        if not tid:
+            return []
+        tasks = self._runtime_tasks_for_downloader()
+        task_id = resolve_task_id(tasks, str(tid))
+        if not task_id:
+            return []
+        task = next(
+            (item for item in tasks if str(item.get("id") or "") == task_id),
+            None,
+        )
+        if not task:
+            return []
+        return task_to_files(task, file_cls=DownloaderFile)
+
+    def start_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                       downloader: Optional[str] = None, **kwargs: Any) -> bool:
+        """同步任务不可续传：已停止的任务只能重新发起同步，不从下载页恢复。"""
+        return False
+
+    def stop_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                      downloader: Optional[str] = None, **kwargs: Any) -> bool:
+        """暂停任务：复用单任务停止逻辑（停止事件 + 跨盘子任务取消）。"""
+        if isinstance(hashs, str):
+            wanted = [hashs]
+        elif hashs:
+            wanted = list(hashs)
+        else:
+            wanted = []
+        if not wanted:
+            return False
+        tasks = self._runtime_tasks_for_downloader()
+        changed = False
+        for hash_value in wanted:
+            task_id = resolve_task_id(tasks, str(hash_value))
+            if not task_id:
+                continue
+            try:
+                result = self.api_stop_sync_task(settings.API_TOKEN, task_id)
+            except Exception as error:  # noqa: BLE001 - 单任务停止失败不影响其它
+                logger.debug(f"停止任务失败：{task_id}，{type(error).__name__}")
+                continue
+            if isinstance(result, dict):
+                changed = bool(result.get("success")) or changed
+            else:
+                changed = bool(result) or changed
+        return changed
+
+    def remove_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                        delete_file: bool = False, downloader: Optional[str] = None,
+                        **kwargs: Any) -> bool:
+        """删除任务记录：只清内存中已终态的同步任务，不删文件、不碰历史表。
+
+        进行中的任务删不掉（先停再说）；终态任务本就不再出现在下载页，
+        这里只是清理 _sync_tasks 里残留的记录。
+        """
+        if isinstance(hashs, str):
+            wanted = [hashs]
+        elif hashs:
+            wanted = list(hashs)
+        else:
+            wanted = []
+        if not wanted:
+            return False
+        from .core.downloader_view import task_hash
+
+        # 终态任务已不在运行态快照里，拿内存表里的 id 逐个算 hash 反查。
+        sync_tasks = getattr(self, "_sync_tasks", None) or {}
+        lock = getattr(self, "_sync_tasks_lock", None)
+        terminal = {"completed", "failed", "stopped", "success"}
+        changed = False
+        for hash_value in wanted:
+            wanted_hash = str(hash_value or "").strip().lower()
+            if not wanted_hash:
+                continue
+            task_id = next(
+                (
+                    key for key in sync_tasks
+                    if task_hash(str(key)) == wanted_hash
+                ),
+                "",
+            )
+            if not task_id:
+                continue
+            if lock is not None:
+                with lock:
+                    task = sync_tasks.get(task_id)
+                    if task and str(task.get("status") or "") in terminal:
+                        sync_tasks.pop(task_id, None)
+                        changed = True
+            else:
+                task = sync_tasks.get(task_id)
+                if task and str(task.get("status") or "") in terminal:
+                    sync_tasks.pop(task_id, None)
+                    changed = True
+        return changed
+
     def stop_service(self, preserve_subscribe_queue: bool = False):
         """停止服务"""
         try:
@@ -2436,6 +2624,12 @@ class CloudSubscribeX(_PluginBase):
                 store.close()
         except Exception as error:
             logger.debug(f"关闭插件独立数据库失败：{error}", exc_info=True)
+
+        # 停用/卸载后下载页不再留一个空标签；下次 init_plugin 会重新登记。
+        try:
+            self._remove_downloader_entry()
+        except Exception as error:  # noqa: BLE001 - 移除失败不阻断停机
+            logger.debug(f"移除下载器条目失败：{error}", exc_info=True)
 
     @eventmanager.register(EventType.PluginReload)
     def reload_plugin_api(self, event: Event):
