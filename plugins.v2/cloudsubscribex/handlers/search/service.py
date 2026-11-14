@@ -46,6 +46,37 @@ _COMPONENT_TYPES = (
 )
 
 
+def _resolve_enabled_source_order(plugin: Any, params: Dict[str, Any]) -> List[str]:
+    """解析搜索渠道启用顺序：显式参数（隔离测试）优先，其次渠道库，最后旧配置。
+
+    插件运行态的唯一来源是渠道库（``plugin.get_enabled_search_sources()``，
+    按渠道 priority 倒序）；隔离测试处理器（``_build_test_search_handler``）
+    用 ``search_source_order=[source]`` 显式指定单源，不走渠道库。
+    """
+    explicit = params.get("search_source_order")
+    if explicit is not None:
+        return [
+            str(item).strip().lower() for item in (explicit or [])
+            if str(item).strip()
+        ]
+    getter = getattr(plugin, "get_enabled_search_sources", None)
+    if callable(getter):
+        try:
+            return [
+                str(item).strip().lower() for item in (getter() or [])
+                if str(item).strip()
+            ]
+        except Exception as error:
+            logger.warning(f"按渠道库读取搜索渠道失败，回退旧配置：{error}")
+    legacy = getattr(plugin, "_search_source_order", None)
+    if legacy is None:
+        legacy = params.get("search_source_order", [])
+    return [
+        str(item).strip().lower() for item in (legacy or [])
+        if str(item).strip()
+    ]
+
+
 class SearchHandler:
     """搜索处理器"""
 
@@ -105,7 +136,7 @@ class SearchHandler:
         for index, value in enumerate(self._resource_type_order_config):
             self._resource_type_order_map.setdefault(value, index)
 
-        self._search_source_order = get_val("search_source_order", []) or []
+        self._search_source_order = _resolve_enabled_source_order(plugin, params)
         self._search_proxy = get_val("search_proxy")
         self._search_cache_enabled = bool(get_val("search_cache_enabled", True))
         search_cache_ttl_minutes = get_val("search_cache_ttl_minutes", 30)
@@ -190,8 +221,40 @@ class SearchHandler:
         source = str(source or "").strip().lower()
         return self._source_timeouts.get(source, self._search_source_timeout)
 
+    def refresh_enabled_sources(self) -> None:
+        """渠道增删改启停后调用：按渠道库重读启用顺序并清搜索缓存。"""
+        plugin = getattr(self, "_plugin", None)
+        getter = getattr(plugin, "get_enabled_search_sources", None)
+        if callable(getter):
+            try:
+                self._search_source_order = [
+                    str(item).strip().lower() for item in (getter() or [])
+                    if str(item).strip()
+                ]
+            except Exception as error:
+                logger.warning(f"按渠道库刷新搜索渠道失败：{error}")
+        self.clear_search_cache()
+
+    def _configured_source_order(self) -> List[str]:
+        """返回全部搜索渠道的展示顺序（渠道库 priority 倒序，含停用的）。
+
+        详情页/资源页 Tab 展示全部已注册渠道，启用顺序只决定先后；
+        实际跑哪些渠道只看 :meth:`get_enabled_sources`。
+        """
+        plugin = getattr(self, "_plugin", None)
+        getter = getattr(plugin, "get_search_channel_order", None)
+        if callable(getter):
+            try:
+                return [
+                    str(item).strip().lower() for item in (getter() or [])
+                    if str(item).strip()
+                ]
+            except Exception as error:
+                logger.warning(f"按渠道库读取搜索渠道顺序失败：{error}")
+        return list(getattr(self, "_search_source_order", []) or [])
+
     def get_enabled_sources(self, media_type: Optional[MediaType] = None) -> List[str]:
-        """返回用户选择且当前可用的搜索渠道（完全由 search_source_order 优先级列表控制）。"""
+        """返回渠道库里已启用且当前可用的搜索渠道（按 priority 倒序）。"""
         available_set = {
             provider.key for provider in self._search_registry.available()
         }
@@ -221,8 +284,8 @@ class SearchHandler:
             for def_cls in SearchSourceRegistry.get_definitions()
         }
 
-        # 优先读取用户配置的优先级顺序，其余按自描述规范标准偏好排列
-        configured_order = getattr(self, "_search_source_order", []) or []
+        # 优先读取渠道库里的全部渠道顺序（priority 倒序，含停用的），其余按自描述规范标准偏好排列
+        configured_order = self._configured_source_order()
         default_pref = [d.id for d in SearchSourceRegistry.get_definitions()]
 
         merged_order: List[str] = []
@@ -677,19 +740,15 @@ class SearchHandler:
         except Exception:
             logger.debug("_auto_remove_search_source 分支忽略异常", exc_info=True)
         try:
-            owner = getattr(self, "_owner", None)
-            if owner and hasattr(owner, "update_config"):
-                cfg = dict(getattr(owner, "_config", None) or {})
-                raw_order = cfg.get("search_source_order") or []
-                if isinstance(raw_order, str):
-                    raw_order = [s.strip() for s in raw_order.split(",") if s.strip()]
-                new_order = [s for s in raw_order if str(s).strip().lower() != source]
-                if len(new_order) != len(raw_order):
-                    cfg["search_source_order"] = new_order
-                    owner.update_config(cfg)
-                    logger.info(f"已持久化更新插件配置：已将 [{source.upper()}] 从搜索渠道优先级列表中自动移除")
+            plugin = getattr(self, "_plugin", None)
+            disabler = getattr(plugin, "disable_search_channel", None)
+            if callable(disabler):
+                if disabler(source):
+                    logger.info(
+                        f"已持久化更新渠道库：已将 [{source.upper()}] 停用"
+                    )
         except Exception as err:
-            logger.debug(f"持久化剔除搜索渠道 [{source}] 失败：{err}", exc_info=True)
+            logger.debug(f"持久化停用搜索渠道 [{source}] 失败：{err}", exc_info=True)
 
     def search_single_source(
             self,

@@ -30,12 +30,3 @@ export function createResourceTypeItems(options, config) {
     .filter((item) => supportedTypes.has(item?.value))
     .map((item) => ({title: item.name, value: item.value, icon: item.icon}));
 }
-
-/** 搜索渠道选项由后端下发（options.sources）。 */
-export function createSourceItems(options) {
-  return (Array.isArray(options.sources) ? options.sources : []).map((item) => ({
-    title: item.name,
-    value: item.key,
-    icon: item.icon,
-  }));
-}

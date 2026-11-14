@@ -1258,17 +1258,32 @@ class TgChannelMonitor:
             self._client = None
 
     # ------------------------------------------------------------------ 扫描
-    def scan(self, trigger: str = "手动", full: bool = False) -> Dict[str, Any]:
+    def scan(
+            self, trigger: str = "手动", full: bool = False,
+            channels: Optional[Iterable[str]] = None,
+    ) -> Dict[str, Any]:
+        """扫描启用的频道规则；``channels`` 给定时只扫描其中列出的频道。"""
+        wanted = (
+            {normalize_channel(str(item)) for item in (channels or [])}
+            if channels is not None else None
+        )
+        rules = [
+            rule for rule in self._channel_rules
+            if wanted is None or rule.get("channel") in wanted
+        ]
         if not self._enabled:
             return {"ok": False, "message": "频道监控未启用"}
-        if not self._channel_rules:
+        if not rules:
+            if wanted is not None:
+                return {"ok": False, "message": "该频道未在监控规则里"}
             return {"ok": False, "message": "还没有配置要监控的频道"}
-        if not any(rule.get("enabled", True) for rule in self._channel_rules):
+        if not any(rule.get("enabled", True) for rule in rules):
             return {"ok": False, "message": "所有频道规则都已停用"}
-        return asyncio.run(self._scan_async(trigger, full=full))
+        return asyncio.run(self._scan_async(trigger, full=full, channels=wanted))
 
     async def _scan_async(
             self, trigger: str, full: bool = False,
+            channels: Optional[Iterable[str]] = None,
     ) -> Dict[str, Any]:
         client = self._new_client(self._session)
         await client.connect()
@@ -1279,8 +1294,10 @@ class TgChannelMonitor:
             # 对话列表；只有首次解析或缓存失效时才全量拉一遍（全量拉取本身
             # 也会占用 Telegram 的请求配额）
             state = self._store.load(STATE_KEY, {}) or {}
+            wanted = set(channels) if channels is not None else None
             need_warm = any(
                 rule.get("enabled", True)
+                and (wanted is None or rule["channel"] in wanted)
                 and not str(
                     state.get(f"resolved_hash:{rule['channel']}") or ""
                 ).isdigit()
@@ -1293,7 +1310,9 @@ class TgChannelMonitor:
                     logger.warning(
                         f"TG 拉取对话列表失败（不影响邀请链接扫描）：{error}"
                     )
-            return await self._scan_with_client(client, trigger, full=full)
+            return await self._scan_with_client(
+                client, trigger, full=full, channels=wanted,
+            )
         finally:
             try:
                 await client.disconnect()
@@ -1302,6 +1321,7 @@ class TgChannelMonitor:
 
     async def _scan_with_client(
             self, client, trigger: str, full: bool = False,
+            channels: Optional[Iterable[str]] = None,
     ) -> Dict[str, Any]:
         state = dict(self._store.load(STATE_KEY, {}) or {})
         items = list(self._store.load(ITEMS_KEY, []) or [])
@@ -1314,7 +1334,12 @@ class TgChannelMonitor:
         errors: List[str] = []
         scanned = 0
         rule_debug: List[dict] = []
-        for rule in self._channel_rules:
+        wanted = set(channels) if channels is not None else None
+        rules = [
+            rule for rule in self._channel_rules
+            if wanted is None or rule.get("channel") in wanted
+        ]
+        for rule in rules:
             raw_channel = rule["channel"]
             if not rule.get("enabled", True):
                 rule_debug.append({"channel": raw_channel, "enabled": False})
@@ -1532,7 +1557,7 @@ class TgChannelMonitor:
         candidate_ids = {str(item.get("id")) for item, _rule in auto_candidates}
         rules_by_channel = {
             str(rule.get("channel") or ""): rule
-            for rule in self._channel_rules
+            for rule in rules
             if rule.get("enabled", True)
         }
         for item in items:
@@ -1563,7 +1588,7 @@ class TgChannelMonitor:
             "scanned": scanned,
             "added": len(added),
             "channels": sum(
-                1 for rule in self._channel_rules if rule.get("enabled", True)
+                1 for rule in rules if rule.get("enabled", True)
             ),
             "errors": errors,
             "debug": rule_debug,

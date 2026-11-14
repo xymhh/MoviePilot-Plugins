@@ -146,6 +146,10 @@
             <v-icon icon="mdi-television-guide" size="small" class="mr-2" />
             频道监控
           </v-tab>
+          <v-tab value="channels">
+            <v-icon icon="mdi-rss" size="small" class="mr-2" />
+            渠道管理
+          </v-tab>
           <v-tab value="organize">
             <v-icon icon="mdi-folder-move-outline" size="small" class="mr-2" />
             网盘整理
@@ -169,6 +173,9 @@
         </div>
         <div v-show="mainTab === 'tg'" class="workspace-pane tg-pane">
           <TgMonitor :api="api" :active="mainTab === 'tg'" />
+        </div>
+        <div v-show="mainTab === 'channels'" class="workspace-pane channels-pane">
+          <ChannelManager :api="api" :active="mainTab === 'channels'" />
         </div>
         <div v-show="mainTab === 'organize'" class="workspace-pane organize-pane">
           <OrganizePanel :api="api" />
@@ -382,6 +389,7 @@ import {formatBytes} from "../composables/resourceUtils.js";
 
 const Config = defineAsyncComponent(() => import("./Config.vue"))
 const TgMonitor = defineAsyncComponent(() => import("./dashboard/TgMonitor.vue"))
+const ChannelManager = defineAsyncComponent(() => import("./dashboard/ChannelManager.vue"))
 const ConfirmDialog = defineAsyncComponent(() => import("./dialogs/ConfirmDialog.vue"));
 const ManualResourceDialog = defineAsyncComponent(() => import("./dialogs/ManualResourceDialog.vue"))
 const OfflineTasksDialog = defineAsyncComponent(() => import("./dialogs/OfflineTasksDialog.vue"))

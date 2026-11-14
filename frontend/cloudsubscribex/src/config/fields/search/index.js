@@ -1,5 +1,4 @@
 import {createCommonSearchGroups} from "./common.js";
-import {createSourceItems} from "../helpers.js";
 
 function resolveDynamicField(field, options) {
   const descriptor = field?.dynamicOptions;
@@ -26,7 +25,7 @@ export function createSearchSection(resourceTypeItems, options = {}) {
       ...dynamicSchemas.map((s) => s.subtab).filter(Boolean),
     ],
     groups: [
-      ...createCommonSearchGroups(resourceTypeItems, createSourceItems(options)),
+      ...createCommonSearchGroups(resourceTypeItems),
       ...dynamicSchemas.flatMap((schema) =>
         (Array.isArray(schema.groups) ? schema.groups : []).map((group) => ({
           ...group,

@@ -49,14 +49,6 @@ export function createTgMonitorSection() {
         icon: "mdi-broadcast",
         fields: [
           {
-            key: "tg_channel_rules",
-            label: "频道规则",
-            type: "tg-channel-rules",
-            hint: "每个频道独立设置包含关键词、排除关键词与回溯条数；命中后按标题在全部订阅内匹配，只有唯一高置信结果才自动转存。规则为空时会回退到旧版全局频道/关键词配置（插件日志会告警）",
-            cols: 12,
-            show: enabled("tg_monitor_enabled"),
-          },
-          {
             key: "tg_monitor_interval_minutes",
             label: "扫描间隔（分钟）",
             type: "number",

@@ -1,6 +1,7 @@
 """页面与API适配。"""
 
 from .account import AccountApi
+from .channels import ChannelsApi
 from .checkin import CheckinApi
 from .config import ConfigApi
 from .doctor import DoctorApi
@@ -20,6 +21,7 @@ from .tg import TgMonitorApi
 
 __all__ = [
     "AccountApi",
+    "ChannelsApi",
     "CheckinApi",
     "ConfigApi",
     "DoctorApi",

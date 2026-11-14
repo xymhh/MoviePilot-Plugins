@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 # 1.9.44 移除任务中心页签（用户反馈「看着多余」），任务状态只跟随订阅卡展示
-EXPECTED_TABS = ["hub", "history", "tg", "organize"]
+EXPECTED_TABS = ["hub", "history", "tg", "channels", "organize"]
 
 
 def main(root: Path) -> int:

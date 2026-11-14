@@ -1,19 +1,12 @@
 import {enabled} from "../helpers.js";
 
-export function createCommonSearchGroups(resourceTypeItems, sourceItems = []) {
+export function createCommonSearchGroups(resourceTypeItems) {
   return [
     {
       tab: "common",
       title: "搜索顺序",
       icon: "mdi-sort",
       fields: [
-        {
-          key: "search_source_order",
-          label: "搜索资源优先级",
-          type: "priority-order",
-          items: sourceItems,
-          cols: 12,
-        },
         {
           key: "resource_type_order",
           label: "资源类型优先级",
