@@ -200,7 +200,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.86"
+    plugin_version = "1.9.87"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -2501,6 +2501,21 @@ class CloudSubscribeX(_PluginBase):
                     sync_tasks.pop(task_id, None)
                     changed = True
         return changed
+
+    def get_module(self) -> dict:
+        """按模块合同向宿主声明下载器能力。
+
+        MP 下载页查任务走模块调度器，只认插件 get_module() 返回的
+        字典；只声明下载器相关的 5 个方法（本插件不是搜索频道，
+        也不提供 download 入口）。
+        """
+        return {
+            "list_torrents": self.list_torrents,
+            "torrent_files": self.torrent_files,
+            "start_torrents": self.start_torrents,
+            "stop_torrents": self.stop_torrents,
+            "remove_torrents": self.remove_torrents,
+        }
 
     def stop_service(self, preserve_subscribe_queue: bool = False):
         """停止服务"""
