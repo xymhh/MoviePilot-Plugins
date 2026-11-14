@@ -182,6 +182,8 @@ class UIConfig:
             "search_proxy": "",
             "search_proxy_username": "",
             "search_proxy_password": "",
+            # MP 自己拉合成种子用的内部地址：与 MP 同进程时默认 localhost 即可。
+            "mp_base_url": "http://127.0.0.1:3000",
             "search_cache_enabled": True,
             "search_cache_ttl_minutes": 30,
             "search_concurrency": 2,

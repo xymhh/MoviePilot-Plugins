@@ -522,6 +522,15 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "实时推送运行状态",
             },
             {
+                # MP 搜索页拉合成种子用的匿名端点：MP 不带登录态请求，
+                # 安全靠 sid + HMAC 签名（见 core/mp_search.api_torrent）。
+                "path": "/torrent",
+                "endpoint": self.api_torrent,
+                "methods": ["GET"],
+                "allow_anonymous": True,
+                "summary": "按分享 id 输出合成种子",
+            },
+            {
                 "path": "/offline",
                 "endpoint": self.api_vue_offline_tasks,
                 "methods": ["GET"],

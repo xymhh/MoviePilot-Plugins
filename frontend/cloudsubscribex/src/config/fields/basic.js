@@ -87,6 +87,14 @@ export function createBasicSection(cloudDriveItems, options = {}) {
             placeholder: "30 2,10,18 * * *",
             cols: 8,
           },
+          {
+            key: "mp_base_url",
+            label: "MoviePilot 内部地址",
+            type: "text",
+            hint: "MP 自己拉合成种子用的地址，与 MP 同进程时默认 localhost 即可",
+            placeholder: "http://127.0.0.1:3000",
+            cols: 8,
+          },
         ],
       },
       {

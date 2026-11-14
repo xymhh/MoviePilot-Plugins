@@ -203,7 +203,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.90"
+    plugin_version = "1.9.91"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -2679,14 +2679,54 @@ class CloudSubscribeX(_PluginBase):
                     changed = True
         return changed
 
-    def get_module(self) -> dict:
-        """按模块合同向宿主声明下载器能力。
+    # ---------- MP 原生搜索：搜索结果进搜索页，下载走本插件转存 ----------
+    # 实现在 core/mp_search.py，这里只做薄委托（与 list_torrents 委托给
+    # downloader_view.py 一个写法）。
 
-        MP 下载页查任务走模块调度器，只认插件 get_module() 返回的
-        字典；只声明下载器相关的 5 个方法（本插件不是搜索频道，
-        也不提供 download 入口）。
+    def search_torrents(self, site: Optional[dict] = None,
+                        keyword: Optional[str] = None,
+                        mtype: Optional[Any] = None,
+                        cat: Optional[str] = None,
+                        page: int = 0):
+        """MP 搜索页入口：把订阅助手的搜索候选交给搜索页展示。"""
+        from .core.mp_search import search_torrents as _mp_search_torrents
+
+        return _mp_search_torrents(
+            self, site=site, keyword=keyword, mtype=mtype, cat=cat, page=page
+        )
+
+    def download(self, content: Any, download_dir: Any,
+                 cookie: Any = None, episodes: Optional[Any] = None,
+                 category: Optional[str] = None, label: Optional[str] = None,
+                 downloader: Optional[str] = None,
+                 custom_words: Optional[str] = None):
+        """MP 下载入口：只接管本插件合成种子的任务，其余返回 None。"""
+        from .core.mp_search import download as _mp_download
+
+        return _mp_download(
+            self, content, download_dir, cookie=cookie, episodes=episodes,
+            category=category, label=label, downloader=downloader,
+            custom_words=custom_words,
+        )
+
+    def api_torrent(self, sid: str = "", sig: str = ""):
+        """按分享 id 输出合成种子（匿名端点，靠 sid + HMAC 签名鉴权）。"""
+        from .core.mp_search import api_torrent as _mp_api_torrent
+
+        return _mp_api_torrent(self, sid=sid, sig=sig)
+
+    def get_module(self) -> dict:
+        """按模块合同向宿主声明下载器、搜索与下载能力。
+
+        MP 下载页查任务与搜索页查插件结果都走模块调度器，只认插件
+        get_module() 返回的字典：1.9.87 只声明了 5 个下载器方法，
+        调度器根本不调本插件的 list_torrents；这次补上
+        search_torrents 与 download，搜索页才能搜到订阅助手的结果，
+        点下载后才走本插件自己的转存流程。
         """
         return {
+            "search_torrents": self.search_torrents,
+            "download": self.download,
             "list_torrents": self.list_torrents,
             "torrent_files": self.torrent_files,
             "start_torrents": self.start_torrents,

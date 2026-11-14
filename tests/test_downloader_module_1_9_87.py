@@ -7,7 +7,9 @@ get_module() 返回的字典，调度器根本不调本插件的 list_torrents�
 下载器条目已在、任务运行中，GET /download/ 仍返回 0 条。
 
 本文件复用 test_downloader_plugin_1_9_86 的真实插件加载器，断言
-get_module() 声明的 5 个下载器方法，并通过声明的 list_torrents
+get_module() 声明的 5 个下载器方法 + 1.9.91 新增的 search_torrents /
+download（搜索接入 MP 原生搜索后，这两个入口必须在声明里，否则
+搜索页与下载链路根本不到插件这一步），并通过声明的 list_torrents
 入口跑一次投影，确认运行中任务能返回（含真机复现：玫瑰战争
 running 52% 的跨盘任务）。
 """
@@ -23,6 +25,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from test_downloader_plugin_1_9_86 import _plugin  # noqa: E402
 
 EXPECTED_KEYS = {
+    "search_torrents",
+    "download",
     "list_torrents",
     "torrent_files",
     "start_torrents",
@@ -62,18 +66,18 @@ ROSE_WAR_TASKS = [
 
 
 class TestGetModuleDeclaration(unittest.TestCase):
-    def test_declares_exactly_five_downloader_methods(self):
+    def test_declares_exactly_seven_module_methods(self):
         plugin = _plugin()
         module = plugin.get_module()
         self.assertEqual(set(module.keys()), EXPECTED_KEYS)
         for key, fn in module.items():
             self.assertTrue(callable(fn), f"{key} 不可调用")
 
-    def test_declares_no_search_or_download(self):
-        """本插件不是搜索频道也不是下载器，不声明这两个入口。"""
+    def test_declares_search_and_download(self):
+        """1.9.91：搜索接入 MP 原生搜索，两个入口必须在声明里。"""
         module = _plugin().get_module()
-        self.assertNotIn("search_torrents", module)
-        self.assertNotIn("download", module)
+        self.assertIn("search_torrents", module)
+        self.assertIn("download", module)
 
     def test_list_torrents_via_declared_module(self):
         """经声明入口跑投影：运行中任务必须返回（1.9.86 的 bug 是
