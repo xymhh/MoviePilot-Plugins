@@ -19,6 +19,7 @@ from ..cloud import CloudDriveCapability
 from ..delegation import OwnerDelegator
 from ..config import UIConfig
 from .season_rules import _season_total_episodes, _select_season_numbers
+from ..episode_parse import parse_episodes_from_names as _parse_episodes_from_names
 from ..media import call_with_supported_kwargs, recognize_media
 from ...drive.scanner import DriverRegistry
 from ...search.matching import is_anime_media
@@ -62,9 +63,6 @@ _LOCAL_LIBRARY_STATE: dict[str, Any] = {"at": 0.0, "root": "", "index": {}}
 _SEASON_DIR_PATTERN = re.compile(r"^(?:season[\s._-]*|s)(\d{1,2})$|^第\s*(\d{1,2})\s*季$", re.IGNORECASE)
 _TMDB_TAG_PATTERN = re.compile(r"\{tmdb[-_]?(\d+)\}", re.IGNORECASE)
 _YEAR_TAG_PATTERN = re.compile(r"[（(](\d{4})[)）]")
-_EPISODE_TAG_PATTERN = re.compile(r"[Ss](\d{1,2})[\s._-]*[Ee](\d{1,4})")
-_CN_EPISODE_PATTERN = re.compile(r"第\s*(\d{1,4})\s*[集话話]")
-_VIDEO_SUFFIXES = {".strm", ".mp4", ".mkv", ".ts", ".avi", ".mov", ".wmv", ".flv", ".m2ts", ".iso"}
 
 
 def _match_season_dir(dir_name: str) -> int | None:
@@ -87,41 +85,6 @@ def _normalize_media_name(value: str) -> str:
     text = re.sub(r"[\[\]【】{}()（）._·:：!！?？,，、\-—~]+", " ", text)
     text = re.sub(r"\s+", "", text)
     return text.strip().lower()
-
-
-def _parse_episodes_from_names(file_names, season: int) -> set[int]:
-    """从文件名解析目标季的集号；只认已存在的文件，多版本同集只算一次。"""
-    episodes: set[int] = set()
-    for raw_name in file_names:
-        name = str(raw_name or "")
-        if not name:
-            continue
-        suffix = os.path.splitext(name)[1].lower()
-        if suffix and suffix not in _VIDEO_SUFFIXES:
-            continue
-        tagged = False
-        for tag in _EPISODE_TAG_PATTERN.finditer(name):
-            tagged = True
-            try:
-                file_season = int(tag.group(1))
-                episode = int(tag.group(2))
-            except (TypeError, ValueError):
-                continue
-            if file_season != season or episode <= 0:
-                continue
-            episodes.add(episode)
-        # 只有完全没有 SxxExx 标签时才回退中文集号，避免把「第2集」这类
-        # 描述性文字误判成集号（例如 S01E02 与 S02E01 混在同一目录时）
-        if tagged:
-            continue
-        for tag in _CN_EPISODE_PATTERN.finditer(name):
-            try:
-                episode = int(tag.group(1))
-            except (TypeError, ValueError):
-                continue
-            if episode > 0:
-                episodes.add(episode)
-    return episodes
 
 
 def _aired_episode_info(tmdb_id: int, season: int) -> dict | None:

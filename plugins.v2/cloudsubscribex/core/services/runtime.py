@@ -15,9 +15,15 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from ...core import CloudDriveCapability
 from ...core import OwnerDelegator
-from ...core.media import media_identity
+from ...core.media import media_identity, tmdb_id_of
 
 sync_lock = Lock()
+
+# 已完成/失败/已停止任务在下载页的保留时长（秒）：任务一完成就从
+# _serialize_sync_tasks 里消失，用户看不到完成态；保留 10 分钟，到期或
+# 下一轮同步登记（_register_sync_tasks）时再清掉。下载页本身只查
+# DOWNLOADING，保留完成态不会污染正在下载列表。
+_COMPLETED_TASK_RETENTION_SECONDS = 600.0
 
 
 class SyncRuntimeService(OwnerDelegator):
@@ -103,6 +109,7 @@ class SyncRuntimeService(OwnerDelegator):
             tasks[task_id] = {
                 "id": task_id,
                 "subscribe_id": getattr(subscribe, "id", None),
+                "tmdb_id": tmdb_id_of(subscribe),
                 "sub_key": (
                     self._sync_handler.subscription_budget_key(subscribe)
                     if bool(getattr(subscribe, "_transient_target", False))
@@ -271,7 +278,25 @@ class SyncRuntimeService(OwnerDelegator):
         with self._sync_tasks_lock:
             tasks = []
             for task in self._sync_tasks.values():
-                if task.get("status") not in {
+                status = str(task.get("status") or "")
+                if status in {"completed", "failed", "stopped"}:
+                    # 终态短暂保留：刚完成的任务能在下载页看到完成态；
+                    # 超过保留期（或 finished_at 缺失无法判断）即丢弃。
+                    try:
+                        finished_at = float(
+                            task.get("finished_at")
+                            or task.get("started_at")
+                            or task.get("queued_at")
+                            or 0
+                        )
+                    except (TypeError, ValueError):
+                        finished_at = 0.0
+                    if (
+                            not finished_at
+                            or now - finished_at > _COMPLETED_TASK_RETENTION_SECONDS
+                    ):
+                        continue
+                elif status not in {
                     "queued", "running", "stopping", "downloading",
                     "transferring", "postprocessing"
                 }:
@@ -446,6 +471,7 @@ class SyncRuntimeService(OwnerDelegator):
                 "pending_keys": [],
                 "subscribe_id": subscribe_id if subscribe_id > 0 else None,
                 "sub_key": sub_key,
+                "tmdb_id": tmdb_id_of(media_data),
                 "title": str(media_data.get("title") or "未命名订阅"),
                 "year": media_data.get("year") or "",
                 "season": item.get("season"),
@@ -533,6 +559,8 @@ class SyncRuntimeService(OwnerDelegator):
                     "_postprocess_file_keys": file_keys,
                     "finished_at": None,
                 }
+                if group.get("tmdb_id"):
+                    values["tmdb_id"] = group["tmdb_id"]
                 if not task:
                     values = {**self._idle_postprocess_state(), **values}
                 if not task or not task.get("postprocess_active"):
@@ -578,6 +606,7 @@ class SyncRuntimeService(OwnerDelegator):
                     "id": task_id,
                     "subscribe_id": group["subscribe_id"],
                     "sub_key": group["sub_key"],
+                    "tmdb_id": group.get("tmdb_id"),
                     "title": group["title"],
                     "media_type": "电视剧" if is_tv else "电影",
                     "year": group["year"],
@@ -821,7 +850,14 @@ class SyncRuntimeService(OwnerDelegator):
             stage_transferred = 0
             stage_total = 0
             messages: Dict[str, int] = {}
+            file_names: List[str] = []
             for item in transfers:
+                # 子任务标题即文件名（跨盘任务 title=目标文件名），供父任务
+                # 从文件名推导集号；只加字段，不改合并的进度算法。
+                for key in ("title", "result_file_name"):
+                    file_name = str(item.get(key) or "").strip()
+                    if file_name and file_name not in file_names:
+                        file_names.append(file_name)
                 item_total = int(item.get("total") or 0)
                 total += item_total
                 transferred += int(item.get("transferred") or 0)
@@ -866,6 +902,7 @@ class SyncRuntimeService(OwnerDelegator):
                 "speed_bytes_per_second": speed,
                 "transfer_active": True,
                 "transfer_file_count": len(transfers),
+                "transfer_file_names": file_names,
                 "transfer_task_ids": [
                     str(item.get("id") or "") for item in transfers
                 ],

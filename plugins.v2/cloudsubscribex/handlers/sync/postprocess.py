@@ -1044,6 +1044,7 @@ class PostprocessService(OwnerDelegator):
             pending_key: str,
             reason: str,
             ctx: PostprocessBatchContext,
+            notify: bool = True,
     ) -> None:
         """单项后处理定位或执行失败后，彻底结算该项，更新历史并通知前端停止该项。"""
         logger.warning(
@@ -1051,6 +1052,14 @@ class PostprocessService(OwnerDelegator):
         )
         if not self._resolve_history_record(item, pending_key, "失败", reason):
             return
+        # 终态失败统一走已有的死任务失败通知口径（同一标题/文案、同一 _notify 开关）：
+        # 此前只有 finalize_dead 路径会通知，直接 abort（定位失败、离线超时等）
+        # 静默结算，用户收不到任何完成/失败通知——手动转存的跨盘文件一旦走到
+        # 这里就表现为「下载完了但没有通知」。死任务路径的通知调用已并入此处，
+        # 同一项只会通知一次；用户主动停止（notify=False）不发失败通知，
+        # 停止流程本身已有「任务已停止」通知。
+        if notify:
+            self._notify_finalize_dead(item, pending_key)
         ctx.pending.pop(pending_key, None)
         ctx.committed_keys.add(pending_key)
         ctx.failed += 1
@@ -1332,7 +1341,10 @@ class PostprocessService(OwnerDelegator):
             return False
         if not self._has_existing_cloud_file(item, pending_key, ctx):
             logger.info(f"任务停止：目标文件尚未就绪，安全跳过并终止：{item.get('file_name') or pending_key}")
-            self._abort_single_item(item, pending_key, "任务已被用户主动停止，终止后处理", ctx)
+            self._abort_single_item(
+                item, pending_key, "任务已被用户主动停止，终止后处理", ctx,
+                notify=False,
+            )
             return True
         return False
 
@@ -1342,7 +1354,6 @@ class PostprocessService(OwnerDelegator):
         """处理达到连续失败上限的死任务。"""
         fail_count = int(item.get("fail_count") or 0)
         reason = self._FINALIZE_DEAD_REASON.format(fail_count)
-        self._notify_finalize_dead(item, pending_key)
         self._abort_single_item(item, pending_key, reason, ctx)
 
     def _poll_offline_ready(
@@ -1750,12 +1761,11 @@ class PostprocessService(OwnerDelegator):
 
         ready_at = float(item.get("download_completed_at") or created_at)
         if ctx.now - ready_at >= self._FILE_FINALIZE_TIMEOUT:
-            reason = "文件已下载但30分钟内仍无法生成 STRM"
-            if not self._resolve_history_record(item, pending_key, "失败", reason):
-                return
-            ctx.pending.pop(pending_key, None)
-            ctx.committed_keys.add(pending_key)
-            ctx.failed += 1
+            # 与 _abort_single_item 同口径结算：写失败历史、清队列、推任务终态、
+            # 发失败通知；此前这里内联结算，不推任务终态也不通知，文件静默失败。
+            self._abort_single_item(
+                item, pending_key, "文件已下载但30分钟内仍无法生成 STRM", ctx
+            )
         else:
             self._schedule_finalize_retry(item, ctx.now)
 
@@ -2494,7 +2504,7 @@ class PostprocessService(OwnerDelegator):
                 title=self._FINALIZE_DEAD_TITLE,
                 text=self._FINALIZE_DEAD_TEXT.format(
                     str(item.get("file_name") or pending_key),
-                    int(item.get("fail_count") or 0),
+                    max(1, int(item.get("fail_count") or 0)),
                 ),
             )
         except Exception as error:

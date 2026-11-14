@@ -1247,8 +1247,12 @@ class HistoryService(OwnerDelegator):
                 item, media_data or {}, mediainfo=mediainfo
             )
         if not mediainfo:
-            logger.warning("文件已完成，但缺少媒体信息，无法发送完成通知和Webhook")
-            return None
+            # 媒体信息恢复失败也不丢通知：文件已经就绪，用后处理项与历史记录
+            # 现有字段拼一份同口径详情（无海报），走同一条完成通知。
+            # 手动/MP 搜索转存的提交时通知本就被跳过（pending_key 导致详情为空），
+            # 这里再返回 None，该文件就永远没有任何完成通知。
+            logger.warning("文件已完成但缺少媒体信息，改用后处理记录发送完成通知")
+            return self._fallback_finalized_detail(item, pending_key)
         history_record = self._pending_history_record(pending_key) or {}
         display_title = str(
             getattr(subscribe, "name", None)
@@ -1301,6 +1305,76 @@ class HistoryService(OwnerDelegator):
                 ),
             )
             detail["episodes"] = episodes
+        return detail
+
+    def _fallback_finalized_detail(
+            self, item: Dict[str, Any], pending_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """媒体信息缺失时的完成通知详情：只用后处理项与历史记录现有字段。
+
+        与主路径同一份详情结构（type/title/year/image/file_name/size/source/
+        notification_kind/season/episodes），只是没有海报；渲染文案与
+        ``_send_transfer_notification_now`` 完全一致。
+        """
+        history_record = self._pending_history_record(pending_key) or {}
+        title = str(
+            item.get("name")
+            or item.get("title")
+            or history_record.get("title")
+            or ""
+        ).strip()
+        if not title:
+            title = str(item.get("file_name") or pending_key).strip()
+        record_type = str(history_record.get("type") or "").strip()
+        is_tv = (
+            record_type == MediaType.TV.value
+            or bool(item.get("season"))
+            or bool(item.get("notification_episodes"))
+            or bool(item.get("success_episodes"))
+            or bool(history_record.get("episode"))
+        )
+        detail: Dict[str, Any] = {
+            "type": MediaType.TV.value if is_tv else MediaType.MOVIE.value,
+            "title": title,
+            "year": history_record.get("year") or item.get("year") or "",
+            "image": None,
+            "file_name": item.get("file_name"),
+            "size": self._detail_size(history_record, item),
+            "source": self._detail_source_text(history_record or item),
+            "notification_kind": (
+                "upgrade"
+                if self._is_upgrade_history(history_record)
+                else "cross_transfer"
+                if history_record.get("transfer_mode") == "cross"
+                else "transfer"
+            ),
+        }
+        if is_tv:
+            episodes = []
+            episode_values = (
+                item.get("notification_episodes")
+                or item.get("success_episodes")
+                or (
+                    [history_record.get("episode")]
+                    if history_record.get("episode")
+                    else []
+                )
+            )
+            for value in episode_values:
+                try:
+                    episode = int(str(value or "0"))
+                except (TypeError, ValueError):
+                    continue
+                if episode > 0:
+                    episodes.append(episode)
+            try:
+                season = int(
+                    item.get("season") or history_record.get("season") or 1
+                )
+            except (TypeError, ValueError):
+                season = 1
+            detail["season"] = max(1, season)
+            detail["episodes"] = sorted(set(episodes))
         return detail
 
     @staticmethod
