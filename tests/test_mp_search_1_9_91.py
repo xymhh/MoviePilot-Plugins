@@ -577,16 +577,17 @@ class TestModuleAndConfig(unittest.TestCase):
             self.assertIn(key, module)
             self.assertTrue(callable(module[key]))
 
-    def test_version_is_1_9_91(self):
+    def test_version_is_1_9_92(self):
         module = _load_plugin_module()
-        self.assertEqual(module.CloudSubscribeX.plugin_version, "1.9.91")
+        self.assertEqual(module.CloudSubscribeX.plugin_version, "1.9.92")
         with open(
             os.path.join(REPO_ROOT, "package.v2.json"), encoding="utf-8"
         ) as handle:
             package = json.load(handle)
         plugin = package["CloudSubscribeX"]
-        self.assertEqual(plugin["version"], "1.9.91")
+        self.assertEqual(plugin["version"], "1.9.92")
         self.assertIn("v1.9.91", plugin["history"])
+        self.assertIn("v1.9.92", plugin["history"])
         self.assertIn("search_torrents", plugin["history"]["v1.9.91"])
 
     def test_config_default_and_frontend_field(self):

@@ -95,13 +95,13 @@ def _make_response(content: bytes, status_code: int = 200,
         if not hasattr(resp, "body"):
             try:
                 resp.body = bytes(content or b"")
-            except Exception:
-                pass
+            except Exception as error:  # noqa: BLE001 - 桩 Response 补字段失败不影响返回
+                logger.debug(f"补 Response.body 失败：{error}", exc_info=True)
         if not hasattr(resp, "media_type"):
             try:
                 resp.media_type = media_type
-            except Exception:
-                pass
+            except Exception as error:  # noqa: BLE001 - 桩 Response 补字段失败不影响返回
+                logger.debug(f"补 Response.media_type 失败：{error}", exc_info=True)
         return resp
 
 try:
@@ -208,25 +208,24 @@ class SnapshotRegistry:
 
 def _snapshot_registry(plugin: Any) -> SnapshotRegistry:
     """取插件实例上的登记表（没有就建一个，挂在实例上不污染模块全局）。"""
-    registry = None
-    try:
-        registry = plugin.__dict__.get("_mp_search_registry")
-    except Exception:
-        registry = None
+    obj_dict = getattr(plugin, "__dict__", None)
+    registry = (
+        obj_dict.get("_mp_search_registry")
+        if isinstance(obj_dict, dict) else None
+    )
     if isinstance(registry, SnapshotRegistry):
         return registry
     with _REGISTRY_LOCK:
-        try:
-            registry = plugin.__dict__.get("_mp_search_registry")
-        except Exception:
-            registry = None
+        obj_dict = getattr(plugin, "__dict__", None)
+        registry = (
+            obj_dict.get("_mp_search_registry")
+            if isinstance(obj_dict, dict) else None
+        )
         if isinstance(registry, SnapshotRegistry):
             return registry
         registry = SnapshotRegistry()
-        try:
-            plugin.__dict__["_mp_search_registry"] = registry
-        except Exception:
-            pass
+        if isinstance(obj_dict, dict):
+            obj_dict["_mp_search_registry"] = registry
         return registry
 
 
@@ -451,8 +450,9 @@ def get_sign_secret(plugin: Any) -> str:
     的签名/验签（快照只有 1 小时 TTL，下次启动会重新生成）。
     """
     try:
-        cached = plugin.__dict__.get("_mp_search_sign_secret")
-    except Exception:
+        cached = getattr(plugin, "__dict__", {}).get("_mp_search_sign_secret")
+    except Exception as error:  # noqa: BLE001 - 缓存读不到就按缺失处理
+        logger.debug(f"读取搜索签名密钥缓存失败：{error}", exc_info=True)
         cached = None
     if cached:
         return str(cached)
@@ -472,12 +472,11 @@ def get_sign_secret(plugin: Any) -> str:
         if result is not False:
             try:
                 plugin._applied_config = merged
-            except Exception:
-                pass
-    try:
-        plugin.__dict__["_mp_search_sign_secret"] = secret
-    except Exception:
-        pass
+            except Exception as error:  # noqa: BLE001 - 内存同步失败不影响本次进程
+                logger.debug(f"搜索签名密钥内存同步失败：{error}", exc_info=True)
+    obj_dict = getattr(plugin, "__dict__", None)
+    if isinstance(obj_dict, dict):
+        obj_dict["_mp_search_sign_secret"] = secret
     return secret
 
 
@@ -585,8 +584,8 @@ def _channel_display_names(plugin: Any, handler: Any,
             try:
                 names[source] = str(getter(source) or source)
                 continue
-            except Exception:
-                pass
+            except Exception as error:  # noqa: BLE001 - 单源展示名失败即用 key
+                logger.debug(f"读取搜索源展示名失败：{error}", exc_info=True)
         names[source] = source
     return names
 
@@ -615,7 +614,7 @@ def _channel_priorities(plugin: Any, sources: List[str]) -> Dict[str, int]:
             except (TypeError, ValueError):
                 priorities[key] = 0
     except Exception as error:  # noqa: BLE001 - 渠道库异常不阻断搜索
-        logger.debug(f"读取渠道 priority 失败：{error}")
+        logger.debug(f"读取渠道 priority 失败：{error}", exc_info=True)
     for index, source in enumerate(sources):
         priorities.setdefault(source, len(sources) - index)
     return priorities
@@ -654,7 +653,7 @@ def search_torrents(plugin: Any, site: Any = None, keyword: Optional[str] = None
     try:
         sources = handler.get_enabled_sources(resolved_mtype)
     except Exception as error:  # noqa: BLE001 - 渠道读取失败即无结果
-        logger.debug(f"读取已启用搜索渠道失败：{error}")
+        logger.debug(f"读取已启用搜索渠道失败：{error}", exc_info=True)
         return []
     sources = [str(item).strip().lower() for item in (sources or []) if str(item).strip()]
     if not sources:
