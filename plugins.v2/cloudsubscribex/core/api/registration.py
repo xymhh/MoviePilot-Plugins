@@ -851,6 +851,14 @@ class MoviePilotRegistration(OwnerDelegator):
                 "permission": "discovery",
                 "order": 31,
             },
+            {
+                "nav_key": "channels",
+                "title": "渠道管理",
+                "icon": "mdi-hub-outline",
+                "section": "system",
+                "permission": "manage",
+                "order": 30,
+            },
         ]
 
     def get_actions(self) -> List[Dict[str, Any]]:
