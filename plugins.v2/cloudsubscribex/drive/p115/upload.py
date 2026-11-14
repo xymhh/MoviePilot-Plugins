@@ -203,7 +203,31 @@ class P115UploadService(OwnerDelegator):
     rapid_requires_local_file = True
 
     def _oss_proxy_kwargs(self) -> Dict[str, Any]:
-        """OSS 数据面（分片 PUT / 元数据）的代理参数；未配置时为空字典。"""
+        """OSS 数据面（分片 PUT / 元数据）的代理参数；未配置时为空字典。
+
+        2026-11-14 真机修复：本类的 ``_owner`` 是 ``P115ClientManager``，不是插件实例。
+        ``P115ClientManager.__getattr__`` 只解析职责组件、**不会**转发到插件，
+        因此旧写法 ``getattr(self._owner, "_cross_transfer_upload_proxy", "")`` 恒为空
+        （异常被吞），代理从来没生效过——日志里一条「数据面已启用代理」都没有。
+
+        manager 在 ``create_client`` 时已把配置里的代理规范化存进 ``_upload_proxies``，
+        这里直接读它；同时保留对 owner 上 ``_cross_transfer_upload_proxy`` 的兼容回退
+        （测试桩/未来若把插件直接挂到 manager 上）。
+        """
+        proxies = getattr(self._owner, "_upload_proxies", None)
+        if isinstance(proxies, dict) and proxies:
+            # normalize_proxies 已给出 {"http": ..., "https": ...}，取 https 作代理地址
+            url = str(proxies.get("https") or proxies.get("http") or "").strip()
+            if url:
+                kwargs = oss_request_kwargs(url)
+                # 只在第一次真正拿到 session 时打一次，便于真机核对代理是否生效
+                if kwargs and not getattr(self, "_oss_proxy_logged", False):
+                    self._oss_proxy_logged = True
+                    logger.info(
+                        f"115 上传数据面已启用代理（OSS 分片走代理，API 直连）：{url}"
+                    )
+                return kwargs
+            return {}
         try:
             proxy = str(
                 getattr(self._owner, "_cross_transfer_upload_proxy", "") or ""
