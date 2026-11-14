@@ -1,8 +1,10 @@
 """跨盘缓存残留清理。
 
-只处理 ``cloud-transfer-<32位hash>.bin`` 及其自动改名副本
-``… (1).bin``、伴随文件 ``.meta.json`` / ``.parts.json``（含 ``.tmp``），
-目录里其他文件一律不碰。
+只处理 ``cloud-transfer-<32位hash>`` 开头的中继缓存：旧名
+``cloud-transfer-<hash>.bin`` 与新名
+``cloud-transfer-<hash>-<源文件名>``（如
+``…-律界战争 S01E05.mp4``），及其自动改名副本 ``… (1)``、伴随文件
+``.meta.json`` / ``.parts.json``（含 ``.tmp``），目录里其他文件一律不碰。
 
 两级判定：
 
@@ -23,11 +25,14 @@ from pathlib import Path
 from typing import Dict, Iterable, Optional, Set
 
 RESIDUE_PATTERN = re.compile(
-    r"^(?P<key>cloud-transfer-[0-9a-f]{32})(?: \(\d+\))?"
-    r"\.bin(?:\.meta\.json(?:\.tmp)?|\.parts\.json(?:\.tmp)?)?$"
+    r"^(?P<key>cloud-transfer-[0-9a-f]{32})"
+    r"(?:-[^/\\]+?)?"           # 新名：-<清洗后的源文件名>（旧名无此段）
+    r"(?: \(\d+\))?"            # 下载器 AutoRename 的 (n) 变体
+    r"(?:\.bin|\.[^./\\]+)"     # 扩展名：旧名 .bin / 新名媒体扩展
+    r"(?:\.meta\.json(?:\.tmp)?|\.parts\.json(?:\.tmp)?)?$"
 )
 
-_VARIANT_PATTERN = re.compile(r" \(\d+\)(?=\.bin(?:\.|$))")
+_VARIANT_PATTERN = re.compile(r" \(\d+\)(?=\.[^./\\]+(?:\.|$))")
 
 #: 到期保留期：6 小时内写过的缓存不动（下载中会持续刷新 mtime）。
 DEFAULT_MIN_AGE_SECONDS = 6 * 3600

@@ -205,7 +205,7 @@ class _RelayHarnessBase(unittest.TestCase):
 
     def _seed_complete_cache(self, manager):
         cache_key = manager._cache_key("quark", self.file_item)
-        cache_path = manager._cache_path(cache_key)
+        cache_path = manager._cache_path(cache_key, self.file_item)
         cache_path.write_bytes(PAYLOAD)
         manager._mark_complete_cache(cache_path, cache_key, self.file_item)
         return cache_path
@@ -322,6 +322,33 @@ class SameCacheKeySerializationTests(_RelayHarnessBase):
         self.assertTrue(self._wait_cache_gone())
 
 
+    def test_legacy_bin_cache_reused_and_renamed_to_new_name(self):
+        """旧名 .bin 完整缓存命中时复用并改名到新名（含伴随文件）。"""
+        manager = self.make_manager(upload_file=self._ok_upload)
+        cache_key = manager._cache_key("quark", self.file_item)
+        legacy = manager._cache_path(cache_key)
+        legacy.write_bytes(PAYLOAD)
+        manager._mark_complete_cache(legacy, cache_key, self.file_item)
+        new_path = manager._cache_path(cache_key, self.file_item)
+        manager._acquire_cache_ref(cache_key)  # 兄弟在飞，终态保留缓存以便断言
+
+        public = manager.create(
+            source_key="quark", source_file=self.file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+            algorithm="sha1", checksum=SHA1,
+        )
+        task = self._wait_terminal(manager, public["id"])
+
+        self.assertEqual(task["status"], "success")
+        self.assertTrue(new_path.is_file(), "命中旧名缓存时应改名到新名")
+        self.assertFalse(legacy.exists(), "改名后旧名文件不应残留")
+        self.assertTrue(
+            manager._cache_meta_path(new_path).is_file(),
+            "伴随文件应随主文件改名",
+        )
+        manager._release_cache_ref(cache_key)
+
+
 class CacheRefRetentionTests(_RelayHarnessBase):
     """组2/组3：引用计数保留与 delete_cache 在用跳过。"""
 
@@ -419,7 +446,7 @@ class CacheRefRetentionTests(_RelayHarnessBase):
         manager = self.make_manager(download_file=download_file)
         manager_ref["manager"] = manager
         cache_path = manager._cache_path(
-            manager._cache_key("quark", self.file_item)
+            manager._cache_key("quark", self.file_item), self.file_item
         )
         cache_key = manager._cache_key("quark", self.file_item)
         manager._acquire_cache_ref(cache_key)  # 兄弟在飞

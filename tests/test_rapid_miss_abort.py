@@ -271,7 +271,9 @@ class RapidMissAbortTests(unittest.TestCase):
         self.fail("任务未在期限内进入终态")
 
     def _cache_triples(self, manager, file_item):
-        cache_path = manager._cache_path(manager._cache_key("quark", file_item))
+        cache_path = manager._cache_path(
+            manager._cache_key("quark", file_item), file_item
+        )
         return (
             cache_path,
             manager._cache_meta_path(cache_path),
@@ -279,7 +281,9 @@ class RapidMissAbortTests(unittest.TestCase):
         )
 
     def _seed_complete_cache(self, manager, file_item):
-        cache_path = manager._cache_path(manager._cache_key("quark", file_item))
+        cache_path = manager._cache_path(
+            manager._cache_key("quark", file_item), file_item
+        )
         cache_path.write_bytes(PAYLOAD)
         manager._mark_complete_cache(
             cache_path, manager._cache_key("quark", file_item), file_item,

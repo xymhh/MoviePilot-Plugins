@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import tempfile
 import time
@@ -26,6 +27,7 @@ from .cloud import (
     CloudFile,
     RapidUploadResult,
 )
+from .residue import RESIDUE_PATTERN
 from .target_writer import (
     TargetConflictError,
     TargetPlan,
@@ -808,6 +810,12 @@ class CrossDriveTransfer:
         return CrossDriveTransferResult(item, "fallback")
 
 
+#: 缓存文件名里源文件名的最大字符数（截尾部、保留扩展名）。
+_CACHE_NAME_MAX_CHARS = 120
+#: 完整缓存文件名的最大字节数（多字节字符下仍不超过文件系统 255 字节限制）。
+_CACHE_FILENAME_MAX_BYTES = 200
+
+
 class CrossTransferTaskManager:
     """本地中继任务管理器。"""
 
@@ -978,8 +986,107 @@ class CrossTransferTaskManager:
         ))
         return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
 
-    def _cache_path(self, cache_key: str) -> Path:
+    @staticmethod
+    def _sanitize_cache_name(name: str) -> str:
+        """清洗源文件名用于缓存命名。
+
+        去掉路径分隔符与非法字符、空白折叠、截断到安全长度（截尾部、保证扩展名
+        保留）；没有可用扩展名时返回空串，调用方退回旧名 ``.bin``。
+        """
+        text = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', "_", str(name or ""))
+        text = re.sub(r"\s+", " ", text).strip(" .")
+        if not text:
+            return ""
+        suffix = Path(text).suffix
+        if not suffix or suffix == ".":
+            return ""
+        if len(text) > _CACHE_NAME_MAX_CHARS:
+            stem = text[: -len(suffix)]
+            text = stem[: max(0, _CACHE_NAME_MAX_CHARS - len(suffix))] + suffix
+        # 多字节字符下再按字节上限截断，仍保留扩展名。
+        prefix_len = len("cloud-transfer-" + "0" * 32 + "-")
+        while len(text.encode("utf-8")) + prefix_len > _CACHE_FILENAME_MAX_BYTES:
+            stem = text[: -len(suffix)]
+            if not stem:
+                return ""
+            text = stem[:-1] + suffix
+        return text
+
+    def _cache_path(self, cache_key: str, source: CloudFile | None = None) -> Path:
+        """中继缓存路径：有源文件名时用真实文件名命名，否则沿用旧名。
+
+        新名：``cloud-transfer-<hash>-<清洗后的源文件名>``（如
+        ``cloud-transfer-f0c9…-律界战争 S01E05.mp4``）；源文件名不可用
+        （空、无扩展名）时退回旧名 ``cloud-transfer-<hash>.bin``。
+        缓存按源内容寻址，文件名必须反映源文件本身，不用目标名
+        （同一源文件可能被不同任务以不同目标名转存）。
+        """
+        if source is not None:
+            clean = self._sanitize_cache_name(getattr(source, "name", "") or "")
+            if clean:
+                return self._cache_root() / f"cloud-transfer-{cache_key}-{clean}"
         return self._cache_root() / f"cloud-transfer-{cache_key}.bin"
+
+    def _legacy_cache_path(self, cache_key: str) -> Path:
+        """旧名中继缓存路径（``cloud-transfer-<hash>.bin``）。"""
+        return self._cache_root() / f"cloud-transfer-{cache_key}.bin"
+
+    def _rename_cache_files(self, old_path: Path, new_path: Path) -> bool:
+        """把旧名缓存连同伴随文件改名到新名；主文件改名失败返回 False。"""
+        try:
+            old_path.replace(new_path)
+        except OSError as error:
+            logger.warning(
+                f"中继缓存改名失败：{old_path.name} → {new_path.name}：{error}"
+            )
+            return False
+        for old_comp, new_comp in (
+                (self._cache_meta_path(old_path), self._cache_meta_path(new_path)),
+                (self._cache_parts_path(old_path), self._cache_parts_path(new_path)),
+        ):
+            for old_variant, new_variant in (
+                    (old_comp, new_comp),
+                    (
+                        old_comp.with_name(f"{old_comp.name}.tmp"),
+                        new_comp.with_name(f"{new_comp.name}.tmp"),
+                    ),
+            ):
+                if not old_variant.is_file():
+                    continue
+                try:
+                    old_variant.replace(new_variant)
+                except OSError as error:  # noqa: BLE001 - 伴随文件改名失败不影响主文件
+                    logger.debug(
+                        f"中继缓存伴随文件改名失败：{old_variant.name}：{error}",
+                        exc_info=True,
+                    )
+        return True
+
+    def _resolve_cache_path(self, cache_key: str, source: CloudFile | None) -> Path:
+        """返回本次应使用的缓存路径（调用方必须持有该 cache_key 的锁）。
+
+        新名不存在、旧名存在时，把旧名缓存连同伴随文件改名成新名——这是
+        旧缓存唯一的改名迁移路径。
+        """
+        new_path = self._cache_path(cache_key, source)
+        legacy_path = self._legacy_cache_path(cache_key)
+        if new_path == legacy_path or new_path.is_file() or not legacy_path.is_file():
+            return new_path
+        logger.info(f"中继缓存改名：{legacy_path.name} → {new_path.name}")
+        if self._rename_cache_files(legacy_path, new_path):
+            return new_path
+        return legacy_path
+
+    def _lookup_cache_path(self, cache_key: str, source: CloudFile | None) -> Path:
+        """不持有 cache_key 锁时的只读查找：先找新名、再找旧名，不改名。
+
+        改名迁移留待下次传输时由 :meth:`_resolve_cache_path` 在锁内完成。
+        """
+        new_path = self._cache_path(cache_key, source)
+        legacy_path = self._legacy_cache_path(cache_key)
+        if new_path == legacy_path or new_path.is_file() or not legacy_path.is_file():
+            return new_path
+        return legacy_path
 
     @staticmethod
     def _task_cache_key(task: dict | None) -> str:
@@ -1077,7 +1184,27 @@ class CrossTransferTaskManager:
                 f"跨盘缓存正在使用中，跳过清理：{normalized}（在用引用 {in_use}）"
             )
             return 0
-        return self._delete_cache_path(self._cache_path(normalized))
+        # 只按 cache_key 查找：新名（cloud-transfer-<key>-<源文件名>）与旧名
+        # （cloud-transfer-<key>.bin）都要删，含伴随文件与 AutoRename 变体。
+        wanted = f"cloud-transfer-{normalized}"
+        deleted = 0
+        try:
+            entries = list(self._cache_root().iterdir())
+        except OSError as error:
+            logger.debug(f"读取跨盘缓存目录失败：{error}", exc_info=True)
+            return 0
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            match = RESIDUE_PATTERN.match(entry.name)
+            if not match or match.group("key") != wanted:
+                continue
+            try:
+                entry.unlink()
+                deleted += 1
+            except OSError as error:  # noqa: BLE001 - 单个文件删失败不影响其余
+                logger.debug(f"删除跨盘缓存失败：{entry.name}：{error}", exc_info=True)
+        return deleted
 
     def _validate_complete_cache(
             self, path: Path, cache_key: str, source: CloudFile,
@@ -1172,7 +1299,7 @@ class CrossTransferTaskManager:
             verify_checksum: bool = True,
     ) -> dict:
         cache_key = self._cache_key(source_key, source)
-        path = self._cache_path(cache_key)
+        path = self._lookup_cache_path(cache_key, source)
         complete = self._validate_complete_cache(
             path, cache_key, source, verify_checksum=verify_checksum
         )
@@ -1188,7 +1315,8 @@ class CrossTransferTaskManager:
     def _temporary_path(self, task: dict) -> str:
         source = task.get("source_file")
         cache_key = self._cache_key(task.get("source_provider"), source)
-        return str(self._cache_path(cache_key))
+        # _run_locked 全程持有该 cache_key 的锁，命中旧名缓存时在此改名迁移。
+        return str(self._resolve_cache_path(cache_key, source))
 
     def create(self, source_path: str = "", target_key: str = "", save_path: str = "/",
                target_name: str = "", algorithm: str = "", checksum: str = "",
@@ -2136,8 +2264,9 @@ class CrossTransferTaskManager:
                 self._delete_cache_path_for_task(task, Path(temporary_path))
         except InterruptedError:
             # 手动取消即清空中继（含已下完的完整缓存）：只删本任务的
-            # cloud-transfer-<hash>.bin 及其 .meta.json/.parts.json（含 .tmp 变体），
-            # 不碰同目录下其它文件；同 cache_key 还有任务在用时保留。
+            # cloud-transfer-<hash>-<源文件名>（或旧名 .bin）及其伴随文件
+            # .meta.json/.parts.json（含 .tmp 变体），不碰同目录下其它文件；
+            # 同 cache_key 还有任务在用时保留。
             retained = (
                 'temporary_path' in locals() and temporary_path
                 and self._cache_retained_for_others(task)
