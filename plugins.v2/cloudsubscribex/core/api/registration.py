@@ -836,22 +836,6 @@ class MoviePilotRegistration(OwnerDelegator):
             return []
         return [
             {
-                "nav_key": "main",
-                "title": "网盘订阅",
-                "icon": "mdi-cloud-sync-outline",
-                "section": "subscribe",
-                "permission": "subscribe",
-                "order": 30,
-            },
-            {
-                "nav_key": "resource",
-                "title": "网盘资源",
-                "icon": "mdi-cloud-search-outline",
-                "section": "discovery",
-                "permission": "discovery",
-                "order": 31,
-            },
-            {
                 "nav_key": "channels",
                 "title": "渠道管理",
                 "icon": "mdi-hub-outline",

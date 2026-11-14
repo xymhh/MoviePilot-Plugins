@@ -1,16 +1,13 @@
-"""1.9.89：渠道管理改成 MP 主侧栏顶级导航，与站点管理平级。
+"""1.9.89/1.9.90：渠道管理改成 MP 主侧栏顶级导航，与站点管理平级。
 
 1.9.88 的渠道管理页是插件页 AppPage.vue 内的一个标签；MP 侧栏导航走
 后端 GET /plugin/sidebar_nav 聚合各插件 get_sidebar_nav() 的声明，前端
 DefaultLayout 按 section 分组插入主侧栏，点开走 plugin-app 路由
 （pluginId + navKey），联邦加载器按 navKey 先试 AppPage{NavKeyPascal}
-再回退 AppPage/Page。本次把渠道管理挪到 system 分组（与站点管理同组），
-插件页内不再保留 channels 标签。
-
-本文件加载真实的 core/api/registration.py（app.* 与第三方依赖全部打桩），
-在 MoviePilotRegistration 上验证侧栏声明；另做前端静态断言：vite
-exposes 含 AppPageChannels、新组件渲染 ChannelManager、AppPage.vue 内
-无 channels 标签残留。
+再回退 AppPage/Page。1.9.89 把渠道管理挪到 system 分组（与站点管理同组），
+插件页内不再保留 channels 标签；1.9.90 再删掉主侧栏另外两个入口
+（网盘订阅 main、网盘资源 resource），侧栏只留“渠道管理”，
+main/resource 的页面组件本身保留，用户仍可从插件管理里打开插件主页。
 """
 
 from __future__ import annotations
@@ -88,13 +85,11 @@ class TestSidebarNavChannels(unittest.TestCase):
         self.assertIn(item["section"], VALID_SECTIONS)
         self.assertIn(item["permission"], VALID_PERMISSIONS)
 
-    def test_existing_entries_unchanged(self):
+    def test_only_channels_entry_remains(self):
         nav = _registration().get_sidebar_nav()
-        by_key = {item["nav_key"]: item for item in nav}
-        self.assertEqual(by_key["main"]["title"], "网盘订阅")
-        self.assertEqual(by_key["main"]["section"], "subscribe")
-        self.assertEqual(by_key["resource"]["title"], "网盘资源")
-        self.assertEqual(by_key["resource"]["section"], "discovery")
+        self.assertEqual([item["nav_key"] for item in nav], ["channels"])
+        self.assertNotIn("main", {item["nav_key"] for item in nav})
+        self.assertNotIn("resource", {item["nav_key"] for item in nav})
 
     def test_disabled_plugin_returns_empty(self):
         self.assertEqual(_registration(enabled=False).get_sidebar_nav(), [])
