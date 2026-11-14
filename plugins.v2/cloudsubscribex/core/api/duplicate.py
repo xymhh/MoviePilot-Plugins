@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from app.log import logger
 
-from .. import OwnerDelegator
+from ..delegation import OwnerDelegator
 from ..services.candidate_ledger import append_records
 
 #: MoviePilot 订阅状态：S = 暂停。

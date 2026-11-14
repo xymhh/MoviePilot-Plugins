@@ -11,7 +11,8 @@ from fastapi import Request
 from fastapi.responses import StreamingResponse
 
 from .page import clear_ui_options_cache
-from .. import CloudDriveCapability, OwnerDelegator
+from ..cloud import CloudDriveCapability
+from ..delegation import OwnerDelegator
 from ...utils import clear_magnet_metadata_cache
 
 

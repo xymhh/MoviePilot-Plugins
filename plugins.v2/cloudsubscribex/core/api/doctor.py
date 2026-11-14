@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.log import logger
 
-from .. import OwnerDelegator
+from ..delegation import OwnerDelegator
 from ..bypass_guard import bypass_guard
 from ...utils.cache import cache_stats
 

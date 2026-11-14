@@ -13,7 +13,9 @@ from app.log import logger
 from fastapi import Request
 
 from .page import clear_ui_options_cache
-from .. import CloudDriveCapability, OwnerDelegator, SearchCapability
+from ..cloud import CloudDriveCapability
+from ..delegation import OwnerDelegator
+from ..search import SearchCapability
 from ...utils.cache import create_platform_ttl_cache
 
 _ACCOUNT_INFO_CACHE = create_platform_ttl_cache(

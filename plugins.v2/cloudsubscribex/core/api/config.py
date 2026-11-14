@@ -8,7 +8,7 @@ from fastapi import Request
 
 from .account import clear_account_cache
 from .page import clear_ui_options_cache
-from .. import OwnerDelegator
+from ..delegation import OwnerDelegator
 from ..config import DEFAULT_AUTO_SUBSCRIBE_USERNAME, UIConfig
 from ..services.runtime import sync_lock
 from ...utils.http_client import build_proxy_url, validate_proxy_address

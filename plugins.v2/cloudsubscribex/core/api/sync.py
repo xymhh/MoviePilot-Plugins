@@ -11,7 +11,9 @@ from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 from app.schemas.types import MediaType
 
-from .. import CloudDriveCapability, OwnerDelegator, SearchCapability
+from ..cloud import CloudDriveCapability
+from ..delegation import OwnerDelegator
+from ..search import SearchCapability
 from ..media import media_identity, recognize_media, tmdb_id_of
 from ...search.matching import positive_ints
 from ...search.types import (

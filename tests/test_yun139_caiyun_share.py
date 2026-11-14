@@ -79,6 +79,28 @@ register_mock(
     ShareLinkStatus=MagicMock(),
     CloudDriveCapability=MagicMock(),
 )
+# 1.9.85：core/api/*.py 改为直连子模块（消除 core.api <-> core 导入环），
+# 子模块桩要跟着注册，否则 from ..delegation / ..search 会落到真实包解析。
+register_module("cloudsubscribex.core.delegation", OwnerDelegator=OwnerDelegator)
+register_module(
+    "cloudsubscribex.core.share_link",
+    canonicalize_share_url=MagicMock(side_effect=lambda u: u),
+)
+register_module(
+    "cloudsubscribex.core.state",
+    STATUS_DOWNLOADING="downloading",
+    STATUS_FAILED="failed",
+    STATUS_SUCCESS="success",
+    STATUS_PENDING="pending",
+    STATUS_SKIPPED="跳过",
+)
+register_module(
+    "cloudsubscribex.core.search",
+    SearchCapability=MagicMock(),
+    SearchCapabilityError=type("SearchCapabilityError", (RuntimeError,), {}),
+    SEARCH_CIRCUIT_BREAKER=MagicMock(),
+    SearchCandidate=dict,
+)
 register_mock("cloudsubscribex.core.media")
 register_mock("cloudsubscribex.core.transfer", HttpFileDownloadService=MagicMock())
 register_mock("cloudsubscribex.search.matching", positive_ints=MagicMock())

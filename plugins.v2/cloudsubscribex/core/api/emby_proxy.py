@@ -319,7 +319,7 @@ class EmbyProxyService:
         if provider is None:
             return False
         try:
-            from .. import CloudDriveCapability
+            from ..cloud import CloudDriveCapability
 
             provider.require(CloudDriveCapability.FILE_DOWNLOAD)
             return True

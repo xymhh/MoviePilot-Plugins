@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 from app.core.config import settings
 from app.log import logger
 
-from .. import OwnerDelegator
+from ..delegation import OwnerDelegator
 from ..services.runtime import sync_lock
 
 

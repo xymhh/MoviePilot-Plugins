@@ -15,7 +15,8 @@ from app.utils.string import StringUtils
 from .page import _platform_image_url
 from .source_filter import filter_source_meta_by_enabled
 from .title_parse import split_title_season
-from .. import OwnerDelegator, SearchCapability
+from ..delegation import OwnerDelegator
+from ..search import SearchCapability
 from ..cloud import CloudDriveCapability
 from ..config import UIConfig
 from ..media import apply_media_identity, recognize_media, search_medias

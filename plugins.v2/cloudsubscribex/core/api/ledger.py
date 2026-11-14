@@ -9,7 +9,7 @@ from typing import Any
 
 from app.log import logger
 
-from .. import OwnerDelegator
+from ..delegation import OwnerDelegator
 from ..services.candidate_ledger import read_records, summarize
 from ...utils.cache import cache_stats
 

@@ -14,7 +14,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from fastapi import Depends
 
-from .. import OwnerDelegator
+from ..delegation import OwnerDelegator
 from ..agent import (
     CloudSubscribeCacheClearTool,
     CloudSubscribeCheckinTool,

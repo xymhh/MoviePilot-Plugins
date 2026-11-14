@@ -12,7 +12,8 @@ from app.log import logger
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from .. import CloudDriveCapability, CloudFile, OwnerDelegator
+from ..cloud import CloudDriveCapability, CloudFile
+from ..delegation import OwnerDelegator
 
 #: pickcode 固定 17 位字母数字（115）
 _PICKCODE_LENGTH = 17

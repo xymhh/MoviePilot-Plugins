@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, Optional
 
-from .. import OwnerDelegator
+from ..delegation import OwnerDelegator
 
 
 class CheckinApi(OwnerDelegator):

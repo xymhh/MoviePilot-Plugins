@@ -15,7 +15,8 @@ from app.core.metainfo import MetaInfo
 from app.log import logger
 from app.schemas.types import MediaType, NotificationType
 
-from .. import CloudDriveCapability, OwnerDelegator
+from ..cloud import CloudDriveCapability
+from ..delegation import OwnerDelegator
 from ..config import UIConfig
 from .season_rules import _season_total_episodes, _select_season_numbers
 from ..media import call_with_supported_kwargs, recognize_media

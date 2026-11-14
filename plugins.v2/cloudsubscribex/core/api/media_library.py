@@ -14,7 +14,8 @@ except ImportError:
 from app.log import logger
 from sqlalchemy import func
 
-from .. import OwnerDelegator, render_template, resolve_template
+from ...utils.notify_template import render_template, resolve_template
+from ..delegation import OwnerDelegator
 from ...utils.deep_delete_dedupe import DeepDeleteDeduplicator
 from ...utils.deep_delete_match import media_display_name
 from ..media import media_server_tmdb_filters, tmdb_id_of

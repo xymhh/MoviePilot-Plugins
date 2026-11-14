@@ -46,6 +46,16 @@ register_module(
     CloudDriveCapability=MagicMock(),
 )
 register_module("cloudsubscribex.core.cloud", CloudDriveCapability=MagicMock())
+# 1.9.85：core/api/*.py 改为直连子模块（消除 core.api <-> core 的导入环），
+# 测试桩要跟着注册子模块属性，否则 from ..delegation / ..search 取不到符号。
+register_module("cloudsubscribex.core.delegation", OwnerDelegator=OwnerDelegator)
+register_module(
+    "cloudsubscribex.core.search",
+    SearchCapability=MagicMock(),
+    SearchCapabilityError=type("SearchCapabilityError", (RuntimeError,), {}),
+    SEARCH_CIRCUIT_BREAKER=MagicMock(),
+    SearchCandidate=dict,
+)
 register_module(
     "cloudsubscribex.core.api.page",
     _platform_image_url=MagicMock(return_value=""),
