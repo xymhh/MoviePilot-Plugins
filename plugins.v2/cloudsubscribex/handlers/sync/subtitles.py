@@ -482,6 +482,12 @@ class SubtitleService(OwnerDelegator):
                             "season": item.get("season"),
                             "year": getattr(subtitle_mediainfo, "year", None),
                             "media_title": getattr(subtitle_mediainfo, "title", ""),
+                            # 字幕任务也带存量海报：下载页实时查不到时兜底。
+                            "poster": (
+                                subtitle_mediainfo.get_poster_image()
+                                if getattr(subtitle_mediainfo, "get_poster_image", None)
+                                else ""
+                            ) or "",
                         },
                     ))
                     if retry_item.get("staging_name"):

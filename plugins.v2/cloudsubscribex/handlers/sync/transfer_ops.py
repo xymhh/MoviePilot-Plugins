@@ -228,6 +228,13 @@ class TransferOpsMixin(OwnerDelegator):
                                 "season": season,
                                 "year": getattr(mediainfo, "year", None),
                                 "media_title": getattr(mediainfo, "title", ""),
+                                # 同步时 mediainfo 自带的海报地址：下载页
+                                # 实时查 TMDB 取不到时用它兜底。
+                                "poster": (
+                                    mediainfo.get_poster_image()
+                                    if getattr(mediainfo, "get_poster_image", None)
+                                    else ""
+                                ) or "",
                                 # 目标文件名里有 SxxExx 时直接取集号；裸文件名
                                 # （如 18.mp4）解析不到，靠上层 target_episodes。
                                 "target_episodes": sorted(parse_episodes_from_names(

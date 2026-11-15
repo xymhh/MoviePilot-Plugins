@@ -324,6 +324,11 @@ def _task_media(
         if tmdb_id
         else ""
     )
+    if not poster:
+        # 实时查 TMDB 取不到时，用任务创建时带上的存量海报地址兜底
+        # （历史记录的 image / 同步时 mediainfo 的海报）；没有也不
+        # 影响标题与季集，只是不显示海报图。
+        poster = str(task.get("poster") or "").strip()
     media: Dict[str, Any] = {
         "type": media_type,
         # 独立跨盘任务的 title 是文件名，媒体标题用 media_title（有的话），

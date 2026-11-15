@@ -546,11 +546,17 @@ class HistoryRetryService(OwnerDelegator):
                  "md5": record.get("source_md5") or ""},
                 self._cloud_transfer_path, None, source_sha1,
                 media={
-                    "tmdb_id": getattr(mediainfo, "tmdb_id", None),
+                    # mediainfo 是本次重试现认的，认不到时 tmdb_id 为空；
+                    # 记录本身存的 tmdb_id 是权威的（历史页媒体详情就
+                    # 链到它，如 LOST10 的 tmdb:329490），拿来兜底。
+                    "tmdb_id": getattr(mediainfo, "tmdb_id", None) or record.get("tmdb_id"),
                     "media_type": getattr(getattr(mediainfo, "type", None), "name", ""),
                     "season": season,
                     "year": getattr(mediainfo, "year", None),
                     "media_title": getattr(mediainfo, "title", ""),
+                    # 记录建时存的海报地址：下载页实时查 TMDB 取不到
+                    # 海报时用它兜底（MP 自身都识别不到该媒体时也一样）。
+                    "poster": str(record.get("image") or ""),
                     # 重试知道确切集号：裸文件名（如 18.mp4）解析不出集号，
                     # 靠这里直传，否则下载页只剩 S01、没有 E18。
                     "target_episodes": (

@@ -865,6 +865,15 @@ def _normalize_task_media(media: Any) -> Dict[str, Any]:
         })
         if parsed:
             normalized["target_episodes"] = parsed
+    # 存量海报地址（历史记录的 image / mediainfo 的 get_poster_image）：
+    # 下载页实时查 TMDB 取不到海报时（MP 自身都识别不到该媒体，如
+    # LOST10 tmdb:329490 详情页 500），就用这张存量图兜底；只认
+    # http(s) 绝对地址，相对路径与空串一律丢掉。
+    poster = str(
+        media.get("poster") or media.get("image") or ""
+    ).strip()
+    if poster.startswith(("http://", "https://")):
+        normalized["poster"] = poster
     return normalized
 
 
