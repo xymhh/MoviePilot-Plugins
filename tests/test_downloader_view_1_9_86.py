@@ -88,6 +88,28 @@ STOPPING = {
     "progress": 80,
 }
 
+STOPPED = {
+    "id": "subscribe:126",
+    "title": "学生会也有洞！",
+    "media_type": "电视剧",
+    "year": "2026",
+    "season": 1,
+    "target_episodes": [7],
+    "status": "stopped",
+    "progress": 58,
+}
+
+FAILED = {
+    "id": "subscribe:127",
+    "title": "今天是太阳雨",
+    "media_type": "电视剧",
+    "year": "2026",
+    "season": 1,
+    "target_episodes": [18],
+    "status": "failed",
+    "progress": 79,
+}
+
 CROSS = {
     "id": "cross:abcdef123456",
     "task_kind": "cross_transfer",
@@ -107,7 +129,10 @@ CROSS = {
 
 
 def _tasks():
-    return [dict(SYNC_TV), dict(SYNC_MOVIE), dict(QUEUED), dict(STOPPING), dict(CROSS)]
+    return [
+        dict(SYNC_TV), dict(SYNC_MOVIE), dict(QUEUED), dict(STOPPING),
+        dict(CROSS), dict(STOPPED), dict(FAILED),
+    ]
 
 
 class TestTaskHash(unittest.TestCase):
@@ -131,6 +156,8 @@ class TestMapTaskState(unittest.TestCase):
         for status in (
             "queued", "running", "downloading",
             "transferring", "postprocessing", "pending",
+            # stopping 是正在取消的瞬时态，仍在进行中，不按已暂停画。
+            "stopping",
         ):
             self.assertEqual(_view.map_task_state(status), "downloading", status)
 
@@ -139,7 +166,9 @@ class TestMapTaskState(unittest.TestCase):
             self.assertEqual(_view.map_task_state(status), "completed", status)
 
     def test_paused_statuses(self):
-        for status in ("stopping", "failed", "stopped", "unknown", "", None):
+        # 只有用户点的暂停（stopped）与未知状态按已暂停画；
+        # failed 不再经过这里——project_tasks 会先把它拦掉。
+        for status in ("stopped", "unknown", "", None):
             self.assertEqual(_view.map_task_state(status), "paused", status)
 
 
@@ -182,8 +211,10 @@ class TestTaskToTorrent(unittest.TestCase):
 
 class TestProjectTasks(unittest.TestCase):
     def test_all_returns_everything(self):
+        # 7 条原始任务，终态失败的 1 条（今天是太阳雨）被拦掉。
         rows = _view.project_tasks(_tasks(), torrent_cls=_Torrent)
-        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(rows), 6)
+        self.assertNotIn("今天是太阳雨", {row.title for row in rows})
 
     def test_downloading_filter(self):
         rows = _view.project_tasks(
@@ -191,12 +222,13 @@ class TestProjectTasks(unittest.TestCase):
         )
         self.assertEqual(
             {row.title for row in rows},
-            {"谷雨", "天使与恶徒", "折月亮", "谷雨 S01E21.mkv"},
+            {"谷雨", "天使与恶徒", "折月亮", "谷雨 S01E21.mkv", "走马上任"},
         )
 
     def test_paused_filter(self):
+        # 只有真正用户暂停的任务进已暂停列表；正在停止的不再算暂停。
         rows = _view.project_tasks(_tasks(), status="paused", torrent_cls=_Torrent)
-        self.assertEqual([row.title for row in rows], ["走马上任"])
+        self.assertEqual([row.title for row in rows], ["学生会也有洞！"])
 
     def test_completed_filter_is_empty_for_live_tasks(self):
         rows = _view.project_tasks(_tasks(), status="completed", torrent_cls=_Torrent)

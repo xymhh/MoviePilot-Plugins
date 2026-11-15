@@ -30,11 +30,18 @@ DOWNLOADER_NAME = "网盘订阅助手"
 DOWNLOADER_TYPE = "CloudSubscribeX"
 
 # 运行时任务里视为“进行中”的状态；其余一律按已暂停展示。
+# stopping 是正在取消的瞬时态（仍在 ACTIVE 里），不是用户暂停，
+# 按“已暂停”画会给一张点“继续”也没用的卡，归进行中。
 _DOWNLOADING_STATUSES = {
     "queued", "running", "downloading", "transferring",
-    "postprocessing", "pending",
+    "postprocessing", "pending", "stopping",
 }
 _COMPLETED_STATUSES = {"completed", "success"}
+# 终态失败不属于下载页：它们归历史记录。下载页的任务模型没有失败态，
+# 一旦投过去就会被 map_task_state 按“已暂停”展示，进度停在失败那一刻，
+# 与历史记录对不上；卡片上的“继续”又是死的（start_torrents 恒 False），
+# 所以 project_tasks 直接把这类任务拦掉。
+_TERMINAL_FAILED_STATUSES = {"failed", "canceled", "aborted", "error"}
 
 
 def task_hash(task_id: str) -> str:
@@ -54,7 +61,9 @@ def map_task_state(status: Any) -> str:
         return "completed"
     if text in _DOWNLOADING_STATUSES:
         return "downloading"
-    # stopping / failed / stopped / 未知：一律按已暂停展示。
+    # stopped（用户点的暂停）/ 未知：一律按已暂停展示。终态失败
+    # （failed / canceled / aborted / error）不由这里处理——
+    # project_tasks 会先把它们拦掉，不让它们上下载页。
     return "paused"
 
 
@@ -517,6 +526,13 @@ def project_tasks(
     for task in tasks:
         task_id = str(task.get("id") or "")
         if not task_id:
+            continue
+        if (
+            str(task.get("status") or "").strip().lower()
+            in _TERMINAL_FAILED_STATUSES
+        ):
+            # 终态失败归历史记录：不进下载页，避免被画成一张
+            # 进度停在失败那一刻的“已暂停”卡片。
             continue
         if wanted is not None and task_hash(task_id) not in wanted:
             continue
