@@ -7,7 +7,6 @@ API 层（RuntimeApi.api_vue_cleanup_residue）与定时任务都调同一个入
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict
 
 from app.log import logger
 

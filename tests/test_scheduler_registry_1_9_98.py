@@ -50,7 +50,7 @@ from plugin_env import (
     install_core_delegation,
     load_module,
 )
-from test_downloader_plugin_1_9_86 import _load_plugin_module, _plugin
+from test_downloader_plugin_1_9_86 import _plugin
 
 
 def _load_scheduler_module():

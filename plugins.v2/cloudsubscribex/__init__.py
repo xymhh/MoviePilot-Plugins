@@ -6,7 +6,6 @@ import ast
 import copy
 import datetime
 import json
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as ThreadEvent, Lock, RLock, local, Thread
 from typing import Optional, Any, List, Dict, Tuple, Callable, Union
@@ -203,7 +202,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.98"
+    plugin_version = "1.9.99"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页

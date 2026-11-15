@@ -25,7 +25,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 from plugin_env import (  # noqa: E402
     ensure_package,
     install_app_mocks,
-    install_core_delegation,
     load_module,
     register_mock,
     register_module,

@@ -5,7 +5,7 @@
 TG 频道测试只做格式 + 账号校验（最小实现），扫描走监控的单频道扫描。
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from app.log import logger
 from app.schemas.types import MediaType
