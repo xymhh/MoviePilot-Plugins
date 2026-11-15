@@ -20,6 +20,7 @@ from ...core import (
     CloudFile,
     OwnerDelegator,
 )
+from ...core.episode_parse import parse_episodes_from_names
 from ...core.share_link import canonicalize_share_url
 from ...drive.scanner import get_driver_definitions
 
@@ -221,6 +222,18 @@ class TransferOpsMixin(OwnerDelegator):
                             parent_task_id=parent_task_id,
                             stop_requested=batch_stop_requested,
                             media_type=getattr(getattr(mediainfo, "type", None), "name", ""),
+                            media={
+                                "tmdb_id": getattr(mediainfo, "tmdb_id", None),
+                                "media_type": getattr(getattr(mediainfo, "type", None), "name", ""),
+                                "season": season,
+                                "year": getattr(mediainfo, "year", None),
+                                "media_title": getattr(mediainfo, "title", ""),
+                                # 目标文件名里有 SxxExx 时直接取集号；裸文件名
+                                # （如 18.mp4）解析不到，靠上层 target_episodes。
+                                "target_episodes": sorted(parse_episodes_from_names(
+                                    [save_target_name], season
+                                )),
+                            },
                         )
                     except Exception as error:
                         if batch_stop_requested():
@@ -530,6 +543,7 @@ class TransferOpsMixin(OwnerDelegator):
             parent_task_id: str = "",
             stop_requested: Optional[Callable[[], bool]] = None,
             media_type: str = "",
+            media: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """转存入口：可选地先走同步作业账本，再执行原转存实现。
 
@@ -540,7 +554,7 @@ class TransferOpsMixin(OwnerDelegator):
         if not bool(getattr(self, "_sync_job_ledger_enabled", False)):
             return self._transfer_file_impl(
                 share_url, file_item, save_path, target_name, source_sha1,
-                parent_task_id, stop_requested, media_type,
+                parent_task_id, stop_requested, media_type, media,
             )
 
         if self._sync_paused():
@@ -612,7 +626,7 @@ class TransferOpsMixin(OwnerDelegator):
         try:
             success = self._transfer_file_impl(
                 share_url, file_item, save_path, target_name, source_sha1,
-                parent_task_id, stop_requested, media_type,
+                parent_task_id, stop_requested, media_type, media,
             )
         except Exception as error:
             heartbeat_stop.set()
@@ -664,6 +678,7 @@ class TransferOpsMixin(OwnerDelegator):
             parent_task_id: str = "",
             stop_requested: Optional[Callable[[], bool]] = None,
             media_type: str = "",
+            media: Optional[Dict[str, Any]] = None,
     ) -> bool:
         should_stop = stop_requested or self._stop_requested
         cloud_resource = self._is_cloud_resource_url(share_url)
@@ -760,10 +775,22 @@ class TransferOpsMixin(OwnerDelegator):
             try:
                 if not parent_task_id:
                     parent_task_id, _ = self._current_task_context()
+                # 媒体身份只做展示用（下载页海报/季集）：显式参数优先，
+                # file_item 里的同名字段次之；无归属订阅的独立任务靠它
+                # 在下载页画出海报，否则只有文件名、没有媒体信息。
+                effective_media = dict(media or {})
+                for key in ("tmdb_id", "media_type", "season", "year", "media_title"):
+                    if effective_media.get(key) in (None, ""):
+                        value = file_item.get(key)
+                        if value not in (None, ""):
+                            effective_media[key] = value
+                if not effective_media.get("media_type") and media_type:
+                    effective_media["media_type"] = media_type
                 task = self._cross_transfer_manager.create_from_cloud_file(
                     source.key, item, self._cloud_drive.key, save_path, target_name,
                     fallback=True,
                     parent_task_id=parent_task_id,
+                    media=effective_media or None,
                 )
                 success = self._cross_transfer_manager.wait(
                     task["id"], cancel_check=should_stop

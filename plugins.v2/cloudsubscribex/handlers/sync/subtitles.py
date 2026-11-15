@@ -464,6 +464,9 @@ class SubtitleService(OwnerDelegator):
                     "md5": subtitle.get("source_md5") or "",
                 }
                 try:
+                    subtitle_mediainfo = self._deserialize_mediainfo(
+                        item.get("mediainfo") or {}
+                    )
                     subtitle["transferred"] = bool(self._transfer_file(
                         subtitle_url,
                         retry_item,
@@ -471,12 +474,15 @@ class SubtitleService(OwnerDelegator):
                         provisional_name,
                         subtitle.get("source_sha1") or "",
                         media_type=str(
-                            getattr(
-                                self._deserialize_mediainfo(item.get("mediainfo") or {}),
-                                "type",
-                                "",
-                            )
+                            getattr(subtitle_mediainfo, "type", "")
                         ),
+                        media={
+                            "tmdb_id": getattr(subtitle_mediainfo, "tmdb_id", None),
+                            "media_type": str(getattr(subtitle_mediainfo, "type", "")),
+                            "season": item.get("season"),
+                            "year": getattr(subtitle_mediainfo, "year", None),
+                            "media_title": getattr(subtitle_mediainfo, "title", ""),
+                        },
                     ))
                     if retry_item.get("staging_name"):
                         subtitle["staging_name"] = retry_item["staging_name"]

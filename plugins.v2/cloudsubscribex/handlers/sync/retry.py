@@ -545,6 +545,20 @@ class HistoryRetryService(OwnerDelegator):
                  "sha1": source_sha1,
                  "md5": record.get("source_md5") or ""},
                 self._cloud_transfer_path, None, source_sha1,
+                media={
+                    "tmdb_id": getattr(mediainfo, "tmdb_id", None),
+                    "media_type": getattr(getattr(mediainfo, "type", None), "name", ""),
+                    "season": season,
+                    "year": getattr(mediainfo, "year", None),
+                    "media_title": getattr(mediainfo, "title", ""),
+                    # 重试知道确切集号：裸文件名（如 18.mp4）解析不出集号，
+                    # 靠这里直传，否则下载页只剩 S01、没有 E18。
+                    "target_episodes": (
+                        [episode]
+                        if mediainfo.type == MediaType.TV and episode
+                        else []
+                    ),
+                },
             )
 
         if not success:

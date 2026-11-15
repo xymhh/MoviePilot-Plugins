@@ -271,10 +271,15 @@
             v-else-if="formSection.groups.length"
             :section="formSection"
             :config="form.config"
-            :options="{}"
+            :options="channelOptions"
             :api="api"
+            :refreshing-accounts="refreshingAccounts"
+            :hdhive-oauth-action="hdhiveOauthAction"
             @notify="notify"
             @test-source="handleFormTestSource"
+            @refresh-account="refreshAccount"
+            @hdhive-oauth-start="startHdhiveOAuth"
+            @hdhive-oauth-exchange="exchangeHdhiveOAuth"
           />
           <v-alert v-else type="info" variant="tonal" density="compact" class="mt-2">
             该搜索渠道没有可配置项，保存后即可参与搜索。
@@ -307,7 +312,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref, watch } from "vue"
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue"
 import { useDisplay } from "vuetify"
 
 import ConfigSection from "../config/ConfigSection.vue"
@@ -353,6 +358,146 @@ const detail = ref(null)
 
 const testingId = ref("")
 const scanningId = ref("")
+
+// 传给 ConfigSection 的账户信息：配置页（Config.vue）用同一份 options
+// 喂 AccountInfo；渠道页之前传的是空对象，account 字段永远显示
+// “账号未连接”，登录状态和账户详情都出不来。这里按需拉取并缓存。
+const channelOptions = reactive({ searchAccounts: {} })
+const refreshingAccounts = ref([])
+const hdhiveOauthAction = ref("")
+let hdhiveOauthWindow = null
+
+function unwrapResponse(raw) {
+  if (raw?.data && typeof raw.data === "object" && "success" in raw.data) {
+    return raw.data
+  }
+  return raw || {}
+}
+
+async function refreshAccount(accountKey, { silent = false } = {}) {
+  const normalizedKey = String(accountKey || "").trim().toLowerCase()
+  if (!normalizedKey || refreshingAccounts.value.includes(normalizedKey)) return
+  refreshingAccounts.value = [...refreshingAccounts.value, normalizedKey]
+  try {
+    const data = await request("post", `plugin/${props.pluginId}/account/refresh`, {
+      key: normalizedKey,
+    })
+    const [category, source] = String(data?.key || normalizedKey).split(":", 2)
+    const account = data?.account && typeof data.account === "object" ? data.account : {}
+    if (category === "search") {
+      channelOptions.searchAccounts = {
+        ...channelOptions.searchAccounts,
+        [source]: account,
+      }
+    }
+    if (!silent) {
+      notify(
+        data?.limited ? "刷新过于频繁，已显示最近一次账户信息" : "账户信息已刷新",
+        data?.limited ? "warning" : "success",
+      )
+    }
+  } catch (error) {
+    if (!silent) notify(`账户信息刷新失败：${error.message || error}`, "error")
+  } finally {
+    refreshingAccounts.value = refreshingAccounts.value.filter((key) => key !== normalizedKey)
+  }
+}
+
+/** 按当前表单的 account 字段拉取账户信息（静默，供打开编辑时调用）。 */
+async function loadChannelAccounts() {
+  const keys = []
+  for (const group of formSection.value.groups || []) {
+    for (const field of group.fields || []) {
+      if (field?.type === "account" && field.accountKey) keys.push(String(field.accountKey))
+    }
+  }
+  for (const key of [...new Set(keys)]) {
+    await refreshAccount(key, { silent: true })
+  }
+}
+
+function hdhiveOAuthPayload() {
+  return {
+    client_id: String(form.config.hdhive_client_id || "").trim(),
+    app_secret: String(form.config.hdhive_api_key || "").trim(),
+    redirect_uri: String(form.config.hdhive_redirect_uri || "").trim(),
+    response_mode: String(form.config.hdhive_response_mode || "redirect").trim(),
+    scope: "query unlock write",
+  }
+}
+
+async function startHdhiveOAuth() {
+  if (hdhiveOauthAction.value) return
+  const oauthPopup = window.open("about:blank", "hdhive-openapi-oauth", "width=560,height=760,noopener=no")
+  hdhiveOauthAction.value = "start"
+  try {
+    const response = unwrapResponse(
+      await props.api.post(`plugin/${props.pluginId}/hdhive/oauth/start`, hdhiveOAuthPayload()),
+    )
+    if (response.success === false) {
+      throw new Error(response.message || "生成 HDHive 授权链接失败")
+    }
+    const data = response.data?.data || response.data || {}
+    if (!data.authorize_url) throw new Error("HDHive 授权链接为空")
+    if (oauthPopup) {
+      oauthPopup.location.href = data.authorize_url
+      hdhiveOauthWindow = oauthPopup
+    } else {
+      window.open(data.authorize_url, "_blank", "noopener,noreferrer")
+    }
+    notify(response.message || "HDHive 授权页已打开")
+  } catch (error) {
+    if (oauthPopup && !oauthPopup.closed) oauthPopup.close()
+    notify(`发起 HDHive 授权失败：${error.message || error}`, "error")
+  } finally {
+    hdhiveOauthAction.value = ""
+  }
+}
+
+async function exchangeHdhiveOAuth(callbackData = {}) {
+  if (hdhiveOauthAction.value) return
+  hdhiveOauthAction.value = "exchange"
+  try {
+    const response = unwrapResponse(
+      await props.api.post(`plugin/${props.pluginId}/hdhive/oauth/exchange`, {
+        ...hdhiveOAuthPayload(),
+        callback: String(form.config.hdhive_oauth_callback || "").trim(),
+        code: String(callbackData.code || "").trim(),
+        state: String(callbackData.state || "").trim(),
+      }),
+    )
+    if (response.success === false) {
+      throw new Error(response.message || "HDHive 用户授权失败")
+    }
+    const data = response.data?.data || response.data || {}
+    form.config.hdhive_access_token = data.access_token || ""
+    form.config.hdhive_refresh_token = data.refresh_token || ""
+    form.config.hdhive_token_expires_at = Number(data.token_expires_at || 0)
+    form.config.hdhive_auth_code = ""
+    form.config.hdhive_oauth_callback = ""
+    if (hdhiveOauthWindow && !hdhiveOauthWindow.closed) hdhiveOauthWindow.close()
+    hdhiveOauthWindow = null
+    notify(data.warning || "HDHive OpenAPI 授权成功，请保存渠道使 Token 生效", data.warning ? "warning" : "success")
+    await refreshAccount("search:hdhive", { silent: true })
+  } catch (error) {
+    notify(`完成 HDHive 授权失败：${error.message || error}`, "error")
+  } finally {
+    hdhiveOauthAction.value = ""
+  }
+}
+
+function handleHdhiveOAuthMessage(event) {
+  if (event.origin !== "https://re0.me") return
+  const payload = event.data
+  if (
+    !payload ||
+    payload.source !== "hdhive-openapi" ||
+    payload.type !== "authorization_response" ||
+    String(payload.client_id || "") !== String(form.config.hdhive_client_id || "")
+  )
+    return
+  void exchangeHdhiveOAuth(payload)
+}
 
 const snack = reactive({ show: false, text: "", color: "success" })
 
@@ -572,6 +717,7 @@ function openCreate() {
   Object.assign(form, next)
   form.config = applySchemaDefaults({}, form.type)
   dialogVisible.value = true
+  void loadChannelAccounts()
 }
 
 function onTypeChange(value) {
@@ -581,6 +727,7 @@ function onTypeChange(value) {
   form.name = typeLabel(value)
   form.config = applySchemaDefaults({}, value)
   form.tg = { channel: "", keywords: "", exclude_keywords: "", scan_limit: 20 }
+  void loadChannelAccounts()
 }
 
 function openEdit(item) {
@@ -601,6 +748,7 @@ function openEdit(item) {
     },
   })
   dialogVisible.value = true
+  void loadChannelAccounts()
 }
 
 function splitList(text) {
@@ -777,6 +925,11 @@ onMounted(() => {
     void load()
     void loadSummary()
   }
+  window.addEventListener("message", handleHdhiveOAuthMessage)
+})
+
+onUnmounted(() => {
+  window.removeEventListener("message", handleHdhiveOAuthMessage)
 })
 </script>
 

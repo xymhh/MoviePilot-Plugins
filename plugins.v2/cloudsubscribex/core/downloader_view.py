@@ -326,7 +326,9 @@ def _task_media(
     )
     media: Dict[str, Any] = {
         "type": media_type,
-        "title": str(task.get("title") or "未命名订阅"),
+        # 独立跨盘任务的 title 是文件名，媒体标题用 media_title（有的话），
+        # 否则海报旁显示的就是文件名。
+        "title": str(task.get("media_title") or task.get("title") or "未命名订阅"),
         "season": season,
         "episode": episode,
         "poster": poster or None,
@@ -338,8 +340,12 @@ def _task_media(
 
 
 def _display_name(task: Dict[str, Any]) -> str:
-    """下载页的显示名称：标题 + 季集（有的话）。"""
-    title = str(task.get("title") or "未命名订阅")
+    """下载页的显示名称：标题 + 季集（有的话）。
+
+    独立跨盘任务的 title 是文件名，卡片标题用媒体标题（有的话），
+    否则下载页上只剩一个文件名、认不出是哪部剧。
+    """
+    title = str(task.get("media_title") or task.get("title") or "未命名订阅")
     season_episode = _season_episode_text(task)
     return f"{title} {season_episode}" if season_episode else title
 

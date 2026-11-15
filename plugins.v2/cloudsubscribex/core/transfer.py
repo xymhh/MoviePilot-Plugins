@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event, Lock, Semaphore, Thread
-from typing import Callable, Mapping, Optional
+from typing import Any, Callable, Dict, Mapping, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -816,6 +816,58 @@ _CACHE_NAME_MAX_CHARS = 120
 _CACHE_FILENAME_MAX_BYTES = 200
 
 
+def _normalize_task_media(media: Any) -> Dict[str, Any]:
+    """规范化跨盘任务的媒体身份，只保留下载页投影认得的字段。
+
+    独立跨盘任务（无归属订阅）此前不带任何媒体信息，下载页拿不到
+    tmdb_id/媒体类型，投影不出海报与季集。调用方把已知的媒体身份
+    传进来，任务字典就带上，下载页直接按 tmdb_id 取海报。
+    """
+    if not isinstance(media, dict):
+        return {}
+    normalized: Dict[str, Any] = {}
+    try:
+        tmdb_id = int(media.get("tmdb_id") or 0)
+    except (TypeError, ValueError):
+        tmdb_id = 0
+    if tmdb_id > 0:
+        normalized["tmdb_id"] = tmdb_id
+    raw_type = getattr(media.get("media_type"), "name", media.get("media_type"))
+    media_type = {
+        "tv": "电视剧", "电视剧": "电视剧",
+        "movie": "电影", "电影": "电影",
+        # str(MediaType.TV) == "MediaType.TV" 时的形态。
+        "mediatype.tv": "电视剧", "mediatype.movie": "电影",
+    }.get(str(raw_type or "").strip().lower())
+    if media_type:
+        normalized["media_type"] = media_type
+    try:
+        season = int(media.get("season") or 0)
+    except (TypeError, ValueError):
+        season = 0
+    if season > 0:
+        normalized["season"] = season
+    try:
+        year = int(str(media.get("year") or "").strip() or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year > 0:
+        normalized["year"] = str(year)
+    title = str(media.get("media_title") or media.get("title") or "").strip()
+    if title:
+        normalized["media_title"] = title
+    episodes = media.get("target_episodes")
+    if isinstance(episodes, (list, tuple, set)):
+        parsed = sorted({
+            int(episode)
+            for episode in episodes
+            if str(episode).isdigit() and int(episode) > 0
+        })
+        if parsed:
+            normalized["target_episodes"] = parsed
+    return normalized
+
+
 class CrossTransferTaskManager:
     """本地中继任务管理器。"""
 
@@ -1334,7 +1386,7 @@ class CrossTransferTaskManager:
     def create(self, source_path: str = "", target_key: str = "", save_path: str = "/",
                target_name: str = "", algorithm: str = "", checksum: str = "",
                fallback: bool = True, source_key: str = "", source_file: CloudFile | None = None,
-               parent_task_id: str = "") -> dict:
+               parent_task_id: str = "", media: Optional[Dict[str, Any]] = None) -> dict:
         source = Path(source_path) if source_path else None
         if source is not None and not source.is_file():
             raise ValueError("源文件不存在或不是文件")
@@ -1374,6 +1426,9 @@ class CrossTransferTaskManager:
             "queued_at": now, "started_at": None, "finished_at": None,
             "updated_at": now, "stop_event": Event(),
         }
+        # 媒体身份只做展示用（下载页海报/季集）：有归属订阅的任务由父任务
+        # 提供，独立任务靠这里带上，否则下载页永远画不出海报。
+        task.update(_normalize_task_media(media))
         with self._lock:
             terminal = [key for key, value in self._tasks.items()
                         if value["status"] not in self.ACTIVE]
@@ -1388,7 +1443,8 @@ class CrossTransferTaskManager:
     def create_from_cloud_file(self, source_key: str, source_file: CloudFile,
                                target_key: str, save_path: str, target_name: str = "",
                                algorithm: str = "", fallback: bool = True,
-                               parent_task_id: str = "") -> dict:
+                               parent_task_id: str = "",
+                               media: Optional[Dict[str, Any]] = None) -> dict:
         selected = algorithm or ""
         if not selected:
             try:
@@ -1402,7 +1458,7 @@ class CrossTransferTaskManager:
             target_key=target_key, save_path=save_path, target_name=target_name,
             algorithm=selected, checksum=checksum, fallback=fallback,
             source_key=source_key, source_file=source_file,
-            parent_task_id=parent_task_id,
+            parent_task_id=parent_task_id, media=media,
         )
 
     def list(self, active_only: bool = False) -> list[dict]:
