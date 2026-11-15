@@ -131,6 +131,9 @@
         :items="overviewGroups"
         :tasks="runtime.tasks"
         :is-subscribe-mode="false"
+        :show-filter-chips="false"
+        :empty-title="overviewEmptyTitle"
+        :empty-hint="overviewEmptyHint"
         :api="api"
         :loading="loading"
         :retrying-key="retryingHistoryKey"
@@ -530,7 +533,13 @@ const {
 
 onMounted(() => {
   void loadSummary()
-  void loadPage(false)
+  // 1.10.5：总览默认看失败记录，首屏就按状态查服务端（含秒传未命中，
+  // 见 overviewStatusesFor）；历史页仍按原来不筛选加载。
+  if (props.mode === "overview") {
+    void updateHistoryQuery({statuses: ["失败", "秒传失败"], page: 1})
+  } else {
+    void loadPage(false)
+  }
   void loadTransferPause()
 })
 onUnmounted(() => {
@@ -542,7 +551,35 @@ function handleStatSelect(stat) {
   historyStatuses.value = filter ? [filter] : []
   // 总览页用同一过滤切转存动态；历史页用 historyStatuses 过滤表格。
   overviewFilter.value = filter
+  // 1.10.5：总览默认只拉第 1 页（最新 10 组）再在前端过滤，失败分组不在
+  // 这 10 组里就永远显示不出。过滤改走服务端状态查询。
+  void updateHistoryQuery({
+    statuses: filter ? overviewStatusesFor(filter) : [],
+    page: 1,
+  })
 }
+
+// 1.10.5：总览的“失败”要含秒传未命中——它在后端是独立的伪状态
+// “秒传失败”，只查“失败”会漏掉它；统计卡的失败数是两类之和。
+function overviewStatusesFor(filter) {
+  if (filter === "失败") return ["失败", "秒传失败"]
+  return [filter]
+}
+
+const overviewEmptyTitle = computed(() =>
+  overviewFilter.value === "失败"
+    ? "暂无失败记录"
+    : overviewFilter.value === "成功"
+      ? "暂无成功记录"
+      : "暂无转存记录",
+)
+const overviewEmptyHint = computed(() =>
+  overviewFilter.value === "失败"
+    ? "失败的转存会出现在这里，可直接重试"
+    : overviewFilter.value === "成功"
+      ? "成功的转存会出现在这里"
+      : "转存记录会出现在这里",
+)
 
 const overviewListTitle = computed(() =>
   overviewFilter.value === "失败"

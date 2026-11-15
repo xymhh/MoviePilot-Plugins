@@ -7,6 +7,7 @@ import {createSearchSection} from "./fields/search/index.js";
 import {createTransferSection} from "./fields/transfer.js";
 import {createUpgradeSection} from "./fields/upgrade.js";
 import {createSubscribeSection} from "./fields/subscribe.js";
+import {createSubsourcesSection} from "./fields/subsources.js";
 import {createCheckinSection} from "./fields/checkin.js";
 import {createTgMonitorSection} from "./fields/tg.js";
 import {createStrmSection} from "./fields/strm.js";
@@ -23,6 +24,9 @@ export function createConfigSections(options, config = {}) {
     createTransferSection(options),
     createOrganizeSection(),
     createSubscribeSection(options),
+    // 1.10.5：榜单源（豆瓣/猫眼/TMDB/Mikan/Bangumi/AniList/Netflix）
+    // 从“榜单订阅”拆成独立分组，订阅只留运行设置与代理。
+    createSubsourcesSection(),
     createCheckinSection(options),
     createTgMonitorSection(),
     createStrmSection(),

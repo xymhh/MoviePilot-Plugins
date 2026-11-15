@@ -1011,6 +1011,7 @@ const qrVisible = ref(false),
 let previewRequestId = 0
 const options = reactive({
   sections: [],
+  defaults: {},
   subscribes: [],
   mediaservers: [],
   mediaLibraryWebhookUrls: {},
@@ -1144,7 +1145,7 @@ const navGroups = computed(() => {
   const groups = [
     {
       name: "核心配置",
-      items: ["basic", "transfer", "organize", "subscribe", "upgrade"]
+      items: ["basic", "transfer", "organize", "subscribe", "subsources", "upgrade"]
         .map((v) => map.get(v)).filter(Boolean),
     },
     {
@@ -1272,7 +1273,10 @@ const sourceNames = computed(() => {
 });
 
 const autoSubscribeProviderNames = computed(() => {
-  const subSec = allSections.value.find((s) => s.value === "subscribe");
+  // 1.10.5：榜单源已从“榜单订阅”拆到独立分组“订阅源”。
+  const subSec =
+    allSections.value.find((s) => s.value === "subsources") ||
+    allSections.value.find((s) => s.value === "subscribe");
   const result = {}
   ;(subSec?.subtabs || []).forEach((t) => {
     if (t.value && t.value !== "global") result[t.value] = `${t.title}榜单`;
@@ -1304,6 +1308,12 @@ function applyOptions(data) {
   Object.entries(data.defaults || {}).forEach(([key, value]) => {
     if (!(key in config)) config[key] = value
   })
+  // 1.10.5：把后端默认值表留下来，供 ConfigSection 的“恢复默认值”
+  // 与分组“有修改”圆点用（以前 options.defaults 从没赋值过，恢复时
+  // 只能按类型猜默认值，文本框会被错恢复成空串）。
+  if (data.defaults && typeof data.defaults === "object") {
+    options.defaults = data.defaults
+  }
   if ("sections" in data && Array.isArray(data.sections)) {
     options.sections = data.sections;
   }

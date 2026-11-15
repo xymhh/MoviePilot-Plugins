@@ -356,26 +356,32 @@ class HistoryRepository(DbOper):
             HistoryRecord.payload, "$.failure_kind"
         )
         pseudo_kinds = {KIND_CHECKSUM_MISS}
-        if plain_statuses:
-            if "失败" in plain_statuses and pseudo_kinds:
-                # 「失败」不含细分的伪状态（如「秒传失败」），它们各有独立选项。
-                plain_statuses.discard("失败")
-                filters.append(and_(
-                    func.lower(HistoryRecord.status) == "失败",
-                    or_(
-                        failure_kind_expr.is_(None),
-                        failure_kind_expr.not_in(sorted(pseudo_kinds)),
-                    ),
-                ))
-            if plain_statuses:
-                filters.append(
-                    func.lower(HistoryRecord.status).in_(plain_statuses)
-                )
+        failure_branches = []
+        if "失败" in plain_statuses and pseudo_kinds:
+            # 「失败」不含细分的伪状态（如「秒传失败」），它们各有独立选项。
+            plain_statuses.discard("失败")
+            failure_branches.append(and_(
+                func.lower(HistoryRecord.status) == "失败",
+                or_(
+                    failure_kind_expr.is_(None),
+                    failure_kind_expr.not_in(sorted(pseudo_kinds)),
+                ),
+            ))
         for kind in sorted(wanted_kinds):
-            filters.append(and_(
+            failure_branches.append(and_(
                 func.lower(HistoryRecord.status) == "失败",
                 failure_kind_expr == kind,
             ))
+        if len(failure_branches) > 1:
+            # 1.10.5：同时勾选「失败」与「秒传失败」时按并集查；以前两个
+            # 条件是 AND 拼在一起，结果恒为空，什么都查不到。
+            filters.append(or_(*failure_branches))
+        elif failure_branches:
+            filters.append(failure_branches[0])
+        if plain_statuses:
+            filters.append(
+                func.lower(HistoryRecord.status).in_(plain_statuses)
+            )
         if normalized_task_types:
             filters.append(or_(*[
                 HistoryRecord.task_types.like(f"%|{value}|%")

@@ -2,7 +2,7 @@
   <div class="media-hub-root">
     <!-- 顶部工具栏：快速搜索 + 订阅状态筛选 -->
     <div class="hub-toolbar d-flex flex-wrap align-center justify-space-between ga-2 mb-4">
-      <div class="hub-filter-chips d-flex align-center ga-1 flex-wrap">
+      <div v-if="showFilterChips" class="hub-filter-chips d-flex align-center ga-1 flex-wrap">
         <v-chip-group v-model="filterStatus" mandatory selected-class="text-primary font-weight-bold">
           <v-chip value="all" size="small" variant="tonal">全部订阅 ({{ filteredGroups.length }})</v-chip>
           <v-chip value="missing" size="small" variant="tonal" color="warning">
@@ -42,7 +42,7 @@
     </div>
 
     <!-- 追更日历：未来 7 天待更新，点某天只看当天要播的剧（独立一行，手机上横向滑动） -->
-    <div v-if="hasTvGroups" class="release-strip">
+    <div v-if="isSubscribeMode && hasTvGroups" class="release-strip">
       <span class="release-strip-title">追更日历</span>
       <div class="release-days">
         <button
@@ -68,8 +68,12 @@
     <!-- 空数据提示 -->
     <div v-else-if="!displayedGroups.length" class="empty-state text-center py-12">
       <v-icon icon="mdi-filmstrip-off" size="56" color="medium-emphasis" class="mb-2" />
-      <div class="text-body-1 font-weight-medium">暂无匹配的追更订阅</div>
-      <div class="text-caption text-medium-emphasis mt-1">请先在 MoviePilot 添加订阅，或通过右上角「手动添加」</div>
+      <div class="text-body-1 font-weight-medium">
+        {{ searchKeyword.trim() ? "没有匹配的记录" : emptyTitle }}
+      </div>
+      <div class="text-caption text-medium-emphasis mt-1">
+        {{ searchKeyword.trim() ? "换个关键词试试" : emptyHint }}
+      </div>
     </div>
 
     <!-- 订阅进度卡片网格：内容优先，海报主导，信息四层递减 -->
@@ -175,6 +179,11 @@ const props = defineProps({
   loading: { type: Boolean, default: false },
   retryingKey: { type: String, default: "" },
   api: { type: Object, default: null },
+  // 1.10.5：总览模式下 items 是转存记录分组，不是订阅分组——订阅口径的
+  // 筛选 chips（全部订阅/有缺集待补/正在转存）与追更日历都不适用，隐藏。
+  showFilterChips: { type: Boolean, default: true },
+  emptyTitle: { type: String, default: "暂无匹配的追更订阅" },
+  emptyHint: { type: String, default: "请先在 MoviePilot 添加订阅，或通过右上角「手动添加」" },
 })
 
 defineEmits(["refresh", "retry", "retry-failed", "delete"])

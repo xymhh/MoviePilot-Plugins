@@ -97,9 +97,25 @@
     <div class="config-section-scroll">
       <transition name="tab-fade" mode="out-in">
         <div :key="activeSubtab || 'main'" class="subtab-pane">
+          <!-- 1.10.5：分组折叠。默认只展开首组与有修改的组，点标题切换。 -->
+          <div v-if="visibleGroups.length > 1" class="group-fold-toolbar">
+            <span class="group-fold-count">{{ visibleGroups.length }} 组</span>
+            <div class="group-fold-actions">
+              <button type="button" class="group-fold-btn" @click="expandAllGroups">全部展开</button>
+              <button type="button" class="group-fold-btn" @click="collapseAllGroups">全部收起</button>
+            </div>
+          </div>
           <template v-for="(group, index) in visibleGroups" :key="group.title">
             <section class="config-group">
-              <div v-if="!group.hideHeading" class="group-heading d-flex align-center justify-space-between">
+              <div
+                v-if="!group.hideHeading"
+                class="group-heading group-heading--collapsible d-flex align-center justify-space-between"
+                role="button"
+                tabindex="0"
+                :aria-expanded="isGroupExpanded(group)"
+                @click="toggleGroup(group)"
+                @keydown.enter.prevent="toggleGroup(group)"
+                @keydown.space.prevent="toggleGroup(group)">
                 <div class="d-flex align-center min-w-0 flex-grow-1">
                   <v-icon :icon="group.icon" color="primary" size="small" class="group-heading-icon" />
                   <div class="group-heading-content">
@@ -111,20 +127,28 @@
                 </span>
                   </div>
                 </div>
-                <v-btn
-                  v-if="index === 0 && canResetCurrentSubtab"
-                  variant="tonal"
-                  size="x-small"
-                  color="error"
-                  prepend-icon="mdi-restore"
-                  class="subtab-reset-btn ml-2 flex-shrink-0"
-                  :title="`仅恢复当前【${currentSubtabTitle}】配置项为默认值`"
-                  @click="promptResetSubtab">
-                  恢复默认值
-                </v-btn>
+                <div class="group-heading-right d-flex align-center ga-1 flex-shrink-0">
+                  <span v-if="groupHasChanges(group)" class="group-modified-dot" title="本组有修改" />
+                  <span class="group-field-count">{{ (group.fields || []).length }} 项</span>
+                  <v-btn
+                    v-if="index === 0 && canResetCurrentSubtab"
+                    variant="tonal"
+                    size="x-small"
+                    color="error"
+                    prepend-icon="mdi-restore"
+                    class="subtab-reset-btn ml-2 flex-shrink-0"
+                    :title="`仅恢复当前【${currentSubtabTitle}】配置项为默认值`"
+                    @click.stop="promptResetSubtab">
+                    恢复默认值
+                  </v-btn>
+                  <v-icon
+                    :icon="isGroupExpanded(group) ? 'mdi-chevron-down' : 'mdi-chevron-right'"
+                    size="18"
+                    class="group-fold-chevron" />
+                </div>
           </div>
 
-              <v-row dense class="config-fields-row">
+              <v-row v-show="isGroupExpanded(group)" dense class="config-fields-row">
             <template v-for="field in group.fields" :key="field.key">
               <v-col
                 v-if="evalShowCondition(field.show, config) && !isFieldEmbedded(group, field)"
@@ -644,24 +668,7 @@ function executeResetSubtab() {
 
   let count = 0;
   fieldsToReset.forEach((field) => {
-    let defVal = field.default;
-    if (defVal === undefined || defVal === null) {
-      defVal = props.options?.defaults?.[field.key];
-    }
-    if (defVal === undefined || defVal === null) {
-      if (field.type === "switch") defVal = false;
-      else if (field.type === "number") defVal = field.min ?? 0;
-      else if (field.type === "cloud-directory") defVal = "/";
-      else if (field.type === "select" && Array.isArray(field.options) && field.options.length) {
-        defVal = field.options[0].value;
-      } else if (["priority-order", "tags", "channels", "plugins"].includes(field.type)) {
-        defVal = [];
-      } else if (field.type === "online-documents") {
-        defVal = [{url: "", resource_types: []}];
-      } else {
-        defVal = "";
-      }
-    }
+    const defVal = fieldDefaultValue(field);
     props.config[field.key] = JSON.parse(JSON.stringify(defVal));
     count++;
   });
@@ -802,6 +809,7 @@ function onSubtabClick(val, event) {
 onMounted(() => {
   nextTick(() => {
     updateScrollState();
+    seedExpandedGroups();
     window.addEventListener("resize", updateScrollState);
   });
 });
@@ -877,6 +885,146 @@ const visibleGroups = computed(() => {
     (group) => !group.beforeTabs && (!props.section.subtabs?.length || !group.tab || group.tab === activeSubtab.value),
   )
   return [...leadingGroups, ...tabGroups]
+})
+
+// ---------------------------------------------------------------- 分组折叠（1.10.5）
+// 展开状态按分组标题记在 localStorage（按 section 区分）；没存过时默认
+// 展开首组与有修改的组；首次切进某个 subtab 时若该 tab 一组都没展开，
+// 也先展开首组（之后完全按用户手动折叠的选择来）。
+const GROUP_FOLD_STORAGE_PREFIX = "csx-config-expanded-groups:"
+const expandedGroups = ref(new Set())
+const visitedSubtabs = ref(new Set())
+
+function groupFoldStorageKey() {
+  return `${GROUP_FOLD_STORAGE_PREFIX}${props.section?.value || "main"}`
+}
+
+function readStoredFoldState() {
+  try {
+    const raw = window.localStorage.getItem(groupFoldStorageKey())
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((t) => typeof t === "string") : null
+  } catch {
+    return null
+  }
+}
+
+function saveFoldState() {
+  try {
+    window.localStorage.setItem(groupFoldStorageKey(), JSON.stringify([...expandedGroups.value]))
+  } catch {
+    // 隐私模式等写不进 localStorage 时只记内存状态。
+  }
+}
+
+function seedExpandedGroups() {
+  const stored = readStoredFoldState()
+  const next = new Set(stored || [])
+  if (!stored) {
+    const visible = visibleGroups.value
+    if (visible.length) next.add(visible[0].title)
+    for (const group of visible) {
+      if (groupHasChanges(group)) next.add(group.title)
+    }
+  }
+  expandedGroups.value = next
+  visitedSubtabs.value = new Set([activeSubtab.value || "main"])
+}
+
+function isGroupExpanded(group) {
+  return expandedGroups.value.has(group?.title)
+}
+
+function toggleGroup(group) {
+  if (!group?.title) return
+  const next = new Set(expandedGroups.value)
+  if (next.has(group.title)) next.delete(group.title)
+  else next.add(group.title)
+  expandedGroups.value = next
+  saveFoldState()
+}
+
+function expandAllGroups() {
+  expandedGroups.value = new Set(visibleGroups.value.map((g) => g.title))
+  saveFoldState()
+}
+
+function collapseAllGroups() {
+  expandedGroups.value = new Set()
+  saveFoldState()
+}
+
+function ensureFirstGroupExpanded() {
+  const key = activeSubtab.value || "main"
+  if (visitedSubtabs.value.has(key)) return
+  visitedSubtabs.value.add(key)
+  const visible = visibleGroups.value
+  if (!visible.length) return
+  if (visible.some((g) => isGroupExpanded(g))) return
+  const next = new Set(expandedGroups.value)
+  next.add(visible[0].title)
+  expandedGroups.value = next
+}
+
+// 字段默认值：字段定义优先，其次后端下发的默认值表（Config.vue 的
+// applyOptions 会把 ui_options 的 defaults 存进 options.defaults），
+// 都没有再按类型兜底。恢复默认值与“有修改”圆点共用同一口径。
+function fieldDefaultValue(field) {
+  let defVal = field.default;
+  if (defVal === undefined || defVal === null) {
+    defVal = props.options?.defaults?.[field.key];
+  }
+  if (defVal === undefined || defVal === null) {
+    if (field.type === "switch") defVal = false;
+    else if (field.type === "number") defVal = field.min ?? 0;
+    else if (field.type === "cloud-directory") defVal = "/";
+    else if (field.type === "select" && Array.isArray(field.options) && field.options.length) {
+      defVal = field.options[0].value;
+    } else if (["priority-order", "tags", "channels", "plugins"].includes(field.type)) {
+      defVal = [];
+    } else if (field.type === "online-documents") {
+      defVal = [{url: "", resource_types: []}];
+    } else {
+      defVal = "";
+    }
+  }
+  return defVal;
+}
+
+// 按钮/信息类字段没有可比的值，不计入“有修改”。
+const NON_VALUE_FIELD_TYPES = new Set([
+  "account", "test-source", "test-auto-subscribe", "hdhive-oauth",
+  "info", "checkin-timeline", "media-library-webhook", "cleanup-residue",
+])
+
+function isFieldChanged(field) {
+  if (!field?.key || NON_VALUE_FIELD_TYPES.has(field.type)) return false
+  const current = props.config[field.key]
+  if (current === undefined || current === null) return false
+  try {
+    return JSON.stringify(current) !== JSON.stringify(fieldDefaultValue(field))
+  } catch {
+    return current !== fieldDefaultValue(field)
+  }
+}
+
+function groupHasChanges(group) {
+  return (group?.fields || []).some((field) => isFieldChanged(field))
+}
+
+watch(
+  () => props.section?.value,
+  () => {
+    nextTick(() => seedExpandedGroups())
+  },
+)
+
+watch(activeSubtab, () => {
+  nextTick(() => {
+    updateScrollState()
+    ensureFirstGroupExpanded()
+  })
 })
 
 function mediaLibraryWebhookUrl(field, serverName) {
@@ -1240,6 +1388,79 @@ function mediaLibraryWebhookUrl(field, serverName) {
   gap: 8px;
   margin-bottom: 12px;
   padding-bottom: 2px;
+}
+
+/* 1.10.5：分组折叠。标题整行可点，展开/收起；有修改的组标题旁有圆点。 */
+.group-heading--collapsible {
+  cursor: pointer;
+  border-radius: 8px;
+  padding: 4px 6px;
+  margin-inline: -6px;
+}
+
+.group-heading--collapsible:hover {
+  background: rgba(var(--v-theme-on-surface), 0.04);
+}
+
+.group-heading--collapsible:focus-visible {
+  outline: 2px solid rgba(var(--v-theme-primary), 0.5);
+  outline-offset: 1px;
+}
+
+.group-heading-right {
+  min-width: 0;
+}
+
+.group-modified-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(var(--v-theme-primary));
+  flex-shrink: 0;
+}
+
+.group-field-count {
+  font-size: 0.75rem;
+  color: rgba(var(--v-theme-on-surface), 0.5);
+  white-space: nowrap;
+}
+
+.group-fold-chevron {
+  color: rgba(var(--v-theme-on-surface), 0.55);
+  flex-shrink: 0;
+  transition: transform 0.2s ease;
+}
+
+.group-fold-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.group-fold-count {
+  font-size: 0.75rem;
+  color: rgba(var(--v-theme-on-surface), 0.5);
+}
+
+.group-fold-actions {
+  display: flex;
+  gap: 2px;
+}
+
+.group-fold-btn {
+  border: none;
+  background: transparent;
+  color: rgb(var(--v-theme-primary));
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.group-fold-btn:hover {
+  background: rgba(var(--v-theme-primary), 0.08);
 }
 
 .group-heading-icon {
