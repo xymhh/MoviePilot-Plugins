@@ -1,0 +1,215 @@
+"""1.10.3：插件 UI 按流程复用 MP 界面，无法复用的新建导航。
+
+- 追更列表走 MP 订阅页、网盘资源走 MP 探索页：插件主页瘦成总览
+  （PluginWorkbench mode="overview"：统计 + 转存动态），不再有页签；
+- 历史记录没有 MP 代替：独立成主侧栏导航（history），实现仍是
+  PluginWorkbench（mode="history"），与总览共用同一份逻辑；
+- 网盘整理没有 MP 界面：独立成主侧栏导航（organize，OrganizePanel）；
+- 频道监控与签到状态并进渠道页（AppPageChannels）；
+- 网盘资源页与 resource/ 组件、useMediaData/useMediaDetail/
+  useResourcePreview 一并删除；
+- 配置页默认只露常用 6 组，其余 6 组折叠进高级设置（本地记忆开关）。
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import sys
+import unittest
+from types import SimpleNamespace
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+
+from plugin_env import OwnerDelegator, ensure_package, load_module  # noqa: E402
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+VALID_SECTIONS = {"start", "discovery", "subscribe", "organize", "system"}
+VALID_PERMISSIONS = {"subscribe", "discovery", "search", "manage", "admin"}
+
+
+def _load_registration_module():
+    """打桩后加载真实的 registration.py（只加载一次）。"""
+    module = sys.modules.get("cloudsubscribex.core.api.registration")
+    if isinstance(getattr(module, "MoviePilotRegistration", None), type):
+        return module
+    for name in (
+        "app", "app.core", "app.core.config", "app.core.security",
+        "app.log", "app.schemas", "app.schemas.types", "app.utils",
+        "app.utils.timer", "pytz",
+        "apscheduler", "apscheduler.triggers",
+        "apscheduler.triggers.combining", "apscheduler.triggers.cron",
+        "apscheduler.triggers.date", "fastapi",
+    ):
+        ensure_package(name)
+    delegation = ensure_package("cloudsubscribex.core.delegation")
+    delegation.OwnerDelegator = OwnerDelegator
+    ensure_package("cloudsubscribex.core.agent")
+    ensure_package("cloudsubscribex.core.config")
+    ensure_package("cloudsubscribex.core.api")
+    ensure_package("cloudsubscribex.core.api.emby_proxy")
+    return load_module(
+        "cloudsubscribex.core.api.registration",
+        "plugins.v2/cloudsubscribex/core/api/registration.py",
+    )
+
+
+def _registration(enabled=True, show_sidebar_nav=True):
+    module = _load_registration_module()
+    owner = SimpleNamespace(_enabled=enabled, _show_sidebar_nav=show_sidebar_nav)
+    return module.MoviePilotRegistration(owner)
+
+
+def _read(rel_path: str) -> str:
+    with open(os.path.join(REPO_ROOT, rel_path), encoding="utf-8") as f:
+        return f.read()
+
+
+def _exists(rel_path: str) -> bool:
+    return os.path.exists(os.path.join(REPO_ROOT, rel_path))
+
+
+class TestSidebarNavRestructure(unittest.TestCase):
+    def test_history_and_organize_entries_declared(self):
+        nav = _registration().get_sidebar_nav()
+        by_key = {item["nav_key"]: item for item in nav}
+        self.assertEqual(
+            [item["nav_key"] for item in nav],
+            ["channels", "history", "organize"],
+        )
+        history = by_key["history"]
+        self.assertEqual(history["title"], "转存记录")
+        self.assertEqual(history["section"], "system")
+        self.assertEqual(history["permission"], "manage")
+        self.assertEqual(history["order"], 31)
+        self.assertTrue(str(history["icon"]).startswith("mdi-"))
+        organize = by_key["organize"]
+        self.assertEqual(organize["title"], "网盘整理")
+        self.assertEqual(organize["section"], "system")
+        self.assertEqual(organize["permission"], "manage")
+        self.assertEqual(organize["order"], 32)
+        self.assertTrue(str(organize["icon"]).startswith("mdi-"))
+
+    def test_all_entries_in_host_whitelist(self):
+        nav = _registration().get_sidebar_nav()
+        for item in nav:
+            self.assertIn(item["section"], VALID_SECTIONS)
+            self.assertIn(item["permission"], VALID_PERMISSIONS)
+
+    def test_disabled_plugin_returns_empty(self):
+        self.assertEqual(_registration(enabled=False).get_sidebar_nav(), [])
+
+    def test_sidebar_switch_off_returns_empty(self):
+        self.assertEqual(
+            _registration(show_sidebar_nav=False).get_sidebar_nav(), []
+        )
+
+
+class TestWorkbenchThinShells(unittest.TestCase):
+    def test_workbench_is_the_only_implementation(self):
+        source = _read(
+            "frontend/cloudsubscribex/src/components/PluginWorkbench.vue"
+        )
+        self.assertIn("StatsGrid", source)
+        self.assertIn("MediaHub", source)
+        self.assertIn("HistoryTable", source)
+        self.assertNotIn("<v-tab", source)
+        self.assertNotIn("TgMonitor", source)
+        self.assertNotIn("OrganizePanel", source)
+        self.assertIn('mode: { type: String, default: "overview" }', source)
+        self.assertIn("overviewGroups", source)
+        self.assertIn("overviewFilter", source)
+
+    def test_app_page_is_overview_shell(self):
+        source = _read("frontend/cloudsubscribex/src/components/AppPage.vue")
+        self.assertIn("PluginWorkbench", source)
+        self.assertIn('mode="overview"', source)
+        self.assertNotIn("<v-tab", source)
+        self.assertNotIn("MediaHub", source)
+        self.assertNotIn("HistoryTable", source)
+
+    def test_app_history_is_history_shell(self):
+        source = _read(
+            "frontend/cloudsubscribex/src/components/AppPageHistory.vue"
+        )
+        self.assertIn("PluginWorkbench", source)
+        self.assertIn('mode="history"', source)
+        self.assertNotIn("<v-tab", source)
+
+    def test_app_organize_mounts_organize_panel(self):
+        source = _read(
+            "frontend/cloudsubscribex/src/components/AppPageOrganize.vue"
+        )
+        self.assertIn("OrganizePanel", source)
+        self.assertNotIn("<v-tab", source)
+
+    def test_channels_page_absorbs_tg_monitor_and_checkin(self):
+        source = _read(
+            "frontend/cloudsubscribex/src/components/AppPageChannels.vue"
+        )
+        self.assertIn("ChannelManager", source)
+        self.assertIn("TgMonitor", source)
+        self.assertIn("CheckinDashboard", source)
+        self.assertNotIn("<v-tab", source)
+
+    def test_vite_exposes_new_pages_not_resource(self):
+        vite = _read("frontend/cloudsubscribex/vite.config.js")
+        self.assertIn(
+            '"./AppPageHistory": "./src/components/AppPageHistory.vue"',
+            vite,
+        )
+        self.assertIn(
+            '"./AppPageOrganize": "./src/components/AppPageOrganize.vue"',
+            vite,
+        )
+        self.assertNotIn("AppPageResource", vite)
+
+    def test_resource_page_and_components_deleted(self):
+        self.assertFalse(
+            _exists(
+                "frontend/cloudsubscribex/src/components/AppPageResource.vue"
+            )
+        )
+        self.assertFalse(
+            _exists("frontend/cloudsubscribex/src/components/resource")
+        )
+        for composable in (
+            "useMediaData.js",
+            "useMediaDetail.js",
+            "useResourcePreview.js",
+        ):
+            self.assertFalse(
+                _exists(
+                    f"frontend/cloudsubscribex/src/composables/{composable}"
+                )
+            )
+
+
+class TestConfigAdvancedFolding(unittest.TestCase):
+    def test_advanced_sections_flagged_in_fields(self):
+        source = _read("frontend/cloudsubscribex/src/config/fields.js")
+        self.assertIn("ADVANCED_SECTIONS", source)
+        for value in ("organize", "checkin", "strm", "emby", "drive", "upgrade"):
+            self.assertIn(f'"{value}"', source)
+        for value in ("basic", "transfer", "subscribe", "search", "tg", "notify"):
+            self.assertNotIn(f'"{value}"', source.split("ADVANCED_SECTIONS")[1])
+
+    def test_config_filters_advanced_and_wizard_reads_all(self):
+        source = _read("frontend/cloudsubscribex/src/components/Config.vue")
+        self.assertIn("allSections", source)
+        self.assertIn("showAdvanced", source)
+        self.assertIn("csx-config-show-advanced", source)
+        self.assertIn("显示高级设置", source)
+        # 向导按 key 取字段必须读全量，否则落地位置那步取不到 organize 字段。
+        pick = re.search(
+            r"function pickFields\(keys\) \{.*?for \(const section of (\w+)\.value",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(pick)
+        self.assertEqual(pick.group(1), "allSections")
+
+
+if __name__ == "__main__":
+    unittest.main()

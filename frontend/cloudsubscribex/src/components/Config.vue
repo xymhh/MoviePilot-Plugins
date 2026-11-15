@@ -93,6 +93,15 @@
               </div>
             </template>
           </nav>
+          <!-- 1.10.3：高级设置折叠开关（默认只露常用 6 组） -->
+          <div class="sidebar-advanced-toggle">
+            <v-switch
+              v-model="showAdvanced"
+              density="compact"
+              hide-details
+              color="primary"
+              label="显示高级设置" />
+          </div>
           <!-- 电脑端左下角全高状态看板卡片（排版饱满高级，不显空旷） -->
           <div class="sidebar-footer">
             <div class="sidebar-status-panel">
@@ -915,6 +924,22 @@ const isMobile = computed(() => (display?.smAndDown?.value ?? false) || (typeof 
 const config = reactive(JSON.parse(JSON.stringify(props.initialConfig || {})))
 const activeTab = ref("basic")
 
+// 1.10.3：高级设置默认折叠（本地记忆开关）；只影响导航展示，不影响保存与向导取字段。
+const SHOW_ADVANCED_KEY = "csx-config-show-advanced";
+const showAdvanced = ref(false);
+try {
+  showAdvanced.value = window.localStorage?.getItem(SHOW_ADVANCED_KEY) === "1";
+} catch {}
+watch(showAdvanced, (value) => {
+  try {
+    window.localStorage?.setItem(SHOW_ADVANCED_KEY, value ? "1" : "0");
+  } catch {}
+  const visible = sections.value || [];
+  if (!visible.some((s) => s.value === activeTab.value) && visible[0]) {
+    activeTab.value = visible[0].value;
+  }
+});
+
 function onNavClick(val, event) {
   activeTab.value = val;
   if (event?.currentTarget) {
@@ -1005,7 +1030,8 @@ const options = reactive({
   rsshubInstances: [],
   rsshubLoading: false,
 })
-const sections = computed(() => createConfigSections(options, config))
+const allSections = computed(() => createConfigSections(options, config))
+const sections = computed(() => (allSections.value || []).filter((s) => showAdvanced.value || !s.advanced))
 
 // ---------------------------------------------------------------- 配置向导
 // 只做「必填三件事」：选网盘并登录 → 落地目录 → 保存并体检。
@@ -1019,7 +1045,7 @@ const wizardDoctorLoading = ref(false)
 function pickFields(keys) {
   const wanted = new Set(keys)
   const picked = []
-  for (const section of sections.value || []) {
+  for (const section of allSections.value || []) {
     for (const group of section.groups || []) {
       for (const field of group.fields || []) {
         if (field?.key && wanted.has(field.key)) picked.push(field)
@@ -1237,7 +1263,7 @@ const filteredTestItems = computed(() => {
 })
 
 const sourceNames = computed(() => {
-  const searchSec = sections.value.find((s) => s.value === "search");
+  const searchSec = allSections.value.find((s) => s.value === "search");
   const result = {}
   ;(searchSec?.subtabs || []).forEach((t) => {
     if (t.value && t.value !== "common") result[t.value] = t.title;
@@ -1246,7 +1272,7 @@ const sourceNames = computed(() => {
 });
 
 const autoSubscribeProviderNames = computed(() => {
-  const subSec = sections.value.find((s) => s.value === "subscribe");
+  const subSec = allSections.value.find((s) => s.value === "subscribe");
   const result = {}
   ;(subSec?.subtabs || []).forEach((t) => {
     if (t.value && t.value !== "global") result[t.value] = `${t.title}榜单`;
@@ -2580,6 +2606,16 @@ watch(
 }
 
 /* 左下角全高状态看板卡片（占满下方空白，排版饱满高级） */
+.sidebar-advanced-toggle {
+  flex: 0 0 auto;
+  padding: 4px 16px 8px;
+  border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+}
+
+.sidebar-advanced-toggle :deep(.v-switch) {
+  font-size: 0.85rem;
+}
+
 .sidebar-footer {
   flex: 1 1 auto;
   display: flex;

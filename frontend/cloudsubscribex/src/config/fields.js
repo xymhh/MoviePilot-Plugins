@@ -15,6 +15,9 @@ import {createEmbyProxySection} from "./fields/emby.js";
 export function createConfigSections(options, config = {}) {
   const cloudDriveItems = createCloudDriveItems(options);
   const resourceTypeItems = createResourceTypeItems(options, config);
+  // 1.10.3：配置页默认只露常用 6 组；其余 6 组折叠进“高级设置”。
+  // 向导按 key 取字段时读全量（见 Config.vue 的 allSections），不受折叠影响。
+  const ADVANCED_SECTIONS = new Set(["organize", "checkin", "strm", "emby", "drive", "upgrade"]);
   return [
     createBasicSection(cloudDriveItems, options),
     createTransferSection(options),
@@ -28,5 +31,5 @@ export function createConfigSections(options, config = {}) {
     createSearchSection(resourceTypeItems, options),
     createUpgradeSection(options),
     createNotifySection(options),
-  ]
+  ].map((section) => ({ ...section, advanced: ADVANCED_SECTIONS.has(section.value) }));
 }

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""校验前端单入口：AppPage 是唯一实现，Page 只做转发。
+"""校验前端入口：PluginWorkbench 是唯一实现，AppPage/AppPageHistory 只做薄壳转发。
 
-背景（1.7.90）：MoviePilot `nav_key=main` 先加载 `./AppPage`，`./Page` 仅作
-fallback。此前两个组件各维护一份模板与逻辑，2026-10-27 出现「频道监控」
-页签只在 Page.vue 里、侧边栏进入看不到的分叉事故。
+背景（1.10.3）：插件 UI 按流程复用 MP 界面——
+- 插件主页（AppPage）瘦成总览：统计 + 转存动态，不再有页签；
+- 转存记录（AppPageHistory）与网盘整理（AppPageOrganize）独立成主侧栏导航；
+- 频道监控与签到并进渠道页（AppPageChannels）；
+- 网盘资源页（AppPageResource）删除，走 MP 探索页；追更列表走 MP 订阅页。
+PluginWorkbench 按 mode="overview"|"history" 渲染总览与历史两页；Page 只做转发。
 
 用法：python3 scripts/check_frontend_entry.py [项目根]
 """
@@ -14,40 +17,87 @@ import re
 import sys
 from pathlib import Path
 
-# 1.9.44 移除任务中心页签（用户反馈「看着多余」），任务状态只跟随订阅卡展示
-# 1.9.89 渠道管理移到主侧栏整页（AppPageChannels.vue），AppPage 内不再有 channels 页签
-EXPECTED_TABS = ["hub", "history", "tg", "organize"]
-
 
 def main(root: Path) -> int:
     components = root / "frontend" / "cloudsubscribex" / "src" / "components"
+    workbench = components / "PluginWorkbench.vue"
     app_page = components / "AppPage.vue"
+    app_history = components / "AppPageHistory.vue"
+    app_organize = components / "AppPageOrganize.vue"
+    app_channels = components / "AppPageChannels.vue"
     page = components / "Page.vue"
     errors: list[str] = []
 
-    for path in (app_page, page):
+    for path in (workbench, app_page, app_history, app_organize, app_channels, page):
         if not path.exists():
             errors.append(f"缺少文件：{path}")
     if errors:
         return report(errors)
 
+    # 1.10.3 已删的网盘资源页不得复活
+    resource_page = components / "AppPageResource.vue"
+    if resource_page.exists():
+        errors.append("AppPageResource.vue 应已删除（网盘资源走 MP 探索页）")
+    if (components / "resource").exists():
+        errors.append("components/resource/ 应已删除（网盘资源走 MP 探索页）")
+
+    wb_text = workbench.read_text(encoding="utf-8")
     app_text = app_page.read_text(encoding="utf-8")
+    history_text = app_history.read_text(encoding="utf-8")
+    organize_text = app_organize.read_text(encoding="utf-8")
+    channels_text = app_channels.read_text(encoding="utf-8")
     page_text = page.read_text(encoding="utf-8")
 
-    tabs = re.findall(r'<v-tab[^>]*value="([^"]+)"', app_text)
-    if tabs != EXPECTED_TABS:
-        errors.append(
-            f"AppPage 页签应为 {EXPECTED_TABS}，实际 {tabs}"
-        )
+    # 薄壳：不含页签，只转发 PluginWorkbench
+    for name, text, mode in (
+        ("AppPage", app_text, "overview"),
+        ("AppPageHistory", history_text, "history"),
+    ):
+        if re.search(r"<v-tab\b", text):
+            errors.append(f"{name} 不应再有页签（1.10.3 已并掉）")
+        if "PluginWorkbench" not in text:
+            errors.append(f"{name} 应转发 PluginWorkbench")
+        if f'mode="{mode}"' not in text:
+            errors.append(f"{name} 应以 mode=\"{mode}\" 转发 PluginWorkbench")
 
-    if "TgMonitor" not in app_text:
-        errors.append("AppPage 未挂载 TgMonitor（频道监控页签会空白）")
+    if "OrganizePanel" not in organize_text:
+        errors.append("AppPageOrganize 未挂载 OrganizePanel（网盘整理整页会空白）")
+    if re.search(r"<v-tab\b", organize_text):
+        errors.append("AppPageOrganize 不应有页签")
 
-    # 1.9.45 移除「未转存账本」入口与前端组件（后端账本接口保留），不再要求挂载 CandidateLedgerPanel
+    for component in ("ChannelManager", "TgMonitor", "CheckinDashboard"):
+        if component not in channels_text:
+            errors.append(f"AppPageChannels 未挂载 {component}（1.10.3 渠道页收拢）")
+    if re.search(r"<v-tab\b", channels_text):
+        errors.append("AppPageChannels 不应有页签")
 
-    for ref in sorted(set(re.findall(r'@click="(\w*Visible) = true"', app_text))):
-        if f'v-model="{ref}"' not in app_text:
-            errors.append(f"AppPage 里 {ref} 没有对应的 v-model 弹窗（按钮会点了没反应）")
+    # 唯一实现：总览动态 + 历史整表都在 PluginWorkbench，不再有页签
+    if re.search(r"<v-tab\b", wb_text):
+        errors.append("PluginWorkbench 不应再有页签（1.10.3 已并掉）")
+    for component in ("StatsGrid", "MediaHub", "HistoryTable"):
+        if component not in wb_text:
+            errors.append(f"PluginWorkbench 未挂载 {component}")
+    for gone in ("TgMonitor", "OrganizePanel"):
+        if gone in wb_text:
+            errors.append(f"PluginWorkbench 不应再挂载 {gone}（已移出插件主页）")
+    if 'mode: { type: String, default: "overview" }' not in wb_text:
+        errors.append("PluginWorkbench 缺少 mode prop（overview/history）")
+    if "overviewGroups" not in wb_text or "overviewFilter" not in wb_text:
+        errors.append("PluginWorkbench 总览动态缺少 overviewGroups/overviewFilter")
+
+    for ref in sorted(set(re.findall(r'@click="(\w*Visible) = true"', wb_text))):
+        if f'v-model="{ref}"' not in wb_text:
+            errors.append(f"PluginWorkbench 里 {ref} 没有对应的 v-model 弹窗（按钮会点了没反应）")
+
+    vite = (root / "frontend" / "cloudsubscribex" / "vite.config.js").read_text(encoding="utf-8")
+    for expose in (
+        '"./AppPageHistory": "./src/components/AppPageHistory.vue"',
+        '"./AppPageOrganize": "./src/components/AppPageOrganize.vue"',
+    ):
+        if expose not in vite:
+            errors.append(f"vite 联邦缺少暴露：{expose}")
+    if "AppPageResource" in vite:
+        errors.append("vite 联邦不应再暴露 ./AppPageResource（已删除）")
 
     status_module = components.parent / "utils" / "status.js"
     if not status_module.exists():
@@ -75,7 +125,7 @@ def report(errors: list[str]) -> int:
         for line in errors:
             print(f"  - {line}")
         return 1
-    print(f"前端单入口校验通过：AppPage {len(EXPECTED_TABS)} 个页签 + 历史双子视图，Page 为转发壳")
+    print("前端单入口校验通过：PluginWorkbench 双模式 + 侧栏历史/整理/渠道页，Page 为转发壳")
     return 0
 
 

@@ -168,7 +168,9 @@ class TestStripRemoved(unittest.TestCase):
         )
 
     def test_no_mount_points_reference_strip(self):
-        for name in ("AppPage.vue", "AppPageResource.vue"):
+        # 1.10.3：AppPage.vue 瘦成薄壳，实现在 PluginWorkbench.vue；
+        # AppPageResource.vue 已删（网盘资源走 MP 探索页）。
+        for name in ("AppPage.vue", "PluginWorkbench.vue"):
             page = read(os.path.join(FRONTEND, "src", "components", name))
             self.assertNotIn("RuntimeTaskStrip", page, f"{name} 不应再挂载任务条")
             self.assertNotIn("stopRuntimeTask", page, f"{name} 不应再有条带停止函数")

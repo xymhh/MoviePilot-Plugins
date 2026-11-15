@@ -531,8 +531,9 @@ class EpisodeDedupSkipStatusContractTests(unittest.TestCase):
         table = self._read("frontend/cloudsubscribex/src/components/dashboard/HistoryTable.vue")
         self.assertIn("statusQueryValues(selectedStatuses.value)", table)
         self.assertIn('["成功", "失败", "跳过"]', table)
-        app_page = self._read("frontend/cloudsubscribex/src/components/AppPage.vue")
-        self.assertIn('["成功", "失败", "跳过"]', app_page)
+        # 1.10.3：可删除判定随 AppPage.vue 搬进 PluginWorkbench.vue。
+        workbench = self._read("frontend/cloudsubscribex/src/components/PluginWorkbench.vue")
+        self.assertIn('["成功", "失败", "跳过"]', workbench)
 
     def test_frontend_status_map_covers_history_statuses(self):
         """20. 统一状态表必须覆盖后端全部历史状态词，漏一个就会显示成原始值。"""

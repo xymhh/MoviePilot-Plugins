@@ -28,7 +28,8 @@ export default defineConfig({
                 "./Config": "./src/components/Config.vue",
                 "./Dashboard": "./src/components/Dashboard.vue",
                 "./AppPage": "./src/components/AppPage.vue",
-                "./AppPageResource": "./src/components/AppPageResource.vue",
+                "./AppPageHistory": "./src/components/AppPageHistory.vue",
+                "./AppPageOrganize": "./src/components/AppPageOrganize.vue",
                 "./AppPageChannels": "./src/components/AppPageChannels.vue",
             },
             shared: {

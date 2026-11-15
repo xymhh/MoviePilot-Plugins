@@ -843,6 +843,8 @@ class MoviePilotRegistration(OwnerDelegator):
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
         if not self._enabled or not self._show_sidebar_nav:
             return []
+        # 1.10.3：插件 UI 按流程复用 MP 界面——追更列表走 MP 订阅页、网盘资源走
+        # MP 探索页；历史记录没有 MP 代替，独立成侧栏导航；网盘整理同理。
         return [
             {
                 "nav_key": "channels",
@@ -851,6 +853,22 @@ class MoviePilotRegistration(OwnerDelegator):
                 "section": "system",
                 "permission": "manage",
                 "order": 30,
+            },
+            {
+                "nav_key": "history",
+                "title": "转存记录",
+                "icon": "mdi-clipboard-text-clock-outline",
+                "section": "system",
+                "permission": "manage",
+                "order": 31,
+            },
+            {
+                "nav_key": "organize",
+                "title": "网盘整理",
+                "icon": "mdi-folder-move-outline",
+                "section": "system",
+                "permission": "manage",
+                "order": 32,
             },
         ]
 
