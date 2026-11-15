@@ -4,7 +4,8 @@
   （PluginWorkbench mode="overview"：统计 + 转存动态），不再有页签；
 - 历史记录没有 MP 代替：独立成主侧栏导航（history），实现仍是
   PluginWorkbench（mode="history"），与总览共用同一份逻辑；
-- 网盘整理没有 MP 界面：独立成主侧栏导航（organize，OrganizePanel）；
+- 1.10.4：网盘整理不新增导航（1.10.3 的 organize 入口已撤），整理设置
+  只留在配置页（organize 分组，高级设置里），整理台随导航一起删除；
 - 频道监控与签到状态并进渠道页（AppPageChannels）；
 - 网盘资源页与 resource/ 组件、useMediaData/useMediaDetail/
   useResourcePreview 一并删除；
@@ -71,25 +72,21 @@ def _exists(rel_path: str) -> bool:
 
 
 class TestSidebarNavRestructure(unittest.TestCase):
-    def test_history_and_organize_entries_declared(self):
+    def test_history_entry_declared_no_organize(self):
+        # 1.10.4：网盘整理不新增导航，侧栏只剩渠道管理与转存记录。
         nav = _registration().get_sidebar_nav()
         by_key = {item["nav_key"]: item for item in nav}
         self.assertEqual(
             [item["nav_key"] for item in nav],
-            ["channels", "history", "organize"],
+            ["channels", "history"],
         )
+        self.assertNotIn("organize", by_key)
         history = by_key["history"]
         self.assertEqual(history["title"], "转存记录")
         self.assertEqual(history["section"], "system")
         self.assertEqual(history["permission"], "manage")
         self.assertEqual(history["order"], 31)
         self.assertTrue(str(history["icon"]).startswith("mdi-"))
-        organize = by_key["organize"]
-        self.assertEqual(organize["title"], "网盘整理")
-        self.assertEqual(organize["section"], "system")
-        self.assertEqual(organize["permission"], "manage")
-        self.assertEqual(organize["order"], 32)
-        self.assertTrue(str(organize["icon"]).startswith("mdi-"))
 
     def test_all_entries_in_host_whitelist(self):
         nav = _registration().get_sidebar_nav()
@@ -137,12 +134,18 @@ class TestWorkbenchThinShells(unittest.TestCase):
         self.assertIn('mode="history"', source)
         self.assertNotIn("<v-tab", source)
 
-    def test_app_organize_mounts_organize_panel(self):
-        source = _read(
-            "frontend/cloudsubscribex/src/components/AppPageOrganize.vue"
+    def test_organize_page_and_panel_deleted(self):
+        # 1.10.4：网盘整理不新增导航，整理台随导航一起删除。
+        self.assertFalse(
+            _exists(
+                "frontend/cloudsubscribex/src/components/AppPageOrganize.vue"
+            )
         )
-        self.assertIn("OrganizePanel", source)
-        self.assertNotIn("<v-tab", source)
+        self.assertFalse(
+            _exists(
+                "frontend/cloudsubscribex/src/components/dashboard/OrganizePanel.vue"
+            )
+        )
 
     def test_channels_page_absorbs_tg_monitor_and_checkin(self):
         source = _read(
@@ -159,10 +162,8 @@ class TestWorkbenchThinShells(unittest.TestCase):
             '"./AppPageHistory": "./src/components/AppPageHistory.vue"',
             vite,
         )
-        self.assertIn(
-            '"./AppPageOrganize": "./src/components/AppPageOrganize.vue"',
-            vite,
-        )
+        # 1.10.4：网盘整理导航已撤，联邦不再暴露 AppPageOrganize。
+        self.assertNotIn("AppPageOrganize", vite)
         self.assertNotIn("AppPageResource", vite)
 
     def test_resource_page_and_components_deleted(self):

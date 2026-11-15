@@ -3,9 +3,12 @@
 
 背景（1.10.3）：插件 UI 按流程复用 MP 界面——
 - 插件主页（AppPage）瘦成总览：统计 + 转存动态，不再有页签；
-- 转存记录（AppPageHistory）与网盘整理（AppPageOrganize）独立成主侧栏导航；
+- 转存记录（AppPageHistory）独立成主侧栏导航；
 - 频道监控与签到并进渠道页（AppPageChannels）；
 - 网盘资源页（AppPageResource）删除，走 MP 探索页；追更列表走 MP 订阅页。
+1.10.4：网盘整理不新增导航（1.10.3 的 AppPageOrganize 入口已撤），
+整理设置只留在配置页（organize 分组，高级设置里），整理台
+（OrganizePanel）随导航一起删除；网盘整理页不得复活。
 PluginWorkbench 按 mode="overview"|"history" 渲染总览与历史两页；Page 只做转发。
 
 用法：python3 scripts/check_frontend_entry.py [项目根]
@@ -23,12 +26,11 @@ def main(root: Path) -> int:
     workbench = components / "PluginWorkbench.vue"
     app_page = components / "AppPage.vue"
     app_history = components / "AppPageHistory.vue"
-    app_organize = components / "AppPageOrganize.vue"
     app_channels = components / "AppPageChannels.vue"
     page = components / "Page.vue"
     errors: list[str] = []
 
-    for path in (workbench, app_page, app_history, app_organize, app_channels, page):
+    for path in (workbench, app_page, app_history, app_channels, page):
         if not path.exists():
             errors.append(f"缺少文件：{path}")
     if errors:
@@ -41,10 +43,15 @@ def main(root: Path) -> int:
     if (components / "resource").exists():
         errors.append("components/resource/ 应已删除（网盘资源走 MP 探索页）")
 
+    # 1.10.4 已撤的网盘整理页不得复活（整理设置只留在配置页）
+    if (components / "AppPageOrganize.vue").exists():
+        errors.append("AppPageOrganize.vue 应已删除（1.10.4 撤掉网盘整理导航）")
+    if (components / "dashboard" / "OrganizePanel.vue").exists():
+        errors.append("OrganizePanel.vue 应已删除（1.10.4 随导航一起撤掉）")
+
     wb_text = workbench.read_text(encoding="utf-8")
     app_text = app_page.read_text(encoding="utf-8")
     history_text = app_history.read_text(encoding="utf-8")
-    organize_text = app_organize.read_text(encoding="utf-8")
     channels_text = app_channels.read_text(encoding="utf-8")
     page_text = page.read_text(encoding="utf-8")
 
@@ -59,11 +66,6 @@ def main(root: Path) -> int:
             errors.append(f"{name} 应转发 PluginWorkbench")
         if f'mode="{mode}"' not in text:
             errors.append(f"{name} 应以 mode=\"{mode}\" 转发 PluginWorkbench")
-
-    if "OrganizePanel" not in organize_text:
-        errors.append("AppPageOrganize 未挂载 OrganizePanel（网盘整理整页会空白）")
-    if re.search(r"<v-tab\b", organize_text):
-        errors.append("AppPageOrganize 不应有页签")
 
     for component in ("ChannelManager", "TgMonitor", "CheckinDashboard"):
         if component not in channels_text:
@@ -90,12 +92,10 @@ def main(root: Path) -> int:
             errors.append(f"PluginWorkbench 里 {ref} 没有对应的 v-model 弹窗（按钮会点了没反应）")
 
     vite = (root / "frontend" / "cloudsubscribex" / "vite.config.js").read_text(encoding="utf-8")
-    for expose in (
-        '"./AppPageHistory": "./src/components/AppPageHistory.vue"',
-        '"./AppPageOrganize": "./src/components/AppPageOrganize.vue"',
-    ):
-        if expose not in vite:
-            errors.append(f"vite 联邦缺少暴露：{expose}")
+    if '"./AppPageHistory": "./src/components/AppPageHistory.vue"' not in vite:
+        errors.append("vite 联邦缺少暴露：./AppPageHistory")
+    if "AppPageOrganize" in vite:
+        errors.append("vite 联邦不应再暴露 ./AppPageOrganize（1.10.4 已删除）")
     if "AppPageResource" in vite:
         errors.append("vite 联邦不应再暴露 ./AppPageResource（已删除）")
 
@@ -125,7 +125,7 @@ def report(errors: list[str]) -> int:
         for line in errors:
             print(f"  - {line}")
         return 1
-    print("前端单入口校验通过：PluginWorkbench 双模式 + 侧栏历史/整理/渠道页，Page 为转发壳")
+    print("前端单入口校验通过：PluginWorkbench 双模式 + 侧栏历史/渠道页，Page 为转发壳")
     return 0
 
 

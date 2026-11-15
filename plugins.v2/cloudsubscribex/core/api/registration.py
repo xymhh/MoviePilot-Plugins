@@ -844,7 +844,9 @@ class MoviePilotRegistration(OwnerDelegator):
         if not self._enabled or not self._show_sidebar_nav:
             return []
         # 1.10.3：插件 UI 按流程复用 MP 界面——追更列表走 MP 订阅页、网盘资源走
-        # MP 探索页；历史记录没有 MP 代替，独立成侧栏导航；网盘整理同理。
+        # MP 探索页；历史记录没有 MP 代替，独立成侧栏导航。
+        # 1.10.4：网盘整理不新增导航（1.10.3 的 organize 入口已撤），整理设置
+        # 只留在配置页（organize 分组，高级设置里），整理台随导航一起删除。
         return [
             {
                 "nav_key": "channels",
@@ -861,14 +863,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "section": "system",
                 "permission": "manage",
                 "order": 31,
-            },
-            {
-                "nav_key": "organize",
-                "title": "网盘整理",
-                "icon": "mdi-folder-move-outline",
-                "section": "system",
-                "permission": "manage",
-                "order": 32,
             },
         ]
 

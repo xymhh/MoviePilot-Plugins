@@ -86,12 +86,13 @@ class TestSidebarNavChannels(unittest.TestCase):
         self.assertIn(item["permission"], VALID_PERMISSIONS)
 
     def test_only_channels_entry_remains(self):
-        # 1.10.3：侧栏新增转存记录（history）与网盘整理（organize），
-        # 与渠道管理同在 system 分组；main/resource 仍不出现。
+        # 1.10.3：侧栏新增转存记录（history），与渠道管理同在 system 分组；
+        # 1.10.4：网盘整理（organize）导航已撤，侧栏只剩两项；
+        # main/resource 仍不出现。
         nav = _registration().get_sidebar_nav()
         self.assertEqual(
             [item["nav_key"] for item in nav],
-            ["channels", "history", "organize"],
+            ["channels", "history"],
         )
         self.assertNotIn("main", {item["nav_key"] for item in nav})
         self.assertNotIn("resource", {item["nav_key"] for item in nav})
