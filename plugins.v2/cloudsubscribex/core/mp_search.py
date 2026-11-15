@@ -384,6 +384,11 @@ def clean_title(title: str) -> str:
     text = re.sub(r"(?:全集|完结|连载中|更新中|已完结)", " ", text)
     # 残留的成对空括号（内容保留，如方头括号里 2024 的年份）
     text = re.sub(r"[\u3010\u3011\[\]()\uff08\uff09]", " ", text)
+    # 开头的装饰符号/emoji（如 🗄 📁）：会毒化 TMDB 标题搜索，整段去掉；
+    # 去掉后为空则保留原串。
+    stripped = re.sub(r"^[^\w]+", "", text)
+    if stripped.strip():
+        text = stripped
     text = re.sub(r"\s+", " ", text)
     return text.strip(" -_\u00b7\u2022| ")
 

@@ -163,6 +163,17 @@ class PlatformIntegrationService(OwnerDelegator):
         return re.sub(r"[\W_]+", "", str(value or "").casefold())
 
     @staticmethod
+    def _strip_leading_decorations(value: Any) -> str:
+        """去掉标题开头的装饰符号/emoji（如 🗄 📁），保留剧名本身。
+
+        开头的 emoji 会毒化 TMDB 标题搜索（带 🗄 的标题查不到候选），
+        订阅标题匹配也会因此失败；去掉后为空则保留原串。
+        """
+        text = str(value or "")
+        stripped = re.sub(r"^[^\w]+", "", text)
+        return stripped if stripped.strip() else text
+
+    @staticmethod
     def _agent_media_type(value: Any) -> Optional[MediaType]:
         normalized = str(getattr(value, "value", value) or "").strip().lower()
         if normalized in {"movie", MediaType.MOVIE.value.lower()}:
@@ -969,6 +980,9 @@ class PlatformIntegrationService(OwnerDelegator):
                     "success": False,
                     "message": "未能从分享内容识别媒体名称，请在链接前补充名称后重试",
                 }
+            # 标题开头的装饰符号/emoji 会毒化 TMDB 标题搜索与订阅标题匹配，
+            # 先去掉（预览标题与传入标题都可能带，如 🗄）。
+            recognized_title = self._strip_leading_decorations(recognized_title)
             title = recognized_title
             normalized_type = str(media_type or "").strip().lower()
             if normalized_type and normalized_type not in {"movie", "tv"}:
