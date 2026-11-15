@@ -25,6 +25,7 @@ from ...core.media import (
     get_subscribe_by_media,
     legacy_media_ids,
     media_identity,
+    recognize_media,
     tmdb_id_of,
 )
 from ...search.types import (
@@ -172,6 +173,57 @@ class PlatformIntegrationService(OwnerDelegator):
         text = str(value or "")
         stripped = re.sub(r"^[^\w]+", "", text)
         return stripped if stripped.strip() else text
+
+    def _candidate_for_tmdb_id(self, tmdb_id: Any, media_type: str,
+                               title: str) -> Optional[Dict[str, Any]]:
+        """按明确 TMDB ID 直接取媒体候选，不走标题搜索。
+
+        供 MP 搜索下载用：搜索时已按关键词唯一命中 TMDB，提交时直接
+        信它，跳过标题搜索、多媒体检测与分享预览（那些分支都在
+        ``selected_candidate is None`` 时才跑）。识别失败或返回的
+        TMDB ID 不符时返回 None，调用方走原标题流程。
+        """
+        try:
+            tmdb_id = int(tmdb_id or 0)
+        except (TypeError, ValueError):
+            return None
+        if tmdb_id <= 0:
+            return None
+        requested_type = str(media_type or "").strip().lower()
+        mtype = MediaType.MOVIE if requested_type == "movie" else MediaType.TV
+        clean_title = self._strip_leading_decorations(title)
+        try:
+            mediainfo = recognize_media(
+                self.chain,
+                meta=MetaInfo(clean_title or str(tmdb_id)),
+                mtype=mtype,
+                tmdb_id=tmdb_id,
+                cache=True,
+            )
+        except Exception as error:  # noqa: BLE001 - 识别失败走原标题流程
+            logger.debug(f"按 TMDB ID 识别媒体失败：{error}", exc_info=True)
+            return None
+        if not mediainfo:
+            return None
+        try:
+            resolved_id = int(getattr(mediainfo, "tmdb_id", 0) or 0)
+        except (TypeError, ValueError):
+            resolved_id = 0
+        if resolved_id != tmdb_id:
+            return None
+        resolved_type = getattr(mediainfo, "type", None)
+        candidate_type = (
+            "movie" if resolved_type == MediaType.MOVIE
+            else "tv" if resolved_type == MediaType.TV
+            else requested_type or "tv"
+        )
+        return {
+            "tmdb_id": tmdb_id,
+            "media_type": candidate_type,
+            "title": str(getattr(mediainfo, "title", None) or clean_title or ""),
+            "original_title": str(getattr(mediainfo, "original_title", "") or ""),
+            "year": getattr(mediainfo, "year", None),
+        }
 
     @staticmethod
     def _agent_media_type(value: Any) -> Optional[MediaType]:
@@ -903,6 +955,20 @@ class PlatformIntegrationService(OwnerDelegator):
             links = self.extract_resource_links(resource_links)
         if not links:
             return {"success": False, "message": "请至少提供一个有效资源链接"}
+
+        # 调用方给了明确 TMDB ID（MP 搜索下载：搜索时已按关键词唯一命中），
+        # 直接按它取候选，不走标题搜索。候选一定下来，多媒体检测、分享
+        # 预览与标题搜索都在 selected_candidate is None 的分支里，全部跳过。
+        # 识别失败时 selected_candidate 仍为空，走原标题流程。
+        if selected_candidate is None:
+            try:
+                requested_tmdb_id = int(tmdb_id or 0)
+            except (TypeError, ValueError):
+                requested_tmdb_id = 0
+            if requested_tmdb_id > 0:
+                selected_candidate = self._candidate_for_tmdb_id(
+                    requested_tmdb_id, media_type, title
+                )
 
         # 一个分享可能包含多个媒体。无显式标题时按文件名分组，分别走现有
         # TMDB/订阅匹配和整理流程，避免把整包错误归到出现次数最多的媒体。

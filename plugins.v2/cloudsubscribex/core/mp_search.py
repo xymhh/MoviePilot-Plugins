@@ -4,8 +4,11 @@
 
 1. 搜索：MP 的 ``SearchChain`` 调模块 ``search_torrents``，本模块用插件
    已有的 ``SearchHandler`` 按关键词查各搜索渠道，把候选登记成
-   内存快照后映射成 ``TorrentInfo`` 返回；``enclosure`` 是本插件
-   的 ``/torrent`` 合成种子地址，MP 点下载时会先拉这个种子。
+   快照后映射成 ``TorrentInfo`` 返回；搜索时按关键词查一次 TMDB，
+   唯一候选就把 tmdb_id 写进快照（下载提交时直接信它，不再拿标题
+   重新搜 TMDB）；快照同时落盘到插件数据目录，重启后仍可用。
+   ``enclosure`` 是本插件的 ``/torrent`` 合成种子地址，MP 点下载时
+   会先拉这个种子。
 2. 取种子：MP 请求 ``/torrent?sid=...&sig=...``，验签通过后按快照里的
    分享链接现场取文件清单，编码成合法种子返回。
 3. 下载：MP 把种子字节交给模块 ``download``，本模块从种子 comment 里
@@ -23,6 +26,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
@@ -31,6 +35,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
@@ -132,6 +137,8 @@ MARKER = "CLOUDSUBSCRIBEX"
 # 快照 TTL：与网盘直链的缓存同量级；过期后 /torrent 与 download 都按
 # 「请重新搜索」处理，不再静默取旧分享。
 SNAPSHOT_TTL_SECONDS = 3600
+#: 快照落盘文件名（插件数据目录内），与 channels.json 同一目录。
+SNAPSHOTS_FILE = "mp_search_snapshots.json"
 # 每个搜索渠道最多取的候选数（search_sources 的 result_limit 是单源口径）；
 # 跨渠道合并后总上限另见 MAX_RESULTS。
 RESULT_LIMIT_PER_SOURCE = 5
@@ -177,19 +184,126 @@ class ShareSnapshot:
             name = name.replace(char, " ")
         return " ".join(name.split())[:120] or self.sid
 
+    def to_dict(self) -> Dict[str, Any]:
+        """落盘用：全部字段原样写出。"""
+        return {
+            "sid": self.sid,
+            "share_url": self.share_url,
+            "passcode": self.passcode,
+            "resource_type": self.resource_type,
+            "title": self.title,
+            "media_type": self.media_type,
+            "season": self.season,
+            "tmdb_id": self.tmdb_id,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, row: Dict[str, Any]) -> "ShareSnapshot":
+        """从落盘数据恢复；字段缺失时按默认值补，sid 为空时报错。"""
+        sid = str(row.get("sid") or "").strip()
+        if not sid:
+            raise ValueError("快照缺少 sid")
+        try:
+            tmdb_id = int(row.get("tmdb_id") or 0) or None
+        except (TypeError, ValueError):
+            tmdb_id = None
+        try:
+            season = row.get("season")
+            season = int(season) if season is not None else None
+        except (TypeError, ValueError):
+            season = None
+        try:
+            created_at = float(row.get("created_at") or 0)
+        except (TypeError, ValueError):
+            created_at = 0.0
+        return cls(
+            sid=sid,
+            share_url=str(row.get("share_url") or ""),
+            passcode=str(row.get("passcode") or ""),
+            resource_type=str(row.get("resource_type") or ""),
+            title=str(row.get("title") or ""),
+            media_type=str(row.get("media_type") or "tv"),
+            season=season,
+            tmdb_id=tmdb_id,
+            created_at=created_at,
+        )
+
 
 class SnapshotRegistry:
-    """分享快照的内存登记表：线程安全，过期条目读取时即丢弃。"""
+    """分享快照登记表：线程安全，过期条目读取时即丢弃。
 
-    def __init__(self, ttl_seconds: float = SNAPSHOT_TTL_SECONDS):
+    绑定文件时同时落盘（与 channels.json 同一目录、同一原子写
+    法）：插件重启/更新后，已搜过的快照仍可下载，不用重新搜索。
+    未绑定文件时纯内存，不影响搜索与下载。
+    """
+
+    def __init__(self, ttl_seconds: float = SNAPSHOT_TTL_SECONDS,
+                 file_path: Any = None):
         self._ttl = float(ttl_seconds)
         self._lock = threading.RLock()
         self._items: Dict[str, ShareSnapshot] = {}
+        self._file: Optional[Path] = Path(file_path) if file_path else None
+        if self._file is not None:
+            self._load()
+
+    def bind_file(self, file_path: Any) -> None:
+        """绑定落盘文件并从中恢复未过期快照；已绑定时忽略。"""
+        with self._lock:
+            if self._file is not None:
+                return
+            self._file = Path(file_path)
+            self._load()
+
+    def _load(self) -> None:
+        """从磁盘恢复快照；文件缺失或损坏时按空表处理。"""
+        if self._file is None or not self._file.exists():
+            return
+        try:
+            payload = json.loads(self._file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        rows = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(rows, list):
+            return
+        now = time.time()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                snapshot = ShareSnapshot.from_dict(row)
+            except (TypeError, ValueError):
+                continue
+            if now - (snapshot.created_at or 0) >= self._ttl:
+                continue
+            self._items[snapshot.sid] = snapshot
+
+    def _save_locked(self) -> None:
+        """原子写回快照文件（只写未过期条目）；调用方必须持锁。"""
+        if self._file is None:
+            return
+        try:
+            now = time.time()
+            items = [
+                snapshot.to_dict()
+                for snapshot in self._items.values()
+                if now - (snapshot.created_at or 0) < self._ttl
+            ]
+            self._file.parent.mkdir(parents=True, exist_ok=True)
+            temp = self._file.with_suffix(".json.tmp")
+            temp.write_text(
+                json.dumps({"items": items}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            temp.replace(self._file)
+        except OSError:
+            return
 
     def put(self, snapshot: ShareSnapshot) -> None:
         with self._lock:
             snapshot.created_at = time.time()
             self._items[snapshot.sid] = snapshot
+            self._save_locked()
 
     def get(self, sid: str) -> Optional[ShareSnapshot]:
         with self._lock:
@@ -204,6 +318,27 @@ class SnapshotRegistry:
     def drop(self, sid: str) -> None:
         with self._lock:
             self._items.pop(str(sid or ""), None)
+            self._save_locked()
+
+
+def _bind_snapshot_file(plugin: Any, registry: SnapshotRegistry) -> None:
+    """把快照登记表绑到插件数据目录的 mp_search_snapshots.json。
+
+    拿不到数据目录时保持纯内存（测试桩与旧宿主走这条路），不影响搜索。
+    """
+    getter = getattr(plugin, "get_data_path", None)
+    if not callable(getter):
+        return
+    try:
+        data_path = getter()
+    except Exception:  # noqa: BLE001 - 数据目录不可用时纯内存
+        return
+    if not data_path:
+        return
+    try:
+        registry.bind_file(Path(data_path) / SNAPSHOTS_FILE)
+    except Exception:  # noqa: BLE001 - 绑定失败时纯内存
+        return
 
 
 def _snapshot_registry(plugin: Any) -> SnapshotRegistry:
@@ -226,7 +361,41 @@ def _snapshot_registry(plugin: Any) -> SnapshotRegistry:
         registry = SnapshotRegistry()
         if isinstance(obj_dict, dict):
             obj_dict["_mp_search_registry"] = registry
+        _bind_snapshot_file(plugin, registry)
         return registry
+
+
+def _resolve_search_tmdb_id(plugin: Any, keyword: str,
+                            media_type_str: str) -> Optional[Tuple[int, str]]:
+    """搜索时按关键词查一次 TMDB：唯一候选时返回 (tmdb_id, media_type)。
+
+    供快照携带媒体身份用：下载提交时直接信这个 tmdb_id，不再拿标题
+    重新搜 TMDB。0/多候选、查询失败时返回 None，走原标题流程。
+    """
+    search_tmdb = getattr(plugin, "api_vue_search_tmdb_candidates", None)
+    if not callable(search_tmdb):
+        return None
+    try:
+        result = search_tmdb({"title": keyword, "media_type": media_type_str})
+    except Exception as error:  # noqa: BLE001 - TMDB 解析失败不影响搜索
+        logger.debug(f"搜索 TMDB 解析失败：{error}", exc_info=True)
+        return None
+    if not isinstance(result, dict) or not result.get("success"):
+        return None
+    items = list((result.get("data") or {}).get("items") or [])
+    if len(items) != 1:
+        return None
+    item = items[0]
+    try:
+        tmdb_id = int(item.get("tmdb_id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if tmdb_id <= 0:
+        return None
+    media_type = str(item.get("media_type") or media_type_str).strip().lower()
+    if media_type not in {"movie", "tv"}:
+        media_type = media_type_str
+    return tmdb_id, media_type
 
 
 def normalize_share_url(url: Any) -> str:
@@ -683,6 +852,13 @@ def search_torrents(plugin: Any, site: Any = None, keyword: Optional[str] = None
     display_names = _channel_display_names(plugin, handler, sources)
     priorities = _channel_priorities(plugin, sources)
     registry = _snapshot_registry(plugin)
+    # 搜索时按关键词解析一次 TMDB：唯一候选就把 tmdb_id 写进快照，
+    # 下载提交时直接信它，不再拿标题重新搜 TMDB；解析不到时走原流程。
+    resolved_tmdb = None
+    if any((grouped or {}).get(source) for source in sources):
+        resolved_tmdb = _resolve_search_tmdb_id(plugin, keyword, media_type_str)
+    snapshot_tmdb_id = resolved_tmdb[0] if resolved_tmdb else None
+    snapshot_media_type = resolved_tmdb[1] if resolved_tmdb else media_type_str
     pubdate = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     category = _category_of(mtype)
     results: List[Any] = []
@@ -711,8 +887,9 @@ def search_torrents(plugin: Any, site: Any = None, keyword: Optional[str] = None
                 passcode=str(item.get("password") or ""),
                 resource_type=resource_type,
                 title=title,
-                media_type=media_type_str,
+                media_type=snapshot_media_type,
                 season=season_of_title(raw_title),
+                tmdb_id=snapshot_tmdb_id,
             )
             registry.put(snapshot)
             try:
@@ -812,7 +989,26 @@ def _normalize_match_text(value: Any) -> str:
 
 def _task_matches_snapshot(task: Dict[str, Any], snapshot: ShareSnapshot,
                            snapshot_title: str) -> bool:
-    """运行时任务是否与本次提交的快照匹配：标题相含 + 季号一致（有季号时）。"""
+    """运行时任务是否与本次提交的快照匹配。
+
+    快照带 tmdb_id 时优先按 tmdb_id 认（有季号时再按季号收紧）；
+    任务没带 tmdb_id 时退回标题相含 + 季号一致（有季号时）。
+    """
+    if snapshot.tmdb_id:
+        try:
+            task_tmdb_id = int(task.get("tmdb_id") or 0)
+        except (TypeError, ValueError):
+            task_tmdb_id = 0
+        if task_tmdb_id:
+            if task_tmdb_id != int(snapshot.tmdb_id):
+                return False
+            if snapshot.season is None:
+                return True
+            try:
+                task_season = int(task.get("season") or 1)
+            except (TypeError, ValueError):
+                task_season = 1
+            return task_season == int(snapshot.season)
     task_title = _normalize_match_text(task.get("title") or "")
     if not task_title or not snapshot_title:
         return False
