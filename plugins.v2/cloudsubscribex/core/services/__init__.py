@@ -3,6 +3,7 @@
 from .checkin import CheckinService
 from .organize import OrganizeService
 from .platform import PlatformIntegrationService
+from .residue import ResidueService
 from .runtime import SyncRuntimeService, sync_lock
 from .scoring import SubscriptionScoringService
 from .skip_stats import SkipStatsCollector
@@ -17,6 +18,7 @@ __all__ = [
     "PlatformIntegrationService",
     "CheckinService",
     "OrganizeService",
+    "ResidueService",
     "SkipStatsCollector",
     "sync_lock",
 ]

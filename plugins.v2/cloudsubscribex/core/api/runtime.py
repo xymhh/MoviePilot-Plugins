@@ -13,6 +13,9 @@ from fastapi.responses import StreamingResponse
 from .page import clear_ui_options_cache
 from ..cloud import CloudDriveCapability
 from ..delegation import OwnerDelegator
+from ..retry_policy import is_dead_letter
+from ..sync_pause import set_paused, snapshot
+from ..task_center import collect_tasks
 from ...utils import clear_magnet_metadata_cache
 
 
@@ -65,6 +68,135 @@ class RuntimeApi(OwnerDelegator):
                 "X-Accel-Buffering": "no",
             },
         )
+
+    def api_vue_tasks(self, state: str = "all") -> dict:
+        """统一任务中心：只读聚合同步作业与非终态历史。"""
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            with store.manager.session(write=False) as db:
+                tasks = collect_tasks(db, state_filter=state)
+            return {
+                "success": True,
+                "data": tasks,
+                "total": len(tasks),
+                "state": str(state or "all"),
+                "paused": snapshot(self._sync_pause_repository()),
+            }
+        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
+            logger.error(f"读取任务中心失败：{error}", exc_info=True)
+            return {"success": False, "message": str(error), "data": []}
+
+    def api_vue_sync_pause(self) -> dict:
+        """读取全局转存暂停开关。"""
+        return {
+            "success": True,
+            "data": snapshot(self._sync_pause_repository()),
+        }
+
+    def api_vue_set_sync_pause(self, payload: Dict[str, Any]) -> dict:
+        """切换全局暂停：暂停后不再认领新作业，正在写的文件不打断。"""
+        data = payload if isinstance(payload, dict) else {}
+        if "paused" not in data:
+            return {"success": False, "message": "缺少 paused 参数"}
+        try:
+            state = set_paused(
+                bool(data.get("paused")),
+                actor="任务中心",
+                repository=self._sync_pause_repository(),
+            )
+        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
+            logger.error(f"切换转存暂停失败：{error}", exc_info=True)
+            return {"success": False, "message": str(error)}
+        self._sync_pause_cache = None
+        message = "已暂停转存，新作业不再认领" if state["paused"] else "已恢复转存"
+        return {"success": True, "message": message, "data": state}
+
+    def api_vue_pause_task(self, payload: Dict[str, Any]) -> dict:
+        """暂停单个排队中/等待重试的作业（不消耗重试次数）。"""
+        return self._task_pause_action(payload, pause=True)
+
+    def api_vue_resume_task(self, payload: Dict[str, Any]) -> dict:
+        """恢复暂停的作业，重新排队。"""
+        return self._task_pause_action(payload, pause=False)
+
+    def _task_pause_action(self, payload: Dict[str, Any], pause: bool) -> dict:
+        data = payload if isinstance(payload, dict) else {}
+        job_id = str(data.get("job_id") or "").strip()
+        job_key = str(data.get("job_key") or "").strip()
+        if not job_id and not job_key:
+            return {"success": False, "message": "缺少 task 标识"}
+        action = "暂停" if pause else "恢复"
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            repo = store.repositories.sync_jobs
+            row = repo.get_by_id(job_id) if job_id else repo.get(job_key)
+            if row is None:
+                return {"success": False, "message": "未找到对应任务"}
+            if pause:
+                changed = repo.pause(row.job_key, "用户在任务中心暂停")
+            else:
+                changed = repo.resume(row.job_key, "用户在任务中心恢复")
+            if not changed:
+                return {
+                    "success": False,
+                    "message": (
+                        f"当前状态无法{action}（只有排队中/等待重试的任务能暂停）"
+                        if pause else "该任务不是暂停状态，无需恢复"
+                    ),
+                }
+            logger.info(
+                f"任务中心{action}作业：{row.target_path}/{row.target_name}"
+            )
+            return {"success": True, "message": f"已{action}"}
+        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
+            logger.error(f"任务中心{action}失败：{error}", exc_info=True)
+            return {"success": False, "message": str(error)}
+
+    def api_vue_retry_task(self, payload: Dict[str, Any]) -> dict:
+        """任务中心显式重试：只复活死信作业，次数与退避清零后重新入队。"""
+        data = payload if isinstance(payload, dict) else {}
+        job_id = str(data.get("job_id") or "").strip()
+        job_key = str(data.get("job_key") or "").strip()
+        if not job_id and not job_key:
+            return {"success": False, "message": "缺少 task 标识"}
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            repo = store.repositories.sync_jobs
+            row = (
+                repo.get_by_id(job_id) if job_id else repo.get(job_key)
+            )
+            if row is None:
+                return {"success": False, "message": "未找到对应任务"}
+            if not is_dead_letter(
+                    row.state, row.last_error, row.attempt, row.max_attempts,
+            ):
+                return {
+                    "success": False,
+                    "message": "该任务不在死信状态，无需手动重试",
+                }
+            reopened = repo.reopen_dead_letter(
+                row.job_key, "用户在任务中心手动重试",
+            )
+            if not reopened:
+                return {"success": False, "message": "重试未能入队，请刷新后重看"}
+            logger.info(
+                f"任务中心手动重试死信：{row.target_path}/{row.target_name}"
+            )
+            return {"success": True, "message": "死信已重新入队，最多再试 3 次"}
+        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
+            logger.error(f"任务中心重试失败：{error}", exc_info=True)
+            return {"success": False, "message": str(error)}
+
+    def _sync_pause_repository(self) -> Any:
+        """暂停开关用的仓储；库没就绪时返回 None（读按未暂停、写明确报错）。"""
+        try:
+            return self._get_data_store().repositories.runtime
+        except Exception as error:  # noqa: BLE001 - 暂停开关故障不能拖垮调用方
+            logger.warning(f"获取转存暂停开关仓储失败：{error}")
+            return None
 
     def api_vue_offline_tasks(self, refresh: bool = False) -> dict:
         return self.api_offline_tasks(settings.API_TOKEN, refresh)

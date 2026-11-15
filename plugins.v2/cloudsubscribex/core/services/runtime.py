@@ -10,7 +10,6 @@ import pytz
 from app.core.config import global_vars, settings
 from app.log import logger
 from app.schemas.types import MediaType
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from ...core import CloudDriveCapability
@@ -1564,42 +1563,31 @@ class SyncRuntimeService(OwnerDelegator):
         """仅在存在待后处理文件时运行独立监控。"""
         self._refresh_postprocessing_sync_tasks()
         with self._offline_scheduler_lock:
-            scheduler = self._offline_scheduler
+            registry = self._scheduler_registry()
             if pending_count > 0:
-                if scheduler and scheduler.running:
-                    scheduler.modify_job(
+                if registry.get_job("CloudSubscribe_OfflineMonitor") is not None:
+                    registry.modify_job_next_run(
                         "CloudSubscribe_OfflineMonitor",
-                        next_run_time=datetime.datetime.now(
+                        datetime.datetime.now(
                             tz=pytz.timezone(settings.TZ)
                         ) + datetime.timedelta(seconds=1),
                     )
                     return
-                scheduler = BackgroundScheduler(timezone=settings.TZ)
-                scheduler.add_job(
+                registry.ensure_job(
+                    "CloudSubscribe_OfflineMonitor",
                     func=self.monitor_offline_tasks,
                     trigger=IntervalTrigger(seconds=20),
-                    id="CloudSubscribe_OfflineMonitor",
                     next_run_time=datetime.datetime.now(
                         tz=pytz.timezone(settings.TZ)
                     ) + datetime.timedelta(seconds=3),
                     max_instances=2,
                     coalesce=True,
-                    replace_existing=True,
                 )
-                scheduler.start()
-                self._offline_scheduler = scheduler
                 logger.debug(f"网盘文件终态后处理监控已启动（待处理 {pending_count} 个）")
                 return
 
-            if not scheduler:
-                return
-            try:
-                scheduler.remove_all_jobs()
-                if scheduler.running:
-                    scheduler.shutdown(wait=False)
-            finally:
-                self._offline_scheduler = None
-            logger.debug("网盘文件终态后处理队列已清空，监控已停止")
+            if registry.remove_job("CloudSubscribe_OfflineMonitor"):
+                logger.debug("网盘文件终态后处理队列已清空，监控已停止")
 
     def monitor_offline_tasks(self):
         """轻量检查到期节点，实际网盘请求间隔由待处理任务控制。"""

@@ -25,7 +25,6 @@ from app.schemas.types import (
     SystemConfigKey,
     TorrentQueryStatus,
 )
-from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -42,7 +41,7 @@ from .core import (
     get_component,
     resolve_component,
 )
-from .core.aria2 import configure_aria2, shutdown_aria2
+from .core.aria2 import configure_aria2, resolve_data_dir, shutdown_aria2
 from .core.api import (
     AccountApi,
     ChannelsApi,
@@ -64,6 +63,8 @@ from .core.api import (
     TgMonitorApi,
 )
 from .core.channels import ChannelStore
+from .core.config_normalize import normalize_plugin_config
+from .core.scheduler import SchedulerRegistry
 from .core.hook import MessageRoutingHook, PluginEventHandler, SubscriptionSearchHook
 from .core.legacy_migration import LegacyIdMigrator
 from .core.media_scope import configure_media_path_ignores
@@ -72,15 +73,13 @@ from .core.services import (
     CheckinService,
     OrganizeService,
     PlatformIntegrationService,
+    ResidueService,
     SubscriptionScoringService,
     SyncExecutionService,
     SyncRuntimeService,
     SkipStatsCollector,
 )
 from .core.storage import CloudSubscribeDataStore
-from .core.retry_policy import is_dead_letter
-from .core.task_center import collect_tasks
-from .core import sync_pause
 from .core.downloader_view import (
     DOWNLOADER_NAME,
     DOWNLOADER_TYPE,
@@ -137,6 +136,7 @@ _COMPONENT_TYPES = (
     PlatformIntegrationService,
     CheckinService,
     OrganizeService,
+    ResidueService,
     AutoSubscribeService,
 )
 
@@ -203,7 +203,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.97"
+    plugin_version = "1.9.98"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -216,8 +216,9 @@ class CloudSubscribeX(_PluginBase):
     auth_level = 1
 
     # 私有变量
-    _scheduler: Optional[BackgroundScheduler] = None
-    _offline_scheduler: Optional[BackgroundScheduler] = None
+    # 插件唯一的定时任务注册表（core.scheduler.SchedulerRegistry）：全部
+    # 周期/一次性任务按 id 登记在这里，stop_service 一次停掉，不再各自建调度器。
+    _job_registry: Optional[SchedulerRegistry] = None
     _offline_scheduler_lock: RLock = RLock()
     _offline_monitor_lock: RLock = RLock()
     # 配置属性
@@ -321,7 +322,6 @@ class CloudSubscribeX(_PluginBase):
     _residue_disk_free_ratio: float = 0.10
     #: STRM 全量校准单次时间预算（秒），0 表示不限；到达上限后断点续扫。
     _strm_full_scan_budget: int = 900
-    _residue_scheduler: Optional[BackgroundScheduler] = None
     _subscription_concurrency: int = 2
     _batch_size: int = 20
     _batch_interval: float = 3
@@ -365,11 +365,9 @@ class CloudSubscribeX(_PluginBase):
     )
     _strm_full_scan_enabled: bool = False
     _strm_full_scan_overwrite: bool = False
-    _strm_full_scan_scheduler: Optional[BackgroundScheduler] = None
     _strm_increment_enabled: bool = False
     _strm_increment_minutes: int = 10
     _strm_increment_budget: int = 180
-    _strm_increment_scheduler: Optional[BackgroundScheduler] = None
     _media_server_refresh_enabled: bool = False
     _media_servers: List[str] = []
     _media_server_ignore_paths: str = ""
@@ -449,141 +447,25 @@ class CloudSubscribeX(_PluginBase):
         if self._drive_manager:
             self._drive_manager._clients["115"] = value
 
-    def api_vue_tasks(self, state: str = "all") -> dict:
-        """统一任务中心：只读聚合同步作业与非终态历史。"""
-        try:
-            store = self._get_data_store()
-            store.initialize()
-            with store.manager.session(write=False) as db:
-                tasks = collect_tasks(db, state_filter=state)
-            return {
-                "success": True,
-                "data": tasks,
-                "total": len(tasks),
-                "state": str(state or "all"),
-                "paused": sync_pause.snapshot(self._sync_pause_repository()),
-            }
-        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
-            logger.error(f"读取任务中心失败：{error}", exc_info=True)
-            return {"success": False, "message": str(error), "data": []}
-
-    def api_vue_sync_pause(self) -> dict:
-        """读取全局转存暂停开关。"""
-        return {
-            "success": True,
-            "data": sync_pause.snapshot(self._sync_pause_repository()),
-        }
-
-    def api_vue_set_sync_pause(self, payload: Dict[str, Any]) -> dict:
-        """切换全局暂停：暂停后不再认领新作业，正在写的文件不打断。"""
-        data = payload if isinstance(payload, dict) else {}
-        if "paused" not in data:
-            return {"success": False, "message": "缺少 paused 参数"}
-        try:
-            state = sync_pause.set_paused(
-                bool(data.get("paused")),
-                actor="任务中心",
-                repository=self._sync_pause_repository(),
-            )
-        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
-            logger.error(f"切换转存暂停失败：{error}", exc_info=True)
-            return {"success": False, "message": str(error)}
-        self._sync_pause_cache = None
-        message = "已暂停转存，新作业不再认领" if state["paused"] else "已恢复转存"
-        return {"success": True, "message": message, "data": state}
-
-    def api_vue_pause_task(self, payload: Dict[str, Any]) -> dict:
-        """暂停单个排队中/等待重试的作业（不消耗重试次数）。"""
-        return self._task_pause_action(payload, pause=True)
-
-    def api_vue_resume_task(self, payload: Dict[str, Any]) -> dict:
-        """恢复暂停的作业，重新排队。"""
-        return self._task_pause_action(payload, pause=False)
-
-    def _task_pause_action(self, payload: Dict[str, Any], pause: bool) -> dict:
-        data = payload if isinstance(payload, dict) else {}
-        job_id = str(data.get("job_id") or "").strip()
-        job_key = str(data.get("job_key") or "").strip()
-        if not job_id and not job_key:
-            return {"success": False, "message": "缺少 task 标识"}
-        action = "暂停" if pause else "恢复"
-        try:
-            store = self._get_data_store()
-            store.initialize()
-            repo = store.repositories.sync_jobs
-            row = repo.get_by_id(job_id) if job_id else repo.get(job_key)
-            if row is None:
-                return {"success": False, "message": "未找到对应任务"}
-            if pause:
-                changed = repo.pause(row.job_key, "用户在任务中心暂停")
-            else:
-                changed = repo.resume(row.job_key, "用户在任务中心恢复")
-            if not changed:
-                return {
-                    "success": False,
-                    "message": (
-                        f"当前状态无法{action}（只有排队中/等待重试的任务能暂停）"
-                        if pause else "该任务不是暂停状态，无需恢复"
-                    ),
-                }
-            logger.info(
-                f"任务中心{action}作业：{row.target_path}/{row.target_name}"
-            )
-            return {"success": True, "message": f"已{action}"}
-        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
-            logger.error(f"任务中心{action}失败：{error}", exc_info=True)
-            return {"success": False, "message": str(error)}
-
-    def api_vue_retry_task(self, payload: Dict[str, Any]) -> dict:
-        """任务中心显式重试：只复活死信作业，次数与退避清零后重新入队。"""
-        data = payload if isinstance(payload, dict) else {}
-        job_id = str(data.get("job_id") or "").strip()
-        job_key = str(data.get("job_key") or "").strip()
-        if not job_id and not job_key:
-            return {"success": False, "message": "缺少 task 标识"}
-        try:
-            store = self._get_data_store()
-            store.initialize()
-            repo = store.repositories.sync_jobs
-            row = (
-                repo.get_by_id(job_id) if job_id else repo.get(job_key)
-            )
-            if row is None:
-                return {"success": False, "message": "未找到对应任务"}
-            if not is_dead_letter(
-                    row.state, row.last_error, row.attempt, row.max_attempts,
-            ):
-                return {
-                    "success": False,
-                    "message": "该任务不在死信状态，无需手动重试",
-                }
-            reopened = repo.reopen_dead_letter(
-                row.job_key, "用户在任务中心手动重试",
-            )
-            if not reopened:
-                return {"success": False, "message": "重试未能入队，请刷新后重看"}
-            logger.info(
-                f"任务中心手动重试死信：{row.target_path}/{row.target_name}"
-            )
-            return {"success": True, "message": "死信已重新入队，最多再试 3 次"}
-        except Exception as error:  # noqa: BLE001 - API 失败返回结构统一
-            logger.error(f"任务中心重试失败：{error}", exc_info=True)
-            return {"success": False, "message": str(error)}
-
-    def _sync_pause_repository(self) -> Any:
-        """暂停开关用的仓储；库没就绪时返回 None（读按未暂停、写明确报错）。"""
-        try:
-            return self._get_data_store().repositories.runtime
-        except Exception as error:  # noqa: BLE001 - 暂停开关故障不能拖垮调用方
-            logger.warning(f"获取转存暂停开关仓储失败：{error}")
-            return None
-
     def _get_data_store(self) -> CloudSubscribeDataStore:
         store = self.__dict__.get("_cloudsubscribe_data_store")
         if store is None:
             store = CloudSubscribeDataStore(self)
             self.__dict__["_cloudsubscribe_data_store"] = store
         return store
+
+    def _scheduler_registry(self) -> SchedulerRegistry:
+        """插件唯一的定时任务注册表（core.scheduler.SchedulerRegistry）。
+
+        正常由 init_plugin 在 _apply_plugin_config 之前创建；这里兜底懒创建，
+        保证配置保存、离线监控等在任何调用顺序下都能登记任务。注册表在
+        shutdown 后可重建，所以 stop_service 之后再登记不需要额外处理。
+        """
+        registry = self.__dict__.get("_job_registry")
+        if registry is None:
+            registry = SchedulerRegistry()
+            self.__dict__["_job_registry"] = registry
+        return registry
 
     def get_data(self, key: Optional[str] = None, plugin_id: Optional[str] = None) -> Any:
         """读取插件业务数据与可恢复运行状态，统一使用私有库。"""
@@ -723,6 +605,8 @@ class CloudSubscribeX(_PluginBase):
         config = self._migrate_from_legacy_plugin(config)
         self._offline_monitor_lock = RLock()
         self._offline_scheduler_lock = RLock()
+        # 统一调度器先建好：_apply_plugin_config 末尾的各 _start_* 直接登记任务。
+        self.__dict__["_job_registry"] = SchedulerRegistry()
         # 初始化独立数据库并修复历史分组键。
         self._get_data_store().initialize()
         self._apply_plugin_config(config, reset_runtime=True)
@@ -814,37 +698,7 @@ class CloudSubscribeX(_PluginBase):
         config = dict(config or {})
         original_config = dict(config)
         configure_media_path_ignores(config.get("media_server_ignore_paths", ""))
-        # 丢弃已移除搜索渠道的历史配置，避免旧字段继续进入运行态或保存结果。
-        removed_config_prefixes = ("but" + "ailing_",)
-        config = {
-            key: value
-            for key, value in config.items()
-            if not str(key).lower().startswith(removed_config_prefixes)
-        }
-        legacy_download_keys = (
-            "block_platform_downloads", "takeover_platform_downloads"
-        )
-        if (
-                "platform_download_policy" not in config
-                and any(key in config for key in legacy_download_keys)
-        ):
-            config["platform_download_policy"] = (
-                "cloud"
-                if bool(config.get("takeover_platform_downloads", False))
-                else "block"
-                if bool(config.get("block_platform_downloads", True))
-                else "allow"
-            )
-        for deprecated_key in (
-                *legacy_download_keys, "unblock_start_time", "unblock_end_time"
-        ):
-            config.pop(deprecated_key, None)
-        if "platform_download_policy" in config:
-            policy = str(config.get("platform_download_policy") or "block").strip().lower()
-            if policy not in {"allow", "block", "cloud"}:
-                logger.warning(f"未知平台下载策略：{policy}，已回退为阻止平台下载")
-                policy = "block"
-            config["platform_download_policy"] = policy
+        config = normalize_plugin_config(config)
         if config != original_config:
             # 宿主仅在真正失败时返回 False，None 表示库中已是该配置（无需更新）。
             if self.update_config(config) is False:
@@ -1038,9 +892,9 @@ class CloudSubscribeX(_PluginBase):
 
         # 调度一次性任务。
         if self._auto_subscribe_onlyonce:
-            self._scheduler = BackgroundScheduler(timezone=settings.TZ)
             logger.info("榜单自动订阅服务启动，立即运行一次")
-            self._scheduler.add_job(
+            self._scheduler_registry().ensure_job(
+                "cloudsubscribe_auto_subscribe_once",
                 func=self._run_auto_subscribe_once,
                 trigger="date",
                 run_date=(
@@ -1050,8 +904,6 @@ class CloudSubscribeX(_PluginBase):
             )
             self._auto_subscribe_onlyonce = False
             self._persist_config_values(auto_subscribe_onlyonce=False)
-            if self._scheduler.get_jobs():
-                self._scheduler.start()
 
     def _strm_scan_time_budget(self) -> int:
         """STRM 全量校准单次时间预算（秒）；读取失败或负数按 0（不限）处理。"""
@@ -1233,22 +1085,15 @@ class CloudSubscribeX(_PluginBase):
 
     def _start_strm_full_scan(self) -> None:
         """每天 04:20 分批校准（可在设置页关闭），避开 04:30 的其它定时任务。"""
+        registry = self._scheduler_registry()
         if not (self._strm_full_scan_enabled and self._strm_generate_enabled):
+            registry.remove_job("cloudsubscribe_strm_full_scan")
             return
-        if self.__dict__.get("_strm_full_scan_scheduler") is not None:
-            return
-        try:
-            scheduler = BackgroundScheduler(timezone=settings.TZ)
-            scheduler.add_job(
-                func=lambda: self.run_strm_full_scan("定时"),
-                trigger=CronTrigger(hour=4, minute=20),
-                id="cloudsubscribe_strm_full_scan",
-                replace_existing=True,
-            )
-            scheduler.start()
-            self._strm_full_scan_scheduler = scheduler
-        except Exception as error:  # noqa: BLE001
-            logger.warning(f"STRM 全量校准定时任务启动失败：{error}")
+        registry.ensure_job(
+            "cloudsubscribe_strm_full_scan",
+            func=lambda: self.run_strm_full_scan("定时"),
+            trigger=CronTrigger(hour=4, minute=20),
+        )
 
     def run_strm_increment(self, reason: str = "增量") -> dict:
         """轻量增量补齐：只补缺失的 STRM，不改写已有文件。
@@ -1310,41 +1155,25 @@ class CloudSubscribeX(_PluginBase):
 
     def _start_strm_increment(self) -> None:
         """每 N 分钟补一次缺失 STRM（可在设置页关闭）。"""
+        registry = self._scheduler_registry()
         if not (self._strm_increment_enabled and self._strm_generate_enabled):
+            registry.remove_job("cloudsubscribe_strm_increment")
             return
-        if self.__dict__.get("_strm_increment_scheduler") is not None:
-            return
-        try:
-            scheduler = BackgroundScheduler(timezone=settings.TZ)
-            scheduler.add_job(
-                func=lambda: self.run_strm_increment("定时"),
-                trigger=IntervalTrigger(
-                    minutes=max(1, int(self._strm_increment_minutes or 10))
-                ),
-                id="cloudsubscribe_strm_increment",
-                replace_existing=True,
-            )
-            scheduler.start()
-            self._strm_increment_scheduler = scheduler
-        except Exception as error:  # noqa: BLE001
-            logger.warning(f"STRM 增量补齐定时任务启动失败：{error}")
+        registry.ensure_job(
+            "cloudsubscribe_strm_increment",
+            func=lambda: self.run_strm_increment("定时"),
+            trigger=IntervalTrigger(
+                minutes=max(1, int(self._strm_increment_minutes or 10))
+            ),
+        )
 
     def _start_history_state_maintenance(self) -> None:
         """每 5 分钟回收过期租约并清扫超时非终态历史。"""
-        if self.__dict__.get("_history_state_scheduler") is not None:
-            return
-        try:
-            scheduler = BackgroundScheduler(timezone=settings.TZ)
-            scheduler.add_job(
-                func=lambda: self._run_history_state_maintenance(),
-                trigger=IntervalTrigger(minutes=5),
-                id="cloudsubscribe_history_state_maintenance",
-                replace_existing=True,
-            )
-            scheduler.start()
-            self._history_state_scheduler = scheduler
-        except Exception as error:  # noqa: BLE001
-            logger.warning(f"历史状态周期维护启动失败：{error}")
+        self._scheduler_registry().ensure_job(
+            "cloudsubscribe_history_state_maintenance",
+            func=lambda: self._run_history_state_maintenance(),
+            trigger=IntervalTrigger(minutes=5),
+        )
 
     def _run_history_state_maintenance(self) -> None:
         sync_handler = getattr(self, "_sync_handler", None)
@@ -1359,198 +1188,56 @@ class CloudSubscribeX(_PluginBase):
 
     def _start_organize_schedule(self) -> None:
         """按 Cron 定时扫描 115 整理源目录；默认关闭。"""
+        registry = self._scheduler_registry()
         if not self._organize_schedule_enabled:
+            registry.remove_job("cloudsubscribe_organize")
             return
         if not self._organize_source_path:
             logger.warning("整理台定时任务已开启，但未配置 organize_source_path")
+            registry.remove_job("cloudsubscribe_organize")
             return
-        if self.__dict__.get("_organize_scheduler") is not None:
-            return
-        try:
-            scheduler = BackgroundScheduler(timezone=settings.TZ)
-            scheduler.add_job(
-                func=lambda: self.start_scan(
-                    source_path=self._organize_source_path,
-                    auto_execute=self._organize_schedule_auto_execute,
-                    trigger="定时",
-                ),
-                trigger=CronTrigger.from_crontab(self._organize_schedule_cron),
-                id="cloudsubscribe_organize",
-                replace_existing=True,
-            )
-            scheduler.start()
-            self._organize_scheduler = scheduler
-            logger.info(
-                f"115 网盘整理定时任务启动：{self._organize_schedule_cron}，"
-                f"自动执行={'是' if self._organize_schedule_auto_execute else '否'}"
-            )
-        except Exception as error:  # noqa: BLE001
-            logger.warning(f"115 网盘整理定时任务启动失败：{error}")
-
-    def cleanup_transfer_residue(self, reason: str = "手动") -> dict:
-        """删除跨盘缓存残留（cloud-transfer-*），返回统计。
-
-        判定见 :mod:`core.residue`：先删超过保留期（默认 6 小时）的缓存 ——
-        运行中的下载会持续刷新 mtime，所以不需要额外的任务列表兜底
-        （1.7.35 移除 Gopeed 后已无外部任务列表可查）；磁盘余量低于阈值时
-        再按最老优先清理未到期缓存，10 分钟内有写入的组一律保护。
-        """
-        from .core.residue import scan_residue
-
-        retention_hours = max(1, int(getattr(self, "_residue_retention_hours", 6) or 6))
-        result = self._empty_residue_result()
-        roots = self._residue_roots()
-        result["roots"] = roots
-        for root in roots:
-            scanned = scan_residue(
-                root,
-                min_age_seconds=retention_hours * 3600,
-                disk_free_ratio=getattr(self, "_residue_disk_free_ratio", 0.0) or 0.0,
-            )
-            self._merge_residue_result(result, scanned)
-            if not result.get("root"):
-                result["root"] = scanned.get("root")
-        freed_mb = int(result.get("freed_bytes") or 0) / (1024 * 1024)
-        pressure_mb = int(result.get("pressure_freed_bytes") or 0) / (1024 * 1024)
-        logger.info(
-            f"跨盘缓存残留清理（{reason}）：扫描 {len(roots)} 个目录，"
-            f"删除 {result.get('deleted_files')} 个文件、"
-            f"释放 {freed_mb:.1f} MB（其中磁盘压力清理 {result.get('pressure_deleted_files')} 个 / "
-            f"{pressure_mb:.1f} MB）；跳过未过期 {result.get('skipped_recent')} 组、"
-            f"任务中 {result.get('skipped_active')} 组、活跃保护 {result.get('skipped_protected')} 组；"
-            f"磁盘剩余 {result.get('disk_free_ratio')}"
+        registry.ensure_job(
+            "cloudsubscribe_organize",
+            func=lambda: self.start_scan(
+                source_path=self._organize_source_path,
+                auto_execute=self._organize_schedule_auto_execute,
+                trigger="定时",
+            ),
+            trigger=CronTrigger.from_crontab(self._organize_schedule_cron),
         )
-        for error in result.get("errors") or []:
-            logger.warning(f"跨盘缓存残留清理：{error}")
-        return result
-
-    @staticmethod
-    def _empty_residue_result() -> dict:
-        return {
-            "root": "",
-            "roots": [],
-            "deleted_files": 0,
-            "freed_bytes": 0,
-            "skipped_recent": 0,
-            "skipped_active": 0,
-            "skipped_protected": 0,
-            "pressure_deleted_files": 0,
-            "pressure_freed_bytes": 0,
-            "disk_free_ratio": None,
-            "disk_free_target": None,
-            "errors": [],
-        }
-
-    @staticmethod
-    def _merge_residue_result(total: dict, part: dict) -> None:
-        for key in (
-            "deleted_files", "freed_bytes", "skipped_recent", "skipped_active",
-            "skipped_protected", "pressure_deleted_files", "pressure_freed_bytes",
-        ):
-            total[key] = int(total.get(key) or 0) + int(part.get(key) or 0)
-        if part.get("disk_free_ratio") is not None:
-            total["disk_free_ratio"] = part.get("disk_free_ratio")
-        total["disk_free_target"] = part.get("disk_free_target")
-        total["errors"].extend(part.get("errors") or [])
-
-    def _residue_roots(self) -> list[str]:
-        """缓存清理要扫的目录：配置的缓存目录、aria2 工作目录、历史插件数据目录。
-
-        历史版本把 aria2 数据目录（含日志、会话与早期下载残留）放在插件数据
-        目录下，升级后这些残留没人清，所以保留这一条只读扫描路径。
-        """
-        from .core.residue import resolve_roots
-
-        data_path = ""
-        getter = getattr(self, "get_data_path", None)
-        if callable(getter):
-            try:
-                data_path = getter()
-            except Exception as error:  # noqa: BLE001 - 取不到数据目录不影响清理
-                logger.debug(f"读取插件数据目录失败：{error}", exc_info=True)
-        directories = [
-            self._cross_transfer_download_path or "/tmp",
-            self._aria2_data_dir(),
-            data_path,
-        ]
-        roots = resolve_roots(*directories)
-        # 只扫真实存在的目录：aria2 工作目录可能还没建，报「目录不存在」是噪音。
-        return [path for path in roots if Path(path).is_dir()] or roots
-
-    def _aria2_data_dir(self) -> Path:
-        """aria2 工作目录：优先跟随跨盘缓存目录，未配置才回落插件数据目录。
-
-        下载本体一直由 RPC 的 ``dir`` / ``out`` 指向跨盘缓存目录；这里放的
-        是 aria2c 二进制、会话文件与日志。日志按 warn 级别写入且启动前轮转，
-        跟随缓存目录可避免把大文件写到配置盘上。
-        """
-        from .core.aria2 import resolve_data_dir
-
-        return resolve_data_dir(
-            self._cross_transfer_download_path, self.get_data_path()
+        logger.info(
+            f"115 网盘整理定时任务启动：{self._organize_schedule_cron}，"
+            f"自动执行={'是' if self._organize_schedule_auto_execute else '否'}"
         )
 
     def _start_residue_cleanup(self) -> None:
         """启动时跑一次 + 按配置间隔周期跑（默认每 6 小时），与 STRM 校准错峰。
 
-        配置改动后再次调用本方法即可：间隔变化会原地重排任务，
+        配置改动后再次调用本方法即可：间隔变化会原地替换任务，
         关闭开关会移除已挂的定时任务。
         """
-        scheduler = self.__dict__.get("_residue_scheduler")
+        registry = self._scheduler_registry()
         if not self._residue_cleanup:
-            if scheduler is not None:
-                try:
-                    scheduler.remove_job("cloudsubscribe_residue_cleanup")
-                except Exception as error:  # noqa: BLE001
-                    logger.debug(f"移除跨盘缓存清理定时任务失败：{error}", exc_info=True)
+            registry.remove_job("cloudsubscribe_residue_cleanup")
             return
         interval_hours = max(1, min(int(getattr(self, "_residue_interval_hours", 6) or 6), 24))
-        if scheduler is not None:
-            try:
-                job = scheduler.get_job("cloudsubscribe_residue_cleanup")
-                if job is None:
-                    # 任务被外部移除（例如上次 remove_job 后重新开启）：补挂即可
-                    scheduler.add_job(
-                        func=lambda: self.cleanup_transfer_residue("定时"),
-                        trigger=IntervalTrigger(hours=interval_hours),
-                        id="cloudsubscribe_residue_cleanup",
-                        replace_existing=True,
-                    )
-                    return
-                current = None
-                trigger = getattr(job, "trigger", None)
-                if trigger is not None and getattr(trigger, "interval", None) is not None:
-                    current = trigger.interval.total_seconds() / 3600
-                if current is not None and abs(current - interval_hours) < 1e-6:
-                    return
-                scheduler.reschedule_job(
-                    "cloudsubscribe_residue_cleanup",
-                    trigger=IntervalTrigger(hours=interval_hours),
-                )
-                logger.info(f"跨盘缓存清理间隔已改为每 {interval_hours} 小时")
-                return
-            except Exception as error:  # noqa: BLE001
-                logger.warning(f"重排跨盘缓存清理定时任务失败：{error}")
-        try:
-            scheduler = BackgroundScheduler(timezone=settings.TZ)
-            scheduler.add_job(
-                func=lambda: self.cleanup_transfer_residue("定时"),
-                trigger=IntervalTrigger(hours=interval_hours),
-                id="cloudsubscribe_residue_cleanup",
-                replace_existing=True,
+        existed = registry.get_job("cloudsubscribe_residue_cleanup") is not None
+        registry.ensure_job(
+            "cloudsubscribe_residue_cleanup",
+            func=lambda: self.cleanup_transfer_residue("定时"),
+            trigger=IntervalTrigger(hours=interval_hours),
+        )
+        if not existed:
+            # 首次挂任务时才跑一次启动清理；配置重载不重复跑。
+            registry.ensure_job(
+                "cloudsubscribe_residue_cleanup_startup",
+                func=lambda: self.cleanup_transfer_residue("启动"),
+                trigger="date",
+                run_date=(
+                    datetime.datetime.now(tz=pytz.timezone(settings.TZ))
+                    + datetime.timedelta(seconds=1)
+                ),
             )
-            scheduler.start()
-            self._residue_scheduler = scheduler
-        except Exception as error:  # noqa: BLE001
-            logger.warning(f"跨盘缓存残留定时清理启动失败：{error}")
-
-        def _run_once():
-            try:
-                self.cleanup_transfer_residue("启动")
-            except Exception as error:  # noqa: BLE001
-                logger.warning(f"跨盘缓存残留清理失败：{error}")
-
-        Thread(target=_run_once, daemon=True).start()
 
     @staticmethod
     def _parse_period_episode_rules(value: Any) -> Dict[str, int]:
@@ -2218,7 +1905,9 @@ class CloudSubscribeX(_PluginBase):
                 max_concurrent=self._cross_transfer_aria2_max_concurrent,
                 min_split_size=self._cross_transfer_aria2_min_split_size,
                 disk_cache=self._cross_transfer_aria2_disk_cache,
-                data_dir=self._aria2_data_dir(),
+                data_dir=resolve_data_dir(
+                    self._cross_transfer_download_path, self.get_data_path()
+                ),
             )
         except Exception as error:  # noqa: BLE001 - 配置失败不得阻塞插件加载
             logger.warning(f"配置 aria2 下载引擎失败：{error}")
@@ -2805,48 +2494,12 @@ class CloudSubscribeX(_PluginBase):
                 platform_service.close()
         except Exception as error:
             logger.debug(f"关闭平台缓存失败：{error}", exc_info=True)
+        # 统一调度器一次停全部：包括以前漏停的历史状态维护与 115 整理两个任务。
         try:
-            if self._scheduler:
-                self._scheduler.remove_all_jobs()
-                if self._scheduler.running:
-                    self._scheduler.shutdown()
-                self._scheduler = None
-        except Exception:
-            logger.debug("stop_service 分支忽略异常", exc_info=True)
-
-        try:
-            if self._offline_scheduler:
-                self._offline_scheduler.remove_all_jobs()
-                if self._offline_scheduler.running:
-                    self._offline_scheduler.shutdown()
-                self._offline_scheduler = None
-        except Exception:
-            logger.debug("stop_service 分支忽略异常", exc_info=True)
-
-        try:
-            if self._residue_scheduler:
-                self._residue_scheduler.remove_all_jobs()
-                if self._residue_scheduler.running:
-                    self._residue_scheduler.shutdown()
-                self._residue_scheduler = None
-        except Exception:
-            logger.debug("stop_service 分支忽略异常", exc_info=True)
-
-        try:
-            if self._strm_full_scan_scheduler:
-                self._strm_full_scan_scheduler.remove_all_jobs()
-                if self._strm_full_scan_scheduler.running:
-                    self._strm_full_scan_scheduler.shutdown()
-                self._strm_full_scan_scheduler = None
-        except Exception:
-            logger.debug("stop_service 分支忽略异常", exc_info=True)
-
-        try:
-            if self._strm_increment_scheduler:
-                self._strm_increment_scheduler.remove_all_jobs()
-                if self._strm_increment_scheduler.running:
-                    self._strm_increment_scheduler.shutdown()
-                self._strm_increment_scheduler = None
+            registry = self.__dict__.get("_job_registry")
+            if registry is not None:
+                registry.shutdown()
+                self.__dict__["_job_registry"] = None
         except Exception:
             logger.debug("stop_service 分支忽略异常", exc_info=True)
 
