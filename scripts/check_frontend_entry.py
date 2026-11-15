@@ -15,7 +15,8 @@ import sys
 from pathlib import Path
 
 # 1.9.44 移除任务中心页签（用户反馈「看着多余」），任务状态只跟随订阅卡展示
-EXPECTED_TABS = ["hub", "history", "tg", "channels", "organize"]
+# 1.9.89 渠道管理移到主侧栏整页（AppPageChannels.vue），AppPage 内不再有 channels 页签
+EXPECTED_TABS = ["hub", "history", "tg", "organize"]
 
 
 def main(root: Path) -> int:
