@@ -17,6 +17,16 @@ from ..media import list_subscribes_by_tmdb_id
 from ...core import OwnerDelegator
 from ...search.types import resource_type_from_url, resource_type_name
 
+# 本插件 MP 搜索输出的合成种子接口路径：search_torrents 生成的 enclosure
+# 固定指向该路径；平台资源（PT/站点/RSS）的 enclosure 不会带它。
+_PLUGIN_TORRENT_PATH = "/plugin/CloudSubscribeX/torrent"
+
+
+def _is_own_plugin_torrent(torrent: Any) -> bool:
+    """判断种子是否为本插件 MP 搜索输出的合成种子。"""
+    enclosure = str(getattr(torrent, "enclosure", "") or "")
+    return _PLUGIN_TORRENT_PATH in enclosure
+
 
 class PluginEventHandler(OwnerDelegator):
     """处理事件总线回调。"""
@@ -865,6 +875,14 @@ class PluginEventHandler(OwnerDelegator):
 
         tmdbid = media.tmdb_id
         if not tmdbid:
+            return
+
+        # 插件自有合成种子的手动下载不拦截：MP 搜索页点插件结果下载时同样会
+        # 走 ResourceDownload 事件；block/cloud 策略下，已订阅剧集的手动下载
+        # 会被当成平台资源一并拦截（1.9.95 修复：空洞的十字架手动添加一直报
+        # “任务添加失败”）。平台资源（PT/站点/RSS）继续按原策略拦截。
+        if _is_own_plugin_torrent(torrent):
+            logger.debug(f"插件自有资源下载，放行：{torrent.title}")
             return
 
         # 查找匹配的订阅；电影没有 season 字段，必须按 TMDB 全量查询。
