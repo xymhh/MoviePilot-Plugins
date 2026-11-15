@@ -67,6 +67,7 @@ class ClassifyTest(unittest.TestCase):
         cases = {
             "请求过于频繁，请稍后再试": failure.KIND_RISK_CONTROL,
             "目标网盘空间不足": failure.KIND_TARGET_SPACE,
+            "跨盘缓存磁盘可用空间不足：剩余 924000000 字节，至少需要 2420000000 字节": failure.KIND_LOCAL_CACHE_SPACE,
             "提交离线下载失败": failure.KIND_OFFLINE_SUBMIT,
             "文件已转存但后处理任务登记失败": failure.KIND_POSTPROCESS,
             "秒传未命中，已中止": failure.KIND_CHECKSUM_MISS,
@@ -85,6 +86,7 @@ class ClassifyTest(unittest.TestCase):
         self.assertTrue(failure.is_permanent(failure.KIND_SHARE_INVALID))
         self.assertTrue(failure.is_permanent(failure.KIND_FILE_MISSING))
         self.assertFalse(failure.is_permanent(failure.KIND_NETWORK))
+        self.assertFalse(failure.is_permanent(failure.KIND_LOCAL_CACHE_SPACE))
         self.assertFalse(failure.is_permanent(""))
 
 

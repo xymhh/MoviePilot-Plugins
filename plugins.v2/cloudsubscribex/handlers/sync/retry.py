@@ -485,22 +485,8 @@ class HistoryRetryService(OwnerDelegator):
             record.update(cache_info)
             if self._save_data:
                 self._save_data("history", history)
-            if not success and cache_info.get("cache_status") == "complete":
-                task = self._cross_transfer_manager.create_from_cloud_file(
-                    source_key,
-                    cached_source,
-                    target_key,
-                    self._cloud_transfer_path,
-                    source_name,
-                )
-                success = self._cross_transfer_manager.wait(task["id"])
-                if not success:
-                    record.update(self._cross_transfer_manager.cache_info(
-                        source_key, cached_source, verify_checksum=False,
-                    ))
-                    apply_failure(record, "缓存恢复上传失败")
-                    self._save_data("history", history)
-                    raise RuntimeError("缓存完整，但恢复上传到目标网盘失败")
+            # 1.10.0 起任务结束即删临时文件，不再保留缓存供恢复；
+            # 重试一律完整重跑（下面直接走分享重新取源文件）。
             if not success:
                 try:
                     cross_source = self._cloud_drive_registry.get(source_key)

@@ -440,8 +440,6 @@ class ResidueServiceTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.owner = SimpleNamespace(
             _cross_transfer_download_path=str(self.root),
-            _residue_retention_hours=6,
-            _residue_disk_free_ratio=0.0,
             get_data_path=lambda: str(self.root),
         )
         self.service = self.Service(self.owner)
@@ -472,6 +470,25 @@ class ResidueServiceTests(unittest.TestCase):
         self.assertEqual(result["deleted_files"], 3)
         self.assertEqual(result["freed_bytes"], 300)
         self.assertEqual(result["skipped_recent"], 1)
+
+    def test_cleanup_keeps_active_cache_keys(self):
+        """1.10.0：进行中任务的缓存整组保留，无主孤儿无论多旧都删。"""
+        active_key = "cloud-transfer-" + "c" * 32
+        owner = SimpleNamespace(
+            _cross_transfer_download_path=str(self.root),
+            _cross_transfer_manager=SimpleNamespace(
+                active_cache_keys=lambda: {active_key},
+            ),
+            get_data_path=lambda: str(self.root),
+        )
+        service = self.Service(owner)
+        active_file = self._make_old(active_key + "-movie.mkv")
+        orphan = self._make_old("cloud-transfer-" + "a" * 32 + ".bin")
+        result = service.cleanup_transfer_residue("手动")
+        self.assertTrue(active_file.exists(), "进行中任务的缓存不得删除")
+        self.assertFalse(orphan.exists(), "无主孤儿文件必须删除")
+        self.assertEqual(result["skipped_active"], 1)
+        self.assertEqual(result["deleted_files"], 1)
 
     def test_residue_roots_include_cache_and_data_dirs(self):
         roots = self.service._residue_roots()
@@ -660,7 +677,6 @@ class PluginWiringTests(unittest.TestCase):
         plugin._organize_schedule_cron = "0 3 * * *"
         plugin._organize_schedule_auto_execute = False
         plugin._residue_cleanup = True
-        plugin._residue_interval_hours = 6
         return plugin
 
     def _start_all(self, plugin):
@@ -683,7 +699,6 @@ class PluginWiringTests(unittest.TestCase):
                 "cloudsubscribe_strm_increment",
                 "cloudsubscribe_history_state_maintenance",
                 "cloudsubscribe_organize",
-                "cloudsubscribe_residue_cleanup",
                 "cloudsubscribe_residue_cleanup_startup",
             },
         )

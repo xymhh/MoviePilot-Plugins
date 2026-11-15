@@ -1159,6 +1159,19 @@ class CrossTransferTaskManager:
         with self._cache_refs_lock:
             return self._cache_refs.get(cache_key, 0)
 
+    def active_cache_keys(self) -> set:
+        """进行中任务持有的中继缓存组键（``cloud-transfer-<32 位 hash>``）。
+
+        1.10.0 起任务结束即删临时文件，残留清理只删无主文件；在途文件
+        靠这里的引用精确保护，不再依赖修改时间。
+        """
+        with self._cache_refs_lock:
+            return {
+                f"cloud-transfer-{key}"
+                for key, count in self._cache_refs.items()
+                if count > 0
+            }
+
     def _cache_retained_for_others(self, task: dict | None) -> bool:
         """任务自身持有 1 个引用；计数 > 1 说明还有兄弟任务在用同一中继文件。"""
         cache_key = self._task_cache_key(task)
@@ -2282,9 +2295,10 @@ class CrossTransferTaskManager:
                 speed_bytes_per_second=0.0, finished_at=time.time(),
             )
         except RapidMissAborted as rapid_miss_error:
-            # abort 模式（秒传未命中即中止）：无条件清理本任务中继缓存——即使
-            # cache_complete 为真也不保留（与 fallback 保留完整缓存供重试不同）；
-            # 探测在下载前发生时 temporary_path 尚未赋值，无需清理。
+            # abort 模式（秒传未命中即中止）：无条件清理本任务中继缓存；
+            # 1.10.0 起 fallback 失败也不再保留（任务结束无论成败都删），
+            # 这里与通用失败分支一致；探测在下载前发生时
+            # temporary_path 尚未赋值，无需清理。
             if 'temporary_path' in locals() and temporary_path:
                 self._delete_cache_path_for_task(task, Path(temporary_path))
             message = "未命中秒传，已按设置中止（未上传任何数据；中继缓存已清理）"
@@ -2309,15 +2323,20 @@ class CrossTransferTaskManager:
                          abort_reason="rapid_miss",
                          speed_bytes_per_second=0.0, finished_at=time.time())
         except Exception as error:
-            if (
-                    'temporary_path' in locals() and temporary_path
-                    and not locals().get("cache_complete", False)
-                    and not self._cache_parts_path(Path(temporary_path)).is_file()
-            ):
+            # 1.10.0 起任务结束无论成败都删临时文件：失败不再保留完整
+            # 缓存供重试（重试 = 完整重跑，重新从源盘下载），
+            # .parts.json 断点续传也随之取消；同 cache_key 还有兄弟
+            # 任务在用时 _delete_cache_path_for_task 会保留文件。
+            if 'temporary_path' in locals() and temporary_path:
                 self._delete_cache_path_for_task(task, Path(temporary_path))
             self._update(task_id, status="failed", phase="failed", message="跨盘传输失败",
                          error=_describe_transfer_error(error),
                          speed_bytes_per_second=0.0, finished_at=time.time())
         finally:
+            # 兜底：任何退出路径（成功、失败、取消、中止、提前 return）
+            # 都不得留下临时文件；文件已删时 _delete_cache_path 是空操作，
+            # 兄弟任务在用时 _delete_cache_path_for_task 会保留。
+            if 'temporary_path' in locals() and temporary_path:
+                self._delete_cache_path_for_task(task, Path(temporary_path))
             self._release_cache_ref(cache_key)
             self._transfer_slots.release()

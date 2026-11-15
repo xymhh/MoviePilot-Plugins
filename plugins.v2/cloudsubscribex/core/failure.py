@@ -22,6 +22,9 @@ KIND_CHECKSUM_MISS = "checksum_miss"
 KIND_RISK_CONTROL = "risk_control"
 #: 目标网盘空间不足。
 KIND_TARGET_SPACE = "target_space"
+#: 本地跨盘缓存盘空间不足（1.10.0：与目标网盘空间不足区分；
+#: 旧文案「跨盘缓存磁盘可用空间不足」曾被误标为目标网盘满）。
+KIND_LOCAL_CACHE_SPACE = "local_cache_space"
 #: 网络超时、连接失败。
 KIND_NETWORK = "network"
 #: 提交离线下载失败。
@@ -43,6 +46,7 @@ KIND_LABELS: Dict[str, str] = {
     KIND_CHECKSUM_MISS: "秒传未命中",
     KIND_RISK_CONTROL: "网盘风控",
     KIND_TARGET_SPACE: "目标网盘空间不足",
+    KIND_LOCAL_CACHE_SPACE: "本地缓存磁盘空间不足",
     KIND_NETWORK: "网络异常",
     KIND_OFFLINE_SUBMIT: "离线下载失败",
     KIND_POSTPROCESS: "后处理失败",
@@ -70,6 +74,9 @@ _KEYWORD_RULES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     (KIND_RISK_CONTROL, (
         "风控", "请求过于频繁", "操作太频繁", "频率限制", "限流",
         "账号异常",
+    )),
+    (KIND_LOCAL_CACHE_SPACE, (
+        "跨盘缓存磁盘", "缓存磁盘", "缓存目录",
     )),
     (KIND_TARGET_SPACE, (
         "空间不足", "容量不足", "空间已满", "存储空间",

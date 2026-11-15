@@ -779,13 +779,9 @@ class HistoryService(OwnerDelegator):
                     return False, "分享内已找不到该文件，需重新搜源"
                 return False, f"{failure_label(kind)}，重试无法恢复，需重新搜源"
             if is_cross:
-                cache_status = str(record.get("cache_status") or "")
-                title = (
-                    "恢复跨盘转存"
-                    if cache_status in {"complete", "partial"}
-                    else "重新执行跨盘转存"
-                )
-                return True, title
+                # 1.10.0 起任务结束即删临时文件，不再保留缓存供恢复；
+                # 重试一律完整重跑（重新从源盘下载再上传）。
+                return True, "重新执行跨盘转存"
             return True, "重试此记录"
         if (
                 status == "成功"

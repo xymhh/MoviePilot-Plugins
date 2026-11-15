@@ -221,11 +221,6 @@ class UIConfig:
             # 每日真实上传字节上限（GB），硬 clamp 1..900；秒传命中 0 字节不计数
             "cross_transfer_daily_upload_limit_gb": 900,
             "cross_transfer_residue_cleanup": True,
-            # 跨盘中继缓存：保留期（小时，默认 6）、清理间隔（小时，默认 6）、
-            # 磁盘剩余比例低于该百分比时按最老优先强制清理（0 关闭，默认 10）。
-            "cross_transfer_residue_retention_hours": 6,
-            "cross_transfer_residue_interval_hours": 6,
-            "cross_transfer_residue_disk_free_pct": 10,
             "subscription_concurrency": 2,
             "batch_size": 20,
             "batch_interval": 3,

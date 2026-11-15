@@ -6,7 +6,8 @@
 2. abort + 未命中 + 源文件有 sha1：不下载、不真实上传、failed/aborted、
    abort_reason="rapid_miss"、缓存与目标盘无残留；
 3. abort + 未命中 + 无校验和：允许下载，但不得真实上传，且缓存被删除；
-4. fallback + 未命中：与 1.6.44 一致（回落上传、method="fallback"）；
+4. fallback + 未命中：回落上传、method="fallback"；1.10.0 起失败也不再
+   保留缓存（任务结束无论成败都删，1.6.44 的保留语义已取消）；
 5. 配置非法值 → 按 fallback 处理，不抛异常；
 6. p115 try_rapid_upload_by_hash：探测只走 upload_file_init、≥1MB 无数据源返回
    None、未命中清理可能的上传会话残留；
@@ -387,8 +388,8 @@ class RapidMissAbortTests(unittest.TestCase):
         self.assertEqual(len(self.source.download_calls), 1)
         self.assertEqual(task.get("abort_reason", ""), "")
 
-    def test_fallback_miss_keeps_cache_on_failure(self):
-        """验收4：fallback 失败时缓存保留策略不变（完整缓存供重试）。"""
+    def test_fallback_miss_deletes_cache_on_failure(self):
+        """1.10.0：fallback 失败时也不再保留缓存（任务结束无论成败都删）。"""
         upload = FakeRapidUploadService(rapid_outcomes=[False])
         upload.upload_file = MagicMock(return_value=False)
         manager, _files_service = self.make_manager(
@@ -407,9 +408,44 @@ class RapidMissAbortTests(unittest.TestCase):
         self.assertEqual(task["status"], "failed")
         self.assertEqual(task["phase"], "failed")
         self.assertEqual(task.get("abort_reason", ""), "")
+        self.assertFalse(cache_path.exists(), "fallback 失败后完整缓存必须删除")
+        self.assertFalse(meta_path.exists(), "fallback 失败后 .meta.json 必须删除")
         self.assertTrue(
-            cache_path.is_file() and meta_path.is_file(),
-            "fallback 失败时完整缓存必须保留（1.6.44 语义）",
+            self._no_cache_left(manager), "失败后缓存目录不得残留本任务文件"
+        )
+
+    def test_fallback_download_failure_deletes_partial_cache(self):
+        """1.10.0：下载中途失败时半截文件与 .parts.json 也必须删除（断点续传取消）。"""
+        upload = FakeRapidUploadService(rapid_outcomes=[False])
+        manager, _files_service = self.make_manager(
+            upload, rapid_miss_action="fallback",
+        )
+        file_item = make_file_item()
+        cache_path, _meta, parts_path = self._cache_triples(manager, file_item)
+
+        def _failing_download(item, local_path, progress_callback=None,
+                              stop_requested=None, preserve_partial=True,
+                              download_threads=5):
+            target = Path(local_path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(PAYLOAD[:5])
+            parts_path.write_text("{}", encoding="utf-8")
+            raise RuntimeError("模拟下载中断")
+
+        self.source.download_file = _failing_download
+        public = manager.create(
+            source_key="quark", source_file=file_item,
+            target_key="115", save_path="/", target_name="movie.mkv",
+            algorithm="sha1", checksum=SHA1,
+        )
+        task = self._wait_terminal(manager, public["id"])
+
+        self.assertEqual(task["status"], "failed")
+        self.assertEqual(task["phase"], "failed")
+        self.assertFalse(cache_path.exists(), "下载失败后半截文件必须删除")
+        self.assertFalse(parts_path.exists(), "下载失败后 .parts.json 必须删除")
+        self.assertTrue(
+            self._no_cache_left(manager), "失败后缓存目录不得残留本任务文件"
         )
 
     def test_abort_complete_cache_deleted_even_on_miss_after_download(self):

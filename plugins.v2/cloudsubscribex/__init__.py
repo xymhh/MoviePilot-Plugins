@@ -202,7 +202,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.9.99"
+    plugin_version = "1.10.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -312,13 +312,9 @@ class CloudSubscribeX(_PluginBase):
     #: 渠道库（channels.json）：搜索源与 TG 监控频道的唯一运行来源。
     #: ``None`` 表示尚未按当前数据目录惰性创建。
     _channels: Optional[ChannelStore] = None
-    # 跨盘缓存残留清理（历史 Gopeed 中间文件与内置下载器的半截文件共用同一套扫描）
+    # 跨盘缓存残留清理：启动时一次孤儿清理 + 手动按钮（1.10.0 起任务结束
+    # 即删临时文件，不再保留缓存、定时清理与磁盘压力清理）
     _residue_cleanup: bool = True
-    #: 中继缓存保留期（小时）与清理间隔（小时）
-    _residue_retention_hours: int = 6
-    _residue_interval_hours: int = 6
-    #: 磁盘剩余比例低于该值时触发最老优先强制清理（0 = 关闭）
-    _residue_disk_free_ratio: float = 0.10
     #: STRM 全量校准单次时间预算（秒），0 表示不限；到达上限后断点续扫。
     _strm_full_scan_budget: int = 900
     _subscription_concurrency: int = 2
@@ -1210,23 +1206,18 @@ class CloudSubscribeX(_PluginBase):
         )
 
     def _start_residue_cleanup(self) -> None:
-        """启动时跑一次 + 按配置间隔周期跑（默认每 6 小时），与 STRM 校准错峰。
+        """启动时跑一次孤儿清理（崩溃 / 异常退出留下的临时文件）。
 
-        配置改动后再次调用本方法即可：间隔变化会原地替换任务，
-        关闭开关会移除已挂的定时任务。
+        1.10.0 起任务结束即删临时文件，不再需要定时清理：定时任务
+        已移除，只保留启动时的一次性清理；手动清理走「立即清理残留」
+        按钮。配置改动后再次调用本方法即可：首次挂任务时才跑一次，
+        配置重载不重复跑。
         """
         registry = self._scheduler_registry()
+        registry.remove_job("cloudsubscribe_residue_cleanup")
         if not self._residue_cleanup:
-            registry.remove_job("cloudsubscribe_residue_cleanup")
             return
-        interval_hours = max(1, min(int(getattr(self, "_residue_interval_hours", 6) or 6), 24))
-        existed = registry.get_job("cloudsubscribe_residue_cleanup") is not None
-        registry.ensure_job(
-            "cloudsubscribe_residue_cleanup",
-            func=lambda: self.cleanup_transfer_residue("定时"),
-            trigger=IntervalTrigger(hours=interval_hours),
-        )
-        if not existed:
+        if registry.get_job("cloudsubscribe_residue_cleanup_startup") is None:
             # 首次挂任务时才跑一次启动清理；配置重载不重复跑。
             registry.ensure_job(
                 "cloudsubscribe_residue_cleanup_startup",
@@ -1942,26 +1933,6 @@ class CloudSubscribeX(_PluginBase):
         self._residue_cleanup = bool(
             config.get("cross_transfer_residue_cleanup", True)
         )
-        # 跨盘中继缓存策略：保留期 / 清理间隔（小时）与磁盘压力阈值（剩余百分比）。
-        # 非法值一律回落到默认，保证老配置升级后行为可预期。
-        try:
-            self._residue_retention_hours = max(
-                1, min(int(config.get("cross_transfer_residue_retention_hours", 6) or 6), 168)
-            )
-        except (TypeError, ValueError):
-            self._residue_retention_hours = 6
-        try:
-            self._residue_interval_hours = max(
-                1, min(int(config.get("cross_transfer_residue_interval_hours", 6) or 6), 24)
-            )
-        except (TypeError, ValueError):
-            self._residue_interval_hours = 6
-        try:
-            disk_free_pct = float(config.get("cross_transfer_residue_disk_free_pct", 10) or 0)
-        except (TypeError, ValueError):
-            disk_free_pct = 10.0
-        disk_free_pct = max(0.0, min(disk_free_pct, 90.0))
-        self._residue_disk_free_ratio = disk_free_pct / 100.0
 
         self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", 2) or 2), 5))
         self._batch_size = int(config.get("batch_size", 20) or 20)

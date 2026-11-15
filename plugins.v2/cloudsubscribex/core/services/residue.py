@@ -1,7 +1,11 @@
 """跨盘缓存残留清理服务。
 
 原先这组方法挂在插件入口（__init__.py）上；1.9.98 起收进职责组件，
-API 层（RuntimeApi.api_vue_cleanup_residue）与定时任务都调同一个入口。
+API 层（RuntimeApi.api_vue_cleanup_residue）与启动清理都调同一个入口。
+
+1.10.0 起任务结束无论成败都删临时文件，残留清理只负责无主文件
+（崩溃、异常退出、旧版遗留）：不看保留期，不做磁盘压力清理；
+在途文件靠跨盘任务管理器的引用精确保护。
 """
 
 from __future__ import annotations
@@ -14,40 +18,51 @@ from ..aria2 import resolve_data_dir
 from ..delegation import OwnerDelegator
 from ..residue import resolve_roots, scan_residue
 
+#: 孤儿文件最小保留期（秒）：防未知写入竞态的宽限；在途文件靠引用保护，
+#: 与文件新旧无关。
+ORPHAN_MIN_AGE_SECONDS = 60
+
 
 class ResidueService(OwnerDelegator):
     """删除跨盘缓存残留（cloud-transfer-*），返回统计。"""
 
     def cleanup_transfer_residue(self, reason: str = "手动") -> dict:
-        """删除跨盘缓存残留（cloud-transfer-*），返回统计。
+        """删除无主的跨盘中继临时文件（cloud-transfer-*），返回统计。
 
-        判定见 :mod:`core.residue`：先删超过保留期（默认 6 小时）的缓存 ——
-        运行中的下载会持续刷新 mtime，所以不需要额外的任务列表兜底
-        （1.7.35 移除 Gopeed 后已无外部任务列表可查）；磁盘余量低于阈值时
-        再按最老优先清理未到期缓存，10 分钟内有写入的组一律保护。
+        只删不属于进行中任务的文件：运行中的任务靠
+        ``CrossTransferTaskManager.active_cache_keys()`` 精确保护，
+        不再依赖修改时间；60 秒宽限只防未知写入竞态。
         """
-        retention_hours = max(1, int(getattr(self, "_residue_retention_hours", 6) or 6))
+        active_keys: set = set()
+        manager = getattr(self, "_cross_transfer_manager", None)
+        getter = getattr(manager, "active_cache_keys", None)
+        if callable(getter):
+            try:
+                active_keys = {
+                    str(key or "").strip() for key in getter() or ()
+                }
+            except Exception:  # noqa: BLE001 - 取不到在途列表也不影响清理
+                active_keys = set()
+            active_keys.discard("")
         result = self._empty_residue_result()
         roots = self._residue_roots()
         result["roots"] = roots
         for root in roots:
             scanned = scan_residue(
                 root,
-                min_age_seconds=retention_hours * 3600,
-                disk_free_ratio=getattr(self, "_residue_disk_free_ratio", 0.0) or 0.0,
+                active_keys=active_keys,
+                min_age_seconds=ORPHAN_MIN_AGE_SECONDS,
+                disk_free_ratio=0,
             )
             self._merge_residue_result(result, scanned)
             if not result.get("root"):
                 result["root"] = scanned.get("root")
         freed_mb = int(result.get("freed_bytes") or 0) / (1024 * 1024)
-        pressure_mb = int(result.get("pressure_freed_bytes") or 0) / (1024 * 1024)
         logger.info(
             f"跨盘缓存残留清理（{reason}）：扫描 {len(roots)} 个目录，"
             f"删除 {result.get('deleted_files')} 个文件、"
-            f"释放 {freed_mb:.1f} MB（其中磁盘压力清理 {result.get('pressure_deleted_files')} 个 / "
-            f"{pressure_mb:.1f} MB）；跳过未过期 {result.get('skipped_recent')} 组、"
-            f"任务中 {result.get('skipped_active')} 组、活跃保护 {result.get('skipped_protected')} 组；"
-            f"磁盘剩余 {result.get('disk_free_ratio')}"
+            f"释放 {freed_mb:.1f} MB；跳过任务中 {result.get('skipped_active')} 组、"
+            f"未满宽限 {result.get('skipped_recent')} 组"
         )
         for error in result.get("errors") or []:
             logger.warning(f"跨盘缓存残留清理：{error}")

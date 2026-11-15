@@ -110,12 +110,19 @@ def _delete_group(files: Iterable[Path], result: Dict[str, object], *, pressure:
 def scan_residue(
         root: str | Path,
         active_names: Optional[Iterable[str]] = None,
+        active_keys: Optional[Iterable[str]] = None,
         min_age_seconds: float = DEFAULT_MIN_AGE_SECONDS,
         now: Optional[float] = None,
         disk_free_ratio: Optional[float] = None,
         protect_recent_seconds: float = DEFAULT_PROTECT_RECENT_SECONDS,
 ) -> Dict[str, object]:
-    """扫描并删除残留，返回统计（不抛异常，单个文件失败记入 errors）。"""
+    """扫描并删除残留，返回统计（不抛异常，单个文件失败记入 errors）。
+
+    ``active_keys``：进行中任务持有的缓存组键
+    （``cloud-transfer-<32 位 hash>``，见
+    ``CrossTransferTaskManager.active_cache_keys``），整组跳过；
+    1.10.0 起残留清理靠它精确保护在途文件，不再只依赖修改时间。
+    """
     base = Path(root)
     result: Dict[str, object] = {
         "root": str(base),
@@ -141,6 +148,11 @@ def scan_residue(
             active.add(text)
             active.add(_canonical(text))
 
+    active_key_set: Set[str] = {
+        str(key or "").strip() for key in active_keys or ()
+    }
+    active_key_set.discard("")
+
     groups: Dict[str, list] = {}
     try:
         entries = list(base.iterdir())
@@ -162,6 +174,9 @@ def scan_residue(
     cutoff = stamp - max(0.0, float(min_age_seconds))
     remaining: Dict[str, tuple] = {}
     for key, files in groups.items():
+        if key in active_key_set:
+            result["skipped_active"] += 1
+            continue
         if any(item.name in active or _canonical(item.name) in active for item in files):
             result["skipped_active"] += 1
             continue
