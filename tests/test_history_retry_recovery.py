@@ -76,6 +76,10 @@ class HistoryRetryRecoveryTest(unittest.TestCase):
         self.owner._cloud_query.find_file.return_value = None
         self.owner._cross_transfer_manager.cache_info.return_value = {}
         self.owner._transfer_file.return_value = True
+        # 1.10.7：重试会先读本次尝试记下来的失败原因；真实现返回 str，
+        # 没记下来时返回 ""，这里按真实行为配桩，否则 MagicMock 的
+        # 返回值会被当成原因写进记录。
+        self.owner._transfer_failure_reason.return_value = ""
         self.owner._generate_or_queue_strm.return_value = (None, "pending-key-1")
         self.owner._is_ed2k_url.return_value = False
         self.owner._share_transfer.check_share_status.return_value.is_valid = True
@@ -144,6 +148,26 @@ class HistoryRetryRecoveryTest(unittest.TestCase):
 
         self.assertEqual("失败", self.record["status"])
         self.assertEqual("重试转存失败", self.record["failure_reason"])
+
+    def test_retry_prefers_fresh_transfer_failure_reason(self):
+        """1.10.7：本次尝试记下来的新原因优先于记录上残留的旧原因。"""
+        self.owner._transfer_file.return_value = False
+        self.owner._transfer_failure_reason.return_value = (
+            "秒传未命中且普通上传失败：115 open api 429"
+        )
+
+        with self.assertRaises(RuntimeError) as caught:
+            self._retry()
+
+        self.assertEqual("失败", self.record["status"])
+        self.assertEqual(
+            "秒传未命中且普通上传失败：115 open api 429",
+            self.record["failure_reason"],
+        )
+        self.assertEqual(
+            "秒传未命中且普通上传失败：115 open api 429",
+            str(caught.exception),
+        )
 
 
 if __name__ == "__main__":

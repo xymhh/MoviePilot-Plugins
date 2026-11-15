@@ -839,6 +839,14 @@ class TransferOpsMixin(OwnerDelegator):
                     ).strip()
                     if str(completed_task.get("abort_reason") or "") == "rapid_miss":
                         failure_reason = failure_reason or "未命中秒传"
+                    if not failure_reason:
+                        # 任务字典里没留下原因时（比如任务中途丢失）也别让
+                        # 记录空着：至少写清失败时卡在哪个阶段，否则历史页
+                        # 上只剩一个光秃秃的「未分类失败」，无从查起。
+                        phase = str(
+                            completed_task.get("phase") or "unknown"
+                        ).strip()
+                        failure_reason = f"跨盘转存失败（阶段：{phase}）"
                     self._remember_transfer_failure(file_item, failure_reason)
                     if (
                             should_stop()

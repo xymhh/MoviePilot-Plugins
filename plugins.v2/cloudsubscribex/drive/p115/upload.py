@@ -202,6 +202,17 @@ class P115UploadService(OwnerDelegator):
 
     rapid_requires_local_file = True
 
+    @property
+    def last_error(self) -> str:
+        """最近一次 ``upload_file`` 失败的原因原文。
+
+        upload_file 只返回 bool，调用方（CrossDriveTransfer）拿不到
+        原因；这里把每次失败的原因留下来，供上层写进任务 error 与
+        历史记录失败原因——否则页面上永远只能看到一句通用的
+        「秒传未命中且普通上传失败」，查不到到底是哪一步错了。
+        """
+        return str(getattr(self, "_last_upload_error", "") or "")
+
     def _oss_proxy_kwargs(self) -> Dict[str, Any]:
         """OSS 数据面（分片 PUT / 元数据）的代理参数；未配置时为空字典。
 
@@ -341,10 +352,12 @@ class P115UploadService(OwnerDelegator):
             progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> bool:
         if not P115_AVAILABLE or not self.client:
+            self._last_upload_error = "115 本地上传不可用：客户端未初始化"
             logger.error("115 本地上传不可用：客户端未初始化")
             return False
         source = Path(str(local_path or ""))
         if not source.is_file():
+            self._last_upload_error = f"115 本地上传文件不存在：{source}"
             logger.error(f"115 本地上传文件不存在：{source}")
             return False
         files = self._owner._get_component(P115FileService)
@@ -352,6 +365,7 @@ class P115UploadService(OwnerDelegator):
             save_path, create=True
         )
         if not lookup.checked or lookup.directory_id is None:
+            self._last_upload_error = f"115 本地上传目录不可用：{save_path}"
             logger.error(f"115 本地上传目录不可用：{save_path}")
             return False
         upload_name = str(target_name or source.name).strip()
@@ -390,8 +404,12 @@ class P115UploadService(OwnerDelegator):
             if progress_callback:
                 progress_callback(file_size, file_size)
             logger.info(f"115 本地文件上传完成：{source.name} -> {save_path}/{upload_name}")
+            self._last_upload_error = ""
             return True
         except Exception as error:
+            self._last_upload_error = (
+                f"115 本地文件上传失败：{source.name}，{error}"
+            )
             logger.error(f"115 本地文件上传失败：{source.name}，{error}")
             return False
 

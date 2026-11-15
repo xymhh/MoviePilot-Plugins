@@ -771,6 +771,12 @@ class CrossDriveTransferResult:
 class CrossDriveTransfer:
     """执行单文件传输；源文件需先由调用层下载到本地临时路径。"""
 
+    def __init__(self) -> None:
+        #: 最近一次 transfer() 失败的原因（调用方读它写进任务 error）。
+        #: upload_file 只返回 bool 不带原因；支持 last_error 属性的
+        #: 上传服务（如 115）会把底层报错原文留在这里。
+        self.last_error: str = ""
+
     @staticmethod
     def select_algorithm(source: CloudFile, target: CloudDriveProvider) -> tuple[str, str]:
         """按目标能力选择源文件已有校验和，MD5 与 SHA1 绝不互换。"""
@@ -800,9 +806,12 @@ class CrossDriveTransfer:
                 if rapid_result.reused and rapid_result.file:
                     return CrossDriveTransferResult(rapid_result.file, "rapid")
         if not fallback:
+            self.last_error = "秒传未命中"
             return None
         upload = target.require(CloudDriveCapability.LOCAL_UPLOAD)
         if not upload.upload_file(source_path, save_path, target_name, progress_callback=progress_callback):
+            detail = str(getattr(upload, "last_error", "") or "").strip()
+            self.last_error = detail or "普通上传失败（目标盘未返回原因）"
             return None
         item = target.require(CloudDriveCapability.FILE_QUERY).find_file(
             save_path, target_name
@@ -2287,9 +2296,15 @@ class CrossTransferTaskManager:
                     if transfer_algorithm == "sha1":
                         observed_sha1 = str(transfer_checksum or "").upper()
             local_method = {"value": ""}
+            # write_local 拿不到返回值以外的信息：transfer() 只返回 None，
+            # 底层原因（115 报错原文）先留在这个格子里，not_written 分支
+            # 再把它拼进任务 error——否则任务只剩一句通用的
+            # 「秒传未命中且普通上传失败」，历史记录也查不到真正原因。
+            local_error = {"value": ""}
 
             def write_local():
-                uploaded = CrossDriveTransfer().transfer(
+                transfer = CrossDriveTransfer()
+                uploaded = transfer.transfer(
                     source_path, target, target_path, target_name,
                     transfer_algorithm, transfer_checksum,
                     # abort 模式：秒传未命中时不进入真实上传（fallback 参数不变）
@@ -2297,6 +2312,7 @@ class CrossTransferTaskManager:
                     progress_callback=progress,
                 )
                 if not uploaded:
+                    local_error["value"] = str(transfer.last_error or "").strip()
                     return None
                 local_method["value"] = uploaded.method
                 return uploaded.file if uploaded.file is not None else True
@@ -2309,7 +2325,13 @@ class CrossTransferTaskManager:
             if local_result.status == "not_written":
                 if rapid_miss_abort:
                     raise RapidMissAborted()
-                raise RuntimeError("秒传未命中且普通上传失败" if fallback else "秒传未命中")
+                detail = str(local_error["value"] or "").strip()[:300]
+                if fallback:
+                    raise RuntimeError(
+                        f"秒传未命中且普通上传失败：{detail}"
+                        if detail else "秒传未命中且普通上传失败"
+                    )
+                raise RuntimeError("秒传未命中")
             result_file = local_result.file
             reused = local_result.status == "reused"
             rapid = (not reused) and local_method["value"] == "rapid"

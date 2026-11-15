@@ -574,7 +574,16 @@ class HistoryRetryService(OwnerDelegator):
                     cached_source,
                     verify_checksum=False,
                 ))
-            reason = str(record.get("failure_reason") or "").strip() or "重试转存失败"
+            # 本次重试的失败原因优先用任务刚记下来的那条（_transfer_file
+            # 已把任务 error 写进 _transfer_failure_reasons）；记录上残留
+            # 的旧原因（上一次失败的）只能作备选。以前这里只读记录，旧
+            # 原因一空就只剩一句通用的「重试转存失败」，查不到这次到底
+            # 错在哪——LOST10 S01E05 那条就是这么来的。
+            reason = (
+                self._transfer_failure_reason(file_id)
+                or str(record.get("failure_reason") or "").strip()
+                or "重试转存失败"
+            )
             apply_failure(record, reason)
             self._save_data("history", history)
             raise RuntimeError(reason)
