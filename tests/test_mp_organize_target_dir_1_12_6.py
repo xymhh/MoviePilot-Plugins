@@ -68,6 +68,9 @@ class TestTriggerMpOrganizeTargetDirectory(unittest.TestCase):
         tracker.reset_mp_organizing()
         self.mediainfo = MagicMock()
         self.mediainfo.type = MediaType.TV
+        # 调用方传的 MediaInfo 默认带分类（真实 MP 识别结果有分类），
+        # v1.12.7 的 trigger 会把它直传给 do_transfer。
+        self.mediainfo.category = "国漫"
         self.mixin = MpOrganizeMixin(_owner())
 
     def test_media_only_get_dir_hits_tv_entry(self):
@@ -115,8 +118,13 @@ class TestTriggerMpOrganizeTargetDirectory(unittest.TestCase):
         self.assertEqual(kwargs["target_directory"].library_path, "/媒体库/剧集")
         self.assertEqual(kwargs["target_storage"], "u115cs")
 
-    def test_do_transfer_receives_built_mediainfo(self):
-        """mediainfo 为空时 do_transfer 收到拼好的最小 MediaInfo。"""
+    def test_do_transfer_omits_built_mediainfo_without_category(self):
+        """media 字典没有 category 时，不把拼好的最小 MediaInfo 传给 MP。
+
+        v1.12.7：最小 MediaInfo 没有 category，传了会被 MP 的分类校验
+        拒绝（“TMDB 信息未匹配到媒体分类”）；不传时 MP 按文件名识别
+        并自己分类。目标目录/存储照常传。
+        """
         ok, _info = self.mixin.trigger_mp_organize(
             "/downloads",
             "吞噬星空 {tmdb-101172} - S01E232 - 第232集.mkv",
@@ -129,10 +137,8 @@ class TestTriggerMpOrganizeTargetDirectory(unittest.TestCase):
         )
         self.assertTrue(ok)
         _fileitem, kwargs = FakeTransferChain.calls[0]
-        self.assertIsInstance(kwargs["mediainfo"], FakeMediaInfo)
-        self.assertEqual(kwargs["mediainfo"].type, MediaType.TV)
-        self.assertEqual(kwargs["mediainfo"].title, "吞噬星空")
-        self.assertEqual(kwargs["mediainfo"].tmdb_id, 101172)
+        self.assertNotIn("mediainfo", kwargs)
+        self.assertEqual(kwargs["mtype"], MediaType.TV)
         self.assertEqual(kwargs["target_storage"], "u115cs")
         self.assertEqual(kwargs["target_directory"].library_path, "/媒体库/剧集")
 

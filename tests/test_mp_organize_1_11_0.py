@@ -180,6 +180,9 @@ class TestTriggerMpOrganize(unittest.TestCase):
         FakeDirectoryHelper.last_conf = None
         self.mediainfo = MagicMock()
         self.mediainfo.type = MediaType.TV
+        # 调用方传的 MediaInfo 默认带分类（真实 MP 识别结果有分类），
+        # v1.12.7 的 trigger 会把它直传给 do_transfer。
+        self.mediainfo.category = "国漫"
         self.mixin = MpOrganizeMixin(_owner())
 
     def test_flag_off_returns_false_without_calling_chain(self):
@@ -254,10 +257,10 @@ class TestTriggerMpOrganize(unittest.TestCase):
         _fileitem, kwargs = FakeTransferChain.calls[0]
         self.assertEqual(kwargs["mtype"], MediaType.TV)
         self.assertEqual(kwargs["season"], 2)
-        # mediainfo 为空时 trigger 内部用 media 字典拼最小 MediaInfo
-        # 传给 do_transfer，不再是 None。
-        self.assertIsInstance(kwargs["mediainfo"], FakeMediaInfo)
-        self.assertEqual(kwargs["mediainfo"].type, MediaType.TV)
+        # v1.12.7：media 字典没有 category 时，拼出的最小 MediaInfo
+        # 不传给 do_transfer（MP 分类校验会拒），MP 按文件名识别并
+        # 自己分类；目标目录/存储照常传。
+        self.assertNotIn("mediainfo", kwargs)
         self.assertEqual(kwargs["target_storage"], "u115cs")
 
 

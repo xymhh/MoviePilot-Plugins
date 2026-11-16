@@ -12,6 +12,15 @@ target_directory / target_storage 传给 do_transfer；否则 MP 会按源
 路径前缀匹配到“夸克追更”条目（download_path=/downloads），把文件
 整理进 /转存/ 而不是媒体库。
 
+v1.12.7：不再无条件把拼好的最小 MediaInfo 传给 do_transfer。
+最小 MediaInfo 没有 category，而 MP 的剧集目录条目开了
+library_category_folder（媒体库下有 国漫/、国产剧/ 子目录）且无
+固定分类时，MP 的分类校验要求 mediainfo 必须带 category，否则
+在动文件前就拒绝（“TMDB 信息未匹配到媒体分类”）。所以只在
+MediaInfo 自带非空 category 时才传；没有时不传，让 MP 按文件名
+识别（文件名带 {tmdb-<id>} 标记，MP 能认到正确的 id）并自己分类。
+目标目录/存储的显式传参不变，/转存/ 落点修复不受影响。
+
 STRM 不受影响：STRM 内容用的是 115 文件的 pickcode（与路径无关），
 整理把文件从 /转存 移进媒体库后，旧 STRM 照样能播。
 """
@@ -137,7 +146,8 @@ class MpOrganizeMixin(OwnerDelegator):
 
         :param save_dir: 文件所在的云盘目录（如 /Alist/影视/moviepilot/转存）
         :param file_name: 保存后的文件名
-        :param mediainfo: 同步已认到的 MediaInfo（有就直传，MP 不用重认）
+        :param mediainfo: 同步已认到的 MediaInfo（自带分类时直传，MP 不用
+            重认；没有分类时不传，让 MP 按文件名识别并自己分类）
         :param media: 只有媒体字典时的备用身份（tmdb_id/media_type/season）
         :param season: 季号（media 字典里没有时可单传）
         :return: (True, info) 表示 MP 已接受整理，info 里有触发时传给
@@ -219,13 +229,20 @@ class MpOrganizeMixin(OwnerDelegator):
                     elif text in ("movie", "电影"):
                         mtype = MediaType.MOVIE
             kwargs: Dict[str, Any] = {
-                "mediainfo": effective,
                 "mtype": mtype,
                 "manual": True,
                 "background": True,
                 "target_directory": conf,
                 "target_storage": getattr(conf, "library_storage", None),
             }
+            # v1.12.7：只在 MediaInfo 自带非空 category 时才传给 MP。
+            # 最小 MediaInfo 没有 category，传了会被 MP 的分类校验直接
+            # 拒绝（“TMDB 信息未匹配到媒体分类”）；不传时 MP 按文件名
+            # 识别（文件名带 {tmdb-<id>} 标记）并自己分类，校验能过。
+            if effective is not None:
+                category = str(getattr(effective, "category", "") or "").strip()
+                if category:
+                    kwargs["mediainfo"] = effective
             if season is None and isinstance(media, dict):
                 season = media.get("season")
             if season is not None:
