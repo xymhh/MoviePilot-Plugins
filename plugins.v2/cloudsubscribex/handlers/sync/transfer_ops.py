@@ -65,6 +65,26 @@ def _release_staging_ref(key: str) -> int:
         return 0
 
 
+def _mark_mp_organizing(parent_task_id: str, mp_organize: Dict[str, Any]) -> None:
+    """把已触发的 MP 整理登记进整理中登记表（v1.12.6 B）。
+
+    登记表由 transfer_ops 写入、下载页读取、finalize 终态时清除。
+    登记只是跨组件交接用的 bookkeeping，导入或登记失败时只记日志，
+    绝不能打断转存流程。
+    """
+    if not parent_task_id or not isinstance(mp_organize, dict):
+        return
+    try:
+        from ...core.services.mp_organize_tracker import mark_mp_organizing
+    except Exception as error:
+        logger.debug(f"MP 整理登记表不可用，已跳过登记：{error}")
+        return
+    try:
+        mark_mp_organizing(parent_task_id, mp_organize)
+    except Exception as error:
+        logger.debug(f"登记 MP 整理中状态失败：{error}", exc_info=True)
+
+
 class TransferOpsMixin(OwnerDelegator):
     """转存执行：秒传/跨盘/失败记录/结果核验/暂存清理。"""
 
@@ -913,23 +933,47 @@ class TransferOpsMixin(OwnerDelegator):
                             completed_task.get("result_local_path") or ""
                         ).strip()
                         local_parts = PurePosixPath(local_path) if local_path else None
-                        organized = bool(
-                            local_parts and local_parts.name
-                            and self.trigger_mp_organize(
+                        if local_parts and local_parts.name:
+                            ok, mp_info = self.trigger_mp_organize(
                                 str(local_parts.parent), local_parts.name,
                                 media=effective_media,
                             )
-                        )
+                        else:
+                            ok, mp_info = False, {
+                                "reason": "no_source",
+                                "message": "MP 整理未触发：本地路径为空，文件未进媒体库",
+                            }
                     else:
-                        organized = bool(self.trigger_mp_organize(
+                        ok, mp_info = self.trigger_mp_organize(
                             save_path, result_name, media=effective_media,
-                        ))
-                    file_item["_mp_organized"] = organized
-                    if not organized:
-                        self._remember_transfer_failure(
-                            file_item,
-                            "MP 整理未接受：文件未进媒体库，下一轮重试",
                         )
+                    file_item["_mp_organized"] = bool(ok)
+                    if ok:
+                        file_item["mp_organize"] = mp_info
+                        if parent_task_id:
+                            _mark_mp_organizing(parent_task_id, mp_info)
+                    else:
+                        info = mp_info if isinstance(mp_info, dict) else {}
+                        reason = info.get("reason")
+                        if reason == "no_target_dir":
+                            failure = (
+                                "MP 整理未触发：未解析到目标目录，"
+                                "文件未进媒体库，下一轮重试"
+                            )
+                        elif reason == "disabled":
+                            failure = (
+                                "MP 整理已关闭：文件未进媒体库，下一轮重试"
+                            )
+                        elif reason == "not_accepted":
+                            failure = (
+                                "MP 整理未接受：文件未进媒体库，下一轮重试"
+                            )
+                        else:
+                            failure = (
+                                info.get("message")
+                                or "MP 整理未接受：文件未进媒体库，下一轮重试"
+                            )
+                        self._remember_transfer_failure(file_item, failure)
                         return False
                 if not success:
                     failure_reason = str(
@@ -1003,12 +1047,19 @@ class TransferOpsMixin(OwnerDelegator):
         # 字幕等非视频文件由 trigger 内部的扩展名守卫拦下。
         if self._mp_organize_enabled():
             saved_name = str(target_name or file_item.get("name") or "")
-            self.trigger_mp_organize(
+            ok, mp_info = self.trigger_mp_organize(
                 save_path, saved_name, media=media,
                 season=(
                     media.get("season") if isinstance(media, dict) else None
                 ),
             )
+            if ok and mp_info:
+                # 触发成功才记身份：finalize 改走 MP 跟踪，不再 2 分钟判失败；
+                # 触发失败不影响本次直存结果（文件已在 115 /转存/，老定位找得到）。
+                file_item["mp_organize"] = mp_info
+                file_item["_mp_organized"] = True
+                if parent_task_id:
+                    _mark_mp_organizing(parent_task_id, mp_info)
         return success
 
     def _ensure_share_transfer_available(self, provider_key: str) -> None:

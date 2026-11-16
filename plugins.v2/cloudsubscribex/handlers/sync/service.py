@@ -1559,6 +1559,7 @@ class SyncHandler:
             upgrade_old_size: int = 0,
             subtitles: Optional[List[Dict[str, Any]]] = None,
             skip_history: bool = False,
+            mp_organize: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """构造单个后处理记录；单项和批量入口共用同一字段规则。"""
         current = current or {}
@@ -1586,7 +1587,7 @@ class SyncHandler:
                 else f"media:{sub_key}" if sub_key else ""
             )
         )
-        return {
+        record = {
             **current,
             "pending_key": pending_key,
             "task_type": task_type,
@@ -1670,6 +1671,14 @@ class SyncHandler:
                 subtitles if subtitles is not None else current.get("subtitles") or []
             ),
         }
+        # v1.12.6 C：MP 整理身份跟 pending 记录走，供 finalize 轮询 MP
+        # 链；重登记时新身份优先、无新身份时沿用旧身份、无身份时不留字段，
+        # 老路径行为一字不改。
+        record.pop("mp_organize", None)
+        mp_organize_value = mp_organize or current.get("mp_organize")
+        if isinstance(mp_organize_value, dict) and mp_organize_value:
+            record["mp_organize"] = copy.deepcopy(mp_organize_value)
+        return record
 
     def _queue_file_finalize(
             self,
@@ -1696,6 +1705,7 @@ class SyncHandler:
             transient_target: bool = False,
             target_subscribe: Optional[Dict[str, Any]] = None,
             skip_history: bool = False,
+            mp_organize: Optional[Dict[str, Any]] = None,
     ) -> str:
         item = {
             "result_key": "single",
@@ -1716,6 +1726,7 @@ class SyncHandler:
             "upgrade_old_size": upgrade_old_size,
             "subtitles": subtitles or [],
             "skip_history": skip_history,
+            "mp_organize": mp_organize,
         }
         result = self._queue_file_finalize_batch(
             items=[item],
@@ -1807,6 +1818,7 @@ class SyncHandler:
                     transient_target=transient_target,
                     target_subscribe=target_subscribe,
                     skip_history=bool(item.get("skip_history")),
+                    mp_organize=item.get("mp_organize"),
                 )
                 result[str(item["result_key"])] = pending_key
             if result:

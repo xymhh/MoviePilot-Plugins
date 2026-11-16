@@ -851,6 +851,57 @@ class PostprocessService(OwnerDelegator):
 
         return None
 
+    def _mp_organize_tracker(self) -> Any:
+        """返回 MP 整理轮询器（每轮 finalize 新建）。
+
+        MP 侧调用很便宜：历史是单条精确查询，队列是内存列表。
+        """
+        from ...core.services.mp_organize_tracker import MpOrganizeTracker
+
+        return MpOrganizeTracker()
+
+    def _clear_mp_organizing_for_item(self, item: Dict[str, Any]) -> None:
+        """终态结算时按源路径清除 MP 整理中登记；无身份时什么都不做。"""
+        mp_organize = item.get("mp_organize") if isinstance(item, dict) else None
+        src_path = ""
+        if isinstance(mp_organize, dict):
+            src_path = str(mp_organize.get("src_path") or "").strip()
+        if not src_path:
+            return
+        try:
+            from ...core.services.mp_organize_tracker import (
+                clear_mp_organizing_by_src,
+            )
+        except Exception as error:
+            logger.debug(f"MP 整理登记表不可用，已跳过清除：{error}")
+            return
+        try:
+            clear_mp_organizing_by_src(src_path)
+        except Exception as error:
+            logger.debug(f"清除 MP 整理中登记失败：{error}", exc_info=True)
+
+    def _locate_cloud_file_by_dest(
+            self, dest_path: str, ctx: PostprocessBatchContext
+    ) -> Optional[Any]:
+        """按 MP 历史 dest 的完整嵌套路径直查文件。
+
+        MP 整理出的文件在“剧名/Season 1/”两层子目录下，平铺扫描看不见；
+        这里只对 dest 的父目录取一次单层快照、按精确文件名查。
+        """
+        dest = str(dest_path or "").strip()
+        if not dest:
+            return None
+        dest_parent = str(Path(dest).parent)
+        dest_name = Path(dest).name
+        if not dest_name:
+            return None
+        valid, file_index = self._cloud_directory_snapshot(
+            dest_parent, ctx.directory_snapshots
+        )
+        if not valid or not file_index or dest_name not in file_index:
+            return None
+        return file_index[dest_name]
+
     def _has_existing_cloud_file(
             self, item: Dict[str, Any], pending_key: str, ctx: PostprocessBatchContext
     ) -> bool:
@@ -1010,6 +1061,8 @@ class PostprocessService(OwnerDelegator):
             )
         if not self._resolve_history_record(item, pending_key, "成功"):
             return
+        # v1.12.6 C：成功终态清除 MP 整理中登记（无身份时是空操作）。
+        self._clear_mp_organizing_for_item(item)
         self._queue_subscription_completion(item, media, media_data, ctx)
         detail = self._notify_pending_file_finalized(
             item,
@@ -1052,6 +1105,9 @@ class PostprocessService(OwnerDelegator):
         )
         if not self._resolve_history_record(item, pending_key, "失败", reason):
             return
+        # v1.12.6 C：所有 abort 都走这里，终态清除 MP 整理中登记集中做
+        # 一次（无身份时是空操作；历史未落盘提前返回时不清除，任务还在）。
+        self._clear_mp_organizing_for_item(item)
         # 终态失败统一走已有的死任务失败通知口径（同一标题/文案、同一 _notify 开关）：
         # 此前只有 finalize_dead 路径会通知，直接 abort（定位失败、离线超时等）
         # 静默结算，用户收不到任何完成/失败通知——手动转存的跨盘文件一旦走到
@@ -1447,6 +1503,115 @@ class PostprocessService(OwnerDelegator):
             )
             ctx.failed += 1
 
+    def _track_mp_organize_stall(
+            self,
+            item: Dict[str, Any],
+            mp_organize: Dict[str, Any],
+            state: str,
+            now: float,
+    ) -> None:
+        """MP 队列 state 不变满 15 分钟时把登记表文案标为停滞，但不 abort。
+
+        MP 是单线程串行队列，队头卡住时后续任务只能排队；这里只提示，
+        不自动取消/重试 MP 队列任务。
+        """
+        from ...core.services.mp_organize_tracker import (
+            MP_ORGANIZE_QUEUE_STALL_SECONDS,
+            update_mp_organizing_by_src,
+        )
+
+        wait = item.get("mp_organize_wait")
+        if not isinstance(wait, dict):
+            wait = {}
+        last_state = str(wait.get("last_state") or "")
+        last_change_at = float(wait.get("last_change_at") or 0)
+        if last_state != state or not last_change_at:
+            item["mp_organize_wait"] = {
+                "last_state": state,
+                "last_change_at": now,
+            }
+            return
+        if now - last_change_at < MP_ORGANIZE_QUEUE_STALL_SECONDS:
+            return
+        src_path = str(mp_organize.get("src_path") or "").strip()
+        if not src_path:
+            return
+        try:
+            update_mp_organizing_by_src(
+                src_path, "整理停滞（队头阻塞，后续任务排队中）"
+            )
+        except Exception as error:
+            logger.debug(f"更新 MP 整理停滞文案失败：{error}", exc_info=True)
+
+    def _poll_mp_organize_state(
+            self,
+            item: Dict[str, Any],
+            pending_key: str,
+            mp_organize: Dict[str, Any],
+            ctx: PostprocessBatchContext,
+    ) -> Tuple[str, Optional[Any], str]:
+        """轮询 MP 整理并处理等待态。
+
+        :return: (action, found_file, dest_parent)；action 为 retry（已调度
+            复查，调用方直接返回）、abort（已 abort，调用方直接返回）、
+            located（dest 文件已找到，调用方继续成功分支）、dest_missed
+            （历史成功但 dest 查无文件，调用方回落平铺定位，仍找不到时
+            只复查、不计 fail_count、不 abort）。
+        """
+        from ...core.services.mp_organize_tracker import (
+            MP_ORGANIZE_GRACE_SECONDS,
+            MP_ORGANIZE_WAIT_TIMEOUT_SECONDS,
+        )
+
+        tracker = self._mp_organize_tracker()
+        state, detail, dest_path = tracker.poll(mp_organize)
+        triggered_at = float(
+            mp_organize.get("triggered_at")
+            or item.get("download_completed_at")
+            or item.get("created_at")
+            or ctx.now
+        )
+        if (
+                state in {"queued", "running", "missing"}
+                and ctx.now - triggered_at > MP_ORGANIZE_WAIT_TIMEOUT_SECONDS
+        ):
+            self._abort_single_item(
+                item, pending_key, "MP 整理超时（90 分钟内未完成）", ctx
+            )
+            return ("abort", None, "")
+        if state == "failed":
+            # detail 已是 MP 原因原文（截断到约 200 字），原样透传。
+            self._abort_single_item(
+                item, pending_key, f"MP 整理失败：{detail}", ctx
+            )
+            return ("abort", None, "")
+        if state in {"queued", "running"}:
+            text = "MP 整理排队中" if state == "queued" else "MP 整理进行中"
+            self._update_postprocess_progress(
+                item, pending_key, "organize", text
+            )
+            self._track_mp_organize_stall(item, mp_organize, state, ctx.now)
+            self._schedule_finalize_retry(item, ctx.now)
+            return ("retry", None, "")
+        if state == "missing":
+            if ctx.now - triggered_at < MP_ORGANIZE_GRACE_SECONDS:
+                self._schedule_finalize_retry(item, ctx.now)
+                return ("retry", None, "")
+            self._abort_single_item(item, pending_key, "MP 整理未受理", ctx)
+            return ("abort", None, "")
+        if state == "succeeded":
+            found = None
+            if dest_path:
+                found = self._locate_cloud_file_by_dest(dest_path, ctx)
+            if found is not None:
+                item["moved_at"] = ctx.now
+                ctx.moved_files[pending_key] = found
+                return ("located", found, str(Path(str(dest_path)).parent))
+            return ("dest_missed", None, "")
+        # 未知态：当作等待处理，只复查、不计失败。
+        self._schedule_finalize_retry(item, ctx.now)
+        return ("retry", None, "")
+
     def _organize_and_finalize_single_item(
             self, item: Dict[str, Any], pending_key: str, ctx: PostprocessBatchContext
     ) -> None:
@@ -1495,6 +1660,27 @@ class PostprocessService(OwnerDelegator):
         target_file = ctx.moved_files.get(pending_key) or ctx.prepared_files.get(pending_key)
         target_hash = self._extract_item_hash(item)
 
+        # v1.12.6 C：带 MP 整理身份的项先轮询 MP 链：MP 还在整理/排队时只
+        # 复查、不计 fail_count；MP 已失败时以 MP 原因 abort；MP 已成功时
+        # 按历史 dest 精确路径定位，跳过平铺目录扫描。
+        mp_organize = item.get("mp_organize")
+        mp_dest_missed = False
+        if (
+                isinstance(mp_organize, dict) and mp_organize
+                and not target_file and not already_moved
+        ):
+            mp_action, mp_found, mp_dest_dir = self._poll_mp_organize_state(
+                item, pending_key, mp_organize, ctx
+            )
+            if mp_action in {"retry", "abort"}:
+                return
+            if mp_action == "located":
+                target_file = mp_found
+                already_moved = True
+                staging_dir = mp_dest_dir or staging_dir
+            elif mp_action == "dest_missed":
+                mp_dest_missed = True
+
         # 仅在尚未就绪物理文件时才执行网盘检索与状态广播，避免重复检查与多余推送
         if not target_file:
             self._update_postprocess_progress(
@@ -1538,6 +1724,11 @@ class PostprocessService(OwnerDelegator):
                     )
 
         if not target_file:
+            if mp_dest_missed:
+                # MP 历史已成功但 dest 查无文件（S01E06 库内查找不一致就是
+                # 前车之鉴）：不计失败、不 abort，只复查，等 MP 侧落定。
+                self._schedule_finalize_retry(item, ctx.now)
+                return
             fail_count = int(item.get("fail_count") or 0) + 1
             item["fail_count"] = fail_count
             is_offline_downloading = (

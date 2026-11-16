@@ -121,10 +121,16 @@ _DOWNLOAD_DONE_PHASES = {"hashing", "rapid_upload", "cache_ready", "done"}
 
 
 def display_phase(task: Dict[str, Any]) -> str:
-    """下载页展示阶段：downloading / uploading / done / ""（无字节口径时）。"""
+    """下载页展示阶段：downloading / uploading / done / organizing / ""（无字节口径时）。
+
+    organizing 是独立的一档（MP 整理中）：不塞进下载/上传/已完成三档，
+    否则按字节算出的进度与速度会把它画成还在传。
+    """
     phase = str(
         task.get("transfer_phase") or task.get("phase") or ""
     ).strip().lower()
+    if phase == "organizing":
+        return "organizing"
     if phase in _DOWNLOAD_PHASES:
         return "downloading"
     if phase in _UPLOAD_PHASES:
@@ -148,7 +154,10 @@ def display_progress(task: Dict[str, Any]) -> Optional[float]:
     """下载页展示进度：下载阶段看已下载占比，上传阶段看已上传占比。
 
     没有字节口径的任务（普通订阅父任务）返回 None，调用方走原有总进度。
+    organizing 档没有有意义的百分比，返回 None，不伪造进度。
     """
+    if display_phase(task) == "organizing":
+        return None
     try:
         total = float(task.get("total") or 0)
     except (TypeError, ValueError):
@@ -180,7 +189,10 @@ def _phase_speed(task: Dict[str, Any], phase: str) -> Optional[str]:
 
     分路速度优先，没有分路字段时退回总速度（老任务字典只有 speed 字段）；
     另一路的速度即使有残值也不投——旧模板按有无点亮 ↑/↓，残值会亮错路。
+    organizing 档不给任何一路的速度。
     """
+    if display_phase(task) == "organizing":
+        return None
     if display_phase(task) != phase:
         return None
     key = (
@@ -199,7 +211,19 @@ def _task_progress(task: Dict[str, Any]) -> float:
 
     后处理阶段仍走原有总进度/后处理进度（95% 待收尾），不按阶段算——
     子任务都传完了不等于收尾做完了，显示 100% 会误导。
+    organizing 档同样只回落到任务自带进度，且上限 95%，绝不显示 100%。
     """
+    if display_phase(task) == "organizing":
+        try:
+            progress = float(task.get("progress") or 0)
+        except (TypeError, ValueError):
+            progress = 0.0
+        if not progress and str(task.get("status") or "") == "postprocessing":
+            try:
+                progress = float(task.get("postprocess_progress") or 0)
+            except (TypeError, ValueError):
+                progress = 0.0
+        return max(0.0, min(95.0, progress))
     if str(task.get("status") or "") != "postprocessing":
         shown = display_progress(task)
         if shown is not None:

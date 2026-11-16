@@ -563,7 +563,8 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         # 调它；在宿主上打桩够不着，必须直接桩组件实例（绕开委托的 __setattr__）。
         component = self.handler._trigger_mp_organize_for_batch.__self__
         object.__setattr__(
-            component, "trigger_mp_organize", MagicMock(return_value=True)
+            component, "trigger_mp_organize",
+            MagicMock(return_value=(True, {"src_path": "/待整理/a - S01E01.mkv"})),
         )
         mock_trigger = component.trigger_mp_organize
         share_url = "https://115.com/s/sample_share"
@@ -611,7 +612,11 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         self.handler._organize_after_transfer = True
         component = self.handler._trigger_mp_organize_for_batch.__self__
         object.__setattr__(
-            component, "trigger_mp_organize", MagicMock(return_value=False)
+            component, "trigger_mp_organize",
+            MagicMock(return_value=(
+                False,
+                {"reason": "not_accepted", "message": "MP 整理未接受"},
+            )),
         )
         share_url = "https://115.com/s/sample_share"
         matched_items = [
@@ -715,7 +720,17 @@ class TestSyncHandlerCrossDownloadOrganize(unittest.TestCase):
         mp_component = self.handler._trigger_mp_organize_for_batch.__self__
         object.__setattr__(
             mp_component, "trigger_mp_organize",
-            MagicMock(return_value=True),
+            MagicMock(return_value=(
+                True,
+                {
+                    "src_path": "/downloads/S01E01.mkv",
+                    "src_storage": "local",
+                    "target_dir": "/媒体库/剧集",
+                    "target_storage": "u115cs",
+                    "target_name": "剧集",
+                    "file_name": "S01E01.mkv",
+                },
+            )),
         )
         object.__setattr__(
             mp_component, "_mp_organize_enabled",
@@ -777,7 +792,10 @@ class TestSyncHandlerCrossDownloadOrganize(unittest.TestCase):
 
     def test_organize_declined_fails_item(self):
         """MP 整理未接受 → 本项记失败（文件不在媒体库，下一轮重试）。"""
-        self.mock_trigger.return_value = False
+        self.mock_trigger.return_value = (
+            False,
+            {"reason": "not_accepted", "message": "MP 整理未接受：文件未进媒体库，下一轮重试"},
+        )
         completed = {
             "id": "cross:x", "status": "success",
             "method": "download_only",

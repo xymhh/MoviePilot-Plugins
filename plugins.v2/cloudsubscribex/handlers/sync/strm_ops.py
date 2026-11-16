@@ -355,6 +355,7 @@ class StrmOpsMixin(OwnerDelegator):
             transient_target: bool = False,
             target_subscribe: Optional[Dict[str, Any]] = None,
             skip_history: bool = False,
+            mp_organize: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[Path], str]:
         strm_path = None
         if not staging_dir:
@@ -398,6 +399,7 @@ class StrmOpsMixin(OwnerDelegator):
             transient_target=transient_target,
             target_subscribe=target_subscribe,
             skip_history=skip_history,
+            mp_organize=mp_organize,
         )
         return None, pending_key
 

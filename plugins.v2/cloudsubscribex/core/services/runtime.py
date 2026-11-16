@@ -832,6 +832,16 @@ class SyncRuntimeService(OwnerDelegator):
         transfer_manager = getattr(self, "_cross_transfer_manager", None)
         if not transfer_manager:
             return tasks
+        # 整理中登记表（v1.12.6 B/C）：transfer_ops 在 MP 整理触发成功后
+        # 按 parent_task_id 登记，finalize 终态时清除。这里每次调用都重新
+        # 取当前模块——登记表模块可能被测试重载，顶层 import 会绑到旧表。
+        organizing_entries: Dict[str, Dict[str, Any]] = {}
+        try:
+            from .mp_organize_tracker import list_mp_organizing
+
+            organizing_entries = list_mp_organizing()
+        except Exception:
+            organizing_entries = {}
         tasks_by_id = {
             str(task.get("id") or ""): task for task in tasks
             if task.get("id")
@@ -846,8 +856,18 @@ class SyncRuntimeService(OwnerDelegator):
                 continue
             grouped_transfers.setdefault(parent_id, []).append(transfer)
 
-        for parent_id, transfers in grouped_transfers.items():
-            if not any(item.get("status") in active_statuses for item in transfers):
+        # 有登记表条目的父任务即使子任务已全部结束也要保留在下载页
+        # （MP 整理中）；没有登记表条目也没有活跃子任务的才跳过。
+        parent_ids = list(grouped_transfers.keys())
+        for parent_id in organizing_entries:
+            if parent_id in tasks_by_id and parent_id not in grouped_transfers:
+                parent_ids.append(parent_id)
+        for parent_id in parent_ids:
+            transfers = grouped_transfers.get(parent_id, [])
+            organizing_entry = organizing_entries.get(parent_id)
+            if not organizing_entry and not any(
+                    item.get("status") in active_statuses for item in transfers
+            ):
                 continue
             parent = tasks_by_id[parent_id]
             total = 0
@@ -902,26 +922,37 @@ class SyncRuntimeService(OwnerDelegator):
                 messages[message] = messages.get(message, 0) + 1
             # 父任务按阶段展示：有子任务在下载看已下载占比，都下完看已上传占比；
             # 旧的加权总进度（下载 0-50、上传 50-100）会让“下载完了”还显示 50%。
-            if "downloading" in child_phases:
-                transfer_phase = "downloading"
-            elif "uploading" in child_phases:
-                transfer_phase = "uploading"
+            # organizing 覆盖一切：只要登记表里还有该父任务，就按 MP 整理中
+            # 展示——哪怕父任务同时在后处理（postprocessing 的 95% 待收尾
+            # 文案不再出现），也不按字节算进度。
+            if organizing_entry:
+                transfer_phase = "organizing"
+                status_text = str(
+                    organizing_entry.get("status_text") or ""
+                ).strip()
+                phase = status_text or "MP 整理中"
+                shown_progress = None
             else:
-                transfer_phase = "done"
-            shown_progress = display_progress({
-                "total": total,
-                "downloaded_bytes": downloaded,
-                "uploaded_bytes": uploaded,
-                "transfer_phase": transfer_phase,
-            })
-            if len(transfers) == 1:
-                phase = next(iter(messages))
-            else:
-                detail = " · ".join(
-                    f"{message} × {count}" if count > 1 else message
-                    for message, count in messages.items()
-                )
-                phase = f"跨盘转存 {len(transfers)} 个文件 · {detail}"
+                if "downloading" in child_phases:
+                    transfer_phase = "downloading"
+                elif "uploading" in child_phases:
+                    transfer_phase = "uploading"
+                else:
+                    transfer_phase = "done"
+                shown_progress = display_progress({
+                    "total": total,
+                    "downloaded_bytes": downloaded,
+                    "uploaded_bytes": uploaded,
+                    "transfer_phase": transfer_phase,
+                })
+                if len(transfers) == 1:
+                    phase = next(iter(messages))
+                else:
+                    detail = " · ".join(
+                        f"{message} × {count}" if count > 1 else message
+                        for message, count in messages.items()
+                    )
+                    phase = f"跨盘转存 {len(transfers)} 个文件 · {detail}"
             merged: Dict[str, Any] = {
                 "phase": phase,
                 "transfer_phase": transfer_phase,
@@ -942,7 +973,15 @@ class SyncRuntimeService(OwnerDelegator):
                 ],
             }
             # 后处理阶段不改进度：收尾未完成时保持 95%，不按阶段算到 100%。
-            if (
+            # organizing 同样不按字节算：沿用父任务自带进度，但上限 95%，
+            # 绝不让已下载=总量（downloaded=total、uploaded=0）被算成 100%。
+            if organizing_entry:
+                try:
+                    stored_progress = float(parent.get("progress") or 0)
+                except (TypeError, ValueError):
+                    stored_progress = 0.0
+                merged["progress"] = max(0.0, min(95.0, stored_progress))
+            elif (
                     str(parent.get("status") or "") != "postprocessing"
                     and shown_progress is not None
             ):

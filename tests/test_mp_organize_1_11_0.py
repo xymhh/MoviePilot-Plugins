@@ -61,9 +61,91 @@ class FakeTransferChain:
         return FakeTransferChain.next_result
 
 
+class FakeMediaInfo:
+    """app.core.context.MediaInfo 替身：只存构造参数。"""
+
+    title = None
+    type = None
+    tmdb_id = None
+    year = None
+    season = None
+    category = ""
+    library_category = ""
+
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
+
+
+class FakeDirectoryConf:
+    """DirectoryHelper.get_dir 返回的目录条目替身（剧集条目）。"""
+
+    def __init__(self, **kwargs):
+        self.library_path = "/媒体库/剧集"
+        self.library_storage = "u115cs"
+        self.name = "剧集"
+        self.library_type_folder = False
+        self.library_category_folder = False
+        self.__dict__.update(kwargs)
+
+    def model_copy(self, deep=False, update=None):
+        clone = FakeDirectoryConf(**self.__dict__)
+        if update:
+            clone.__dict__.update(update)
+        return clone
+
+    def copy(self, deep=False, update=None):
+        return self.model_copy(deep=deep, update=update)
+
+
+class FakeDirectoryHelper:
+    """get_dir 记下调用参数，默认返回剧集条目。"""
+
+    calls = []
+    next_result = "found"
+    last_conf = None
+
+    def get_dir(self, media=None, include_unsorted=False, **kwargs):
+        FakeDirectoryHelper.calls.append(
+            {
+                "media": media,
+                "include_unsorted": include_unsorted,
+                "kwargs": dict(kwargs),
+            }
+        )
+        if FakeDirectoryHelper.next_result == "found":
+            FakeDirectoryHelper.last_conf = FakeDirectoryConf()
+            return FakeDirectoryHelper.last_conf
+        FakeDirectoryHelper.last_conf = None
+        return None
+
+
 register_module("app.chain.storage", StorageChain=FakeStorageChain)
 register_module("app.chain.transfer", TransferChain=FakeTransferChain)
 register_module("app.schemas.file", FileItem=FakeFileItem)
+register_module("app.core.context", MediaInfo=FakeMediaInfo)
+# _resolve 先试 app.helper.directory 再试 app.application.directory：
+# 全量套件里先跑的文件常把 app.helper.directory 注册成 AutoMock，
+# 只桩 application 那边会被 MagicMock 截住，所以两边都桩同一个替身。
+register_module("app.helper.directory", DirectoryHelper=FakeDirectoryHelper)
+register_module("app.application.directory", DirectoryHelper=FakeDirectoryHelper)
+
+
+def _install_stubs():
+    """重注本文件的全部宿主桩。
+
+    必须在每个用例执行前调一次（见 setUp）：全量收集时排在本文件
+    之后的文件（如 test_search_state_lifecycle、
+    test_tmdb_candidate_type_fallback）会用 register_mock 覆盖
+    app.core.context，模块级那次注册到执行时已被抹掉——与
+    set_media_type() 必须在 setUp 里重注是同一个道理。
+    """
+    register_module("app.chain.storage", StorageChain=FakeStorageChain)
+    register_module("app.chain.transfer", TransferChain=FakeTransferChain)
+    register_module("app.schemas.file", FileItem=FakeFileItem)
+    register_module("app.core.context", MediaInfo=FakeMediaInfo)
+    register_module("app.helper.directory", DirectoryHelper=FakeDirectoryHelper)
+    register_module("app.application.directory", DirectoryHelper=FakeDirectoryHelper)
+
 
 mp_organize = load_module(
     "cloudsubscribex.handlers.sync.mp_organize",
@@ -88,39 +170,56 @@ class TestTriggerMpOrganize(unittest.TestCase):
         # 会覆盖 app.schemas.types 上的桩，模块级那次到执行时已失效。
         global MediaType
         MediaType = set_media_type()
+        _install_stubs()
         FakeStorageChain.next_result = "found"
         FakeStorageChain.last_fileitem = None
         FakeTransferChain.calls = []
         FakeTransferChain.next_result = (True, "")
+        FakeDirectoryHelper.calls = []
+        FakeDirectoryHelper.next_result = "found"
+        FakeDirectoryHelper.last_conf = None
         self.mediainfo = MagicMock()
         self.mediainfo.type = MediaType.TV
         self.mixin = MpOrganizeMixin(_owner())
 
     def test_flag_off_returns_false_without_calling_chain(self):
         mixin = MpOrganizeMixin(_owner(_mp_organize_after_share_save=False))
-        self.assertFalse(mixin.trigger_mp_organize(
+        ok, info = mixin.trigger_mp_organize(
             "/Alist/影视/moviepilot/转存", "a.mkv", mediainfo=self.mediainfo,
-        ))
+        )
+        self.assertFalse(ok)
+        self.assertEqual(info["reason"], "disabled")
         self.assertEqual(FakeTransferChain.calls, [])
 
     def test_non_video_file_returns_false(self):
-        self.assertFalse(self.mixin.trigger_mp_organize(
+        ok, info = self.mixin.trigger_mp_organize(
             "/Alist/影视/moviepilot/转存", "a.srt", mediainfo=self.mediainfo,
-        ))
+        )
+        self.assertFalse(ok)
+        self.assertEqual(info["reason"], "not_video")
         self.assertEqual(FakeTransferChain.calls, [])
 
     def test_unresolved_file_returns_false(self):
         FakeStorageChain.next_result = "missing"
-        self.assertFalse(self.mixin.trigger_mp_organize(
+        ok, info = self.mixin.trigger_mp_organize(
             "/Alist/影视/moviepilot/转存", "a.mkv", mediainfo=self.mediainfo,
-        ))
+        )
+        self.assertFalse(ok)
+        self.assertEqual(info["reason"], "no_source_file")
         self.assertEqual(FakeTransferChain.calls, [])
 
     def test_success_calls_do_transfer_background_manual(self):
-        self.assertTrue(self.mixin.trigger_mp_organize(
+        ok, info = self.mixin.trigger_mp_organize(
             "/Alist/影视/moviepilot/转存", "美国人质 - S01E01.mkv",
             mediainfo=self.mediainfo, season=1,
-        ))
+        )
+        self.assertTrue(ok)
+        self.assertEqual(info["src_path"], "/Alist/影视/moviepilot/转存/美国人质 - S01E01.mkv")
+        self.assertEqual(info["src_storage"], "local")
+        self.assertEqual(info["target_dir"], "/媒体库/剧集")
+        self.assertEqual(info["target_storage"], "u115cs")
+        self.assertEqual(info["target_name"], "剧集")
+        self.assertEqual(info["file_name"], "美国人质 - S01E01.mkv")
         fileitem, kwargs = FakeTransferChain.calls[0]
         self.assertEqual(fileitem.storage, "local")
         self.assertEqual(
@@ -134,22 +233,32 @@ class TestTriggerMpOrganize(unittest.TestCase):
         self.assertTrue(kwargs["manual"])
         self.assertTrue(kwargs["background"])
         self.assertEqual(kwargs["season"], 1)
+        self.assertEqual(kwargs["target_directory"].library_path, "/媒体库/剧集")
+        self.assertEqual(kwargs["target_storage"], "u115cs")
 
     def test_do_transfer_rejected_returns_false(self):
         FakeTransferChain.next_result = (False, "整理失败")
-        self.assertFalse(self.mixin.trigger_mp_organize(
+        ok, info = self.mixin.trigger_mp_organize(
             "/Alist/影视/moviepilot/转存", "a.mkv", mediainfo=self.mediainfo,
-        ))
+        )
+        self.assertFalse(ok)
+        self.assertEqual(info["reason"], "not_accepted")
+        self.assertIn("整理失败", info["message"])
 
     def test_media_dict_maps_mtype_and_season(self):
-        self.assertTrue(self.mixin.trigger_mp_organize(
+        ok, _info = self.mixin.trigger_mp_organize(
             "/Alist/影视/moviepilot/转存", "a.mkv",
             media={"media_type": "TV", "season": 2},
-        ))
+        )
+        self.assertTrue(ok)
         _fileitem, kwargs = FakeTransferChain.calls[0]
         self.assertEqual(kwargs["mtype"], MediaType.TV)
         self.assertEqual(kwargs["season"], 2)
-        self.assertIsNone(kwargs["mediainfo"])
+        # mediainfo 为空时 trigger 内部用 media 字典拼最小 MediaInfo
+        # 传给 do_transfer，不再是 None。
+        self.assertIsInstance(kwargs["mediainfo"], FakeMediaInfo)
+        self.assertEqual(kwargs["mediainfo"].type, MediaType.TV)
+        self.assertEqual(kwargs["target_storage"], "u115cs")
 
 
 class TestTriggerMpOrganizeForBatch(unittest.TestCase):
@@ -164,7 +273,11 @@ class TestTriggerMpOrganizeForBatch(unittest.TestCase):
     def test_collects_accepted_ids_only(self):
         object.__setattr__(
             self.mixin, "trigger_mp_organize",
-            MagicMock(side_effect=[True, False, True]),
+            MagicMock(side_effect=[
+                (True, {"src_path": "/Alist/影视/moviepilot/转存/a - S01E01.mkv"}),
+                (False, {"reason": "not_accepted", "message": "MP 整理未接受"}),
+                (True, {"src_path": "/Alist/影视/moviepilot/转存/c - S01E03.mkv"}),
+            ]),
         )
         accepted = self.mixin._trigger_mp_organize_for_batch(
             self.items, {"ep1", "ep2", "ep3"},
@@ -176,7 +289,7 @@ class TestTriggerMpOrganizeForBatch(unittest.TestCase):
         )
 
     def test_skips_items_not_in_success_set(self):
-        trigger = MagicMock(return_value=True)
+        trigger = MagicMock(return_value=(True, {"src_path": "x"}))
         object.__setattr__(self.mixin, "trigger_mp_organize", trigger)
         accepted = self.mixin._trigger_mp_organize_for_batch(
             self.items, {"ep2"}, mediainfo=MagicMock(), season=1,
@@ -186,7 +299,7 @@ class TestTriggerMpOrganizeForBatch(unittest.TestCase):
 
     def test_flag_off_returns_empty_without_triggering(self):
         mixin = MpOrganizeMixin(_owner(_mp_organize_after_share_save=False))
-        trigger = MagicMock(return_value=True)
+        trigger = MagicMock(return_value=(True, {"src_path": "x"}))
         object.__setattr__(mixin, "trigger_mp_organize", trigger)
         accepted = mixin._trigger_mp_organize_for_batch(
             self.items, {"ep1", "ep2", "ep3"},

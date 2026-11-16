@@ -481,6 +481,10 @@ class HistoryRetryService(OwnerDelegator):
                 break
         cross_source = None
         cached_source = None
+        # v1.12.6 C：转存入参字典要留一个名字——_transfer_file_impl 会在跨盘
+        # 分支就地写 file_item["mp_organize"]，重试后 _generate_or_queue_strm
+        # 要从同一对象上读它传给 finalize；原来是内联字面量，调用后读不到。
+        transfer_file_item: Dict[str, Any] = {}
         if record.get("transfer_mode") == "cross":
             source_key = str(record.get("source_drive_key") or "").strip()
             target_key = str(record.get("target_drive_key") or "").strip()
@@ -556,12 +560,15 @@ class HistoryRetryService(OwnerDelegator):
                         sha1=source_sha1,
                         md5=source_md5,
                     )
+            transfer_file_item = {
+                "id": file_id, "name": source_name,
+                "size": record.get("file_size") or 0,
+                "sha1": source_sha1,
+                "md5": record.get("source_md5") or "",
+            }
             success = self._transfer_file(
                 canonical_url,
-                {"id": file_id, "name": source_name,
-                 "size": record.get("file_size") or 0,
-                 "sha1": source_sha1,
-                 "md5": record.get("source_md5") or ""},
+                transfer_file_item,
                 self._cloud_transfer_path, target_name, source_sha1,
                 # 1.12.2：重试必须把上面算好的目标名（整理后的规范名，如
                 # “十万狂花入梦来 - S01E06 - 第6集.mkv”）传给转存，不能传
@@ -637,6 +644,10 @@ class HistoryRetryService(OwnerDelegator):
             ),
             staging_dir="" if final_file_exists else self._cloud_transfer_path,
             staging_name=retry_staging_name,
+            # v1.12.6 C：跨盘重试转存成功时 _transfer_file_impl 已把 MP 整理
+            # 身份就地写进 transfer_file_item；同盘重试或复用既有文件时没有
+            # 身份，传 None 走老路径。
+            mp_organize=transfer_file_item.get("mp_organize"),
         )
         if not strm_path and not pending_key:
             apply_failure(record, "文件已转存但后处理任务登记失败")
