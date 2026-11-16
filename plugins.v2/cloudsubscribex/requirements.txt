@@ -1,4 +1,6 @@
 p115client>=0.0.9.7.2
+# 本地文件上传走 oss2 自管分片（p115disk 同款）；缺失时回退 p115oss
+oss2>=2.18.0
 torf>=4.3.1
 curl_cffi>=0.15.0
 numpy>=2.0.0

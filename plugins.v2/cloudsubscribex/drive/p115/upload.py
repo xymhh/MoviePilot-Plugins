@@ -52,6 +52,49 @@ except ImportError:  # pragma: no cover - 依赖缺失时的降级分支
     def oss_multipart_upload_part(*args, **kwargs):
         raise RuntimeError("p115oss 不可用")
 
+try:
+    # 本地文件上传走 oss2 自管分片（p115disk 同款路子）：分片级重试 +
+    # token 续期。缺失时回退到 p115oss 的 client.upload_file（旧路子）。
+    from oss2 import Bucket as Oss2Bucket
+    from oss2 import StsAuth as Oss2StsAuth
+    from oss2 import determine_part_size as oss2_determine_part_size
+    from oss2.exceptions import ServerError as OssServerError
+    from oss2.models import PartInfo as OssPartInfo
+    from oss2.utils import SizedFileAdapter as OssSizedFileAdapter
+    from oss2.utils import b64encode_as_string as oss2_b64encode
+
+    OSS2_AVAILABLE = True
+except ImportError:  # pragma: no cover - 依赖缺失时的降级分支
+    OSS2_AVAILABLE = False
+    Oss2Bucket = None
+    Oss2StsAuth = None
+    oss2_determine_part_size = None
+    OssServerError = None
+    OssPartInfo = None
+    OssSizedFileAdapter = None
+    oss2_b64encode = None
+
+# oss2 自管分片上传的分片大小：10MB（p115disk 同款口径）。
+OSS2_UPLOAD_PART_SIZE = 10 * 1024 * 1024
+# OSS STS token 提前刷新阈值（分钟）：分片前若 token 在该时间内过期，先刷新。
+OSS2_TOKEN_REFRESH_THRESHOLD_MINUTES = 5
+# 单片失败重试次数（p115disk 同款口径：最多传 2 次）。
+OSS2_PART_MAX_RETRIES = 2
+# upload_file_init 重试次数与初始退避秒数（p115disk 同款口径 3 次、2 秒起翻倍）。
+OSS2_INIT_MAX_RETRIES = 3
+OSS2_INIT_RETRY_DELAY_SECONDS = 2
+# 115 OSS 上传域名（p115disk 同款）。
+OSS2_ENDPOINT = "http://oss-cn-shenzhen.aliyuncs.com"
+# token 过期类错误码（oss2 ServerError.code）。
+OSS2_TOKEN_EXPIRED_CODES = ("InvalidAccessKeyId", "SecurityTokenExpired")
+# iOS UA（与 drive/p115/client.py 的 IOS_USER_AGENT 同值；upload.py 不能
+# 从 client 导入它，会循环引用）。upload_gettoken 时带上，取 p115disk 同款。
+OSS2_IOS_USER_AGENT = (
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5_1 like Mac OS X) "
+    "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 "
+    "115wangpan_ios/36.2.20"
+)
+
 # 115 分块上传的分片大小：默认 16MB（官方建议下限 10MB）。
 # 旧实现用 partsize=-1 自动分块，实测只有 400KB，单个 3.8GB 文件要 9317 片，
 # 顺序 PUT 时任意一片抖动即整单失败（2026-10-10 线上事故）。
@@ -349,6 +392,271 @@ class P115UploadService(OwnerDelegator):
                 target, upload_id, **self._oss_proxy_kwargs()
             )
 
+    def _upload_proxy_url(self) -> str:
+        """上传代理地址（原始 URL）；未配置时返回空字符串。"""
+        proxies = getattr(self._owner, "_upload_proxies", None)
+        if isinstance(proxies, dict) and proxies:
+            url = str(proxies.get("https") or proxies.get("http") or "").strip()
+            if url:
+                return url
+        try:
+            return str(
+                getattr(self._owner, "_cross_transfer_upload_proxy", "") or ""
+            ).strip()
+        except Exception:
+            return ""
+
+    def _oss2_proxy_dict(self) -> Dict[str, str]:
+        """oss2 数据面用的代理字典；未配置时返回空字典（直连）。"""
+        url = self._upload_proxy_url()
+        return {"http": url, "https": url} if url else {}
+
+    @staticmethod
+    def _oss2_token_expiring(
+            expiration: Any,
+            threshold_minutes: int = OSS2_TOKEN_REFRESH_THRESHOLD_MINUTES,
+    ) -> bool:
+        """STS token 是否在阈值内过期（或已过期）；解析失败时按快过期处理。"""
+        try:
+            from datetime import datetime, timezone
+
+            if expiration is None:
+                return True
+            if isinstance(expiration, str):
+                expiration = datetime.fromisoformat(
+                    expiration.replace("Z", "+00:00")
+                )
+            now = datetime.now(timezone.utc)
+            remaining = (expiration - now).total_seconds()
+            return remaining < threshold_minutes * 60
+        except Exception:
+            return True
+
+    @staticmethod
+    def _is_oss2_token_error(error: BaseException) -> bool:
+        """是否是 oss2 的 token 过期类错误（可刷新 token 后重传该片）。"""
+        if not OSS2_AVAILABLE or OssServerError is None:
+            return False
+        if not isinstance(error, OssServerError):
+            return False
+        return str(getattr(error, "code", "") or "") in OSS2_TOKEN_EXPIRED_CODES
+
+    def _oss2_get_token(self) -> Tuple[str, str, str, str, Any]:
+        """拿 OSS STS 凭证；返回 (endpoint, key_id, key_secret, token, expiration)。"""
+        token_resp = self._rate_limited_call(
+            self.client.upload_gettoken,
+            headers={"user-agent": OSS2_IOS_USER_AGENT},
+        )
+        check_response(token_resp)
+        data = token_resp.get("data") or {}
+
+        def _pick(*keys: str) -> Any:
+            for key in keys:
+                value = token_resp.get(key)
+                if value:
+                    return value
+                value = data.get(key)
+                if value:
+                    return value
+            return ""
+
+        access_key_id = _pick("AccessKeyId")
+        access_key_secret = _pick("AccessKeySecret")
+        security_token = _pick("SecurityToken")
+        expiration = _pick("Expiration")
+        if not (access_key_id and access_key_secret and security_token):
+            raise RuntimeError(f"115 OSS 凭证不完整：{token_resp}")
+        return (
+            OSS2_ENDPOINT,
+            str(access_key_id),
+            str(access_key_secret),
+            str(security_token),
+            expiration,
+        )
+
+    def _upload_via_oss2(
+            self,
+            source: Path,
+            directory_id: int,
+            upload_name: str,
+            checksum: str,
+            file_size: int,
+            progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> bool:
+        """oss2 自管分片上传一次（不含整文件重传，由调用方循环）。
+
+        p115disk 同款流程：upload_file_init（3 次重试 + sig invalid 处理）
+        → 秒传 reuse → 拿 OSS token → oss2 分片上传（每片前检查 token、
+        单片失败只重传该片）→ complete 回调。成功（含秒传）返回 True，
+        失败抛异常（由调用方决定是否整文件重传）。
+        """
+        # -- Step 1: 初始化上传（带重试）--
+        def read_range_hash(range_str: str) -> str:
+            start, end = (int(part) for part in range_str.split("-", 1))
+            with source.open("rb") as handle:
+                handle.seek(start)
+                chunk = handle.read(end - start + 1)
+            digest = hashlib.sha1()
+            digest.update(chunk)
+            return digest.hexdigest().upper()
+
+        init_resp = None
+        init_retry_delay = OSS2_INIT_RETRY_DELAY_SECONDS
+        sig_invalid_handled = False
+        for init_attempt in range(OSS2_INIT_MAX_RETRIES):
+            init_resp = None
+            try:
+                init_resp = self._rate_limited_call(
+                    self.client.upload_file_init,
+                    filename=upload_name,
+                    filesize=file_size,
+                    filesha1=checksum,
+                    pid=int(directory_id or 0),
+                    read_range_bytes_or_hash=read_range_hash,
+                )
+                check_response(init_resp)
+                break
+            except Exception as error:
+                if (
+                        not sig_invalid_handled
+                        and isinstance(init_resp, dict)
+                        and init_resp.get("statusmsg") == "sig invalid"
+                ):
+                    # p115disk 同款：清掉缓存的 userkey 后重试一次。
+                    try:
+                        from p115client.const import _CACHE_DIR
+
+                        userkey_points = _CACHE_DIR / "userkey_stable_points.json"
+                        if userkey_points.exists():
+                            userkey_points.unlink(missing_ok=True)
+                    except Exception:
+                        logger.debug("清理 userkey 缓存失败，继续重试", exc_info=True)
+                    sig_invalid_handled = True
+                    continue
+                if init_attempt < OSS2_INIT_MAX_RETRIES - 1:
+                    logger.warning(
+                        f"115 上传初始化失败，第 {init_attempt + 1}/"
+                        f"{OSS2_INIT_MAX_RETRIES} 次重试：{error}"
+                    )
+                    time.sleep(init_retry_delay)
+                    init_retry_delay *= 2
+                else:
+                    logger.error(f"115 上传初始化重试用尽：{error}")
+                    raise
+        if init_resp is None:
+            raise RuntimeError("115 上传初始化失败：无响应")
+        if not init_resp.get("state"):
+            raise RuntimeError(
+                f"115 上传初始化失败：{init_resp.get('error') or init_resp}"
+            )
+        # 秒传命中：不用传，直接成功。
+        if init_resp.get("reuse"):
+            logger.info(f"115 秒传成功：{upload_name}")
+            return True
+
+        # 上传会话信息：顶层与 data 里都可能放，两边都看。
+        data = init_resp.get("data") or {}
+        bucket_name = init_resp.get("bucket") or data.get("bucket")
+        object_name = init_resp.get("object") or data.get("object")
+        callback_info = init_resp.get("callback") or data.get("callback") or {}
+        if not (bucket_name and object_name and callback_info):
+            raise RuntimeError(f"115 上传信息不完整：{init_resp}")
+
+        # -- Step 2: OSS token --
+        endpoint, key_id, key_secret, token, expiration = self._oss2_get_token()
+        proxies = self._oss2_proxy_dict()
+
+        def _make_bucket():
+            auth = Oss2StsAuth(key_id, key_secret, token)
+            return Oss2Bucket(auth, endpoint, bucket_name, proxies=proxies)
+
+        bucket = _make_bucket()
+        part_size = oss2_determine_part_size(
+            file_size, preferred_size=OSS2_UPLOAD_PART_SIZE
+        )
+        logger.info(
+            f"115 开始分片上传（oss2）：{source.name} -> {upload_name}，"
+            f"分片 {part_size // 1024 // 1024}MB"
+        )
+        upload_id = bucket.init_multipart_upload(
+            object_name, params={"encoding-type": "url", "sequential": ""}
+        ).upload_id
+        parts = []
+        try:
+            with source.open("rb") as fileobj:
+                part_number = 1
+                offset = 0
+                while offset < file_size:
+                    # token 快过期就先刷新，再传这一片。
+                    if self._oss2_token_expiring(expiration):
+                        logger.info("115 OSS Token 即将过期，正在刷新...")
+                        endpoint, key_id, key_secret, token, expiration = (
+                            self._oss2_get_token()
+                        )
+                        bucket = _make_bucket()
+                        logger.info("115 OSS Token 刷新成功")
+                    num_to_upload = min(part_size, file_size - offset)
+                    # 单片失败只重传该片；token 过期类错误先刷新 token。
+                    last_part_error: Optional[Exception] = None
+                    for part_attempt in range(OSS2_PART_MAX_RETRIES):
+                        try:
+                            result = bucket.upload_part(
+                                object_name,
+                                upload_id,
+                                part_number,
+                                data=OssSizedFileAdapter(fileobj, num_to_upload),
+                            )
+                            parts.append(OssPartInfo(part_number, result.etag))
+                            last_part_error = None
+                            break
+                        except Exception as error:
+                            last_part_error = error
+                            if part_attempt >= OSS2_PART_MAX_RETRIES - 1:
+                                break
+                            if self._is_oss2_token_error(error):
+                                logger.warning(
+                                    "115 上传分片遇到 Token 过期，刷新后重传该片"
+                                )
+                                endpoint, key_id, key_secret, token, expiration = (
+                                    self._oss2_get_token()
+                                )
+                                bucket = _make_bucket()
+                            else:
+                                logger.warning(
+                                    f"115 上传分片失败，重传该片 "
+                                    f"({part_attempt + 1}/{OSS2_PART_MAX_RETRIES})："
+                                    f"{error}"
+                                )
+                            fileobj.seek(offset)
+                    if last_part_error is not None:
+                        raise last_part_error
+                    offset += num_to_upload
+                    part_number += 1
+                    if progress_callback:
+                        progress_callback(offset, file_size)
+        except Exception:
+            with contextlib.suppress(Exception):
+                bucket.abort_multipart_upload(object_name, upload_id)
+            raise
+
+        # -- Step 3: 完成上传并回调 115 --
+        headers = {
+            "X-oss-callback": oss2_b64encode(
+                str(callback_info.get("callback") or "")
+            ),
+            "x-oss-callback-var": oss2_b64encode(
+                str(callback_info.get("callback_var") or "")
+            ),
+            "x-oss-forbid-overwrite": "false",
+        }
+        result = bucket.complete_multipart_upload(
+            object_name, upload_id, parts, headers=headers
+        )
+        if result.status != 200:
+            raise RuntimeError(f"115 上传完成失败，状态码：{result.status}")
+        logger.info(f"115 本地文件上传完成（oss2）：{source.name} -> {upload_name}")
+        return True
+
     def upload_file(
             self,
             local_path: str,
@@ -378,22 +686,41 @@ class P115UploadService(OwnerDelegator):
         checksum = str(file_sha1 or "").strip().upper() or self._file_sha1(source)
         # p115oss 分片上传没有重试：凡人修仙传 S01E200 两次失败在不同分块
         # （服务端收到的分块 md5 与客户端算出的不一致，属传输抖动），一次
-        # 失败就杀死整个任务。这里在驱动层重传整份文件，最多 3 次、指数
-        # 退避（与 MP 自带 u115 存储的 3 次重试同一口径）；SHA1 只算一次，
-        # 不随重试重复读整份文件。
+        # 失败就杀死整个任务。1.12.9 起本地文件改走 oss2 自管分片（p115disk
+        # 同款）：单片失败只重传该片、token 快过期先刷新；整文件重传
+        # （最多 3 次、退避 2/4 秒，与 MP 自带 u115 存储同一口径）只作
+        # 外层兜底。SHA1 只算一次，不随重试重复读整份文件。
         last_error: Optional[Exception] = None
         for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
             try:
                 file_size = source.stat().st_size
-                part_size = upload_part_size(file_size)
-                # p115oss.upload_file 会把 request_kwargs 透传给 OSS 分片 PUT，
-                # 在这里传 session=<ProxyManager> 才能真正让上传数据走代理。
-                upload_kwargs = dict(self._oss_proxy_kwargs(), max_retries=0)
-                if progress_callback:
-                    with source.open("rb") as file:
+                if OSS2_AVAILABLE:
+                    self._upload_via_oss2(
+                        source, int(lookup.directory_id or 0), upload_name,
+                        checksum, file_size, progress_callback,
+                    )
+                else:
+                    # oss2 缺失时回退旧路子（p115oss）。
+                    part_size = upload_part_size(file_size)
+                    # p115oss.upload_file 会把 request_kwargs 透传给 OSS 分片 PUT，
+                    # 在这里传 session=<ProxyManager> 才能真正让上传数据走代理。
+                    upload_kwargs = dict(self._oss_proxy_kwargs(), max_retries=0)
+                    if progress_callback:
+                        with source.open("rb") as file:
+                            response = self._rate_limited_call(
+                                self.client.upload_file,
+                                _ProgressReader(file, file_size, progress_callback),
+                                pid=int(lookup.directory_id or 0),
+                                filename=upload_name,
+                                filesha1=checksum,
+                                filesize=file_size,
+                                partsize=part_size,
+                                **upload_kwargs,
+                            )
+                    else:
                         response = self._rate_limited_call(
                             self.client.upload_file,
-                            _ProgressReader(file, file_size, progress_callback),
+                            source,
                             pid=int(lookup.directory_id or 0),
                             filename=upload_name,
                             filesha1=checksum,
@@ -401,18 +728,7 @@ class P115UploadService(OwnerDelegator):
                             partsize=part_size,
                             **upload_kwargs,
                         )
-                else:
-                    response = self._rate_limited_call(
-                        self.client.upload_file,
-                        source,
-                        pid=int(lookup.directory_id or 0),
-                        filename=upload_name,
-                        filesha1=checksum,
-                        filesize=file_size,
-                        partsize=part_size,
-                        **upload_kwargs,
-                    )
-                check_response(response)
+                    check_response(response)
                 self._target_file_cache.clear()
                 if progress_callback:
                     progress_callback(file_size, file_size)

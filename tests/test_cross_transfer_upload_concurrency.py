@@ -234,15 +234,22 @@ class LocalUploadPartSizeTest(unittest.TestCase):
         ))
         upload_module.P115_AVAILABLE = True
         upload_module.check_response = MagicMock()
-        owner = FakeOwner()
-        service = upload_module.P115UploadService(owner)
-        with tempfile.TemporaryDirectory() as folder:
-            path = Path(folder) / "movie.mkv"
-            path.write_bytes(b"0" * (16 * 1024 * 1024 + 1))
-            self.assertTrue(service.upload_file(str(path), "/save", "movie.mkv"))
-        kwargs = owner.client.upload_file.call_args.kwargs
-        self.assertEqual(kwargs["partsize"], 16 * 1024 * 1024)
-        self.assertNotEqual(kwargs["partsize"], -1)
+        # 1.12.9 起 upload_file 默认走 oss2 自管分片；这里钉死回退路子
+        # （p115oss），只验回退路子仍用显式 16MB 分片、不用 -1 自动分块。
+        saved_oss2 = upload_module.OSS2_AVAILABLE
+        upload_module.OSS2_AVAILABLE = False
+        try:
+            owner = FakeOwner()
+            service = upload_module.P115UploadService(owner)
+            with tempfile.TemporaryDirectory() as folder:
+                path = Path(folder) / "movie.mkv"
+                path.write_bytes(b"0" * (16 * 1024 * 1024 + 1))
+                self.assertTrue(service.upload_file(str(path), "/save", "movie.mkv"))
+            kwargs = owner.client.upload_file.call_args.kwargs
+            self.assertEqual(kwargs["partsize"], 16 * 1024 * 1024)
+            self.assertNotEqual(kwargs["partsize"], -1)
+        finally:
+            upload_module.OSS2_AVAILABLE = saved_oss2
 
 
 if __name__ == "__main__":

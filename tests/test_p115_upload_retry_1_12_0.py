@@ -107,10 +107,14 @@ class P115UploadRetryTests(unittest.TestCase):
         self._saved = {
             "P115_AVAILABLE": upload_module.P115_AVAILABLE,
             "P115OSS_AVAILABLE": upload_module.P115OSS_AVAILABLE,
+            "OSS2_AVAILABLE": upload_module.OSS2_AVAILABLE,
             "check_response": getattr(upload_module, "check_response", None),
         }
         upload_module.P115_AVAILABLE = True
         upload_module.P115OSS_AVAILABLE = False
+        # 1.12.9 起 upload_file 默认走 oss2 自管分片；这里钉死回退路子
+        # （p115oss），只测外层整文件重传契约——分片级重试另有专测。
+        upload_module.OSS2_AVAILABLE = False
         upload_module.check_response = MagicMock()
         self.addCleanup(self._restore)
 
