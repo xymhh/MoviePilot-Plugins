@@ -20,6 +20,7 @@ from ...core import (
     CloudFile,
     OwnerDelegator,
 )
+from ...core.error_text import sanitize_error_text
 from ...core.episode_parse import parse_episodes_from_names
 from ...core.share_link import canonicalize_share_url
 from ...drive.scanner import get_driver_definitions
@@ -568,7 +569,7 @@ class TransferOpsMixin(OwnerDelegator):
             logger.warning(
                 f"转存已暂停，跳过本次转存：{save_path}/{target_name}"
             )
-            return False
+            return self._fail_transfer(file_item, "转存已暂停")
 
         should_stop = stop_requested or self._stop_requested
         source = self._resource_provider_for_url(share_url)
@@ -597,13 +598,17 @@ class TransferOpsMixin(OwnerDelegator):
             )
         except Exception as error:
             logger.error(f"同步作业账本不可用，已阻止本次转存：{error}")
-            return False
+            return self._fail_transfer(
+                file_item, f"同步作业账本不可用：{error}"
+            )
         if lease is None:
             logger.warning(
                 f"同步作业未认领，跳过本次转存：{save_path}/{effective_name}，"
                 f"原因={reason or '未知'}"
             )
-            return False
+            return self._fail_transfer(
+                file_item, f"同步作业未认领：{reason or '未知'}"
+            )
         if lease.reused:
             logger.info(
                 f"同步作业已完成，复用结果不重复转存：{save_path}/{effective_name}"
@@ -708,7 +713,10 @@ class TransferOpsMixin(OwnerDelegator):
                         f"跨盘转存跳过：{source.name} -> {self._cloud_drive.name}，"
                         f"媒体类型 {item_media_type} 未启用"
                     )
-                    return False
+                    return self._fail_transfer(
+                        file_item,
+                        f"媒体类型 {item_media_type} 未启用跨盘转存",
+                    )
             required = (
                     (self._cross_transfer_enabled or is_manual_override)
                     and self._cross_transfer_manager
@@ -722,21 +730,52 @@ class TransferOpsMixin(OwnerDelegator):
                     and self._cloud_drive.supports(CloudDriveCapability.FILE_QUERY)
             )
             if not required:
+                # 逐项点名缺了哪块能力：以前这里只记一句日志就返回 False，
+                # 重试读不到原因，记录只剩通用句。
+                missing = []
+                if not (self._cross_transfer_enabled or is_manual_override):
+                    missing.append("跨盘转存未启用")
+                if not self._cross_transfer_manager:
+                    missing.append("跨盘任务管理器未就绪")
+                if not (
+                    cloud_resource
+                    or source.supports(CloudDriveCapability.SHARE_TRANSFER)
+                ):
+                    missing.append(f"{source.name}不支持分享转存")
+                if not source.supports(CloudDriveCapability.FILE_QUERY):
+                    missing.append(f"{source.name}不支持文件查询")
+                if not source.supports(CloudDriveCapability.FILE_DOWNLOAD):
+                    missing.append(f"{source.name}不支持文件下载")
+                if not self._cloud_drive.supports(
+                    CloudDriveCapability.LOCAL_UPLOAD
+                ):
+                    missing.append(f"{self._cloud_drive.name}不支持本地上传")
+                if not self._cloud_drive.supports(
+                    CloudDriveCapability.FILE_QUERY
+                ):
+                    missing.append(f"{self._cloud_drive.name}不支持文件查询")
+                detail = "、".join(missing) or "未知原因"
                 logger.warning(
                     f"无法跨盘转存单个文件：{source.name} -> "
-                    f"{self._cloud_drive.name}，请检查跨盘开关和网盘能力"
+                    f"{self._cloud_drive.name}，{detail}"
                 )
-                return False
+                return self._fail_transfer(
+                    file_item, f"无法跨盘转存：{detail}"
+                )
             if cloud_resource:
                 item = self._cloud_file_from_dict(file_item)
                 if not item.id:
                     logger.warning(f"无法跨盘整理文件：{source.name} 文件 ID 为空")
-                    return False
+                    return self._fail_transfer(
+                        file_item, "无法跨盘整理文件：源文件 ID 为空"
+                    )
             else:
                 source_file_id = str(file_item.get("id") or "").strip()
                 if not source_file_id:
                     logger.warning(f"无法跨盘转存单个文件：{source.name} 文件 ID 为空")
-                    return False
+                    return self._fail_transfer(
+                        file_item, "无法跨盘转存单个文件：源文件 ID 为空"
+                    )
                 staged_path = self._cross_transfer_staging_path(source.key)
                 source_share = source.require(CloudDriveCapability.SHARE_TRANSFER)
                 try:
@@ -750,7 +789,10 @@ class TransferOpsMixin(OwnerDelegator):
                     raise
                 if not staged:
                     self._cleanup_cross_transfer_staging(source, "")
-                    return False
+                    return self._fail_transfer(
+                        file_item,
+                        f"{source.name}分享转存失败：未返回暂存文件",
+                    )
                 source_files = source.require(CloudDriveCapability.FILE_QUERY)
                 staged_name = file_item.get("name") or target_name
                 item = None
@@ -765,7 +807,11 @@ class TransferOpsMixin(OwnerDelegator):
                         f"{staged_path}/{staged_name}"
                     )
                     self._cleanup_cross_transfer_staging(source, "")
-                    return False
+                    return self._fail_transfer(
+                        file_item,
+                        f"跨盘临时文件尚未可见：{source.name} "
+                        f"{staged_path}/{staged_name}",
+                    )
                 # 暂存文件已可见即登记引用：同路径兄弟任务在飞时 finally 不删（1.6.47）
                 _acquire_staging_ref(_staging_ref_key(staged_path, item))
             if source_sha1 and not item.sha1:
@@ -918,9 +964,24 @@ class TransferOpsMixin(OwnerDelegator):
             f"{key} 分享转存检测到风控，冷却 {self._transfer_risk_cooldown} 秒"
         )
 
+    def _fail_transfer(self, file_item: Dict[str, Any], reason: str) -> bool:
+        """静默失败点统一出口：先把原因记下来，再返回 False。
+
+        2026-11-16 LOST10 S01E05 的教训：_transfer_file_impl 里多处
+        提前 return False 都不留原因，而重试提交时又清掉了旧原因，
+        记录就只剩一句通用的「重试转存失败」，连卡在哪一步都查不到。
+        以后每个 False 出口都走这里。
+        """
+        self._remember_transfer_failure(file_item, reason)
+        return False
+
     def _remember_transfer_failure(self, file_item: Dict[str, Any], reason: str) -> None:
-        """记录单个文件的转存失败原因，供历史记录区分「秒传失败」等类型。"""
-        text = str(reason or "").strip()
+        """记录单个文件的转存失败原因，供历史记录区分「秒传失败」等类型。
+
+        记之前先脱敏：这里是失败原因进历史记录的必经口，任何一路带
+        凭证字段的原因都不能原样落盘（1.10.8 同款处理）。
+        """
+        text = sanitize_error_text(str(reason or "").strip())
         file_id = str((file_item or {}).get("id") or "").strip()
         if not text or not file_id:
             return
