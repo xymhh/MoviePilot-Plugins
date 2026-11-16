@@ -829,6 +829,12 @@ _CACHE_NAME_MAX_CHARS = 120
 #: 完整缓存文件名的最大字节数（多字节字符下仍不超过文件系统 255 字节限制）。
 _CACHE_FILENAME_MAX_BYTES = 200
 
+#: 目标名里的 TMDB 标记（与 handlers/sync/naming.py 的同名模式一致，
+#: MP 文件名识别能解析 {tmdb-123} / [tmdb-123] / {tmdbid-123} 等）：
+#: 1.12.4 起目标名带上标记，此前版本下载的文件用的是无标记的旧目标名，
+#: 两者只差一个标记，迁移时去掉标记比对。
+_TMDB_TAG_RE = re.compile(r"\s*[\[{]tmdb(?:id)?-\d+[\]}]", re.IGNORECASE)
+
 
 def _normalize_task_media(media: Any) -> Dict[str, Any]:
     """规范化跨盘任务的媒体身份，只保留下载页投影认得的字段。
@@ -1133,6 +1139,23 @@ class CrossTransferTaskManager:
             return None
         return self._cache_root() / clean
 
+    def _untagged_cache_path(self, target_name: str | None) -> Path | None:
+        """去掉目标名里 ``{tmdb-...}`` 标记后的旧目标名路径（1.12.4 迁移用）。
+
+        1.12.4 起目标名带标记，此前版本下载的文件用的是无标记的旧目标名
+        （如“十万狂花入梦来 - S01E06 - 第6集.mkv”），与当前目标名只差
+        一个标记。无标记时返回 None；归属仍由调用方按伴随文件核对。
+        """
+        if not target_name:
+            return None
+        stripped = _TMDB_TAG_RE.sub("", str(target_name)).strip()
+        if not stripped or stripped == target_name:
+            return None
+        clean = self._sanitize_cache_name(stripped, prefix_len=0)
+        if not clean:
+            return None
+        return self._cache_root() / clean
+
     @staticmethod
     def _read_cache_owner_key(path: Path) -> str:
         """读 path 的 meta 伴随文件里的 cache_key；读不到返回 ''。"""
@@ -1239,6 +1262,20 @@ class CrossTransferTaskManager:
             if self._rename_cache_files(source_path, desired):
                 return desired
             return source_path
+        # 1.12.4：目标名从本版起带 {tmdb-...} 标记，此前版本下载的文件
+        # 用的是无标记的旧目标名（如“十万狂花入梦来 - S01E06 - 第6集.mkv”）。
+        # 与当前目标名只差一个标记，同样按伴随文件核对归属后改名复用，不重下。
+        untagged_path = self._untagged_cache_path(target_name)
+        if (
+                untagged_path is not None
+                and untagged_path != desired
+                and untagged_path.is_file()
+                and self._is_our_cache_file(untagged_path, cache_key, source)
+        ):
+            logger.info(f"中继缓存改名（无标记旧目标名）：{untagged_path.name} → {desired.name}")
+            if self._rename_cache_files(untagged_path, desired):
+                return desired
+            return untagged_path
         return desired
 
     def _lookup_cache_path(
@@ -1267,6 +1304,14 @@ class CrossTransferTaskManager:
                 and self._is_our_cache_file(source_path, cache_key, source)
         ):
             return source_path
+        untagged_path = self._untagged_cache_path(target_name)
+        if (
+                untagged_path is not None
+                and untagged_path != desired
+                and untagged_path.is_file()
+                and self._is_our_cache_file(untagged_path, cache_key, source)
+        ):
+            return untagged_path
         return desired
 
     def _rename_cache_files(self, old_path: Path, new_path: Path) -> bool:

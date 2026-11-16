@@ -1,6 +1,7 @@
 """媒体文件命名、目标分类路径计算与资源扫描服务。"""
 
 import copy
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -10,6 +11,48 @@ from app.log import logger
 from app.modules.filemanager import FileManagerModule
 from app.modules.filemanager.transhandler import TransHandler
 from app.schemas.types import MediaType
+
+#: MP 文件名识别能解析的 TMDB 标记（app/domain/metainfo.py 的
+#: _EMBY_TMDB_RE_LIST）：{tmdb-123}、[tmdb-123]、{tmdbid-123} 等。
+_TMDB_TAG_RE = re.compile(r"[\[{]tmdb(?:id)?-\d+[\]}]", re.IGNORECASE)
+#: 标题后紧跟的年份，如“ (2026)”；标记插在年份后面。
+_YEAR_SUFFIX_RE = re.compile(r" \((\d{4})\)")
+
+
+def _with_tmdb_tag(file_name: str, mediainfo: MediaInfo) -> str:
+    """目标文件名里加上 ``{tmdb-<id>}`` 标记，供 MP 识别用。
+
+    MP 的文件名识别会解析 ``{tmdb-...}`` 标记并直接用该 id 认媒体，
+    不靠标题猜——同名多版本才不会认错（2026-11-16 实测：凡人修仙传
+    S01E200 没加标记时被认成 2025 年电视剧版 tmdb-243224，而插件认
+    的是 2020 年国漫版 tmdb-106449，此前 S01E193–S01E199 都是按
+    106449 成功入库的）。标记插在标题（与年份）后面、集数前面：
+    “凡人修仙传 {tmdb-106449} - S01E200 - 第200集.mkv”；
+    电影则是“片名 (2026) {tmdb-1}.mkv”。
+
+    只有文件名以媒体标题开头时才注入，改不明白的自定义模板不动；
+    已有标记、没有可用 tmdb_id 时原样返回。
+    """
+    tmdb_id = getattr(mediainfo, "tmdb_id", None)
+    try:
+        tmdb_number = int(tmdb_id) if tmdb_id is not None else 0
+    except (TypeError, ValueError):
+        return file_name
+    if tmdb_number <= 0:
+        return file_name
+    if _TMDB_TAG_RE.search(file_name):
+        return file_name
+    title = str(getattr(mediainfo, "title", "") or "").strip()
+    if not title or not file_name.startswith(title):
+        return file_name
+    rest = file_name[len(title):]
+    year_match = _YEAR_SUFFIX_RE.match(rest)
+    if year_match:
+        head = title + year_match.group(0)
+        rest = rest[len(year_match.group(0)):]
+    else:
+        head = title
+    return f"{head} {{tmdb-{tmdb_number}}}{rest}"
 
 from .utils import normalize_season
 
@@ -195,7 +238,13 @@ class SyncNamingService(OwnerDelegator):
                 relative_name = f"{clean_title}{year_part}/Season {s_num}/{clean_title} - S{s_num:02d}E{e_num:02d}{source_suffix}"
             else:
                 relative_name = f"{clean_title}{year_part}/{clean_title}{year_part}{source_suffix}"
-        return classified_root / Path(relative_name)
+        # 文件名里带上 {tmdb-<id>} 标记：MP 识别直接用该 id，不靠标题猜
+        # 多版本；只改文件名部分，目录部分不动。
+        relative_path = Path(relative_name)
+        tagged_name = _with_tmdb_tag(relative_path.name, effective_media)
+        if tagged_name != relative_path.name:
+            relative_path = relative_path.with_name(tagged_name)
+        return classified_root / relative_path
 
     def _platform_target_file(
             self,
