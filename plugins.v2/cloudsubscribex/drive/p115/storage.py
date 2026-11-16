@@ -28,6 +28,7 @@ U115CS 未实现严格查询”，就是 1.12.2 的旧类还在生效）。
 """
 
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
@@ -49,6 +50,72 @@ _BOUND_PROVIDER: Optional[Any] = None
 
 #: 日志前缀。
 _LOG_PREFIX = "115网盘CS版"
+
+#: 整理进度上报节流：两次更新之间最少间隔（秒）。oss2 每传完一个
+#: 10MB 分片就回调一次，1.3GB 文件约 134 次；不节流会刷爆 MP 的
+#: 进度 SSE（前端每 0.5 秒才拉一次）。
+_PROGRESS_MIN_INTERVAL = 1.0
+
+
+def _mp_filetransfer_progress():
+    """取 MP 的文件整理进度器；拿不到（测试/独立环境）返回 None。
+
+    惰性导入：MP 的 ``app.runtime.progress`` 只在 MP 进程里存在，
+    存储模块被单测加载时不存在，绝不能在模块顶层 import。
+    """
+    try:
+        from app.runtime.progress import ProgressHelper
+    except Exception:
+        return None
+    try:
+        from app.schemas.types import ProgressKey
+        key = ProgressKey.FileTransfer
+    except Exception:
+        key = "filetransfer"
+    try:
+        return ProgressHelper(key)
+    except Exception:
+        return None
+
+
+def _make_upload_progress_callback(file_name: str, total_size: int):
+    """造一个上传进度回调：把字节进度写进 MP 的整理进度。
+
+    MP 整理队列的进度是按**文件数**算的（已处理/总数），单文件整理
+    全程 0%、做完才跳 100%，所以整理大文件时页面一直 0%——不是卡住。
+    这里把当前文件的字节百分比写进同一个 ProgressHelper，单文件时
+    就是整体进度；多文件时至少能看到当前文件在走。MP 没在整理时
+    ProgressHelper 未启用，update 是空操作，不会误报。
+    """
+    last_reported = [0.0]
+
+    def _report(uploaded: int, total: int) -> None:
+        if total <= 0:
+            return
+        now = time.monotonic()
+        finished = uploaded >= total
+        if not finished and now - last_reported[0] < _PROGRESS_MIN_INTERVAL:
+            return
+        last_reported[0] = now
+        pct = max(0.0, min(100.0, uploaded / total * 100))
+        helper = _mp_filetransfer_progress()
+        if helper is None:
+            return
+        try:
+            helper.update(
+                value=round(pct, 1),
+                text=(
+                    f"正在上传 {file_name}：{pct:.0f}%"
+                    f"（{uploaded / 1048576:.0f}MB/{total / 1048576:.0f}MB）"
+                ),
+            )
+        except Exception as error:
+            logger.debug(
+                f"{_LOG_PREFIX}上传进度上报失败：{file_name}，{error}",
+                exc_info=True,
+            )
+
+    return _report
 
 
 class _U115CSSchema:
@@ -434,8 +501,12 @@ class U115CSStorage(StorageBase):
             upload = self._require(CloudDriveCapability.LOCAL_UPLOAD)
             if upload is None:
                 return None
+            total_size = int(local_path.stat().st_size)
             if not upload.upload_file(
-                    str(local_path), dir_path, final_name
+                    str(local_path), dir_path, final_name,
+                    progress_callback=_make_upload_progress_callback(
+                        final_name, total_size
+                    ),
             ):
                 logger.warning(
                     f"{_LOG_PREFIX}上传失败："
