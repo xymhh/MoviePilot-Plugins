@@ -6,9 +6,14 @@ MP 存储标识 ``u115cs``、显示名“115网盘CS版”。MP 的 ``StorageSch
 ``_support_storages`` 都只读 ``.value``）。
 
 注册不靠 MP 更新时重建：插件每次加载都调
-:func:`register_u115cs_storage`，把本类追加进文件管理模块的
+:func:`register_u115cs_storage`，把本类写进文件管理模块的
 ``_storage_schemas`` / ``_support_storages``，并用 ``StorageHelper``
-补一份存储配置；注册后自检，失败记大声日志。
+补一份存储配置；注册后自检，失败记大声日志。写 ``_storage_schemas``
+时是**替换**不是追加：插件每次重载都会产生一个新的本类对象，而 MP
+的 ``__get_storage_oper`` 只取第一个 schema.value 匹配的类，且插件
+卸载/重载时 MP 不清理 ``_storage_schemas``——只追加会让旧类一直排
+在前面、盖住新类（2026-11-16 实测：更新到 1.12.3 后整理仍报“存储
+U115CS 未实现严格查询”，就是 1.12.2 的旧类还在生效）。
 
 注意两点 MP 内部约定：
 - ``FileManagerModule.init_module`` 会把 ``_storage_schemas`` 换成
@@ -687,8 +692,18 @@ def register_u115cs_storage() -> bool:
             supports = getattr(target, "_support_storages", None)
             if not isinstance(schemas, list) or not isinstance(supports, list):
                 raise AttributeError("MP 存储注册表结构已变化")
-            if not any(schema is U115CSStorage for schema in schemas):
-                schemas.append(U115CSStorage)
+            # 替换而非追加：插件每次重载都会产生一个新的本类对象，MP 的
+            # __get_storage_oper 只取第一个 schema.value 匹配的类，且
+            # 插件卸载/重载时 MP 不清理 _storage_schemas——只追加会让
+            # 旧类一直排在前面、盖住新类（2026-11-16 实测：更新到 1.12.3
+            # 后整理仍报“存储 U115CS 未实现严格查询”，就是 1.12.2 的
+            # 旧类还在生效）。先清掉所有同标识的旧类，再挂当前类。
+            schemas[:] = [
+                schema for schema in schemas
+                if getattr(getattr(schema, "schema", None), "value", None)
+                != U115CS_STORAGE_ID
+            ]
+            schemas.append(U115CSStorage)
             if U115CS_STORAGE_ID not in supports:
                 supports.append(U115CS_STORAGE_ID)
         except Exception as error:
@@ -720,13 +735,21 @@ def register_u115cs_storage() -> bool:
         return False
     live_ok = False
     try:
+        # 自检不能只看“当前类在不在列表里”：旧类排在前面时 MP 取到的
+        # 仍是旧类（1.12.3 的教训）。必须确认第一个匹配项就是当前类。
+        first_match = next(
+            (
+                schema
+                for schema in (getattr(instance, "_storage_schemas", None) or [])
+                if getattr(getattr(schema, "schema", None), "value", None)
+                == U115CS_STORAGE_ID
+            ),
+            None,
+        )
         live_ok = (
             U115CS_STORAGE_ID
             in (getattr(instance, "_support_storages", None) or [])
-            and any(
-                schema is U115CSStorage
-                for schema in (getattr(instance, "_storage_schemas", None) or [])
-            )
+            and first_match is U115CSStorage
         )
     except Exception as error:
         logger.error(f"{_LOG_PREFIX}注册自检异常：{error}")

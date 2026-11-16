@@ -12,6 +12,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
@@ -653,6 +654,25 @@ class FakeFileManagerModule:
     _support_storages = []
 
 
+class _StaleU115CSStorage:
+    """模拟上一次插件加载留下的旧版适配器类（无 get_item_strict）。
+
+    插件每次重载都会产生一个新的 U115CSStorage 类对象；MP 的
+    __get_storage_oper 只取第一个 schema.value 匹配的类，且插件
+    卸载/重载时 MP 不清理 _storage_schemas——旧类会一直排在前面、
+    盖住新类（2026-11-16 实测：更新到 1.12.3 后整理仍报“存储 U115CS
+    未实现严格查询”，就是 1.12.2 的旧类还在生效）。
+    """
+
+    schema = SimpleNamespace(value="u115cs", name="U115CS")
+
+
+class _OtherStorage:
+    """其它存储（schema 不同），注册时必须原样保留。"""
+
+    schema = SimpleNamespace(value="u115", name="U115")
+
+
 class FakeModuleManager:
     def __init__(self, instance):
         self.instance = instance
@@ -728,6 +748,46 @@ class TestRegisterU115CSStorage(unittest.TestCase):
     def test_register_without_live_instance_returns_false(self):
         self.module_manager.instance = None
         self.assertFalse(storage.register_u115cs_storage())
+
+    def test_register_replaces_stale_class_from_previous_load(self):
+        """旧类排在前面时注册要把它换掉，否则 MP 取到的仍是旧类。"""
+        self.instance._storage_schemas = [_StaleU115CSStorage]
+        FakeFileManagerModule._storage_schemas = [_StaleU115CSStorage]
+
+        self.assertTrue(storage.register_u115cs_storage())
+
+        self.assertEqual(
+            self.instance._storage_schemas, [storage.U115CSStorage]
+        )
+        self.assertEqual(
+            FakeFileManagerModule._storage_schemas, [storage.U115CSStorage]
+        )
+        # MP 的 __get_storage_oper 只取第一个匹配项，必须是当前类。
+        first_match = next(
+            schema
+            for schema in self.instance._storage_schemas
+            if getattr(schema.schema, "value", None) == "u115cs"
+        )
+        self.assertIs(first_match, storage.U115CSStorage)
+
+    def test_register_replaces_stale_class_and_keeps_other_storages(self):
+        self.instance._storage_schemas = [
+            _OtherStorage, _StaleU115CSStorage,
+        ]
+        FakeFileManagerModule._storage_schemas = [
+            _OtherStorage, _StaleU115CSStorage,
+        ]
+
+        self.assertTrue(storage.register_u115cs_storage())
+
+        self.assertEqual(
+            self.instance._storage_schemas,
+            [_OtherStorage, storage.U115CSStorage],
+        )
+        self.assertEqual(
+            FakeFileManagerModule._storage_schemas,
+            [_OtherStorage, storage.U115CSStorage],
+        )
 
 
 if __name__ == "__main__":
