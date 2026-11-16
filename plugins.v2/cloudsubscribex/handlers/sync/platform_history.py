@@ -1,6 +1,5 @@
 """同步记录与 MoviePilot 平台整理历史表 (TransferHistory) 的双向同步。"""
 
-import copy
 import re
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
@@ -194,92 +193,14 @@ class PlatformHistoryService(OwnerDelegator):
             records: List[Dict[str, Any]],
             reconcile: bool = False,
     ) -> int:
-        enabled = getattr(self, "_platform_transfer_history_enabled", False)
-        if not enabled and not reconcile:
-            return 0
-        # v1.12.8：已交 MP 整理的转存不再另写一条平台记录。MP 的
-        # do_transfer 自己会写一条真正的整理记录（本地 → 115网盘CS版）；
-        # 插件再直写一条「PanSou → 115网盘」（复制）会让同一份资源在
-        # 媒体整理里看起来整理了两遍。skip_history 即「已交 MP 整理」。
-        # 对账时同样排除：desired_sources 不含它们，已存在的旧重复记录
-        # 会在对账清理里被删掉。
-        entries_by_src = {
-            entry["src"]: entry
-            for record in (records if enabled else [])
-            if isinstance(record, dict)
-            and not record.get("skip_history")
-            for entry in self._platform_history_entries(record)
-        }
-        entries = list(entries_by_src.values())
-        if not entries and not reconcile:
-            return 0
-        try:
-            from app.db.models.transferhistory import TransferHistory
-            from sqlalchemy import or_
-
-            lock = getattr(self, "_platform_history_lock", None)
-            if lock and not lock.acquire(timeout=1.0):
-                logger.debug("MoviePilot 整理历史写入仍在执行，本批次已跳过")
-                return 0
-            added = 0
-            updated = 0
-            removed = 0
-            try:
-                with SessionFactory() as db:
-                    columns = set(TransferHistory.__table__.columns.keys())
-                    desired_sources = {entry["src"] for entry in entries}
-                    if reconcile:
-                        managed = db.query(TransferHistory).filter(or_(
-                            TransferHistory.src.like("cloudsubscribe://%"),
-                            TransferHistory.downloader == "网盘订阅助手",
-                        )).all()
-                        existing_by_src = {item.src: item for item in managed}
-                        for item in managed:
-                            if item.src not in desired_sources:
-                                db.delete(item)
-                                existing_by_src.pop(item.src, None)
-                                removed += 1
-                    else:
-                        existing = (
-                            db.query(TransferHistory).filter(
-                                TransferHistory.src.in_(sorted(desired_sources))
-                            ).all()
-                            if desired_sources else []
-                        )
-                        existing_by_src = {item.src: item for item in existing}
-                    for entry in entries:
-                        existing = existing_by_src.get(entry["src"])
-                        if existing:
-                            changed_fields = {
-                                key: value
-                                for key, value in entry.items()
-                                if key in columns and key != "src"
-                                   and getattr(existing, key, None) != value
-                            }
-                            if changed_fields:
-                                for key, value in changed_fields.items():
-                                    setattr(existing, key, value)
-                                updated += 1
-                            continue
-                        db.add(TransferHistory(**{
-                            key: value for key, value in entry.items()
-                            if key in columns
-                        }))
-                        added += 1
-                    if added or updated or removed:
-                        db.commit()
-            finally:
-                if lock:
-                    lock.release()
-            if added or updated or removed:
-                logger.debug(
-                    f"MoviePilot 成功整理历史已同步：新增 {added} 条，"
-                    f"更新 {updated} 条，清理 {removed} 条"
-                )
-            return added + updated + removed
-        except Exception as error:
-            logger.error(f"登记成功整理历史失败：{error}")
-            return 0
+        # 1.12.14：插件不再往 MP 的 TransferHistory 里写记录。
+        # MP 的整理历史是唯一账本，只有 MP 自己能写（do_transfer /
+        # 整理）；插件直写平台记录（PanSou → 115网盘CS版、复制）会
+        # 和 MP 自己的「本地 → 115网盘CS版、移动」成对出现，同一集
+        # 看起来整理了两遍。8 处写入点与启动对账都因此停用；已有
+        # 的插件记录由 remove_platform_transfer_history_mirror_once
+        # 一次性清理。
+        return 0
 
     @staticmethod
     def _history_image_from_download(record: Dict[str, Any]) -> Optional[str]:
@@ -354,7 +275,12 @@ class PlatformHistoryService(OwnerDelegator):
             return 0
 
     def sync_platform_transfer_history(self) -> int:
-        """让整理历史完整镜像插件历史；关闭开关时清理镜像。"""
+        """只恢复插件自身 history 记录缺失的海报，不再镜像到 MP 整理历史。
+
+        1.12.14：MP 的整理历史是唯一账本，插件不再直写平台记录，
+        启动对账（镜像）随之取消。这里只保留海报恢复（插件自己
+        的转存记录页用），返回值是恢复的海报条数。
+        """
         get_data = getattr(self, "_get_data", None)
         save_data = getattr(self, "_save_data", None)
         if not get_data:
@@ -384,9 +310,23 @@ class PlatformHistoryService(OwnerDelegator):
         if restored and save_data:
             save_data("history", history)
             logger.info(f"已从下载历史恢复 {restored} 条插件整理记录海报")
-        records = [
-            copy.deepcopy(record)
-            for record in history
-            if isinstance(record, dict) and record.get("landed") is not False
-        ]
-        return self._record_platform_transfer_histories(records, reconcile=True)
+        return restored
+
+    def remove_platform_transfer_history_mirror_once(self) -> int:
+        """一次性清理插件已写进 MP 整理历史的镜像记录，只跑一次。
+
+        删掉全部插件托管行（src 以 cloudsubscribe:// 开头，或
+        downloader 为「网盘订阅助手」），用数据标记
+        platform_history_mirror_removed 保证只清理一次；之后插件
+        不再写这类记录，MP 的整理历史只剩 MP 自己写的账。
+        """
+        get_data = getattr(self, "_get_data", None)
+        save_data = getattr(self, "_save_data", None)
+        if get_data and get_data("platform_history_mirror_removed"):
+            return 0
+        removed = self._delete_platform_transfer_histories(all_managed=True)
+        if save_data:
+            save_data("platform_history_mirror_removed", True)
+        if removed:
+            logger.info(f"已清理插件写入 MP 整理历史的镜像记录 {removed} 条")
+        return int(removed or 0)

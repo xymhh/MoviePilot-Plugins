@@ -1,17 +1,15 @@
-"""1.12.8：已交 MP 整理的转存不再另写平台整理历史。
+"""1.12.14：插件不再往 MP 整理历史里写记录，并一次性清理镜像。
 
-根因：插件 `_record_platform_transfer_histories` 会把每条成功转存直写
-进 MP 的 TransferHistory（来源标成 PanSou、目标存成 115网盘、方式复制），
-哪怕这条转存已经交给 MP 的 do_transfer（P1/P2）去整理了。MP 那边
-自己会写一条真正的整理记录（本地 → 115网盘CS版），结果同一份资源
-在媒体整理里看起来整理了两遍。`skip_history` 即「已交 MP 整理」，
-写平台历史与对账时都要排除它；对账还会顺带删掉已存在的旧重复记录。
+固定契约（理清逻辑：MP 的整理历史是唯一账本，只有 MP 能写）：
 
-v1.12.11：目标存储改记 MP 存储名「115网盘CS版」（旧值是网盘驱动名
-「115网盘」，与 MP 原生 115 存储同名、会误导）；未交 MP 整理的
-PanSou 记录现为「PanSou → 115网盘CS版」。
-
-覆盖 core/handlers/sync/platform_history.py 的写入口。
+1. `_record_platform_transfer_histories` 是 no-op：无论记录是否
+   交给 MP 整理（skip_history 真/假）、无论开关，都返回 0、不碰
+   数据库——插件不再直写「PanSou → 115网盘CS版、复制」这类记录；
+2. `sync_platform_transfer_history` 不再镜像到 MP 表：只恢复插件
+   自身 history 记录缺失的海报，不调用写入口；
+3. `remove_platform_transfer_history_mirror_once` 一次性清理：删掉
+   全部插件托管行（src 以 cloudsubscribe:// 开头，或 downloader
+   为「网盘订阅助手」），用数据标记只跑一次，第二次调用返回 0。
 """
 
 import sys
@@ -108,6 +106,20 @@ class _FakeQuery:
     def all(self):
         return list(self._rows)
 
+    def delete(self, synchronize_session=False):
+        # 只删插件托管行（与 _delete_platform_transfer_histories
+        # 的 or_ 条件一致），其余行不动。
+        kept = [
+            row for row in self._rows
+            if not (
+                str(getattr(row, "src", "")).startswith("cloudsubscribe://")
+                or getattr(row, "downloader", "") == "网盘订阅助手"
+            )
+        ]
+        count = len(self._rows) - len(kept)
+        self._rows[:] = kept
+        return count
+
 
 class _FakeSession:
     """SessionFactory 桩会话：记录 add/delete/commit，query 返回预置行。"""
@@ -157,12 +169,10 @@ def _positive_int(value):
 
 
 # 先把 positive_int 钉死再加载被测模块：platform_history 在顶层
-# from ...drive.common import positive_int，加载时绑定的就是这里的值；
-# 若留给 AutoMockModule，season 会是 MagicMock，f"{season:02d}" 会炸。
+# from ...drive.common import positive_int，加载时绑定的就是这里的值。
 sys.modules["cloudsubscribex.drive.common"].positive_int = _positive_int
 
 
-# 搜索源注册表桩：pansou → PanSou。
 class _FakeSourceDef:
     def __init__(self, source_id, name):
         self.id = source_id
@@ -217,9 +227,9 @@ def _record(**extra):
 
 
 class _Service(PlatformHistoryService):
-    """只测平台历史写入口，不依赖插件宿主。"""
+    """只测平台历史写入口与一次性清理，不依赖插件宿主。"""
 
-    def __init__(self, session):
+    def __init__(self, session, data=None):
         object.__setattr__(self, "_platform_transfer_history_enabled", True)
         object.__setattr__(self, "_platform_history_lock", None)
         object.__setattr__(self, "_is_upgrade_history", None)
@@ -227,19 +237,18 @@ class _Service(PlatformHistoryService):
         fake_drive.name = "115网盘"
         object.__setattr__(self, "_cloud_drive", fake_drive)
         self._session = session
+        self._data = dict(data or {})
 
     def _get_data(self, key):
-        return None
+        return self._data.get(key)
 
     def _save_data(self, key, value):
+        self._data[key] = value
         return None
 
 
 def _install_session(session):
-    # 全量套件收集全部测试文件后才跑用例，别的测试文件可能覆盖了共享
-    # 模块；每次用例开始时把关键桩重新钉死，避免跨文件污染。
     sys.modules["app.db"].SessionFactory = _FakeSessionFactory(session)
-    # 模块顶层已绑定的 SessionFactory 也要换成桩。
     _platform_history.SessionFactory = _FakeSessionFactory(session)
     sys.modules["app.db.models.transferhistory"].TransferHistory = (
         _FakeTransferHistory
@@ -247,93 +256,71 @@ def _install_session(session):
     sys.modules["cloudsubscribex.search.scanner"].SearchSourceRegistry = (
         _FakeRegistry
     )
-    # 对账分支里 from sqlalchemy import or_：若别的测试文件装了真
-    # sqlalchemy，真 or_ 收到桩列对象会炸；钉成恒返回的 lambda。
     sys.modules["sqlalchemy"].or_ = lambda *args, **kwargs: ("or", args)
     _platform_history.positive_int = _positive_int
 
 
-class TestSkipOrganizedRecords(unittest.TestCase):
-    def test_organized_record_writes_no_platform_history(self):
-        """已交 MP 整理的记录不写「PanSou → 115网盘CS版」平台记录。"""
+class TestPlatformHistoryRemoved(unittest.TestCase):
+    def test_record_is_noop_for_unorganized(self):
+        """未交 MP 整理的记录也不写平台历史（返回 0、不碰数据库）。"""
         session = _FakeSession()
         _install_session(session)
         service = _Service(session)
-        organized = _record(skip_history=True)
-        result = service._record_platform_transfer_histories([organized])
-        self.assertEqual(result, 0)
+        self.assertEqual(
+            service._record_platform_transfer_histories([_record()]), 0
+        )
         self.assertEqual(session.added, [])
         self.assertFalse(session.committed)
 
-    def test_unorganized_record_still_writes_platform_history(self):
-        """未交 MP 整理的记录照常写一条平台记录（PanSou → 115网盘CS版）。"""
+    def test_record_is_noop_for_organized_and_reconcile(self):
+        """已交 MP 整理的记录、对账模式同样不写（返回 0）。"""
         session = _FakeSession()
         _install_session(session)
         service = _Service(session)
-        plain = _record()
-        result = service._record_platform_transfer_histories([plain])
-        self.assertEqual(result, 1)
-        self.assertEqual(len(session.added), 1)
-        entry = session.added[0]
-        self.assertEqual(entry.src_storage, "PanSou")
-        self.assertEqual(entry.dest_storage, "115网盘CS版")
-        self.assertEqual(entry.mode, "copy")
-        self.assertEqual(entry.downloader, "网盘订阅助手")
+        self.assertEqual(
+            service._record_platform_transfer_histories(
+                [_record(skip_history=True)], reconcile=True
+            ),
+            0,
+        )
+        self.assertEqual(session.added, [])
+        self.assertFalse(session.committed)
+
+    def test_mirror_cleanup_deletes_managed_rows_once(self):
+        """一次性清理删掉插件托管行并打标记，第二次调用不再跑。"""
+        managed = [
+            _FakeTransferHistory(
+                src="cloudsubscribe://abc", downloader="网盘订阅助手"
+            ),
+            _FakeTransferHistory(
+                src="cloudsubscribe://def", downloader="网盘订阅助手"
+            ),
+            _FakeTransferHistory(src="local", downloader=""),
+        ]
+        session = _FakeSession(rows=managed)
+        _install_session(session)
+        service = _Service(session)
+        removed = service.remove_platform_transfer_history_mirror_once()
+        self.assertEqual(removed, 2)
         self.assertTrue(session.committed)
+        self.assertTrue(service._data.get("platform_history_mirror_removed"))
+        # 第二次调用：标记已打，不再清理。
+        session2 = _FakeSession(rows=list(managed))
+        _install_session(session2)
+        self.assertEqual(
+            service.remove_platform_transfer_history_mirror_once(), 0
+        )
+        self.assertFalse(session2.committed)
 
-    def test_mixed_batch_only_writes_unorganized(self):
-        """一批里只有未交 MP 整理的那条会写平台记录。"""
+    def test_sync_does_not_mirror_to_mp_history(self):
+        """启动同步不再往 MP 表里写记录（只恢复海报，不碰数据库写）。"""
         session = _FakeSession()
         _install_session(session)
-        service = _Service(session)
-        organized = _record(skip_history=True)
-        plain = _record(title="吞噬星空", tmdb_id=101172, episode=232,
-                        file_name="吞噬星空 - S01E232 - 第232集.mp4")
-        result = service._record_platform_transfer_histories(
-            [organized, plain]
-        )
-        self.assertEqual(result, 1)
-        self.assertEqual(len(session.added), 1)
-        self.assertEqual(session.added[0].title, "吞噬星空")
-
-
-class TestReconcileCleansStaleDuplicates(unittest.TestCase):
-    def test_reconcile_removes_platform_record_for_organized(self):
-        """对账时，已交 MP 整理的那条旧平台记录会被删掉。"""
-        stale = _FakeTransferHistory(
-            src="PanSou · 凡人修仙传 S01E200",
-            src_storage="PanSou",
-            dest_storage="115网盘",
-            mode="copy",
-        )
-        session = _FakeSession(rows=[stale])
-        _install_session(session)
-        service = _Service(session)
-        organized = _record(skip_history=True)
-        result = service._record_platform_transfer_histories(
-            [organized], reconcile=True
-        )
-        self.assertEqual(result, 1)
-        self.assertEqual(session.deleted, [stale])
+        service = _Service(session, data={"history": [_record()]})
+        # 海报恢复依赖下载历史桩（无海报可恢复），只断言不写 MP 表。
+        service.sync_platform_transfer_history()
         self.assertEqual(session.added, [])
-
-    def test_reconcile_keeps_unorganized_platform_record(self):
-        """对账时，未交 MP 整理的那条平台记录会被保留（不删不增）。"""
-        session = _FakeSession()
-        _install_session(session)
-        service = _Service(session)
-        plain = _record()
-        # 用将要写入的同一份条目构造已存在记录，对账时字段全等、无更新。
-        entries = service._platform_history_entries(plain)
-        self.assertEqual(len(entries), 1)
-        existing = _FakeTransferHistory(**entries[0])
-        session.rows = [existing]
-        result = service._record_platform_transfer_histories(
-            [plain], reconcile=True
-        )
-        self.assertEqual(result, 0)
-        self.assertEqual(session.deleted, [])
-        self.assertEqual(session.added, [])
+        self.assertFalse(session.committed)
 
 
 if __name__ == "__main__":
