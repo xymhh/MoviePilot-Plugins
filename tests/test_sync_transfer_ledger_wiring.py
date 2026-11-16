@@ -198,6 +198,23 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
         )
         self.assertEqual(ledger.success_kwargs["result_name"], "第17集.mp4")
         self.assertEqual(ledger.success_kwargs["result_size"], 1024)
+
+    def test_reopen_flag_defaults_off(self):
+        handler, ledger = self._handler(lease=_lease())
+        self.assertTrue(handler._transfer_file(*self._args()))
+        self.assertFalse(
+            ledger.begin_kwargs["allow_reopen_dead_letter"],
+            "自动同步默认不重开死信",
+        )
+
+    def test_reopen_flag_passes_through(self):
+        handler, ledger = self._handler(lease=_lease())
+        self.assertTrue(
+            handler._transfer_file(
+                *self._args(), allow_reopen_dead_letter=True,
+            )
+        )
+        self.assertTrue(ledger.begin_kwargs["allow_reopen_dead_letter"])
         self.assertIsNone(ledger.failure_kwargs)
 
     def test_done_verifier_reports_exists_and_mismatch(self):

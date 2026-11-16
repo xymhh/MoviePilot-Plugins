@@ -552,11 +552,16 @@ class TransferOpsMixin(OwnerDelegator):
             stop_requested: Optional[Callable[[], bool]] = None,
             media_type: str = "",
             media: Optional[Dict[str, Any]] = None,
+            allow_reopen_dead_letter: bool = False,
     ) -> bool:
         """转存入口：可选地先走同步作业账本，再执行原转存实现。
 
         开关关闭时行为与旧版完全一致。打开后，同一内容写同一目标位置只会
         有一个 worker 真正执行；已完成的作业直接复用。
+
+        ``allow_reopen_dead_letter`` 仅供用户显式重试（转存记录点重试）
+        使用：账本里的死信作业先归零再认领。自动同步、字幕转存不传它，
+        死信仍会被账本挡住，不会无限重跑。
         """
         share_url = canonicalize_share_url(share_url)
         if not bool(getattr(self, "_sync_job_ledger_enabled", False)):
@@ -595,6 +600,7 @@ class TransferOpsMixin(OwnerDelegator):
                 history_id=str(file_item.get("history_id") or "") or None,
                 payload={"entry": "sync_transfer"},
                 verify_done=self._verify_sync_job_result,
+                allow_reopen_dead_letter=allow_reopen_dead_letter,
             )
         except Exception as error:
             logger.error(f"同步作业账本不可用，已阻止本次转存：{error}")

@@ -557,7 +557,7 @@ class SyncJobLedgerTests(unittest.TestCase):
     @staticmethod
     def _begin(
             ledger, *, target_name="第17集.mp4", sha1="a" * 40,
-            verify_done=None,
+            verify_done=None, allow_reopen_dead_letter=False,
     ):
         return ledger.begin(
             target_provider="115",
@@ -567,6 +567,7 @@ class SyncJobLedgerTests(unittest.TestCase):
             source_provider="115",
             source_name="第17集.mp4",
             verify_done=verify_done,
+            allow_reopen_dead_letter=allow_reopen_dead_letter,
         )
 
     def _done(self):
@@ -759,6 +760,104 @@ class SyncJobLedgerTests(unittest.TestCase):
         second, reason = self._begin(self.ledger, target_name="第18集.mp4")
         self.assertIsNotNone(second, reason)
         self.assertNotEqual(first.job_key, second.job_key)
+
+
+    # 1.10.13：死信重开。LOST10 S01E05 在 1.10.12 上重试时，账本作业已
+    # 是 failed（重试 3 次耗尽），begin 直接以「作业由其他 worker 持有
+    # 或已终止：failed」拒绝，连下载都走不到。只有用户显式重试才允许
+    # 重开死信，自动同步仍被挡住。
+    def _drive_to_dead_letter(self):
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        for now in (1000, 2000, 3000):
+            self.assertTrue(
+                self.ledger.failure(
+                    lease, error="转存失败", retryable=True, now=now,
+                )
+            )
+            row = self._row(lease.job_key)
+            if row.state == JOB_RETRY_WAIT:
+                with self.session_factory() as db:
+                    target = db.get(models_module.SyncJob, lease.job_key)
+                    target.next_retry_at = 0
+                    db.commit()
+                lease, reason = self._begin(self.ledger)
+                self.assertIsNotNone(lease, reason)
+        row = self._row(lease.job_key)
+        self.assertEqual(row.state, JOB_FAILED)
+        self.assertTrue(
+            str(row.last_error or "").startswith("dead_letter: "),
+            row.last_error,
+        )
+        return lease.job_key
+
+    def test_dead_letter_begin_refuses_without_flag(self):
+        job_key = self._drive_to_dead_letter()
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNone(lease, reason)
+        self.assertIn("failed", reason)
+        self.assertEqual(self._row(job_key).state, JOB_FAILED)
+
+    def test_dead_letter_begin_reopens_with_flag(self):
+        job_key = self._drive_to_dead_letter()
+        lease, reason = self._begin(
+            self.ledger, allow_reopen_dead_letter=True,
+        )
+        self.assertIsNotNone(lease, reason)
+        self.assertFalse(lease.reused)
+        row = self._row(job_key)
+        self.assertEqual(row.state, JOB_TRANSFERRING)
+        self.assertEqual(row.attempt, 1)
+
+    def test_non_dead_letter_failed_is_not_reopened(self):
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(
+            self.ledger.failure(
+                lease, error="不可重试的失败", retryable=False, now=1000,
+            )
+        )
+        row = self._row(lease.job_key)
+        self.assertEqual(row.state, JOB_FAILED)
+        self.assertFalse(
+            str(row.last_error or "").startswith("dead_letter: "),
+        )
+        reopened, reason = self._begin(
+            self.ledger, allow_reopen_dead_letter=True,
+        )
+        self.assertIsNone(reopened, reason)
+        self.assertIn("failed", reason)
+
+    def test_live_job_is_not_stolen_by_reopen_flag(self):
+        first, reason = self._begin(self.ledger)
+        self.assertIsNotNone(first, reason)
+        second, reason = self._begin(
+            self.ledger, allow_reopen_dead_letter=True,
+        )
+        self.assertIsNone(second, reason)
+        self.assertIn("持有", reason)
+
+    def test_exhausted_retry_wait_reopens_with_flag(self):
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(
+            self.ledger.failure(
+                lease, error="转存失败", retryable=True, now=1000,
+            )
+        )
+        with self.session_factory() as db:
+            target = db.get(models_module.SyncJob, lease.job_key)
+            target.attempt = 3
+            target.next_retry_at = 0
+            db.commit()
+        row = self._row(lease.job_key)
+        self.assertEqual(row.state, JOB_RETRY_WAIT)
+        reopened, reason = self._begin(
+            self.ledger, allow_reopen_dead_letter=True,
+        )
+        self.assertIsNotNone(reopened, reason)
+        self.assertFalse(reopened.reused)
+        self.assertEqual(self._row(lease.job_key).attempt, 1)
 
 
 class SyncJobLedgerConcurrencyTests(unittest.TestCase):

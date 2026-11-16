@@ -28,7 +28,7 @@ from .sync_job_state import (
     normalize_path,
 )
 from .sync_jobs import SyncJobRepository
-from ..retry_policy import DEAD_LETTER_PREFIX, backoff_delay
+from ..retry_policy import DEAD_LETTER_PREFIX, backoff_delay, is_dead_letter
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +84,14 @@ class SyncJobLedger:
             history_id: Optional[str] = None,
             payload: Optional[Mapping[str, Any]] = None,
             verify_done: Optional[Callable[[SyncJobResult], str]] = None,
+            allow_reopen_dead_letter: bool = False,
     ) -> tuple[Optional[SyncJobLease], str]:
-        """入队并认领；返回 ``(lease, reason)``，认领失败时 lease 为 None。"""
+        """入队并认领；返回 ``(lease, reason)``，认领失败时 lease 为 None。
+
+        ``allow_reopen_dead_letter`` 仅供用户显式重试（如转存记录点重试）
+        使用：死信作业先 ``reopen_dead_letter`` 归零再认领。自动同步一轮
+        接一轮时必须保持 False，否则「永久失败」会被无限重试。
+        """
         try:
             normalized_path = normalize_path(target_path)
             normalized_name = normalize_name(target_name)
@@ -182,8 +188,9 @@ class SyncJobLedger:
         if current is not None and current.state == JOB_DONE:
             return SyncJobLease(current.job_key, current.job_id, "", reused=True), ""
         # 死信（重试次数耗尽）不在这里自动复活：正常同步一轮接一轮，自动
-        # 重开会把「永久失败」变成无限重试。只有用户在任务中心显式重试
-        # （``POST /tasks/retry``）才会 ``reopen_dead_letter`` 归零重来。
+        # 重开会把「永久失败」变成无限重试。只有用户显式重试（任务中心
+        # ``POST /tasks/retry``，或转存记录点重试把重开开关传进来）才会
+        # ``reopen_dead_letter`` 归零重来。
         # canceled 是「用户停掉了上一次」，不是永久不可用：同内容再次被发起
         # 同步时允许重新入队，否则该文件永远转存不进来（1.7.37）。
         if current is not None and current.state == JOB_CANCELED:
@@ -199,6 +206,34 @@ class SyncJobLedger:
                 if self._repo.claim(current.job_key, retry_owner):
                     logger.info(
                         "同步作业已取消，重新入队并认领（job=%s，target=%s/%s）",
+                        current.job_key, current.target_path, current.target_name,
+                    )
+                    return SyncJobLease(
+                        current.job_key, current.job_id, retry_owner
+                    ), ""
+            current = self._repo.get(row.job_key)
+        # 1.10.13：显式重试才重开死信。口径与任务中心重试 API 完全一致
+        # （``is_dead_letter``），自动同步不走这里，所以永久失败的同步
+        # 仍会在账本这一步被挡住，不会无限重跑。
+        if (
+            allow_reopen_dead_letter
+            and current is not None
+            and is_dead_letter(
+                current.state, current.last_error,
+                current.attempt, current.max_attempts,
+            )
+        ):
+            try:
+                reopened = self._repo.reopen_dead_letter(
+                    current.job_key, "用户显式重试，人工重开死信",
+                )
+            except Exception as error:
+                return None, f"死信重开失败：{error}"
+            if reopened:
+                retry_owner = f"{current.job_id}:{uuid.uuid4().hex[:12]}"
+                if self._repo.claim(current.job_key, retry_owner):
+                    logger.info(
+                        "同步作业死信已重开并认领（job=%s，target=%s/%s）",
                         current.job_key, current.target_path, current.target_name,
                     )
                     return SyncJobLease(

@@ -562,6 +562,12 @@ class HistoryRetryService(OwnerDelegator):
                  "sha1": source_sha1,
                  "md5": record.get("source_md5") or ""},
                 self._cloud_transfer_path, None, source_sha1,
+                # 1.10.13：历史重试是用户显式点的，账本里的死信作业要
+                # 先归零再认领，否则重试连下载都走不到，直接在账本这
+                # 一步被「作业由其他 worker 持有或已终止：failed」挡住
+                # （LOST10 S01E05 在 1.10.12 上就是这么失败的）。自动
+                # 同步不走这条路，死信仍会被账本挡住。
+                allow_reopen_dead_letter=True,
                 media={
                     # mediainfo 是本次重试现认的，认不到时 tmdb_id 为空；
                     # 记录本身存的 tmdb_id 是权威的（历史页媒体详情就
