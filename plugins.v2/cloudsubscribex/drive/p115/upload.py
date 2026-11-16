@@ -392,16 +392,24 @@ class P115UploadService(OwnerDelegator):
                 target, upload_id, **self._oss_proxy_kwargs()
             )
 
-    def _oss2_proxy_dict(self) -> Dict[str, str]:
-        """oss2 数据面用的代理字典；1.12.12 起固定返回空字典（直连）。
+    def _upload_proxy_url(self) -> str:
+        """上传代理地址（原始 URL）；未配置时返回空字符串。"""
+        proxies = getattr(self._owner, "_upload_proxies", None)
+        if isinstance(proxies, dict) and proxies:
+            url = str(proxies.get("https") or proxies.get("http") or "").strip()
+            if url:
+                return url
+        try:
+            return str(
+                getattr(self._owner, "_cross_transfer_upload_proxy", "") or ""
+            ).strip()
+        except Exception:
+            return ""
 
-        根因（2026-11-17 实测）：插件的上传代理（mihomo:7890）传给
-        oss2 Bucket 后，分片上传全失败；但秒传只调 p115 API（代理对
-        其无效、实际直连）能成功，cd2 直连也能成功。p115disk 原版建
-        Bucket 时根本不传代理，也是直连。所以 oss2 数据面改走直连，
-        不再用上传代理；上传代理配置仍保留给 p115 客户端 API 侧。
-        """
-        return {}
+    def _oss2_proxy_dict(self) -> Dict[str, str]:
+        """oss2 数据面用的代理字典；未配置时返回空字典（直连）。"""
+        url = self._upload_proxy_url()
+        return {"http": url, "https": url} if url else {}
 
     @staticmethod
     def _oss2_token_expiring(
@@ -649,6 +657,49 @@ class P115UploadService(OwnerDelegator):
         logger.info(f"115 本地文件上传完成（oss2）：{source.name} -> {upload_name}")
         return True
 
+    def _upload_via_p115oss(
+            self,
+            source: Path,
+            directory_id: int,
+            upload_name: str,
+            checksum: str,
+            file_size: int,
+            progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """p115oss 旧路子上传一次（1.12.9 之前的做法）。
+
+        oss2 路子失败时的回落通道：走 client.upload_file，数据面
+        session 带代理（见 _oss_proxy_kwargs）。失败抛异常。
+        """
+        part_size = upload_part_size(file_size)
+        # p115oss.upload_file 会把 request_kwargs 透传给 OSS 分片 PUT，
+        # 在这里传 session=<ProxyManager> 才能真正让上传数据走代理。
+        upload_kwargs = dict(self._oss_proxy_kwargs(), max_retries=0)
+        if progress_callback:
+            with source.open("rb") as file:
+                response = self._rate_limited_call(
+                    self.client.upload_file,
+                    _ProgressReader(file, file_size, progress_callback),
+                    pid=int(directory_id or 0),
+                    filename=upload_name,
+                    filesha1=checksum,
+                    filesize=file_size,
+                    partsize=part_size,
+                    **upload_kwargs,
+                )
+        else:
+            response = self._rate_limited_call(
+                self.client.upload_file,
+                source,
+                pid=int(directory_id or 0),
+                filename=upload_name,
+                filesha1=checksum,
+                filesize=file_size,
+                partsize=part_size,
+                **upload_kwargs,
+            )
+        check_response(response)
+
     def upload_file(
             self,
             local_path: str,
@@ -682,45 +733,54 @@ class P115UploadService(OwnerDelegator):
         # 同款）：单片失败只重传该片、token 快过期先刷新；整文件重传
         # （最多 3 次、退避 2/4 秒，与 MP 自带 u115 存储同一口径）只作
         # 外层兜底。SHA1 只算一次，不随重试重复读整份文件。
+        # 1.12.13：oss2 路子在线上全量失败（原因未明，代理已排除——
+        # cd2 走同一代理正常），先回落旧路子（p115oss）保证上传能走通，
+        # 同时把 oss2 的原错记下来以便定位。
         last_error: Optional[Exception] = None
         for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
             try:
                 file_size = source.stat().st_size
                 if OSS2_AVAILABLE:
-                    self._upload_via_oss2(
+                    try:
+                        self._upload_via_oss2(
+                            source, int(lookup.directory_id or 0), upload_name,
+                            checksum, file_size, progress_callback,
+                        )
+                    except Exception as oss2_error:
+                        if not P115OSS_AVAILABLE:
+                            raise
+                        # 先把 oss2 原错的描述取出来：回落失败时要报它，
+                        # 但不能直接重抛原异常对象——在 except 块里重抛
+                        # 会把 __context__ 链到 p115oss 的错上，
+                        # describe_upload_error 会沿链走到 p115oss。
+                        oss2_detail = describe_upload_error(oss2_error)
+                        logger.warning(
+                            f"115 oss2 分片上传失败，回落 p115oss 旧路子："
+                            f"{source.name}，{oss2_detail}"
+                        )
+                        try:
+                            self._upload_via_p115oss(
+                                source, int(lookup.directory_id or 0), upload_name,
+                                checksum, file_size, progress_callback,
+                            )
+                        except Exception:
+                            # 回落也失败：报 oss2 的原错（主路子的原因
+                            # 更能定位问题），p115oss 的错只记日志。
+                            # 抛一个新异常带 oss2 的描述，避免异常链
+                            # 把原因带偏到 p115oss。
+                            logger.warning(
+                                f"115 p115oss 回落也失败，仍按 oss2 原错处理："
+                                f"{source.name}"
+                            )
+                            raise RuntimeError(
+                                f"115 oss2 分片上传失败：{oss2_detail}"
+                            ) from None
+                else:
+                    # oss2 缺失时回退旧路子（p115oss）。
+                    self._upload_via_p115oss(
                         source, int(lookup.directory_id or 0), upload_name,
                         checksum, file_size, progress_callback,
                     )
-                else:
-                    # oss2 缺失时回退旧路子（p115oss）。
-                    part_size = upload_part_size(file_size)
-                    # p115oss.upload_file 会把 request_kwargs 透传给 OSS 分片 PUT，
-                    # 在这里传 session=<ProxyManager> 才能真正让上传数据走代理。
-                    upload_kwargs = dict(self._oss_proxy_kwargs(), max_retries=0)
-                    if progress_callback:
-                        with source.open("rb") as file:
-                            response = self._rate_limited_call(
-                                self.client.upload_file,
-                                _ProgressReader(file, file_size, progress_callback),
-                                pid=int(lookup.directory_id or 0),
-                                filename=upload_name,
-                                filesha1=checksum,
-                                filesize=file_size,
-                                partsize=part_size,
-                                **upload_kwargs,
-                            )
-                    else:
-                        response = self._rate_limited_call(
-                            self.client.upload_file,
-                            source,
-                            pid=int(lookup.directory_id or 0),
-                            filename=upload_name,
-                            filesha1=checksum,
-                            filesize=file_size,
-                            partsize=part_size,
-                            **upload_kwargs,
-                        )
-                    check_response(response)
                 self._target_file_cache.clear()
                 if progress_callback:
                     progress_callback(file_size, file_size)

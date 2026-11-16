@@ -1,16 +1,14 @@
-"""1.12.12 oss2 数据面直连单测。
+"""1.12.13 oss2 失败回落 p115oss 单测。
 
-固定契约（修“只有秒传成功、分片上传全失败”）：
+固定契约（修“只有秒传成功、分片上传全失败”，代理已排除）：
 
-1. 插件配了上传代理（mihomo:7890）时，oss2 数据面也不走代理：
-   `_oss2_proxy_dict()` 恒返回空字典；
-2. 分片上传建 Bucket 时传给 oss2 的 proxies 是空字典（直连），
-   与 p115disk 原版一致；秒传只调 p115 API，本来就不走 oss2，
-   不受此改动影响。
-
-根因：1.12.9 把插件的上传代理传给 oss2 Bucket，分片 PUT 全走
-mihomo 代理失败；秒传只调 upload_file_init（p115 客户端的代理
-注入实际无效、走直连）所以成功，cd2 直连也成功。
+1. oss2 分片上传失败时，回落 p115oss 旧路子继续传，成功则整个
+   upload_file 返回 True；回落前把 oss2 的原错记下来；
+2. oss2 成功时不走 p115oss（client.upload_file 不被调用）；
+3. oss2 失败且 p115oss 不可用（P115OSS_AVAILABLE=False）时，
+   上传失败（返回 False），不静默成功；
+4. 代理恢复给 oss2：配了上传代理时 _oss2_proxy_dict 返回该代理
+   （1.12.12 的直连改动是误诊，已撤销；cd2 走同一代理正常）。
 """
 
 import hashlib
@@ -107,8 +105,28 @@ def _init_response(reuse=False):
     }
 
 
-class _FakeBucket:
-    """oss2 Bucket 桩：记录构造时收到的 proxies。"""
+class _FailingBucket:
+    """oss2 Bucket 桩：分片上传直接抛错，模拟线上 oss2 全失败。"""
+
+    def __init__(self, *args, **kwargs):
+        self.construct_kwargs = kwargs
+        self.uploaded_parts = []
+
+    def init_multipart_upload(self, key, params=None):
+        return SimpleNamespace(upload_id="UPLOAD-ID-1")
+
+    def upload_part(self, key, upload_id, part_number, data, **kwargs):
+        raise RuntimeError("oss2 分片上传失败（模拟）")
+
+    def abort_multipart_upload(self, key, upload_id):
+        pass
+
+    def complete_multipart_upload(self, key, upload_id, parts, headers=None):
+        return SimpleNamespace(status=200)
+
+
+class _OkBucket:
+    """oss2 Bucket 桩：正常传完 3 片。"""
 
     def __init__(self, *args, **kwargs):
         self.construct_kwargs = kwargs
@@ -131,11 +149,12 @@ class _FakeBucket:
         return SimpleNamespace(status=200)
 
 
-class Oss2DirectConnectionTests(unittest.TestCase):
+class Oss2FallbackTests(unittest.TestCase):
     def setUp(self):
         self._saved = {
             "P115_AVAILABLE": upload_module.P115_AVAILABLE,
             "OSS2_AVAILABLE": upload_module.OSS2_AVAILABLE,
+            "P115OSS_AVAILABLE": upload_module.P115OSS_AVAILABLE,
             "check_response": getattr(upload_module, "check_response", None),
             "Oss2Bucket": upload_module.Oss2Bucket,
             "Oss2StsAuth": upload_module.Oss2StsAuth,
@@ -143,12 +162,11 @@ class Oss2DirectConnectionTests(unittest.TestCase):
         }
         upload_module.P115_AVAILABLE = True
         upload_module.OSS2_AVAILABLE = True
+        upload_module.P115OSS_AVAILABLE = True
         upload_module.check_response = MagicMock()
         upload_module.oss2_determine_part_size = MagicMock(
             return_value=PART_SIZE
         )
-        self._bucket = _FakeBucket()
-        upload_module.Oss2Bucket = MagicMock(return_value=self._bucket)
         upload_module.Oss2StsAuth = MagicMock(return_value=MagicMock())
         self.addCleanup(self._restore)
 
@@ -156,7 +174,7 @@ class Oss2DirectConnectionTests(unittest.TestCase):
         for key, value in self._saved.items():
             setattr(upload_module, key, value)
 
-    def _make_service(self):
+    def _make_service(self, bucket_cls):
         client = MagicMock()
         far_future = (
             datetime.now(timezone.utc) + timedelta(hours=2)
@@ -167,9 +185,11 @@ class Oss2DirectConnectionTests(unittest.TestCase):
         client.upload_gettoken.side_effect = (
             lambda *args, **kwargs: _token_response(far_future)
         )
+        # p115oss 旧路子：client.upload_file 成功返回。
+        client.upload_file.side_effect = lambda *args, **kwargs: {"state": True}
         self._client = client
-        # 代理配在 owner 上（manager 的 _upload_proxies + 插件的
-        # _cross_transfer_upload_proxy 两种来源都配上）。
+        self._bucket = bucket_cls()
+        upload_module.Oss2Bucket = MagicMock(return_value=self._bucket)
         owner = OwnerDelegator(SimpleNamespace(
             client=client,
             _target_file_cache=MagicMock(),
@@ -184,38 +204,47 @@ class Oss2DirectConnectionTests(unittest.TestCase):
         )
         return upload_module.P115UploadService(owner)
 
-    def test_oss2_proxy_dict_always_empty_despite_configured_proxy(self):
-        """配了 mihomo 代理时，oss2 数据面仍返回空代理字典（直连）。"""
-        service = self._make_service()
-        self.assertEqual(service._oss2_proxy_dict(), {})
+    def _write_source(self, tempdir):
+        source = Path(tempdir) / "05.mkv"
+        source.write_bytes(CONTENT)
+        return source
 
-    def test_multipart_bucket_built_without_proxy(self):
-        """分片上传建 Bucket 时 proxies 为空字典，不把 mihomo 代理传给 oss2。"""
-        service = self._make_service()
+    def test_oss2_failure_falls_back_to_p115oss(self):
+        """oss2 分片失败 → 回落 p115oss 成功，整个上传返回 True。"""
+        service = self._make_service(_FailingBucket)
         with tempfile.TemporaryDirectory() as tempdir:
-            source = Path(tempdir) / "05.mkv"
-            source.write_bytes(CONTENT)
+            source = self._write_source(tempdir)
             self.assertTrue(service.upload_file(str(source), "/"))
+        self._client.upload_file.assert_called_once()
+        self.assertEqual(self._bucket.uploaded_parts, [])
+
+    def test_oss2_success_does_not_call_p115oss(self):
+        """oss2 成功时不走 p115oss 旧路子。"""
+        service = self._make_service(_OkBucket)
+        with tempfile.TemporaryDirectory() as tempdir:
+            source = self._write_source(tempdir)
+            self.assertTrue(service.upload_file(str(source), "/"))
+        self._client.upload_file.assert_not_called()
         self.assertEqual(
             [number for number, _ in self._bucket.uploaded_parts], [1, 2, 3]
         )
-        self.assertEqual(len(self._bucket.completed), 1)
-        upload_module.Oss2Bucket.assert_called_once()
-        _, kwargs = upload_module.Oss2Bucket.call_args
-        self.assertEqual(kwargs.get("proxies"), {})
 
-    def test_rapid_reuse_still_skips_upload(self):
-        """直连改动不影响秒传：reuse 命中仍直接成功，不建 Bucket。"""
-        service = self._make_service()
-        self._client.upload_file_init.side_effect = [
-            _init_response(reuse=True)
-        ]
+    def test_oss2_failure_without_p115oss_fails(self):
+        """oss2 失败且 p115oss 不可用时，上传失败（不静默成功）。"""
+        upload_module.P115OSS_AVAILABLE = False
+        service = self._make_service(_FailingBucket)
         with tempfile.TemporaryDirectory() as tempdir:
-            source = Path(tempdir) / "05.mkv"
-            source.write_bytes(CONTENT)
-            self.assertTrue(service.upload_file(str(source), "/"))
-        upload_module.Oss2Bucket.assert_not_called()
-        self.assertEqual(self._bucket.uploaded_parts, [])
+            source = self._write_source(tempdir)
+            self.assertFalse(service.upload_file(str(source), "/"))
+        self._client.upload_file.assert_not_called()
+
+    def test_oss2_proxy_dict_uses_configured_proxy(self):
+        """代理恢复给 oss2：配了上传代理时返回该代理（撤销 1.12.12 直连）。"""
+        service = self._make_service(_OkBucket)
+        self.assertEqual(
+            service._oss2_proxy_dict(),
+            {"http": PROXY_URL, "https": PROXY_URL},
+        )
 
 
 if __name__ == "__main__":

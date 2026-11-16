@@ -358,6 +358,9 @@ class P115UploadOss2Tests(unittest.TestCase):
         )
         upload_module.Oss2Bucket = MagicMock(return_value=self._bucket)
         service = self._make_service()
+        # 1.12.13 起 oss2 失败会回落 p115oss；这里让回落也失败，
+        # 上传才整体失败（否则 MagicMock 的 upload_file 会“成功”）。
+        self._client.upload_file.side_effect = OSError("p115oss 回落也失败")
         with tempfile.TemporaryDirectory() as tempdir:
             source = self._write_source(tempdir)
             with patch.object(upload_module.time, "sleep"):
@@ -371,6 +374,8 @@ class P115UploadOss2Tests(unittest.TestCase):
         self._bucket = _FakeBucket(complete_status=500)
         upload_module.Oss2Bucket = MagicMock(return_value=self._bucket)
         service = self._make_service()
+        # 1.12.13 回落说明见上一个测试。
+        self._client.upload_file.side_effect = OSError("p115oss 回落也失败")
         with tempfile.TemporaryDirectory() as tempdir:
             source = self._write_source(tempdir)
             with patch.object(upload_module.time, "sleep"):
