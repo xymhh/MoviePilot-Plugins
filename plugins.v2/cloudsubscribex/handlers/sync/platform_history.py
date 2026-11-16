@@ -19,6 +19,18 @@ class PlatformHistoryService(OwnerDelegator):
     """负责将插件的转存成功记录镜像到 MoviePilot 平台的 TransferHistory 表。"""
 
     @staticmethod
+    def _u115cs_storage_name() -> str:
+        """MP 存储名「115网盘CS版」；拿不到常量时用字面值兜底。"""
+        try:
+            from ...drive.p115.storage import U115CS_STORAGE_NAME
+        except Exception:
+            return "115网盘CS版"
+        name = U115CS_STORAGE_NAME
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+        return "115网盘CS版"
+
+    @staticmethod
     def _platform_episode_numbers(record: Dict[str, Any]) -> List[int]:
         values = (
                 record.get("success_episodes")
@@ -45,7 +57,11 @@ class PlatformHistoryService(OwnerDelegator):
     def _platform_source_label(record: Dict[str, Any]) -> str:
         source = str(record.get("source") or "").strip().lower()
         if source == "manual":
-            return "手动添加"
+            # 手动添加的跨盘转存（夸克 → 本地 → 115）：文件进 115 前
+            # 在本地 /downloads 中转，MP 整理历史里应记成「本地」，
+            # 与 MP 自己写的「本地 → 115网盘CS版」一致；记「手动添加」
+            # 会让同一集多出一条来源不同的记录。
+            return "本地"
         if source:
             from ...search.scanner import SearchSourceRegistry
             defs = {d.id: d.name for d in SearchSourceRegistry.get_definitions()}
@@ -107,11 +123,10 @@ class PlatformHistoryService(OwnerDelegator):
         except (TypeError, ValueError):
             file_size = 0
         source_storage = self._platform_source_label(record)
-        dest_storage = str(
-            record.get("cloud_drive_name")
-            or getattr(getattr(self, "_cloud_drive", None), "name", "网盘")
-            or "网盘"
-        ).strip()
+        # 目标存 MP 存储名「115网盘CS版」，不用网盘驱动名「115网盘」：
+        # TransferHistory 的 dest_storage 指 MP 存储；驱动名与 MP 原生
+        # 115 存储同名，会让人以为文件进了原生 115 而不是 CS 版。
+        dest_storage = self._u115cs_storage_name()
         common = {
             "src_storage": source_storage,
             "src_fileitem": {

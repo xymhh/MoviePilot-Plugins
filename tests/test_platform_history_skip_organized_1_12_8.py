@@ -7,6 +7,10 @@
 在媒体整理里看起来整理了两遍。`skip_history` 即「已交 MP 整理」，
 写平台历史与对账时都要排除它；对账还会顺带删掉已存在的旧重复记录。
 
+v1.12.11：目标存储改记 MP 存储名「115网盘CS版」（旧值是网盘驱动名
+「115网盘」，与 MP 原生 115 存储同名、会误导）；未交 MP 整理的
+PanSou 记录现为「PanSou → 115网盘CS版」。
+
 覆盖 core/handlers/sync/platform_history.py 的写入口。
 """
 
@@ -251,7 +255,7 @@ def _install_session(session):
 
 class TestSkipOrganizedRecords(unittest.TestCase):
     def test_organized_record_writes_no_platform_history(self):
-        """已交 MP 整理的记录不写「PanSou → 115网盘」平台记录。"""
+        """已交 MP 整理的记录不写「PanSou → 115网盘CS版」平台记录。"""
         session = _FakeSession()
         _install_session(session)
         service = _Service(session)
@@ -262,7 +266,7 @@ class TestSkipOrganizedRecords(unittest.TestCase):
         self.assertFalse(session.committed)
 
     def test_unorganized_record_still_writes_platform_history(self):
-        """未交 MP 整理的记录照常写一条平台记录（PanSou → 115网盘）。"""
+        """未交 MP 整理的记录照常写一条平台记录（PanSou → 115网盘CS版）。"""
         session = _FakeSession()
         _install_session(session)
         service = _Service(session)
@@ -272,7 +276,7 @@ class TestSkipOrganizedRecords(unittest.TestCase):
         self.assertEqual(len(session.added), 1)
         entry = session.added[0]
         self.assertEqual(entry.src_storage, "PanSou")
-        self.assertEqual(entry.dest_storage, "115网盘")
+        self.assertEqual(entry.dest_storage, "115网盘CS版")
         self.assertEqual(entry.mode, "copy")
         self.assertEqual(entry.downloader, "网盘订阅助手")
         self.assertTrue(session.committed)
