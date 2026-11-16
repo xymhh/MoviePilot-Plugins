@@ -290,3 +290,30 @@ class HistoryRetryExistingEpisodeTest(unittest.TestCase):
 
         self.owner._share_transfer.check_share_status.assert_called_once()
         self.owner._transfer_file.assert_not_called()
+
+class HistoryRetryInflightTests(unittest.TestCase):
+    """1.10.10：清扫器靠在飞集合判断重试线程是否还活着。"""
+
+    def test_inflight_key_tracks_running_retry(self):
+        service = HistoryRetryService.__new__(HistoryRetryService)
+        record = {
+            "time": RECORD_TIME,
+            "share_url": SHARE_URL,
+            "file_name": RECORD_FILE,
+        }
+        # 注意：全量运行时别的测试文件可能又加载过一次 retry 模块，
+        # sys.modules 里的不一定是本类定义所在的那个；直接取方法
+        # __globals__ 里的集合才是该方法真正读的那一份。
+        inflight = HistoryRetryService._history_retry_is_inflight.__globals__[
+            "_retry_inflight_keys"
+        ]
+        key = HistoryRetryService._history_retry_key(
+            RECORD_TIME, SHARE_URL, RECORD_FILE,
+        )
+        self.assertFalse(service._history_retry_is_inflight(record))
+        inflight.add(key)
+        try:
+            self.assertTrue(service._history_retry_is_inflight(record))
+        finally:
+            inflight.discard(key)
+        self.assertFalse(service._history_retry_is_inflight(record))

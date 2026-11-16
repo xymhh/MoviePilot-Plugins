@@ -193,15 +193,42 @@ class TestSweepStaleHistory(unittest.TestCase):
         self.assertEqual(record["status"], state.STATUS_SUCCESS)
         self.assertEqual(record["stage"], state.STAGE_DONE)
 
-    def test_landed_false_marks_pending(self):
+    def test_landed_false_marks_failed_retryable(self):
+        """已核实未落盘的超时处理中记录翻回失败态，可重新重试。
+
+        2026-11-16 LOST10 S01E05：更新前点的重试被插件重载杀掉，记录
+        孤儿化停在“处理中”，重试按钮禁用；旧行为翻成“待确认”，同样
+        点不了重试，所以这里必须翻回失败态。
+        """
         service = _SweepService(
-            [_stale_record("t1", "下载中")],
+            [_stale_record(
+                "t1", "下载中",
+                share_url="https://pan.quark.cn/s/abc",
+                file_name="05.mkv", transfer_mode="cross",
+            )],
             {"t1": {"landed": False, "reason": "missing_in_dir"}},
         )
         self.assertEqual(service.sweep_stale_history(now=1000 + 3601), 1)
         record = service._store["history"][0]
-        self.assertEqual(record["status"], state.STATUS_PENDING_CONFIRM)
-        self.assertEqual(record["stage"], state.STAGE_VERIFYING)
+        self.assertEqual(record["status"], state.STATUS_FAILED)
+        self.assertIn("转存中断", record["failure_reason"])
+        self.assertTrue(record["failure_retryable"])
+        can_retry, title = HistoryService._history_retry_state(record)
+        self.assertTrue(can_retry)
+        self.assertEqual(title, "重新执行跨盘转存")
+
+    def test_active_retry_keeps_processing(self):
+        """还在跑的重试不能被清扫翻成失败（账本默认关着，慢转存没有作业可查）。"""
+        service = _SweepService(
+            [_stale_record("t1")],
+            {"t1": {"landed": False, "reason": "missing_in_dir"}},
+        )
+        object.__setattr__(
+            service, "_history_retry_is_inflight", lambda record: True,
+        )
+        self.assertEqual(service.sweep_stale_history(now=1000 + 3601), 0)
+        record = service._store["history"][0]
+        self.assertEqual(record["status"], state.STATUS_PROCESSING)
 
     def test_unverifiable_keeps_status(self):
         service = _SweepService(

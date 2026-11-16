@@ -41,6 +41,7 @@ from ...core.state import (
     STAGE_DONE,
     STAGE_VERIFYING,
     STATUS_DOWNLOADING,
+    STATUS_FAILED,
     STATUS_PENDING_CONFIRM,
     STATUS_PROCESSING,
     STATUS_SUCCESS,
@@ -1898,6 +1899,22 @@ class HistoryService(OwnerDelegator):
                     continue
         return None
 
+    def _history_has_active_retry(self, record: Dict[str, Any]) -> bool:
+        """是否有后台重试线程仍在跑这条记录；宿主没提供时视为无。
+
+        通过宿主委托找到 HistoryRetryService._history_retry_is_inflight
+        （提交时加键、线程结束时 finally 丢弃）；单测里宿主为空时
+        getattr 返回 None，直接按无处理。清扫器靠它别把还在跑的慢
+        转存误判成孤儿——账本默认是关的，跑着的重试在账本里没有作业。
+        """
+        checker = getattr(self, "_history_retry_is_inflight", None)
+        if not callable(checker):
+            return False
+        try:
+            return bool(checker(record))
+        except Exception:
+            return False
+
     def _history_has_active_sync_job(self, record: Dict[str, Any]) -> bool:
         """同步作业账本里是否仍有对应活动作业；无账本/不可用时视为无。"""
         plugin = getattr(self, "_plugin", None)
@@ -1958,6 +1975,8 @@ class HistoryService(OwnerDelegator):
                     continue
                 if self._history_has_active_sync_job(item):
                     continue
+                if self._history_has_active_retry(item):
+                    continue
                 timestamp = self._history_record_timestamp(item)
                 if timestamp is None or timestamp > cutoff:
                     continue
@@ -1977,8 +1996,22 @@ class HistoryService(OwnerDelegator):
                     target = STATUS_SUCCESS
                     stage = STAGE_DONE
                 elif landed is False:
-                    target = STATUS_PENDING_CONFIRM
-                    stage = STAGE_VERIFYING
+                    # 已核实未落盘，又没有任何活动作业/重试线程在跑：执行
+                    # 线程已经不在了，不是“待确认”，而是中断失败；翻回
+                    # 失败态才能重新重试（_history_retry_state 只认失败态）。
+                    apply_failure(
+                        item,
+                        "转存中断：执行线程已结束或插件已重载，可重新重试",
+                    )
+                    fields = HistoryService._landed_result_fields(info)
+                    if fields:
+                        item.update(fields)
+                    logger.info(
+                        f"task_id={task_id} from={before} to={STATUS_FAILED} "
+                        f"stage={item.get('stage') or ''} reason=sweeper"
+                    )
+                    changed_records.append(copy.deepcopy(item))
+                    continue
                 else:
                     logger.warning(
                         f"task_id={task_id} from={before} to={before} "

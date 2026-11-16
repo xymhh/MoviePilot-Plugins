@@ -69,6 +69,23 @@ class HistoryRetryService(OwnerDelegator):
             (str(record_time or ""), str(share_url or ""), str(file_name or ""))
         )
 
+    def _history_retry_is_inflight(self, record: Dict[str, Any]) -> bool:
+        """这条记录是否正有后台重试线程在跑（清扫器据此别碰它）。
+
+        键在提交时加入、线程结束时 finally 丢弃；插件重载后集合是空的，
+        所以更新杀掉线程后留下的孤儿记录在这里一定返回 False。
+        """
+        try:
+            key = self._history_retry_key(
+                str(record.get("time") or ""),
+                str(record.get("share_url") or ""),
+                str(record.get("file_name") or ""),
+            )
+        except Exception:
+            return False
+        with _retry_inflight_lock:
+            return key in _retry_inflight_keys
+
     def submit_history_retry(
             self, record_time: str, share_url: str, file_name: str
     ) -> Dict[str, Any]:
