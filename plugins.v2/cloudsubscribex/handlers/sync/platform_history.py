@@ -182,10 +182,17 @@ class PlatformHistoryService(OwnerDelegator):
         enabled = getattr(self, "_platform_transfer_history_enabled", False)
         if not enabled and not reconcile:
             return 0
+        # v1.12.8：已交 MP 整理的转存不再另写一条平台记录。MP 的
+        # do_transfer 自己会写一条真正的整理记录（本地 → 115网盘CS版）；
+        # 插件再直写一条「PanSou → 115网盘」（复制）会让同一份资源在
+        # 媒体整理里看起来整理了两遍。skip_history 即「已交 MP 整理」。
+        # 对账时同样排除：desired_sources 不含它们，已存在的旧重复记录
+        # 会在对账清理里被删掉。
         entries_by_src = {
             entry["src"]: entry
             for record in (records if enabled else [])
             if isinstance(record, dict)
+            and not record.get("skip_history")
             for entry in self._platform_history_entries(record)
         }
         entries = list(entries_by_src.values())
