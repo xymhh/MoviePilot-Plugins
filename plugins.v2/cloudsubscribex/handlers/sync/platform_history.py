@@ -198,8 +198,8 @@ class PlatformHistoryService(OwnerDelegator):
         # 整理）；插件直写平台记录（PanSou → 115网盘CS版、复制）会
         # 和 MP 自己的「本地 → 115网盘CS版、移动」成对出现，同一集
         # 看起来整理了两遍。8 处写入点与启动对账都因此停用；已有
-        # 的插件记录由 remove_platform_transfer_history_mirror_once
-        # 一次性清理。
+        # 的插件记录由 remove_platform_transfer_history_mirror
+        # 在启动时清理（幂等）。
         return 0
 
     @staticmethod
@@ -312,21 +312,19 @@ class PlatformHistoryService(OwnerDelegator):
             logger.info(f"已从下载历史恢复 {restored} 条插件整理记录海报")
         return restored
 
-    def remove_platform_transfer_history_mirror_once(self) -> int:
-        """一次性清理插件已写进 MP 整理历史的镜像记录，只跑一次。
+    def remove_platform_transfer_history_mirror(self) -> int:
+        """清理插件已写进 MP 整理历史的镜像记录，幂等、每次启动都跑。
 
         删掉全部插件托管行（src 以 cloudsubscribe:// 开头，或
-        downloader 为「网盘订阅助手」），用数据标记
-        platform_history_mirror_removed 保证只清理一次；之后插件
-        不再写这类记录，MP 的整理历史只剩 MP 自己写的账。
+        downloader 为「网盘订阅助手」）。不写任何数据标记——插件
+        的数据键必须事先声明（CloudSubscribeDataStore.handles），
+        1.12.14 用的 platform_history_mirror_removed 未声明，写入
+        时抛 ValueError 导致插件加载失败、更新回滚到 1.12.11。
+        这里不需要标记：清理是幂等的，第一次删掉旧记录，之后每次
+        启动查到 0 条直接返回；且只删插件自己写的行，MP 自己的
+        记录永远不受影响。
         """
-        get_data = getattr(self, "_get_data", None)
-        save_data = getattr(self, "_save_data", None)
-        if get_data and get_data("platform_history_mirror_removed"):
-            return 0
         removed = self._delete_platform_transfer_histories(all_managed=True)
-        if save_data:
-            save_data("platform_history_mirror_removed", True)
         if removed:
             logger.info(f"已清理插件写入 MP 整理历史的镜像记录 {removed} 条")
         return int(removed or 0)

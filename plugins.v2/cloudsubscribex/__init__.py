@@ -202,7 +202,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.12.14"
+    plugin_version = "1.12.15"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -829,10 +829,10 @@ class CloudSubscribeX(_PluginBase):
         self._init_handlers()
         if self._sync_handler:
             self._sync_handler.sync_platform_transfer_history()
-            # 1.12.14：一次性清理插件以前写进 MP 整理历史的镜像记录
-            # （PanSou → 115网盘CS版、复制等），只跑一次；之后插件
-            # 不再写这类记录，MP 的整理历史只剩 MP 自己写的账。
-            self._sync_handler.remove_platform_transfer_history_mirror_once()
+            # 1.12.14/1.12.15：清理插件以前写进 MP 整理历史的镜像记录
+            # （PanSou → 115网盘CS版、复制等），幂等、每次启动都跑；
+            # 之后插件不再写这类记录，MP 的整理历史只剩 MP 自己写的账。
+            self._sync_handler.remove_platform_transfer_history_mirror()
             self._sync_handler.reconcile_orphan_finalize_records()
         self._update_offline_monitor(
             len(self._sync_handler.get_pending_finalize_tasks())

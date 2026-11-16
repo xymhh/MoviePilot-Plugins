@@ -7,9 +7,12 @@
    数据库——插件不再直写「PanSou → 115网盘CS版、复制」这类记录；
 2. `sync_platform_transfer_history` 不再镜像到 MP 表：只恢复插件
    自身 history 记录缺失的海报，不调用写入口；
-3. `remove_platform_transfer_history_mirror_once` 一次性清理：删掉
+3. `remove_platform_transfer_history_mirror` 清理：删掉
    全部插件托管行（src 以 cloudsubscribe:// 开头，或 downloader
-   为「网盘订阅助手」），用数据标记只跑一次，第二次调用返回 0。
+   为「网盘订阅助手」），幂等、每次启动都跑，不写数据标记
+   （1.12.15：1.12.14 用的 platform_history_mirror_removed 未在
+   CloudSubscribeDataStore 声明，写入时抛 ValueError 导致插件
+   加载失败、更新回滚到 1.12.11）。
 """
 
 import sys
@@ -286,8 +289,8 @@ class TestPlatformHistoryRemoved(unittest.TestCase):
         self.assertEqual(session.added, [])
         self.assertFalse(session.committed)
 
-    def test_mirror_cleanup_deletes_managed_rows_once(self):
-        """一次性清理删掉插件托管行并打标记，第二次调用不再跑。"""
+    def test_mirror_cleanup_deletes_managed_rows_idempotent(self):
+        """清理删掉插件托管行且幂等：第二次调用已无托管行可删，返回 0。"""
         managed = [
             _FakeTransferHistory(
                 src="cloudsubscribe://abc", downloader="网盘订阅助手"
@@ -300,15 +303,21 @@ class TestPlatformHistoryRemoved(unittest.TestCase):
         session = _FakeSession(rows=managed)
         _install_session(session)
         service = _Service(session)
-        removed = service.remove_platform_transfer_history_mirror_once()
+        removed = service.remove_platform_transfer_history_mirror()
         self.assertEqual(removed, 2)
         self.assertTrue(session.committed)
-        self.assertTrue(service._data.get("platform_history_mirror_removed"))
-        # 第二次调用：标记已打，不再清理。
-        session2 = _FakeSession(rows=list(managed))
+        # 第二次调用：托管行已清掉，只剩非托管行，返回 0、不提交。
+        remaining = [
+            row for row in managed
+            if not str(getattr(row, "src", "")).startswith(
+                "cloudsubscribe://"
+            )
+            and getattr(row, "downloader", "") != "网盘订阅助手"
+        ]
+        session2 = _FakeSession(rows=remaining)
         _install_session(session2)
         self.assertEqual(
-            service.remove_platform_transfer_history_mirror_once(), 0
+            service.remove_platform_transfer_history_mirror(), 0
         )
         self.assertFalse(session2.committed)
 
