@@ -44,6 +44,37 @@ _COMPLETED_STATUSES = {"completed", "success"}
 _TERMINAL_FAILED_STATUSES = {"failed", "canceled", "aborted", "error"}
 
 
+# 搜索阶段不上下载页：同步一轮开始时每个订阅都会先建一张父任务卡
+# （queued 0%“等待调度”→ running 10%“检查缺失内容”→ 搜索 45~65%
+# “搜索缺失剧集”），而下载页的任务模型只有下载中/已暂停/已完成，
+# 这些卡片全被画成“下载中”，实际上一个字节都还没动；搜完没找到
+# 资源的还会留一张 100%“已完成”卡 10 分钟。父任务只有真正开始
+# 传了才属于下载页：有活跃子任务（transfer_active，合并时打上）
+# 或已传文件数 transferred > 0；其余的排队/搜索/搜完无结果态拦掉。
+# 独立跨盘任务（id 为 cross:…）不受此限；downloading /
+# transferring / postprocessing / stopped 的父任务也不受此限
+# （它们到这一步时已有真实转存或后处理活动）。1.10.12。
+_SEARCH_PHASE_STATUSES = {"queued", "running", "completed"}
+_PARENT_TASK_PREFIXES = ("subscribe:", "media:")
+
+
+def _is_search_phase_parent(task: Dict[str, Any]) -> bool:
+    """订阅父任务是否还在搜索阶段（没开始传任何文件）。"""
+    task_id = str(task.get("id") or "")
+    if not task_id.startswith(_PARENT_TASK_PREFIXES):
+        return False
+    status = str(task.get("status") or "").strip().lower()
+    if status not in _SEARCH_PHASE_STATUSES:
+        return False
+    if task.get("transfer_active"):
+        return False
+    try:
+        transferred = int(task.get("transferred") or 0)
+    except (TypeError, ValueError):
+        transferred = 0
+    return transferred <= 0
+
+
 def task_hash(task_id: str) -> str:
     """给任务 id 生成稳定的 40 位十六进制 hash。
 
@@ -632,6 +663,10 @@ def project_tasks(
         ):
             # 终态失败归历史记录：不进下载页，避免被画成一张
             # 进度停在失败那一刻的“已暂停”卡片。
+            continue
+        if _is_search_phase_parent(task):
+            # 还在排队/搜索、或搜完无结果的订阅父任务：没传任何文件，
+            # 不上下载页（搜索进度归插件主页的同步状态行）。
             continue
         if wanted is not None and task_hash(task_id) not in wanted:
             continue

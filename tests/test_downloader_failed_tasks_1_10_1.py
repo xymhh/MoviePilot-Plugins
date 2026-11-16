@@ -59,8 +59,15 @@ CROSS_FAILED = {
 }
 STOPPING = _task("subscribe:205", "现在就出发", "stopping", 40)
 STOPPED = _task("subscribe:206", "学生会也有洞！", "stopped", 58)
-RUNNING = _task("subscribe:207", "谷雨", "running", 45)
-DONE = _task("subscribe:208", "仙逆", "completed", 100)
+# 进行中的对照任务：1.10.12 起，没传任何文件的订阅父任务不上下载页，
+# 所以这里按真实转存中的任务给 transfer_active。
+RUNNING = dict(
+    _task("subscribe:207", "谷雨", "running", 45),
+    transfer_active=True,
+)
+# 已完成的对照任务：1.10.12 起，搜完无结果的完成态父任务不上下载页，
+# 所以这里按真实转存完成的任务给 transferred。
+DONE = dict(_task("subscribe:208", "仙逆", "completed", 100), transferred=2)
 
 
 class TestTerminalFailedTasksAreDropped(unittest.TestCase):

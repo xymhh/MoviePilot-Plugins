@@ -211,10 +211,13 @@ class TestTaskToTorrent(unittest.TestCase):
 
 class TestProjectTasks(unittest.TestCase):
     def test_all_returns_everything(self):
-        # 7 条原始任务，终态失败的 1 条（今天是太阳雨）被拦掉。
+        # 7 条原始任务，终态失败的 1 条（今天是太阳雨）被拦掉；
+        # 排队中且没传任何文件的 1 条（折月亮，1.10.12 起不上下载页）
+        # 也被拦掉。
         rows = _view.project_tasks(_tasks(), torrent_cls=_Torrent)
-        self.assertEqual(len(rows), 6)
+        self.assertEqual(len(rows), 5)
         self.assertNotIn("今天是太阳雨", {row.title for row in rows})
+        self.assertNotIn("折月亮", {row.title for row in rows})
 
     def test_downloading_filter(self):
         rows = _view.project_tasks(
@@ -222,7 +225,7 @@ class TestProjectTasks(unittest.TestCase):
         )
         self.assertEqual(
             {row.title for row in rows},
-            {"谷雨", "天使与恶徒", "折月亮", "谷雨 S01E21.mkv", "走马上任"},
+            {"谷雨", "天使与恶徒", "谷雨 S01E21.mkv", "走马上任"},
         )
 
     def test_paused_filter(self):
@@ -235,7 +238,11 @@ class TestProjectTasks(unittest.TestCase):
         self.assertEqual(rows, [])
 
     def test_completed_task_shows_under_completed(self):
-        done = {**SYNC_TV, "status": "completed", "progress": 100}
+        # 已传过文件的完成态父任务照常显示（1.10.12 只拦搜完无结果的）。
+        done = {
+            **SYNC_TV, "status": "completed", "progress": 100,
+            "transferred": 2,
+        }
         rows = _view.project_tasks([done], status="completed", torrent_cls=_Torrent)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].state, "completed")
@@ -243,7 +250,10 @@ class TestProjectTasks(unittest.TestCase):
         self.assertEqual(rows, [])
 
     def test_transfer_query_needs_full_progress(self):
-        done = {**SYNC_TV, "status": "completed", "progress": 100}
+        done = {
+            **SYNC_TV, "status": "completed", "progress": 100,
+            "transferred": 2,
+        }
         half = {**SYNC_TV, "status": "completed", "progress": 50}
         rows = _view.project_tasks(
             [done, half], status="transfer", torrent_cls=_Torrent
@@ -257,11 +267,13 @@ class TestProjectTasks(unittest.TestCase):
         self.assertEqual(rows, [])
 
     def test_hash_filter(self):
-        wanted = _view.task_hash("subscribe:124")
+        # 折月亮是排队中且没传任何文件的父任务，1.10.12 起不上下载页，
+        # hash 查询也查不到它；这里改查有转存活动的谷雨。
+        wanted = _view.task_hash("subscribe:123")
         rows = _view.project_tasks(_tasks(), hashs=[wanted], torrent_cls=_Torrent)
-        self.assertEqual([row.title for row in rows], ["折月亮"])
+        self.assertEqual([row.title for row in rows], ["谷雨"])
         rows = _view.project_tasks(_tasks(), hashs=wanted, torrent_cls=_Torrent)
-        self.assertEqual([row.title for row in rows], ["折月亮"])
+        self.assertEqual([row.title for row in rows], ["谷雨"])
 
 
 class TestTaskToFiles(unittest.TestCase):
