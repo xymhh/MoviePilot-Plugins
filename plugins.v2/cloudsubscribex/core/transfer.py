@@ -2206,6 +2206,9 @@ class CrossTransferTaskManager:
                         self._update(
                             task_id, phase="downloading",
                             message=download_message, progress=0,
+                            # 重试回落重新下载时清零字节计数，否则下载页
+                            # 按阶段算进度会读到上一轮的残值、起手就显示 100%。
+                            downloaded_bytes=0, uploaded_bytes=0,
                         )
                         download_speed = _SpeedSampler()
 
@@ -2343,6 +2346,8 @@ class CrossTransferTaskManager:
             self._update(
                 task_id, status="success", phase="done", progress=100,
                 transferred=task["total"], speed_bytes_per_second=0.0,
+                downloaded_bytes=task["total"],
+                uploaded_bytes=task["total"],
                 stage_transferred=0, stage_total=0,
                 message=(
                     f"目标已存在相同文件，跳过上传：{local_result.actual_name}"

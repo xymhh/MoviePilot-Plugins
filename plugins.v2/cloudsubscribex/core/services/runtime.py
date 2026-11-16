@@ -15,6 +15,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from ...core import CloudDriveCapability
 from ...core import OwnerDelegator
 from ...core.media import media_identity, tmdb_id_of
+from ..downloader_view import display_phase, display_progress
 
 sync_lock = Lock()
 
@@ -844,15 +845,18 @@ class SyncRuntimeService(OwnerDelegator):
             total = 0
             transferred = 0
             speed = 0.0
-            weighted_progress = 0
-            unweighted_progress = 0
+            downloaded = 0
+            uploaded = 0
+            download_speed = 0.0
+            upload_speed = 0.0
+            child_phases: List[str] = []
             stage_transferred = 0
             stage_total = 0
             messages: Dict[str, int] = {}
             file_names: List[str] = []
             for item in transfers:
                 # 子任务标题即文件名（跨盘任务 title=目标文件名），供父任务
-                # 从文件名推导集号；只加字段，不改合并的进度算法。
+                # 从文件名推导集号。
                 for key in ("title", "result_file_name"):
                     file_name = str(item.get(key) or "").strip()
                     if file_name and file_name not in file_names:
@@ -861,13 +865,22 @@ class SyncRuntimeService(OwnerDelegator):
                 total += item_total
                 transferred += int(item.get("transferred") or 0)
                 speed += float(item.get("speed_bytes_per_second") or 0)
-                progress_value = int(item.get("progress") or 0)
-                # 已成功的子任务按 100% 计入，否则「前一个文件传完、下一个刚开始」
-                # 时加权平均会从 100 掉到 50，进度条跟着回跳
-                if item.get("status") == "success":
-                    progress_value = 100
-                weighted_progress += progress_value * item_total
-                unweighted_progress += progress_value
+                if item.get("status") in {"success", "skipped"}:
+                    # 已完成/跳过的子任务按整份计入（与旧加权口径一致：成功按
+                    # 100% 计）；否则秒传成功的任务会因 uploaded_bytes 未及时
+                    # 更新，把正在传的兄弟任务的父进度拉低。
+                    downloaded += item_total
+                    uploaded += item_total
+                else:
+                    downloaded += int(item.get("downloaded_bytes") or 0)
+                    uploaded += int(item.get("uploaded_bytes") or 0)
+                download_speed += float(
+                    item.get("download_speed_bytes_per_second") or 0
+                )
+                upload_speed += float(
+                    item.get("upload_speed_bytes_per_second") or 0
+                )
+                child_phases.append(display_phase(item))
                 if (
                         item.get("status") in active_statuses
                         and int(item.get("stage_total") or 0) > 0
@@ -879,10 +892,20 @@ class SyncRuntimeService(OwnerDelegator):
                     or item.get("phase") or "正在跨盘转存"
                 )
                 messages[message] = messages.get(message, 0) + 1
-            if total > 0:
-                progress = int(weighted_progress / total)
+            # 父任务按阶段展示：有子任务在下载看已下载占比，都下完看已上传占比；
+            # 旧的加权总进度（下载 0-50、上传 50-100）会让“下载完了”还显示 50%。
+            if "downloading" in child_phases:
+                transfer_phase = "downloading"
+            elif "uploading" in child_phases:
+                transfer_phase = "uploading"
             else:
-                progress = int(unweighted_progress / len(transfers))
+                transfer_phase = "done"
+            shown_progress = display_progress({
+                "total": total,
+                "downloaded_bytes": downloaded,
+                "uploaded_bytes": uploaded,
+                "transfer_phase": transfer_phase,
+            })
             if len(transfers) == 1:
                 phase = next(iter(messages))
             else:
@@ -891,11 +914,15 @@ class SyncRuntimeService(OwnerDelegator):
                     for message, count in messages.items()
                 )
                 phase = f"跨盘转存 {len(transfers)} 个文件 · {detail}"
-            parent.update({
+            merged: Dict[str, Any] = {
                 "phase": phase,
-                "progress": progress,
+                "transfer_phase": transfer_phase,
                 "transferred": transferred,
                 "total": total,
+                "downloaded_bytes": downloaded,
+                "uploaded_bytes": uploaded,
+                "download_speed_bytes_per_second": download_speed,
+                "upload_speed_bytes_per_second": upload_speed,
                 "stage_transferred": stage_transferred,
                 "stage_total": stage_total,
                 "speed_bytes_per_second": speed,
@@ -905,7 +932,14 @@ class SyncRuntimeService(OwnerDelegator):
                 "transfer_task_ids": [
                     str(item.get("id") or "") for item in transfers
                 ],
-            })
+            }
+            # 后处理阶段不改进度：收尾未完成时保持 95%，不按阶段算到 100%。
+            if (
+                    str(parent.get("status") or "") != "postprocessing"
+                    and shown_progress is not None
+            ):
+                merged["progress"] = shown_progress
+            parent.update(merged)
             if any(item.get("status") == "stopping" for item in transfers):
                 parent["status"] = "stopping"
         return tasks

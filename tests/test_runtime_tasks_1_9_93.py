@@ -153,10 +153,13 @@ class TestSerializeRuntimeTasksFileNames(unittest.TestCase):
             "total": 100,
             "transferred": 35,
             "progress": 35,
+            "downloaded_bytes": 35,
+            "uploaded_bytes": 0,
             "speed_bytes_per_second": 0,
             "stage_total": 0,
             "stage_transferred": 0,
-            "phase": "正在从夸克网盘下载到本地缓存",
+            "phase": "downloading",
+            "message": "正在从夸克网盘下载到本地缓存",
         }
         manager = SimpleNamespace(
             ACTIVE={"transferring", "downloading"},

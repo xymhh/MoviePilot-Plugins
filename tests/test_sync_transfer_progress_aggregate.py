@@ -1,7 +1,10 @@
-"""父任务进度聚合：已成功的子任务按 100% 计入，避免进度条断崖。
+"""父任务进度按阶段聚合：下载看已下载字节，上传看已上传字节。
 
-固定契约：同一媒体下多个文件的跨盘转存，成功文件的 progress 计入 100，
-不再把「传完但停在 49%」的旧值混进加权平均；仍在跑的文件用自身百分比。
+固定契约（1.10.11）：同一媒体下多个文件的跨盘转存，父进度不再是
+两段总进度的加权平均（下载 0-50、上传 50-100），而是按阶段算——
+有子任务在下载时，已下载字节/总字节；都下完后，已上传字节/总字节。
+已完成的子任务按整份计入（下载与上传字节都算满），不再把「传完但
+停在 49%」的旧值混进来。
 """
 
 import os
@@ -90,12 +93,20 @@ def _serialize(tasks, transfers):
 
 def test_finished_child_counts_as_full_progress():
     transfers = [
-        {"id": "cross:a", "parent_task_id": "subscribe:1", "status": "success",
-         "total": 1000, "transferred": 1000, "progress": 49,
-         "message": "已完成"},
-        {"id": "cross:b", "parent_task_id": "subscribe:1", "status": "running",
-         "total": 1000, "transferred": 0, "progress": 10,
-         "message": "正在跨盘转存"},
+        {
+            "id": "cross:a", "parent_task_id": "subscribe:1",
+            "status": "success", "phase": "done",
+            "total": 1000, "transferred": 1000, "progress": 100,
+            "downloaded_bytes": 1000, "uploaded_bytes": 1000,
+            "message": "已完成",
+        },
+        {
+            "id": "cross:b", "parent_task_id": "subscribe:1",
+            "status": "running", "phase": "downloading",
+            "total": 1000, "transferred": 100, "progress": 10,
+            "downloaded_bytes": 100, "uploaded_bytes": 0,
+            "message": "正在跨盘转存",
+        },
     ]
     result = _serialize([_parent()], transfers)
     assert result[0]["progress"] == 55
@@ -104,9 +115,13 @@ def test_finished_child_counts_as_full_progress():
 
 def test_running_child_keeps_own_percent():
     transfers = [
-        {"id": "cross:a", "parent_task_id": "subscribe:1", "status": "running",
-         "total": 2000, "transferred": 1000, "progress": 40,
-         "message": "正在跨盘转存"},
+        {
+            "id": "cross:a", "parent_task_id": "subscribe:1",
+            "status": "running", "phase": "downloading",
+            "total": 2000, "transferred": 800, "progress": 40,
+            "downloaded_bytes": 800, "uploaded_bytes": 0,
+            "message": "正在跨盘转存",
+        },
     ]
     result = _serialize([_parent()], transfers)
     assert result[0]["progress"] == 40

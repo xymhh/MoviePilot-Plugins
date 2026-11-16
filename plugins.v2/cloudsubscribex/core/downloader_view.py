@@ -78,8 +78,101 @@ def format_speed(bytes_per_second: Any) -> Optional[str]:
     return f"{speed / 1024 / 1024:.1f} MB/s"
 
 
+# 下载页按阶段展示：下载阶段进度=已下载字节占比，上传阶段进度=已上传占比。
+# 任务字典自带的 progress 是两段总进度（下载 0-50、上传 50-100），直接投
+# 到下载页会让“下载完了”还显示 50%；而卡片本身就有 ↓/↑ 两路速度位
+# （旧模板按 parseFloat(dlspeed/upspeed) > 0 分别点亮），按阶段分开投，
+# 下载时 ↓ 亮、上传时 ↑ 亮，阶段一目了然。1.10.11。
+_DOWNLOAD_PHASES = {"downloading", "streaming"}
+_UPLOAD_PHASES = {"uploading"}
+# 下载已完成、上传尚未开始的阶段：校验/秒传尝试/缓存命中，展示 100%。
+_DOWNLOAD_DONE_PHASES = {"hashing", "rapid_upload", "cache_ready", "done"}
+
+
+def display_phase(task: Dict[str, Any]) -> str:
+    """下载页展示阶段：downloading / uploading / done / ""（无字节口径时）。"""
+    phase = str(
+        task.get("transfer_phase") or task.get("phase") or ""
+    ).strip().lower()
+    if phase in _DOWNLOAD_PHASES:
+        return "downloading"
+    if phase in _UPLOAD_PHASES:
+        return "uploading"
+    if phase in _DOWNLOAD_DONE_PHASES:
+        return "done"
+    # 阶段码不可用时（父任务 phase 是文案）按字节推断。
+    try:
+        total = float(task.get("total") or 0)
+        downloaded = float(task.get("downloaded_bytes") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if total <= 0:
+        return ""
+    if downloaded < total:
+        return "downloading"
+    return "uploading"
+
+
+def display_progress(task: Dict[str, Any]) -> Optional[float]:
+    """下载页展示进度：下载阶段看已下载占比，上传阶段看已上传占比。
+
+    没有字节口径的任务（普通订阅父任务）返回 None，调用方走原有总进度。
+    """
+    try:
+        total = float(task.get("total") or 0)
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    try:
+        downloaded = float(task.get("downloaded_bytes") or 0)
+        uploaded = float(task.get("uploaded_bytes") or 0)
+    except (TypeError, ValueError):
+        return None
+    phase = display_phase(task)
+    if phase == "downloading":
+        # 没有字节字段的老格式字典（只有总进度）不按字节算，走总进度。
+        if "downloaded_bytes" not in task:
+            return None
+        return max(0.0, min(100.0, downloaded * 100.0 / total))
+    if phase == "uploading":
+        if "uploaded_bytes" not in task:
+            return None
+        return max(0.0, min(100.0, uploaded * 100.0 / total))
+    if phase == "done":
+        return 100.0
+    return None
+
+
+def _phase_speed(task: Dict[str, Any], phase: str) -> Optional[str]:
+    """按阶段取速度文案：下载阶段只给 ↓，上传阶段只给 ↑，其余不给。
+
+    分路速度优先，没有分路字段时退回总速度（老任务字典只有 speed 字段）；
+    另一路的速度即使有残值也不投——旧模板按有无点亮 ↑/↓，残值会亮错路。
+    """
+    if display_phase(task) != phase:
+        return None
+    key = (
+        "download_speed_bytes_per_second"
+        if phase == "downloading"
+        else "upload_speed_bytes_per_second"
+    )
+    value = task.get(key)
+    if value is None:
+        value = task.get("speed_bytes_per_second")
+    return format_speed(value)
+
+
 def _task_progress(task: Dict[str, Any]) -> float:
-    """任务完成百分比（0-100），后处理阶段优先用后处理进度。"""
+    """任务完成百分比（0-100）：有字节口径时按阶段展示，余下走总进度。
+
+    后处理阶段仍走原有总进度/后处理进度（95% 待收尾），不按阶段算——
+    子任务都传完了不等于收尾做完了，显示 100% 会误导。
+    """
+    if str(task.get("status") or "") != "postprocessing":
+        shown = display_progress(task)
+        if shown is not None:
+            return shown
     try:
         progress = float(task.get("progress") or 0)
     except (TypeError, ValueError):
@@ -391,7 +484,8 @@ def task_to_torrent(
         size=total,
         progress=_task_progress(task),
         state=map_task_state(task.get("status")),
-        dlspeed=format_speed(task.get("speed_bytes_per_second")),
+        dlspeed=_phase_speed(task, "downloading"),
+        upspeed=_phase_speed(task, "uploading"),
         tags=None,
         save_path=str(path) if path else None,
         content_path=str(path) if path else None,
