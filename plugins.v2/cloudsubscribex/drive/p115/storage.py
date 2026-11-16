@@ -17,6 +17,9 @@ MP 存储标识 ``u115cs``、显示名“115网盘CS版”。MP 的 ``StorageSch
 - 适配器不持有 115 客户端：实例由 MP 无参构造，客户端经
   :func:`bind_u115cs_provider` 以模块级绑定注入（插件 ``_init_clients``
   之后调一次）。未绑定时所有方法返回失败值，绝不抛错打断 MP 流程。
+  唯一例外是 ``get_item_strict``：MP 的覆盖保护要求它区分“不存在”
+  和“查不出来”，状态无法确认时必须抛 ``StorageQueryError``（MP 会
+  安全跳过本次整理），返回 None 会被当成“确认不存在”去覆盖。
 """
 
 import tempfile
@@ -25,6 +28,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from app.log import logger
 from app.modules.filemanager.storages import StorageBase
+from app.schemas.exception import StorageQueryError
 from app.schemas.file import FileItem, StorageUsage
 
 from ...core.cloud import CloudDriveCapability, CloudFile
@@ -294,6 +298,70 @@ class U115CSStorage(StorageBase):
         except Exception as error:
             logger.warning(f"{_LOG_PREFIX}查询路径失败：{path}，{error}")
             return None
+
+    def get_item_strict(self, path: Path) -> Optional[FileItem]:
+        """严格查询路径：MP 覆盖保护用的查询，必须区分“不存在”和“查不出来”。
+
+        MP 的整理在写目标文件前调这个方法（转存处理器的覆盖检查）：
+        返回 None 表示已确认目标不存在，可以写；返回 FileItem 表示目标已
+        在，按覆盖策略处理；状态无法确认时必须抛 StorageQueryError，
+        MP 会跳过本次整理而不是把故障误判成不存在去覆盖。
+
+        与宽松版 ``get_item`` 的区别：宽松版把一切异常都吞成 None；
+        这里只有“确认不存在”才返回 None——父目录确认不存在（目标文件
+        不可能存在）也算确认不存在；提供方未绑定、父目录解析失败、目录
+        列举失败一律抛 StorageQueryError。
+
+        父目录先用只读解析确认：整理目标的父目录常常还不存在（如刚按
+        剧名新建的季目录），这时直接调 ``find_file_strict`` 会因父目录
+        解析不到而抛错，导致整理被跳过；先确认父目录不存在就直接返回
+        None，整理才能继续。根目录直接返回根目录项。
+        """
+        normalized = _normalize_115_path(str(path))
+        if normalized == "/":
+            return FileItem(
+                storage=U115CS_STORAGE_ID,
+                path="/",
+                type="dir",
+                name="/",
+                basename="/",
+                fileid="0",
+            )
+        parent, name = _split_parent(normalized)
+        reader = self._require(CloudDriveCapability.DIRECTORY_READ)
+        if reader is None:
+            raise StorageQueryError(
+                f"{_LOG_PREFIX}提供方未就绪，无法确认目标状态：{path}"
+            )
+        try:
+            lookup = reader.resolve_directory(parent)
+        except Exception as error:
+            raise StorageQueryError(
+                f"{_LOG_PREFIX}父目录解析失败，无法确认目标状态：{path}（{error}）"
+            ) from error
+        if not lookup.checked:
+            raise StorageQueryError(
+                f"{_LOG_PREFIX}无法确认父目录状态，无法确认目标状态：{path}"
+            )
+        if lookup.directory_id is None:
+            # 父目录确认不存在，目标文件不可能存在。
+            return None
+        query = self._require(CloudDriveCapability.FILE_QUERY)
+        if query is None:
+            raise StorageQueryError(
+                f"{_LOG_PREFIX}提供方未就绪，无法确认目标状态：{path}"
+            )
+        try:
+            cloud = query.find_file_strict(parent, name)
+        except StorageQueryError:
+            raise
+        except Exception as error:
+            raise StorageQueryError(
+                f"{_LOG_PREFIX}查询失败，无法确认目标状态：{path}（{error}）"
+            ) from error
+        if cloud is None:
+            return None
+        return _to_file_item(cloud, parent)
 
     def detail(self, fileitem: FileItem) -> Optional[FileItem]:
         try:

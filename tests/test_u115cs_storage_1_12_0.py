@@ -92,12 +92,17 @@ class FakeStorageBase:
         self.storagehelper = None
 
 
+class StorageQueryError(Exception):
+    """MP app.schemas.exception.StorageQueryError 的测试替身。"""
+
+
 register_module(
     "app.modules.filemanager.storages", StorageBase=FakeStorageBase
 )
 register_module(
     "app.schemas.file", FileItem=FakeFileItem, StorageUsage=FakeStorageUsage
 )
+register_module("app.schemas.exception", StorageQueryError=StorageQueryError)
 
 storage = load_module(
     "cloudsubscribex.drive.p115.storage",
