@@ -303,21 +303,14 @@ def _task_media(
 ) -> Optional[Dict[str, Any]]:
     """下载页卡片的 media（DownloadTaskMedia 口径）。
 
-    海报取不到时 media 其它字段照常填（标题/季集不能跟着丢）；电影不带季集；
-    多集时 episode 留空，让前端回退到 season_episode 的完整区间文案。
+    海报取不到时 media 其它字段照常填（标题/季集不能跟着丢）；电影不带季集。
+    季和集都留空：MP 卡片模板先拼 media 里的季、集两个数字（有数字就
+    显示裸数字，如 "1 9"），只有两者都空才回退到 season_episode 的标准
+    写法（S01E09）；多集/仅季/电影同理，季集一律走 season_episode。
     """
     media_type = str(task.get("media_type") or "").strip()
     if media_type not in {"电视剧", "电影"}:
         return None
-    episodes = _task_episodes(task)
-    season: Optional[int] = None
-    episode: Optional[int] = None
-    if media_type == "电视剧":
-        try:
-            season = int(task.get("season") or 1)
-        except (TypeError, ValueError):
-            season = 1
-        episode = episodes[0] if len(episodes) == 1 else None
     tmdb_id = _task_tmdb_id(task)
     poster = (
         resolve_poster_url(tmdb_id, media_type, resolver=poster_resolver)
@@ -334,8 +327,9 @@ def _task_media(
         # 独立跨盘任务的 title 是文件名，媒体标题用 media_title（有的话），
         # 否则海报旁显示的就是文件名。
         "title": str(task.get("media_title") or task.get("title") or "未命名订阅"),
-        "season": season,
-        "episode": episode,
+        # 季/集留空（见 docstring）：卡片模板据此回退到 season_episode。
+        "season": None,
+        "episode": None,
         "poster": poster or None,
     }
     if tmdb_id:

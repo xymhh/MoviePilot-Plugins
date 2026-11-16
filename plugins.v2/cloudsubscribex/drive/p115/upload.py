@@ -18,6 +18,7 @@ from requests.adapters import HTTPAdapter
 from .files import P115DirectoryReader, P115FileService
 from .upload_proxy import oss_request_kwargs
 from ...core import OwnerDelegator
+from ...core.error_text import describe_upload_error
 
 try:
     from p115client import check_response
@@ -407,10 +408,15 @@ class P115UploadService(OwnerDelegator):
             self._last_upload_error = ""
             return True
         except Exception as error:
+            # p115oss 会把上传失败包成 MultipartUploadAbort（消息是上传
+            # 参数字典，含 user_key），真报错在 __cause__ 里；这里拆包
+            # 取原错并脱敏，日志行与 last_error 用同一句，下次失败时
+            # 历史记录里直接就是 115 的原错。
+            detail = describe_upload_error(error)
             self._last_upload_error = (
-                f"115 本地文件上传失败：{source.name}，{error}"
+                f"115 本地文件上传失败：{source.name}，{detail}"
             )
-            logger.error(f"115 本地文件上传失败：{source.name}，{error}")
+            logger.error(f"115 本地文件上传失败：{source.name}，{detail}")
             return False
 
     def upload_from_link(

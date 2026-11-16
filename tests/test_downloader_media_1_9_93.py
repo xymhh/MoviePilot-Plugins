@@ -84,8 +84,10 @@ class TestMediaProjection(unittest.TestCase):
         media = torrent.media
         self.assertEqual(media["type"], "电视剧")
         self.assertEqual(media["title"], "律界战争")
-        self.assertEqual(media["season"], 1)
-        self.assertEqual(media["episode"], 5)
+        # 1.10.8：季/集留空，卡片模板据此回退到 season_episode（S01E05），
+        # 不再拼出裸数字 "1 5"；海报/标题/季集文本不受影响。
+        self.assertIsNone(media["season"])
+        self.assertIsNone(media["episode"])
         self.assertEqual(
             media["poster"], "https://image.tmdb.org/t/p/w500/poster123456.jpg"
         )
@@ -118,8 +120,8 @@ class TestMediaProjection(unittest.TestCase):
         media = torrent.media
         self.assertIsNone(media["poster"])
         self.assertEqual(media["title"], "律界战争")
-        self.assertEqual(media["season"], 1)
-        self.assertEqual(media["episode"], 5)
+        self.assertIsNone(media["season"])
+        self.assertIsNone(media["episode"])
         self.assertEqual(torrent.season_episode, "S01E05")
 
     def test_poster_resolver_exception_is_a_miss(self):
@@ -130,7 +132,7 @@ class TestMediaProjection(unittest.TestCase):
             TV_TASK, torrent_cls=_Torrent, poster_resolver=_boom
         )
         self.assertIsNone(torrent.media["poster"])
-        self.assertEqual(torrent.media["episode"], 5)
+        self.assertIsNone(torrent.media["episode"])
 
     def test_no_tmdb_id_means_no_poster_but_media_present(self):
         task = {key: value for key, value in TV_TASK.items() if key != "tmdb_id"}
@@ -139,7 +141,7 @@ class TestMediaProjection(unittest.TestCase):
         )
         self.assertIsNone(torrent.media["poster"])
         self.assertNotIn("media_source", torrent.media)
-        self.assertEqual(torrent.media["episode"], 5)
+        self.assertIsNone(torrent.media["episode"])
 
     def test_movie_media_has_no_season_episode(self):
         task = {
@@ -202,7 +204,7 @@ class TestEpisodeFromFileNames(unittest.TestCase):
             torrent_cls=_Torrent,
         )
         self.assertEqual(torrent.season_episode, "S01E05")
-        self.assertEqual(torrent.media["episode"], 5)
+        self.assertIsNone(torrent.media["episode"])
 
     def test_current_file_is_a_source(self):
         torrent = _view.task_to_torrent(
@@ -220,7 +222,7 @@ class TestEpisodeFromFileNames(unittest.TestCase):
         )
         self.assertEqual(torrent.season_episode, "S01E05-E06")
         self.assertIsNone(torrent.media["episode"])
-        self.assertEqual(torrent.media["season"], 1)
+        self.assertIsNone(torrent.media["season"])
 
     def test_wrong_season_file_falls_back_to_target_episodes(self):
         torrent = _view.task_to_torrent(

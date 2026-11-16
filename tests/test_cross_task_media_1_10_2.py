@@ -213,8 +213,10 @@ class TestStandaloneCrossTaskPoster(unittest.TestCase):
         self.assertIsNotNone(torrent.media)
         self.assertEqual(torrent.media["poster"], "https://img/poster.jpg")
         self.assertEqual(torrent.media["title"], "今天是太阳雨")
-        self.assertEqual(torrent.media["season"], 1)
-        self.assertEqual(torrent.media["episode"], 18)
+        # 1.10.8：季/集留空，卡片模板据此回退到 season_episode（S01E18），
+        # 不再拼出裸数字 "1 18"。
+        self.assertIsNone(torrent.media["season"])
+        self.assertIsNone(torrent.media["episode"])
         self.assertEqual(torrent.name, "今天是太阳雨 S01E18")
 
     def test_no_media_without_media_identity(self):

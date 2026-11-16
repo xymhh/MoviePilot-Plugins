@@ -27,6 +27,7 @@ from .cloud import (
     CloudFile,
     RapidUploadResult,
 )
+from .error_text import sanitize_error_text
 from .residue import RESIDUE_PATTERN
 from .target_writer import (
     TargetConflictError,
@@ -111,8 +112,12 @@ class _RemoteSha1RangeReader:
 
 
 def _describe_transfer_error(error: BaseException) -> str:
-    """把常见底层报错翻译成可操作的提示。"""
-    message = str(error)
+    """把常见底层报错翻译成可操作的提示。
+
+    所有文本先过一遍脱敏：这是任务 error 写进历史记录前的最后一道
+    关，任何一路带凭证字段的报错都不能原样落盘。
+    """
+    message = sanitize_error_text(str(error))
     lowered = message.lower()
     if "too many open files" in lowered or "errno 24" in lowered:
         return (
