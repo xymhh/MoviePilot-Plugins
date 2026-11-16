@@ -42,6 +42,7 @@ from .history import HistoryService
 from .landed import LandedVerifyService
 from .matching import FileMatchingService
 from .media_refresh import MediaRefreshMixin
+from .mp_organize import MpOrganizeMixin
 from .strm_ops import StrmOpsMixin
 from .transfer_ops import TransferOpsMixin
 
@@ -112,6 +113,7 @@ _COMPONENT_TYPES = (
     SyncNotificationService,
     PlatformHistoryService,
     MediaRefreshMixin,
+    MpOrganizeMixin,
     StrmOpsMixin,
     TransferOpsMixin,
 )
@@ -222,6 +224,9 @@ class SyncHandler:
         )
 
         self._organize_after_transfer = bool(_get_val("organize_after_transfer", True))
+        self._mp_organize_after_share_save = bool(
+            _get_val("mp_organize_after_share_save", True)
+        )
         self._organize_subtitles = bool(_get_val("organize_subtitles", True))
         self._subtitle_traditional_to_simplified = bool(
             _get_val("subtitle_traditional_to_simplified", False)

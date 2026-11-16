@@ -453,6 +453,14 @@ class TransferOpsMixin(OwnerDelegator):
             raise
 
         success_id_set = {str(file_id) for file_id in (success_ids or [])}
+        # P1：同盘 115 直存成功后立即交 MP 整理，记录进 MP 媒体整理；
+        # 跨盘、直链、整理关闭时不触发（跨盘是 P2 的事）。
+        mp_organized_ids = set()
+        if not cross_batch and not direct_cloud_resource and organize_enabled:
+            mp_organized_ids = self._trigger_mp_organize_for_batch(
+                processed_items, success_id_set,
+                mediainfo=mediainfo, season=season,
+            )
         transferred_subtitle_ids = set()
         for item in processed_items:
             if str(item["file"]["id"]) not in success_id_set:
@@ -501,6 +509,7 @@ class TransferOpsMixin(OwnerDelegator):
                     "subtitles": item.get("subtitles") or [],
                     "skip_history": bool(
                         (item.get("resource") or {}).get("skip_history")
+                        or str(item["file"]["id"]) in mp_organized_ids
                     ),
                 }
                 for item in processed_items
@@ -950,6 +959,17 @@ class TransferOpsMixin(OwnerDelegator):
                 return True
         if not success:
             self._remember_transfer_failure(file_item, "分享转存失败")
+            return False
+        # P1：单文件同盘直存（历史重试、手动单传）成功后同样交 MP 整理；
+        # 字幕等非视频文件由 trigger 内部的扩展名守卫拦下。
+        if self._mp_organize_enabled():
+            saved_name = str(target_name or file_item.get("name") or "")
+            self.trigger_mp_organize(
+                save_path, saved_name, media=media,
+                season=(
+                    media.get("season") if isinstance(media, dict) else None
+                ),
+            )
         return success
 
     def _ensure_share_transfer_available(self, provider_key: str) -> None:

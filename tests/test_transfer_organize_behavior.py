@@ -555,5 +555,90 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         self.assertEqual(batch_args[0]["result_key"], "ep1_id")
 
 
+    def test_mp_organize_triggered_and_history_skipped_when_organize_enabled(self):
+        """P1：同盘直存成功后交 MP 整理，STRM 批次里该项跳过插件历史。"""
+        self.handler._organize_after_transfer = True
+        # trigger_mp_organize 是 MpOrganizeMixin 的方法，helper 用组件实例
+        # 调它；在宿主上打桩够不着，必须直接桩组件实例（绕开委托的 __setattr__）。
+        component = self.handler._trigger_mp_organize_for_batch.__self__
+        object.__setattr__(
+            component, "trigger_mp_organize", MagicMock(return_value=True)
+        )
+        mock_trigger = component.trigger_mp_organize
+        share_url = "https://115.com/s/sample_share"
+        matched_items = [
+            {
+                "file": {
+                    "id": "ep1_id",
+                    "name": "美国人质 S01E01 2160p.mkv",
+                    "parent_path": "美国人质 (2026) {tmdbid=239618}/Season 1",
+                },
+                "target_name": "美国人质 - S01E01.mkv",
+                "target_dir": "/媒体库/Season 1",
+                "episode": 1,
+            },
+            {
+                "file": {
+                    "id": "ep2_id",
+                    "name": "美国人质 S01E02 2160p.mkv",
+                    "parent_path": "美国人质 (2026) {tmdbid=239618}/Season 1",
+                },
+                "target_name": "美国人质 - S01E02.mkv",
+                "target_dir": "/媒体库/Season 1",
+                "episode": 2,
+            },
+        ]
+
+        self.handler._transfer_episode_batch(
+            matched_items=matched_items,
+            share_url=share_url,
+            mediainfo=self.mediainfo,
+            subscribe=self.subscribe,
+            season=1,
+            sub_key="tv_239618",
+        )
+
+        self.assertEqual(mock_trigger.call_count, 2)
+        for call in mock_trigger.call_args_list:
+            self.assertEqual(call.args[0], "/待整理")
+        batch_args = self.handler._generate_or_queue_strm_batch.call_args[0][0]
+        self.assertEqual(len(batch_args), 2)
+        self.assertTrue(all(item["skip_history"] for item in batch_args))
+
+    def test_mp_organize_not_triggered_when_trigger_declines(self):
+        """P1：MP 整理未接手时不跳插件历史，记录仍有兜底。"""
+        self.handler._organize_after_transfer = True
+        component = self.handler._trigger_mp_organize_for_batch.__self__
+        object.__setattr__(
+            component, "trigger_mp_organize", MagicMock(return_value=False)
+        )
+        share_url = "https://115.com/s/sample_share"
+        matched_items = [
+            {
+                "file": {
+                    "id": "ep1_id",
+                    "name": "美国人质 S01E01 2160p.mkv",
+                    "parent_path": "美国人质 (2026) {tmdbid=239618}/Season 1",
+                },
+                "target_name": "美国人质 - S01E01.mkv",
+                "target_dir": "/媒体库/Season 1",
+                "episode": 1,
+            },
+        ]
+
+        self.handler._transfer_episode_batch(
+            matched_items=matched_items,
+            share_url=share_url,
+            mediainfo=self.mediainfo,
+            subscribe=self.subscribe,
+            season=1,
+            sub_key="tv_239618",
+        )
+
+        batch_args = self.handler._generate_or_queue_strm_batch.call_args[0][0]
+        self.assertEqual(len(batch_args), 1)
+        self.assertFalse(batch_args[0]["skip_history"])
+
+
 if __name__ == "__main__":
     unittest.main()

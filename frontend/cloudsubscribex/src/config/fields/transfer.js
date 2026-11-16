@@ -61,6 +61,13 @@ export function createTransferSection(options) {
             cols: 4,
           },
           {
+            key: "mp_organize_after_share_save",
+            label: "直存后交 MP 整理",
+            type: "switch",
+            hint: "115 分享直存成功后立即调 MP 自带整理进媒体库，记录进 MP 媒体整理；关闭后只写插件自己的转存记录",
+            cols: 4,
+          },
+          {
             key: "skip_other_season_dirs",
             label: "跳过其他季目录",
             type: "switch",

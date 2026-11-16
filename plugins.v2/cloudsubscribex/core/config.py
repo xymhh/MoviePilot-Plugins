@@ -123,6 +123,7 @@ class UIConfig:
             ],
             "cloud_drive": "115",
             "organize_after_transfer": True,
+            "mp_organize_after_share_save": True,
             "organize_subtitles": True,
             "subtitle_traditional_to_simplified": False,
             "video_extensions": [".mkv", ".mp4", ".avi", ".iso"],
