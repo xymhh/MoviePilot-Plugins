@@ -510,6 +510,7 @@ class TransferOpsMixin(OwnerDelegator):
                     "skip_history": bool(
                         (item.get("resource") or {}).get("skip_history")
                         or str(item["file"]["id"]) in mp_organized_ids
+                        or item["file"].get("_mp_organized")
                     ),
                 }
                 for item in processed_items
@@ -859,6 +860,9 @@ class TransferOpsMixin(OwnerDelegator):
                     fallback=True,
                     parent_task_id=parent_task_id,
                     media=effective_media or None,
+                    # P2：跨盘只下载到本地，不向目标盘上传；下载完成后
+                    # 下方触发 MP 整理，由 MP 把本地文件上传进媒体库。
+                    download_only=True,
                 )
                 success = self._cross_transfer_manager.wait(
                     task["id"], cancel_check=should_stop
@@ -892,6 +896,41 @@ class TransferOpsMixin(OwnerDelegator):
                     )
                     if result_size > 0:
                         file_item["size"] = result_size
+                    # P2：跨盘只下载到本地，上传交给 MP 整理。download_only
+                    # 成功时文件在本地 /downloads；秒传命中（rapid/reuse）
+                    # 时文件已在 115 /转存；两种都触发 MP 整理进媒体库。
+                    # 整理未接受时本项记失败（文件不在媒体库，下一轮同步
+                    # 重试；本地缓存复用，不重复下载）。
+                    if not self._mp_organize_enabled():
+                        logger.info(
+                            f"MP 整理已关闭，跨盘文件留在本地待手动整理："
+                            f"{result_name}"
+                        )
+                        return True
+                    method = str(completed_task.get("method") or "")
+                    if method == "download_only":
+                        local_path = str(
+                            completed_task.get("result_local_path") or ""
+                        ).strip()
+                        local_parts = PurePosixPath(local_path) if local_path else None
+                        organized = bool(
+                            local_parts and local_parts.name
+                            and self.trigger_mp_organize(
+                                str(local_parts.parent), local_parts.name,
+                                media=effective_media,
+                            )
+                        )
+                    else:
+                        organized = bool(self.trigger_mp_organize(
+                            save_path, result_name, media=effective_media,
+                        ))
+                    file_item["_mp_organized"] = organized
+                    if not organized:
+                        self._remember_transfer_failure(
+                            file_item,
+                            "MP 整理未接受：文件未进媒体库，下一轮重试",
+                        )
+                        return False
                 if not success:
                     failure_reason = str(
                         completed_task.get("error")

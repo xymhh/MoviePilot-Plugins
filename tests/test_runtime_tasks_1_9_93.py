@@ -181,6 +181,95 @@ class TestSerializeRuntimeTasksFileNames(unittest.TestCase):
         )
 
 
+class TestParentPosterFallback1_12_0(unittest.TestCase):
+    """P2：父任务海报——订阅存量海报优先，子任务海报第二兜底。"""
+
+    def test_subscribe_poster_recorded(self):
+        owner = _owner()
+        _service(owner)._register_sync_tasks([
+            _subscribe(poster="https://image.tmdb.org/t/p/w500/abc.jpg")
+        ])
+        task = owner._sync_tasks["subscribe:35"]
+        self.assertEqual(
+            task["poster"], "https://image.tmdb.org/t/p/w500/abc.jpg"
+        )
+
+    def test_non_http_poster_dropped(self):
+        owner = _owner()
+        _service(owner)._register_sync_tasks([
+            _subscribe(poster="/local/poster.jpg")
+        ])
+        self.assertEqual(owner._sync_tasks["subscribe:35"]["poster"], "")
+
+    def test_merge_carries_child_poster_up(self):
+        now = time.time()
+        child = {
+            "id": "cross:3ad2a315dddc43b8baf1e4c0cfc7bc3e",
+            "parent_task_id": "subscribe:35",
+            "status": "transferring",
+            "title": "律界战争 S01E05.mkv",
+            "result_file_name": "",
+            "total": 100,
+            "transferred": 35,
+            "progress": 35,
+            "downloaded_bytes": 35,
+            "uploaded_bytes": 0,
+            "speed_bytes_per_second": 0,
+            "stage_total": 0,
+            "stage_transferred": 0,
+            "phase": "downloading",
+            "message": "正在从夸克网盘下载到本地缓存",
+            "poster": "https://image.tmdb.org/t/p/w500/child.jpg",
+        }
+        manager = SimpleNamespace(
+            ACTIVE={"transferring", "downloading"},
+            list=lambda: [child],
+        )
+        owner = _owner(cross_transfer_manager=manager)
+        owner._sync_tasks["subscribe:35"] = _task(
+            "subscribe:35", "transferring", now, started_ago=10
+        )
+        tasks = _service(owner)._serialize_runtime_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(
+            tasks[0]["poster"], "https://image.tmdb.org/t/p/w500/child.jpg"
+        )
+
+    def test_merge_keeps_parent_poster_over_child(self):
+        now = time.time()
+        child = {
+            "id": "cross:3ad2a315dddc43b8baf1e4c0cfc7bc3e",
+            "parent_task_id": "subscribe:35",
+            "status": "transferring",
+            "title": "律界战争 S01E05.mkv",
+            "result_file_name": "",
+            "total": 100,
+            "transferred": 35,
+            "progress": 35,
+            "downloaded_bytes": 35,
+            "uploaded_bytes": 0,
+            "speed_bytes_per_second": 0,
+            "stage_total": 0,
+            "stage_transferred": 0,
+            "phase": "downloading",
+            "message": "正在从夸克网盘下载到本地缓存",
+            "poster": "https://image.tmdb.org/t/p/w500/child.jpg",
+        }
+        manager = SimpleNamespace(
+            ACTIVE={"transferring", "downloading"},
+            list=lambda: [child],
+        )
+        owner = _owner(cross_transfer_manager=manager)
+        parent = _task("subscribe:35", "transferring", now, started_ago=10)
+        parent["poster"] = "https://image.tmdb.org/t/p/w500/parent.jpg"
+        owner._sync_tasks["subscribe:35"] = parent
+        tasks = _service(owner)._serialize_runtime_tasks()
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(
+            tasks[0]["poster"], "https://image.tmdb.org/t/p/w500/parent.jpg"
+        )
+
+
 class TestSerializeSyncTasksRetention(unittest.TestCase):
     def test_completed_recently_is_retained_and_stale_is_dropped(self):
         now = time.time()

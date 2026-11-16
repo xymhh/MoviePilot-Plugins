@@ -202,7 +202,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.11.0"
+    plugin_version = "1.12.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1914,6 +1914,7 @@ class CloudSubscribeX(_PluginBase):
         # 0 表示关闭 115 分片并发上传（回退顺序上传），上限 16。
         self._cross_transfer_upload_concurrency = max(0, min(upload_concurrency, 16))
         self._sync_cross_transfer_upload_concurrency()
+        self._register_u115cs_storage()
 
         rapid_miss_action = str(
             config.get("cross_transfer_rapid_miss_action", "abort") or "abort"
@@ -2085,6 +2086,7 @@ class CloudSubscribeX(_PluginBase):
         self._cloud_drive = self._drive_manager.active_drive
         self._cross_transfer_manager = self._drive_manager.cross_transfer_manager
         self._sync_cross_transfer_upload_concurrency()
+        self._register_u115cs_storage()
 
     def _sync_cross_transfer_upload_concurrency(self) -> None:
         """把 115 分片并发度注入 115 客户端管理器。
@@ -2100,6 +2102,33 @@ class CloudSubscribeX(_PluginBase):
             client._cross_transfer_upload_concurrency = self._cross_transfer_upload_concurrency
         except Exception as error:  # noqa: BLE001 - 注入失败不影响主流程
             logger.debug(f"注入 115 上传并发度失败：{error}", exc_info=True)
+
+    def _register_u115cs_storage(self) -> None:
+        """绑定 115 提供方并把“115网盘CS版”注册进 MP 存储。
+
+        插件每次初始化与每次保存配置后都调一次：MP 配置重载会把
+        FileManagerModule 的实例列表换成新列表，抹掉本次注册，重调一次
+        才能恢复。注册失败只记日志，绝不阻塞插件加载。
+        """
+        try:
+            from .drive.p115.storage import (
+                bind_u115cs_provider,
+                register_u115cs_storage,
+            )
+        except Exception as error:  # noqa: BLE001 - 注册失败不得阻塞加载
+            logger.error(f"115网盘CS版存储注册失败：无法导入适配器：{error}")
+            return
+        registry = self.__dict__.get("_cloud_drive_registry")
+        if registry is not None:
+            try:
+                bind_u115cs_provider(registry.get("115"))
+            except Exception as error:  # noqa: BLE001 - 无 115 提供方时不注册
+                logger.error(f"115网盘CS版存储注册失败：未取到 115 提供方：{error}")
+                return
+        try:
+            register_u115cs_storage()
+        except Exception as error:  # noqa: BLE001 - 注册失败不得阻塞加载
+            logger.error(f"115网盘CS版存储注册失败：{error}")
 
     def register_provider(self, key: str) -> bool:
         """根据网盘标识动态注册驱动。"""

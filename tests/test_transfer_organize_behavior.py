@@ -1,6 +1,7 @@
 """测试关闭自动整理时保留原分享母文件夹结构与原始文件名的行为（Issue #8）。"""
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from plugin_env import (
@@ -638,6 +639,174 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         batch_args = self.handler._generate_or_queue_strm_batch.call_args[0][0]
         self.assertEqual(len(batch_args), 1)
         self.assertFalse(batch_args[0]["skip_history"])
+
+
+class _FakeCrossManager:
+    """跨盘任务管理器替身：create/wait/list 三件套。"""
+
+    def __init__(self, completed):
+        self.completed = completed
+        self.created_kwargs = {}
+
+    def create_from_cloud_file(self, *args, **kwargs):
+        self.created_kwargs = dict(kwargs)
+        return {"id": "cross:x"}
+
+    def wait(self, task_id, cancel_check=None):
+        return True
+
+    def list(self):
+        return [self.completed]
+
+
+class TestSyncHandlerCrossDownloadOrganize(unittest.TestCase):
+    """P2：跨盘只下载到本地，下载完成后触发 MP 整理进媒体库。"""
+
+    def setUp(self):
+        self.handler = SyncHandler.__new__(SyncHandler)
+        self.handler._cloud_transfer_path = "/待整理"
+        self.handler._organize_after_transfer = True
+        self.handler._is_cloud_resource_url = lambda url: False
+        self.handler._is_direct_cloud_resource_url = lambda url: False
+        self.handler._is_offline_url = lambda url: False
+        self.handler._stop_requested = lambda: False
+        self.handler._current_task_context = lambda: (None, None)
+        self.handler._cross_transfer_enabled = True
+        self.handler._cloud_drive = SimpleNamespace(
+            key="115", name="115网盘",
+            supports=lambda cap: True,
+        )
+        self.staged_item = SimpleNamespace(
+            id="staged1", name="S01E01.mkv", is_directory=False,
+            size=12345, sha1="ABC", md5="DEF", playback_values={},
+        )
+        share_service = SimpleNamespace(
+            transfer_file=MagicMock(return_value=self.staged_item),
+        )
+        query_service = SimpleNamespace(
+            find_file=MagicMock(return_value=self.staged_item),
+        )
+        self.source = SimpleNamespace(
+            key="quark", name="夸克网盘",
+            supports=lambda cap: True,
+            require=lambda cap: (
+                share_service if "SHARE" in str(cap) else query_service
+            ),
+        )
+        self.handler._resource_provider_for_url = MagicMock(
+            return_value=self.source
+        )
+        # transfer_ops 组件上的方法要桩组件实例（宿主赋值够不着）。
+        ops_component = self.handler._transfer_file_impl.__self__
+        object.__setattr__(
+            ops_component, "_cross_transfer_staging_path",
+            lambda key: "/staging/quark",
+        )
+        object.__setattr__(
+            ops_component, "_cleanup_cross_transfer_staging", MagicMock()
+        )
+        self.failure_reasons = []
+        history_component = self.handler._remember_transfer_failure.__self__
+        object.__setattr__(
+            history_component, "_remember_transfer_failure",
+            lambda file_item, reason: self.failure_reasons.append(reason),
+        )
+        # MP 整理触发器（MpOrganizeMixin 组件）。
+        mp_component = self.handler._trigger_mp_organize_for_batch.__self__
+        object.__setattr__(
+            mp_component, "trigger_mp_organize",
+            MagicMock(return_value=True),
+        )
+        object.__setattr__(
+            mp_component, "_mp_organize_enabled",
+            MagicMock(return_value=True),
+        )
+        self.mock_trigger = mp_component.trigger_mp_organize
+        self.mock_organize_enabled = mp_component._mp_organize_enabled
+
+    def _run_transfer(self, completed):
+        self.manager = _FakeCrossManager(completed)
+        self.handler._cross_transfer_manager = self.manager
+        file_item = {
+            "id": "fid1", "name": "S01E01.mkv", "size": 12345,
+            "sha1": "ABC", "md5": "DEF",
+        }
+        result = self.handler._transfer_file_impl(
+            "https://115.com/s/sample_share", file_item,
+            "/Alist/影视/moviepilot/转存", "S01E01.mkv", "ABC",
+            parent_task_id="subscribe:35",
+            media={"tmdb_id": 123, "media_type": "TV", "season": 1},
+        )
+        return result, file_item
+
+    def test_download_only_triggers_organize_for_local_file(self):
+        """download_only 成功 → 对本地文件触发 MP 整理，本项成功。"""
+        completed = {
+            "id": "cross:x", "status": "success",
+            "method": "download_only",
+            "result_local_path": "/downloads/cloud-transfer-abc-S01E01.mkv",
+            "result_file_name": "S01E01.mkv",
+            "result_file_size": 12345,
+            "result_sha1": "ABC", "result_md5": "DEF",
+        }
+        result, file_item = self._run_transfer(completed)
+        self.assertTrue(result)
+        self.assertTrue(self.manager.created_kwargs.get("download_only"))
+        self.mock_trigger.assert_called_once()
+        call = self.mock_trigger.call_args
+        self.assertEqual(call.args[0], "/downloads")
+        self.assertEqual(call.args[1], "cloud-transfer-abc-S01E01.mkv")
+        self.assertEqual(call.kwargs["media"]["tmdb_id"], 123)
+        self.assertTrue(file_item["_mp_organized"])
+
+    def test_rapid_hit_triggers_organize_for_target_file(self):
+        """秒传命中（文件已在 115 /转存）→ 对 /转存 里的文件触发 MP 整理。"""
+        completed = {
+            "id": "cross:x", "status": "success", "method": "rapid",
+            "result_file_name": "S01E01.mkv",
+            "result_file_size": 12345,
+            "result_sha1": "ABC", "result_md5": "DEF",
+        }
+        result, file_item = self._run_transfer(completed)
+        self.assertTrue(result)
+        self.mock_trigger.assert_called_once()
+        call = self.mock_trigger.call_args
+        self.assertEqual(call.args[0], "/Alist/影视/moviepilot/转存")
+        self.assertEqual(call.args[1], "S01E01.mkv")
+        self.assertTrue(file_item["_mp_organized"])
+
+    def test_organize_declined_fails_item(self):
+        """MP 整理未接受 → 本项记失败（文件不在媒体库，下一轮重试）。"""
+        self.mock_trigger.return_value = False
+        completed = {
+            "id": "cross:x", "status": "success",
+            "method": "download_only",
+            "result_local_path": "/downloads/cloud-transfer-abc-S01E01.mkv",
+            "result_file_name": "S01E01.mkv",
+            "result_file_size": 12345,
+            "result_sha1": "ABC", "result_md5": "DEF",
+        }
+        result, file_item = self._run_transfer(completed)
+        self.assertFalse(result)
+        self.assertFalse(file_item["_mp_organized"])
+        self.assertTrue(
+            any("MP 整理未接受" in reason for reason in self.failure_reasons)
+        )
+
+    def test_organize_disabled_keeps_download_success(self):
+        """MP 整理已关闭 → 下载本身算成功，文件留在本地待手动整理。"""
+        self.mock_organize_enabled.return_value = False
+        completed = {
+            "id": "cross:x", "status": "success",
+            "method": "download_only",
+            "result_local_path": "/downloads/cloud-transfer-abc-S01E01.mkv",
+            "result_file_name": "S01E01.mkv",
+            "result_file_size": 12345,
+            "result_sha1": "ABC", "result_md5": "DEF",
+        }
+        result, file_item = self._run_transfer(completed)
+        self.assertTrue(result)
+        self.mock_trigger.assert_not_called()
 
 
 if __name__ == "__main__":

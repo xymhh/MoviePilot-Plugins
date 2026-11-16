@@ -62,6 +62,11 @@ P115_MAX_UPLOAD_PARTS = 9000
 P115_DEFAULT_UPLOAD_CONCURRENCY = 4
 P115_MAX_UPLOAD_CONCURRENCY = 16
 
+#: 驱动层整份重传次数（与 MP 自带 u115 存储的 3 次重试同一口径）。
+_UPLOAD_MAX_ATTEMPTS = 3
+#: 第 1、2 次失败后的退避秒数（第 3 次失败直接返回，不再等）。
+_UPLOAD_RETRY_DELAY_SECONDS = (2, 4)
+
 
 def upload_part_size(file_size: int) -> int:
     """按文件大小选择 115 分片大小：默认 16MB，超大文件放大以控制分片数。"""
@@ -371,17 +376,35 @@ class P115UploadService(OwnerDelegator):
             return False
         upload_name = str(target_name or source.name).strip()
         checksum = str(file_sha1 or "").strip().upper() or self._file_sha1(source)
-        try:
-            file_size = source.stat().st_size
-            part_size = upload_part_size(file_size)
-            # p115oss.upload_file 会把 request_kwargs 透传给 OSS 分片 PUT，
-            # 在这里传 session=<ProxyManager> 才能真正让上传数据走代理。
-            upload_kwargs = dict(self._oss_proxy_kwargs(), max_retries=0)
-            if progress_callback:
-                with source.open("rb") as file:
+        # p115oss 分片上传没有重试：凡人修仙传 S01E200 两次失败在不同分块
+        # （服务端收到的分块 md5 与客户端算出的不一致，属传输抖动），一次
+        # 失败就杀死整个任务。这里在驱动层重传整份文件，最多 3 次、指数
+        # 退避（与 MP 自带 u115 存储的 3 次重试同一口径）；SHA1 只算一次，
+        # 不随重试重复读整份文件。
+        last_error: Optional[Exception] = None
+        for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
+            try:
+                file_size = source.stat().st_size
+                part_size = upload_part_size(file_size)
+                # p115oss.upload_file 会把 request_kwargs 透传给 OSS 分片 PUT，
+                # 在这里传 session=<ProxyManager> 才能真正让上传数据走代理。
+                upload_kwargs = dict(self._oss_proxy_kwargs(), max_retries=0)
+                if progress_callback:
+                    with source.open("rb") as file:
+                        response = self._rate_limited_call(
+                            self.client.upload_file,
+                            _ProgressReader(file, file_size, progress_callback),
+                            pid=int(lookup.directory_id or 0),
+                            filename=upload_name,
+                            filesha1=checksum,
+                            filesize=file_size,
+                            partsize=part_size,
+                            **upload_kwargs,
+                        )
+                else:
                     response = self._rate_limited_call(
                         self.client.upload_file,
-                        _ProgressReader(file, file_size, progress_callback),
+                        source,
                         pid=int(lookup.directory_id or 0),
                         filename=upload_name,
                         filesha1=checksum,
@@ -389,35 +412,35 @@ class P115UploadService(OwnerDelegator):
                         partsize=part_size,
                         **upload_kwargs,
                     )
-            else:
-                response = self._rate_limited_call(
-                    self.client.upload_file,
-                    source,
-                    pid=int(lookup.directory_id or 0),
-                    filename=upload_name,
-                    filesha1=checksum,
-                    filesize=file_size,
-                    partsize=part_size,
-                    **upload_kwargs,
+                check_response(response)
+                self._target_file_cache.clear()
+                if progress_callback:
+                    progress_callback(file_size, file_size)
+                logger.info(f"115 本地文件上传完成：{source.name} -> {save_path}/{upload_name}")
+                self._last_upload_error = ""
+                return True
+            except Exception as error:
+                last_error = error
+                if attempt >= _UPLOAD_MAX_ATTEMPTS:
+                    break
+                logger.warning(
+                    f"115 本地文件上传第 {attempt} 次失败，"
+                    f"{_UPLOAD_RETRY_DELAY_SECONDS[attempt - 1]} 秒后重传："
+                    f"{source.name}，{describe_upload_error(error)}"
                 )
-            check_response(response)
-            self._target_file_cache.clear()
-            if progress_callback:
-                progress_callback(file_size, file_size)
-            logger.info(f"115 本地文件上传完成：{source.name} -> {save_path}/{upload_name}")
-            self._last_upload_error = ""
-            return True
-        except Exception as error:
-            # p115oss 会把上传失败包成 MultipartUploadAbort（消息是上传
-            # 参数字典，含 user_key），真报错在 __cause__ 里；这里拆包
-            # 取原错并脱敏，日志行与 last_error 用同一句，下次失败时
-            # 历史记录里直接就是 115 的原错。
-            detail = describe_upload_error(error)
-            self._last_upload_error = (
-                f"115 本地文件上传失败：{source.name}，{detail}"
-            )
-            logger.error(f"115 本地文件上传失败：{source.name}，{detail}")
-            return False
+                time.sleep(_UPLOAD_RETRY_DELAY_SECONDS[attempt - 1])
+        # p115oss 会把上传失败包成 MultipartUploadAbort（消息是上传
+        # 参数字典，含 user_key），真报错在 __cause__ 里；这里拆包
+        # 取原错并脱敏，日志行与 last_error 用同一句，下次失败时
+        # 历史记录里直接就是 115 的原错。
+        detail = describe_upload_error(
+            last_error if last_error is not None else IOError("115 本地上传失败")
+        )
+        self._last_upload_error = (
+            f"115 本地文件上传失败：{source.name}，{detail}"
+        )
+        logger.error(f"115 本地文件上传失败：{source.name}，{detail}")
+        return False
 
     def upload_from_link(
             self,

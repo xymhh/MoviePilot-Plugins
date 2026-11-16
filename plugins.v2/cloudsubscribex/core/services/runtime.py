@@ -105,6 +105,13 @@ class SyncRuntimeService(OwnerDelegator):
             preparation = getattr(
                 subscribe, "_cloudsubscribe_preparation", {}
             ) or {}
+            # 订阅自带的存量海报：下载页实时查 TMDB 取不到时（MP 自身都
+            # 识别不到该媒体，如 LOST10）就用它；只认 http(s) 绝对地址。
+            subscribe_poster = str(
+                getattr(subscribe, "poster", "") or ""
+            ).strip()
+            if not subscribe_poster.startswith(("http://", "https://")):
+                subscribe_poster = ""
             task_id = self._sync_task_id(subscribe)
             tasks[task_id] = {
                 "id": task_id,
@@ -116,6 +123,7 @@ class SyncRuntimeService(OwnerDelegator):
                     else ""
                 ),
                 "title": str(getattr(subscribe, "name", "") or "未命名订阅"),
+                "poster": subscribe_poster,
                 "media_type": "电视剧" if is_tv else "电影",
                 "year": getattr(subscribe, "year", None) or "",
                 "season": int(getattr(subscribe, "season", 1) or 1) if is_tv else None,
@@ -940,6 +948,14 @@ class SyncRuntimeService(OwnerDelegator):
             ):
                 merged["progress"] = shown_progress
             parent.update(merged)
+            if not parent.get("poster"):
+                # 父任务没带订阅海报时，把子任务的存量海报带上来（第二兜底）：
+                # 子任务创建时 media 里已带 poster（_normalize_task_media）。
+                for item in transfers:
+                    child_poster = str(item.get("poster") or "").strip()
+                    if child_poster.startswith(("http://", "https://")):
+                        parent["poster"] = child_poster
+                        break
             if any(item.get("status") == "stopping" for item in transfers):
                 parent["status"] = "stopping"
         return tasks

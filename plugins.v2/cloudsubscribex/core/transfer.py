@@ -1407,9 +1407,10 @@ class CrossTransferTaskManager:
         return str(self._resolve_cache_path(cache_key, source))
 
     def create(self, source_path: str = "", target_key: str = "", save_path: str = "/",
-               target_name: str = "", algorithm: str = "", checksum: str = "",
-               fallback: bool = True, source_key: str = "", source_file: CloudFile | None = None,
-               parent_task_id: str = "", media: Optional[Dict[str, Any]] = None) -> dict:
+                target_name: str = "", algorithm: str = "", checksum: str = "",
+                fallback: bool = True, source_key: str = "", source_file: CloudFile | None = None,
+                parent_task_id: str = "", media: Optional[Dict[str, Any]] = None,
+                download_only: bool = False) -> dict:
         source = Path(source_path) if source_path else None
         if source is not None and not source.is_file():
             raise ValueError("源文件不存在或不是文件")
@@ -1446,6 +1447,10 @@ class CrossTransferTaskManager:
             "speed_bytes_per_second": 0.0, "message": "等待跨盘传输",
             "error": "", "method": "rapid" if algorithm else "fallback",
             "algorithm": algorithm.lower(), "fallback": bool(fallback),
+            # P2：只下载到本地（/downloads），不向目标盘上传；下载完成后
+            # 调用方触发 MP 整理，由 MP 把本地文件上传进媒体库。秒传探测
+            # 不受此限（文件已在目标盘时无需下载、无需上传）。
+            "download_only": bool(download_only),
             "queued_at": now, "started_at": None, "finished_at": None,
             "updated_at": now, "stop_event": Event(),
         }
@@ -1464,10 +1469,11 @@ class CrossTransferTaskManager:
         return self._public(task)
 
     def create_from_cloud_file(self, source_key: str, source_file: CloudFile,
-                               target_key: str, save_path: str, target_name: str = "",
-                               algorithm: str = "", fallback: bool = True,
-                               parent_task_id: str = "",
-                               media: Optional[Dict[str, Any]] = None) -> dict:
+                                target_key: str, save_path: str, target_name: str = "",
+                                algorithm: str = "", fallback: bool = True,
+                                parent_task_id: str = "",
+                                media: Optional[Dict[str, Any]] = None,
+                                download_only: bool = False) -> dict:
         selected = algorithm or ""
         if not selected:
             try:
@@ -1482,6 +1488,7 @@ class CrossTransferTaskManager:
             algorithm=selected, checksum=checksum, fallback=fallback,
             source_key=source_key, source_file=source_file,
             parent_task_id=parent_task_id, media=media,
+            download_only=download_only,
         )
 
     def list(self, active_only: bool = False) -> list[dict]:
@@ -1781,6 +1788,8 @@ class CrossTransferTaskManager:
             target_key, target_path = task["target_provider"], task["target_path"]
             target_name, algorithm = task["title"], task["algorithm"]
             fallback = task["fallback"]
+            # P2 只下载到本地：下载完成后不秒传、不上传，调用方触发 MP 整理。
+            download_only = bool(task.get("download_only"))
         # 每日上传额度预检：超限直接跳过本次，不下载、不占本地缓存，等次日恢复
         if self._quota is not None:
             allowed, quota_reason = self._quota.can_start(
@@ -1968,6 +1977,7 @@ class CrossTransferTaskManager:
                     not source_path
                     and self._direct_stream
                     and not rapid_miss_abort
+                    and not download_only
                     and fallback
                     and algorithm == "sha1"
                     and bool(checksum)
@@ -2131,6 +2141,7 @@ class CrossTransferTaskManager:
                     downloader = source_provider.require(CloudDriveCapability.FILE_DOWNLOAD)
                     can_stream = (
                             fallback and not rapid_miss_abort
+                            and not download_only
                             and algorithm == "md5"
                             and bool(checksum)
                             and expected_size > 0
@@ -2246,6 +2257,34 @@ class CrossTransferTaskManager:
                     "本地跨盘缓存文件已被清理（可能来自历史删除联动清缓存或手工清理），"
                     "请重新点击重试，插件会重新下载"
                 )
+            if download_only:
+                # 只下载到本地：本地文件已就绪，不再走秒传/上传；调用方
+                # 触发 MP 整理，由 MP 把它上传进媒体库。本地文件归 MP
+                # 整理所有：finally 的缓存清理对此任务跳过（见 finally）。
+                source_file = task.get("source_file")
+                self._update(
+                    task_id, status="success", phase="done", progress=100,
+                    transferred=task["total"], speed_bytes_per_second=0.0,
+                    downloaded_bytes=task["total"], uploaded_bytes=0,
+                    stage_transferred=0, stage_total=0,
+                    message=f"已下载到本地，待 MP 整理上传到{target_name_text}",
+                    method="download_only",
+                    result_local_path=str(source_path),
+                    result_file_name=str(target_name),
+                    result_file_size=int(
+                        task["total"] or getattr(source_file, "size", 0) or 0
+                    ),
+                    result_sha1=str(
+                        checksum if str(algorithm or "").lower() == "sha1"
+                        else getattr(source_file, "sha1", "") or ""
+                    ),
+                    result_md5=str(
+                        checksum if str(algorithm or "").lower() == "md5"
+                        else getattr(source_file, "md5", "") or ""
+                    ),
+                    finished_at=time.time(),
+                )
+                return
             had_download = bool(temporary_path)
             hash_message = (
                 "正在校验本地缓存"
@@ -2430,10 +2469,14 @@ class CrossTransferTaskManager:
                          error=_describe_transfer_error(error),
                          speed_bytes_per_second=0.0, finished_at=time.time())
         finally:
-            # 兜底：任何退出路径（成功、失败、取消、中止、提前 return）
-            # 都不得留下临时文件；文件已删时 _delete_cache_path 是空操作，
-            # 兄弟任务在用时 _delete_cache_path_for_task 会保留。
-            if 'temporary_path' in locals() and temporary_path:
+            # download_only 成功时本地文件归 MP 整理所有：MP 整理会把它
+            # 移出 /downloads，任务结束不能删（否则 MP 整理读不到文件）；
+            # 失败/取消时仍按原规则清理。
+            keep_local = (
+                bool(task.get("download_only"))
+                and str(task.get("status") or "") == "success"
+            )
+            if 'temporary_path' in locals() and temporary_path and not keep_local:
                 self._delete_cache_path_for_task(task, Path(temporary_path))
             self._release_cache_ref(cache_key)
             self._transfer_slots.release()
