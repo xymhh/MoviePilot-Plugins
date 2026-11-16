@@ -1117,6 +1117,22 @@ class CrossTransferTaskManager:
             return None
         return self._cache_root() / clean
 
+    def _source_cache_path(self, source: CloudFile | None) -> Path | None:
+        """源文件名落盘路径（1.12.1 历史重试漏传目标名时留下的文件）。
+
+        文件名本身不带 hash，归属不能只凭名字认——调用方必须再用
+        :meth:`_is_our_cache_file` 按伴随文件（meta 里的 cache_key 或
+        parts 总量）核对是本次源的文件，才可迁移或复用。
+        """
+        if source is None:
+            return None
+        clean = self._sanitize_cache_name(
+            getattr(source, "name", "") or "", prefix_len=0
+        )
+        if not clean:
+            return None
+        return self._cache_root() / clean
+
     @staticmethod
     def _read_cache_owner_key(path: Path) -> str:
         """读 path 的 meta 伴随文件里的 cache_key；读不到返回 ''。"""
@@ -1208,6 +1224,21 @@ class CrossTransferTaskManager:
             if self._rename_cache_files(legacy, desired):
                 return desired
             return legacy
+        # 1.12.2：1.12.1 历史重试漏传目标名，文件以源文件名落盘（如 06.mkv，
+        # 06.mkv.aria2、06.mkv.meta.json 都在）。源文件名不带 hash，改名前
+        # 必须按伴随文件核对归属（meta 里的 cache_key 或 parts 总量），
+        # 否则别家同名文件会被错改名。
+        source_path = self._source_cache_path(source)
+        if (
+                source_path is not None
+                and source_path != desired
+                and source_path.is_file()
+                and self._is_our_cache_file(source_path, cache_key, source)
+        ):
+            logger.info(f"中继缓存改名（源文件名）：{source_path.name} → {desired.name}")
+            if self._rename_cache_files(source_path, desired):
+                return desired
+            return source_path
         return desired
 
     def _lookup_cache_path(
@@ -1228,6 +1259,14 @@ class CrossTransferTaskManager:
             if legacy == desired or not legacy.is_file():
                 continue
             return legacy
+        source_path = self._source_cache_path(source)
+        if (
+                source_path is not None
+                and source_path != desired
+                and source_path.is_file()
+                and self._is_our_cache_file(source_path, cache_key, source)
+        ):
+            return source_path
         return desired
 
     def _rename_cache_files(self, old_path: Path, new_path: Path) -> bool:
@@ -1239,9 +1278,15 @@ class CrossTransferTaskManager:
                 f"中继缓存改名失败：{old_path.name} → {new_path.name}：{error}"
             )
             return False
+        # aria2 控制文件也一起改名：改名后 aria2（continue=true）才能按新
+        # 名断点续传，否则已落盘的字节白下。aria2 没有 .tmp 变体，子循环
+        # 里那次不存在的 .tmp 尝试会被跳过。
+        aria2_old = old_path.with_name(f"{old_path.name}.aria2")
+        aria2_new = new_path.with_name(f"{new_path.name}.aria2")
         for old_comp, new_comp in (
                 (self._cache_meta_path(old_path), self._cache_meta_path(new_path)),
                 (self._cache_parts_path(old_path), self._cache_parts_path(new_path)),
+                (aria2_old, aria2_new),
         ):
             for old_variant, new_variant in (
                     (old_comp, new_comp),
@@ -1296,6 +1341,10 @@ class CrossTransferTaskManager:
                 self._cache_parts_path(path).with_name(
                     f"{self._cache_parts_path(path).name}.tmp"
                 ),
+                # aria2 控制文件：主文件删了它就是孤儿，不跟上会一直
+                # 堆在 /downloads 里（1.12.1 重试留下的 06.mkv.aria2
+                # 就是这么来的）。
+                path.with_name(f"{path.name}.aria2"),
         ):
             if candidate.is_file():
                 candidate.unlink(missing_ok=True)

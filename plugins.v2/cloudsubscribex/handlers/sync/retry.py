@@ -562,7 +562,14 @@ class HistoryRetryService(OwnerDelegator):
                  "size": record.get("file_size") or 0,
                  "sha1": source_sha1,
                  "md5": record.get("source_md5") or ""},
-                self._cloud_transfer_path, None, source_sha1,
+                self._cloud_transfer_path, target_name, source_sha1,
+                # 1.12.2：重试必须把上面算好的目标名（整理后的规范名，如
+                # “十万狂花入梦来 - S01E06 - 第6集.mkv”）传给转存，不能传
+                # None。此前这里传 None，create() 的 title 退回源文件名，
+                # 1.12.1 的“下载时用目标名落盘”在重试上根本没生效：文件以
+                # 06.mkv 之类的源文件名落到 /downloads，MP 整理认不出剧名，
+                # 5 条重试（13:17–13:21）全以 Downloads 命名失败。同盘分支
+                # 不受影响（SHARE_TRANSFER 仍优先用源文件名保存）。
                 # 1.10.13：历史重试是用户显式点的，账本里的死信作业要
                 # 先归零再认领，否则重试连下载都走不到，直接在账本这
                 # 一步被「作业由其他 worker 持有或已终止：failed」挡住
