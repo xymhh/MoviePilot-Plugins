@@ -134,6 +134,107 @@ class MpOrganizeMixin(OwnerDelegator):
             logger.debug(f"解析 MP 整理目标目录失败：{error}", exc_info=True)
             return None
 
+    def _library_episode_exists(
+            self,
+            library_path: str,
+            file_name: str,
+            season: Any = None,
+    ) -> Optional[str]:
+        """查目标媒体库目录里是否已有同集文件，有则返回已存在的文件名。
+
+        按 MetaInfo 口径比对季集（不是按文件名精确比对）：库里那份
+        可能是带 {tmdb-} 标记的、也可能是不带标记的 mp4/mkv，只要
+        季集相同就算重复。查不到、解析不出集号、目录不存在、列目录
+        失败时都返回 None（放行整理）：一次网络抖动不能拦住正常入库，
+        且目录不存在时该集一定不在库里。
+        """
+        try:
+            from pathlib import Path as _Path
+        except Exception:
+            return None
+        stem = str(_Path(str(file_name or "")).stem or "").strip()
+        if not stem:
+            return None
+        try:
+            dedup_meta = getattr(self, "_dedup_meta_info", None)
+            if callable(dedup_meta):
+                meta = dedup_meta(stem, None)
+            else:
+                from app.core.metainfo import MetaInfo
+                meta = MetaInfo(stem)
+        except Exception:
+            return None
+        episodes = list(getattr(meta, "episode_list", None) or [])
+        if not episodes and getattr(meta, "begin_episode", None):
+            episodes = [meta.begin_episode]
+        if not episodes:
+            return None
+        try:
+            target_episodes = {int(episode) for episode in episodes}
+        except (TypeError, ValueError):
+            return None
+        file_season = getattr(meta, "begin_season", None)
+        cloud_directories = getattr(self, "_cloud_directories", None)
+        if cloud_directories is None:
+            return None
+        target_dir = str(library_path or "").strip().rstrip("/") or "/"
+        try:
+            lookup = cloud_directories.resolve_directory(target_dir)
+        except Exception:
+            return None
+        if not getattr(lookup, "checked", False):
+            return None
+        if getattr(lookup, "directory_id", None) is None:
+            return None
+        try:
+            listing = cloud_directories.list_directory(lookup.directory_id)
+        except Exception:
+            return None
+        if not getattr(listing, "checked", False):
+            return None
+        try:
+            from ...utils.file_parser import MediaFileParser
+        except Exception:
+            return None
+        for item in getattr(listing, "files", []) or []:
+            if getattr(item, "is_directory", False):
+                continue
+            name = str(getattr(item, "name", "") or "")
+            if not MediaFileParser.is_video(name):
+                continue
+            try:
+                if callable(dedup_meta):
+                    item_meta = dedup_meta(_Path(name).stem, None)
+                else:
+                    from app.core.metainfo import MetaInfo
+                    item_meta = MetaInfo(_Path(name).stem)
+            except Exception:
+                continue
+            item_season = getattr(item_meta, "begin_season", None)
+            if item_season is None:
+                item_season = season
+            if (
+                    file_season is not None and item_season is not None
+                    and int(file_season) != int(item_season)
+            ):
+                continue
+            item_episodes = list(
+                getattr(item_meta, "episode_list", None) or []
+            )
+            if not item_episodes and getattr(
+                    item_meta, "begin_episode", None
+            ):
+                item_episodes = [item_meta.begin_episode]
+            try:
+                if any(
+                        int(episode) in target_episodes
+                        for episode in item_episodes
+                ):
+                    return name
+            except (TypeError, ValueError):
+                continue
+        return None
+
     def trigger_mp_organize(
             self,
             save_dir: str,
@@ -214,6 +315,27 @@ class MpOrganizeMixin(OwnerDelegator):
                 return False, {
                     "reason": "no_target_dir",
                     "message": "MP 整理未触发：未解析到目标目录，文件未进媒体库，下一轮重试",
+                }
+            # v1.12.16：入库前先查库里有没有这集。同一集从两个来源各下
+            # 一份时，两边都会触发 MP 整理，文件名一不一样（带 {tmdb-}
+            # 标记/不带、mp4/mkv）就互相覆盖不了，全进库了（玫瑰战争
+            # E24/E25）。查到已存在就跳过，不触发、不记失败、不重试。
+            existing = self._library_episode_exists(
+                str(getattr(conf, "library_path", "") or ""),
+                file_name,
+                season if season is not None else (
+                    media.get("season") if isinstance(media, dict) else None
+                ),
+            )
+            if existing:
+                logger.info(
+                    f"该集已在媒体库，跳过 MP 整理：{local_path}，"
+                    f"库里已有 {existing}"
+                )
+                return False, {
+                    "reason": "already_in_library",
+                    "message": f"该集已在媒体库，跳过整理：库里已有 {existing}",
+                    "existing_file": existing,
                 }
             mtype = None
             if effective is not None:
@@ -305,6 +427,12 @@ class MpOrganizeMixin(OwnerDelegator):
                         mediainfo=mediainfo,
                         season=season,
                 )
+                # v1.12.16：该集已在库时 trigger 返回 already_in_library
+                #（ok=False），同样算“已处理”——文件已在媒体库，不用再
+                # 触发整理，也不写平台记录（skip_history 靠 accepted 集）。
+                if not ok and isinstance(_info, dict):
+                    if _info.get("reason") == "already_in_library":
+                        ok = True
                 if ok:
                     accepted.add(file_id)
             except Exception as error:

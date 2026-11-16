@@ -955,6 +955,15 @@ class TransferOpsMixin(OwnerDelegator):
                     else:
                         info = mp_info if isinstance(mp_info, dict) else {}
                         reason = info.get("reason")
+                        if reason == "already_in_library":
+                            # v1.12.16：该集已在媒体库，目标已达成，不记
+                            # 失败、不重试；本地 /downloads 的这份是多余
+                            # 的重复来源，后续由缓存清理处理。
+                            logger.info(
+                                f"该集已在媒体库，跳过 MP 整理：{result_name}，"
+                                f"库里已有 {info.get('existing_file') or ''}"
+                            )
+                            return True
                         if reason == "no_target_dir":
                             failure = (
                                 "MP 整理未触发：未解析到目标目录，"
