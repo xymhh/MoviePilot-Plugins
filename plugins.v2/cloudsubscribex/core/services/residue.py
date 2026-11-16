@@ -34,6 +34,7 @@ class ResidueService(OwnerDelegator):
         不再依赖修改时间；60 秒宽限只防未知写入竞态。
         """
         active_keys: set = set()
+        active_names: set = set()
         manager = getattr(self, "_cross_transfer_manager", None)
         getter = getattr(manager, "active_cache_keys", None)
         if callable(getter):
@@ -44,12 +45,23 @@ class ResidueService(OwnerDelegator):
             except Exception:  # noqa: BLE001 - 取不到在途列表也不影响清理
                 active_keys = set()
             active_keys.discard("")
+        # 目标名落盘的断点续传文件没有 meta，组键就是文件名本身，靠名字保护。
+        name_getter = getattr(manager, "active_cache_names", None)
+        if callable(name_getter):
+            try:
+                active_names = {
+                    str(name or "").strip() for name in name_getter() or ()
+                }
+            except Exception:  # noqa: BLE001 - 取不到在途列表也不影响清理
+                active_names = set()
+            active_names.discard("")
         result = self._empty_residue_result()
         roots = self._residue_roots()
         result["roots"] = roots
         for root in roots:
             scanned = scan_residue(
                 root,
+                active_names=active_names,
                 active_keys=active_keys,
                 min_age_seconds=ORPHAN_MIN_AGE_SECONDS,
                 disk_free_ratio=0,

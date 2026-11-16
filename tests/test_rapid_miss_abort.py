@@ -272,8 +272,11 @@ class RapidMissAbortTests(unittest.TestCase):
         self.fail("任务未在期限内进入终态")
 
     def _cache_triples(self, manager, file_item):
-        cache_path = manager._cache_path(
-            manager._cache_key("quark", file_item), file_item
+        # 1.12.1 起任务用目标名落盘：按生产侧的解析口径取路径（只读查找，
+        # 不触发改名迁移），否则断言会对着一个从不存在的旧命名路径放空炮。
+        cache_path = manager._lookup_cache_path(
+            manager._cache_key("quark", file_item), file_item,
+            target_name="movie.mkv",
         )
         return (
             cache_path,
@@ -292,7 +295,9 @@ class RapidMissAbortTests(unittest.TestCase):
         return cache_path
 
     def _no_cache_left(self, manager):
-        return not list(Path(self.tempdir.name).glob("cloud-transfer-*"))
+        # 1.12.1 起缓存就是目标名文件本身：断言整个缓存目录干净，而不是
+        # 只查 cloud-transfer-*（否则目标名残留会被漏过去）。
+        return not list(Path(self.tempdir.name).iterdir())
 
     def test_abort_probe_hit_succeeds_and_cleans_cache(self):
         """验收1：abort + 命中 → 成功 method=rapid、缓存删除、无真实上传。"""

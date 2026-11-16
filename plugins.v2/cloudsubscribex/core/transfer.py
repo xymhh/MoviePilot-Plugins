@@ -1062,11 +1062,13 @@ class CrossTransferTaskManager:
         return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
 
     @staticmethod
-    def _sanitize_cache_name(name: str) -> str:
-        """清洗源文件名用于缓存命名。
+    def _sanitize_cache_name(name: str, prefix_len: int | None = None) -> str:
+        """清洗文件名用于缓存命名。
 
         去掉路径分隔符与非法字符、空白折叠、截断到安全长度（截尾部、保证扩展名
-        保留）；没有可用扩展名时返回空串，调用方退回旧名 ``.bin``。
+        保留）；没有可用扩展名时返回空串，调用方退回旧命名。``prefix_len`` 是
+        文件名前要拼的前缀长度（旧命名预留 ``cloud-transfer-<hash>-`` 的位置）；
+        目标名直接落盘时传 0，不预留。
         """
         text = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', "_", str(name or ""))
         text = re.sub(r"\s+", " ", text).strip(" .")
@@ -1079,7 +1081,8 @@ class CrossTransferTaskManager:
             stem = text[: -len(suffix)]
             text = stem[: max(0, _CACHE_NAME_MAX_CHARS - len(suffix))] + suffix
         # 多字节字符下再按字节上限截断，仍保留扩展名。
-        prefix_len = len("cloud-transfer-" + "0" * 32 + "-")
+        if prefix_len is None:
+            prefix_len = len("cloud-transfer-" + "0" * 32 + "-")
         while len(text.encode("utf-8")) + prefix_len > _CACHE_FILENAME_MAX_BYTES:
             stem = text[: -len(suffix)]
             if not stem:
@@ -1088,13 +1091,14 @@ class CrossTransferTaskManager:
         return text
 
     def _cache_path(self, cache_key: str, source: CloudFile | None = None) -> Path:
-        """中继缓存路径：有源文件名时用真实文件名命名，否则沿用旧名。
+        """旧命名中继缓存路径（无目标名时的退路）。
 
-        新名：``cloud-transfer-<hash>-<清洗后的源文件名>``（如
+        ``cloud-transfer-<hash>-<清洗后的源文件名>``（如
         ``cloud-transfer-f0c9…-律界战争 S01E05.mp4``）；源文件名不可用
-        （空、无扩展名）时退回旧名 ``cloud-transfer-<hash>.bin``。
-        缓存按源内容寻址，文件名必须反映源文件本身，不用目标名
-        （同一源文件可能被不同任务以不同目标名转存）。
+        （空、无扩展名）时退回 ``cloud-transfer-<hash>.bin``。
+        1.12.1 起有目标名时下载直接用目标名落盘（见
+        :meth:`_desired_cache_path`），这里只作无目标名时的退路与
+        旧缓存迁移的来源。
         """
         if source is not None:
             clean = self._sanitize_cache_name(getattr(source, "name", "") or "")
@@ -1105,6 +1109,126 @@ class CrossTransferTaskManager:
     def _legacy_cache_path(self, cache_key: str) -> Path:
         """旧名中继缓存路径（``cloud-transfer-<hash>.bin``）。"""
         return self._cache_root() / f"cloud-transfer-{cache_key}.bin"
+
+    def _target_cache_path(self, target_name: str | None) -> Path | None:
+        """目标名落盘路径：清洗后的目标名直接作文件名；不可用返回 None。"""
+        clean = self._sanitize_cache_name(target_name or "", prefix_len=0)
+        if not clean:
+            return None
+        return self._cache_root() / clean
+
+    @staticmethod
+    def _read_cache_owner_key(path: Path) -> str:
+        """读 path 的 meta 伴随文件里的 cache_key；读不到返回 ''。"""
+        try:
+            payload = json.loads(
+                path.with_name(f"{path.name}.meta.json").read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return ""
+        key = str(payload.get("cache_key") or "").strip().lower()
+        if len(key) != 32 or any(value not in "0123456789abcdef" for value in key):
+            return ""
+        return key
+
+    def _read_parts_total(self, path: Path) -> int:
+        """读 path 的 parts 伴随文件里的 total；读不到返回 0。"""
+        try:
+            payload = json.loads(
+                self._cache_parts_path(path).read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return 0
+        try:
+            return int(payload.get("total") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _is_our_cache_file(self, path: Path, cache_key: str, source) -> bool:
+        """path 上的文件是否属于本次源：meta 认 cache_key；无 meta 时
+        断点续传的 parts 总量对得上才认（同名不同源的极端情况靠下载完的
+        SHA1 校验兜底，不会静默损坏）。"""
+        if not path.is_file():
+            return False
+        owner = self._read_cache_owner_key(path)
+        if owner:
+            return owner == cache_key
+        if self._cache_meta_path(path).is_file():
+            return False
+        expected = int(getattr(source, "size", 0) or 0)
+        return expected > 0 and self._read_parts_total(path) == expected
+
+    def _desired_cache_path(
+            self, cache_key: str, source: CloudFile | None,
+            target_name: str | None = None,
+    ) -> Path:
+        """本次应落盘的路径（只读判断，不改名、不迁移）。
+
+        有目标名时直接用目标名（如 ``十万狂花入梦来 - S01E06 - 第6集.mkv``），
+        交给 MP 整理时文件名本身就能被识别；目标名已被别源占用时加
+        `` (8 位 hash)`` 区分；无目标名时沿用旧命名。
+        """
+        target_path = self._target_cache_path(target_name)
+        if target_path is None:
+            return self._cache_path(cache_key, source)
+        if (
+                not target_path.exists()
+                or self._is_our_cache_file(target_path, cache_key, source)
+        ):
+            return target_path
+        disambiguated = target_path.with_name(
+            f"{target_path.stem} ({cache_key[:8]}){target_path.suffix}"
+        )
+        if (
+                not disambiguated.exists()
+                or self._is_our_cache_file(disambiguated, cache_key, source)
+        ):
+            return disambiguated
+        return self._cache_path(cache_key, source)
+
+    def _resolve_cache_path(
+            self, cache_key: str, source: CloudFile | None,
+            target_name: str | None = None,
+    ) -> Path:
+        """返回本次应使用的缓存路径（调用方必须持有该 cache_key 的锁）。
+
+        目标名路径不存在、旧命名缓存存在时，把旧缓存连同伴随文件改名成目标名——
+        这是旧缓存唯一的改名迁移路径，已下好的文件不用重下。
+        """
+        desired = self._desired_cache_path(cache_key, source, target_name)
+        if desired.exists():
+            return desired
+        for legacy in dict.fromkeys((
+            self._cache_path(cache_key, source),
+            self._legacy_cache_path(cache_key),
+        )):
+            if legacy == desired or not legacy.is_file():
+                continue
+            logger.info(f"中继缓存改名：{legacy.name} → {desired.name}")
+            if self._rename_cache_files(legacy, desired):
+                return desired
+            return legacy
+        return desired
+
+    def _lookup_cache_path(
+            self, cache_key: str, source: CloudFile | None,
+            target_name: str | None = None,
+    ) -> Path:
+        """不持有 cache_key 锁时的只读查找：先找本次应落盘的路径、再找旧命名，不改名。
+
+        改名迁移留待下次传输时由 :meth:`_resolve_cache_path` 在锁内完成。
+        """
+        desired = self._desired_cache_path(cache_key, source, target_name)
+        if desired.exists():
+            return desired
+        for legacy in dict.fromkeys((
+            self._cache_path(cache_key, source),
+            self._legacy_cache_path(cache_key),
+        )):
+            if legacy == desired or not legacy.is_file():
+                continue
+            return legacy
+        return desired
 
     def _rename_cache_files(self, old_path: Path, new_path: Path) -> bool:
         """把旧名缓存连同伴随文件改名到新名；主文件改名失败返回 False。"""
@@ -1137,31 +1261,6 @@ class CrossTransferTaskManager:
                     )
         return True
 
-    def _resolve_cache_path(self, cache_key: str, source: CloudFile | None) -> Path:
-        """返回本次应使用的缓存路径（调用方必须持有该 cache_key 的锁）。
-
-        新名不存在、旧名存在时，把旧名缓存连同伴随文件改名成新名——这是
-        旧缓存唯一的改名迁移路径。
-        """
-        new_path = self._cache_path(cache_key, source)
-        legacy_path = self._legacy_cache_path(cache_key)
-        if new_path == legacy_path or new_path.is_file() or not legacy_path.is_file():
-            return new_path
-        logger.info(f"中继缓存改名：{legacy_path.name} → {new_path.name}")
-        if self._rename_cache_files(legacy_path, new_path):
-            return new_path
-        return legacy_path
-
-    def _lookup_cache_path(self, cache_key: str, source: CloudFile | None) -> Path:
-        """不持有 cache_key 锁时的只读查找：先找新名、再找旧名，不改名。
-
-        改名迁移留待下次传输时由 :meth:`_resolve_cache_path` 在锁内完成。
-        """
-        new_path = self._cache_path(cache_key, source)
-        legacy_path = self._legacy_cache_path(cache_key)
-        if new_path == legacy_path or new_path.is_file() or not legacy_path.is_file():
-            return new_path
-        return legacy_path
 
     @staticmethod
     def _task_cache_key(task: dict | None) -> str:
@@ -1247,6 +1346,33 @@ class CrossTransferTaskManager:
                 if count > 0
             }
 
+    def active_cache_names(self) -> set:
+        """进行中任务持有的中继缓存文件名（目标名落盘后的实际文件名）。
+
+        残留清理用它保护没有 meta 伴随文件、只凭文件名分组的断点续传文件
+        （目标名文件）；有 meta 的文件靠 :meth:`active_cache_keys` 的组键保护。
+        只读查找，不触发改名迁移。
+        """
+        names = set()
+        with self._lock:
+            tasks = [
+                task for task in self._tasks.values()
+                if task.get("status") in self.ACTIVE
+            ]
+        for task in tasks:
+            source = task.get("source_file")
+            if source is None:
+                continue
+            try:
+                cache_key = self._cache_key(task.get("source_provider"), source)
+                path = self._lookup_cache_path(
+                    cache_key, source, target_name=str(task.get("title") or ""),
+                )
+            except Exception:  # noqa: BLE001 - 取不到名字不影响清理
+                continue
+            names.add(path.name)
+        return names
+
     def _cache_retained_for_others(self, task: dict | None) -> bool:
         """任务自身持有 1 个引用；计数 > 1 说明还有兄弟任务在用同一中继文件。"""
         cache_key = self._task_cache_key(task)
@@ -1272,8 +1398,8 @@ class CrossTransferTaskManager:
                 f"跨盘缓存正在使用中，跳过清理：{normalized}（在用引用 {in_use}）"
             )
             return 0
-        # 只按 cache_key 查找：新名（cloud-transfer-<key>-<源文件名>）与旧名
-        # （cloud-transfer-<key>.bin）都要删，含伴随文件与 AutoRename 变体。
+        # 按 cache_key 查找：旧命名（cloud-transfer-<key>-<源文件名>／.bin）
+        # 按文件名匹配；目标名落盘的文件按 meta 伴随文件里的 cache_key 匹配。
         wanted = f"cloud-transfer-{normalized}"
         deleted = 0
         try:
@@ -1292,6 +1418,18 @@ class CrossTransferTaskManager:
                 deleted += 1
             except OSError as error:  # noqa: BLE001 - 单个文件删失败不影响其余
                 logger.debug(f"删除跨盘缓存失败：{entry.name}：{error}", exc_info=True)
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            if (
+                    entry.name.endswith(".meta.json")
+                    or entry.name.endswith(".parts.json")
+                    or entry.name.endswith(".tmp")
+            ):
+                continue
+            if self._read_cache_owner_key(entry) != normalized:
+                continue
+            deleted += self._delete_cache_path(entry)
         return deleted
 
     def _validate_complete_cache(
@@ -1382,12 +1520,38 @@ class CrossTransferTaskManager:
         }, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         temporary.replace(meta_path)
 
+    def _stamp_cache_owner(
+            self, path: Path, cache_key: str, source: CloudFile,
+    ) -> None:
+        """下载开始前写未完成 meta（complete=False），只记归属。
+
+        校验只认 complete=True，所以它不会被误当作完整缓存；成功后
+        :meth:`_mark_complete_cache` 会覆盖它。写失败不影响下载。
+        """
+        try:
+            meta_path = self._cache_meta_path(path)
+            temporary = meta_path.with_name(f"{meta_path.name}.tmp")
+            temporary.write_text(json.dumps({
+                "version": 1,
+                "cache_key": cache_key,
+                "complete": False,
+                "size": int(getattr(source, "size", 0) or 0),
+                "sha1": str(getattr(source, "sha1", "") or "").lower(),
+                "md5": str(getattr(source, "md5", "") or "").lower(),
+            }, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            temporary.replace(meta_path)
+        except OSError as error:  # noqa: BLE001 - 归属标记写失败不影响下载
+            logger.debug(
+                f"中继缓存归属标记写入失败：{path.name}：{error}", exc_info=True,
+            )
+
     def cache_info(
             self, source_key: str, source: CloudFile,
             verify_checksum: bool = True,
+            target_name: str | None = None,
     ) -> dict:
         cache_key = self._cache_key(source_key, source)
-        path = self._lookup_cache_path(cache_key, source)
+        path = self._lookup_cache_path(cache_key, source, target_name=target_name)
         complete = self._validate_complete_cache(
             path, cache_key, source, verify_checksum=verify_checksum
         )
@@ -1404,7 +1568,11 @@ class CrossTransferTaskManager:
         source = task.get("source_file")
         cache_key = self._cache_key(task.get("source_provider"), source)
         # _run_locked 全程持有该 cache_key 的锁，命中旧名缓存时在此改名迁移。
-        return str(self._resolve_cache_path(cache_key, source))
+        # 任务标题就是目标名（create 时 target_name 落进 title）：有目标名时
+        # 下载直接用目标名落盘，交给 MP 整理时文件名本身就能被识别。
+        return str(self._resolve_cache_path(
+            cache_key, source, target_name=str(task.get("title") or ""),
+        ))
 
     def create(self, source_path: str = "", target_key: str = "", save_path: str = "/",
                 target_name: str = "", algorithm: str = "", checksum: str = "",
@@ -2137,6 +2305,11 @@ class CrossTransferTaskManager:
                                  speed_bytes_per_second=0.0,
                                  message="已找到完整本地缓存，继续目标盘上传")
                 else:
+                    # 下载开始前先落一个未完成 meta（complete=False），只记归属：
+                    # 断点续传文件也有 cache_key，取消/失败后 delete_cache 与
+                    # residue 扫描都能按 key 认出它；成功后 _mark_complete_cache
+                    # 会用 complete=True 的 meta 覆盖它，校验只认 complete=True。
+                    self._stamp_cache_owner(cache_path, cache_key, source_file)
                     download_message = f"正在从{source_name}下载到本地缓存"
                     downloader = source_provider.require(CloudDriveCapability.FILE_DOWNLOAD)
                     can_stream = (

@@ -497,7 +497,8 @@ class HistoryRetryService(OwnerDelegator):
                 md5=str(record.get("source_md5") or ""),
             )
             cache_info = self._cross_transfer_manager.cache_info(
-                source_key, cached_source, verify_checksum=True
+                source_key, cached_source, verify_checksum=True,
+                target_name=target_name,
             ) if self._cross_transfer_manager else {}
             record.update(cache_info)
             if self._save_data:
@@ -596,6 +597,7 @@ class HistoryRetryService(OwnerDelegator):
                     str(record.get("source_drive_key") or ""),
                     cached_source,
                     verify_checksum=False,
+                    target_name=target_name,
                 ))
             # 本次重试的失败原因优先用任务刚记下来的那条（_transfer_file
             # 已把任务 error 写进 _transfer_failure_reasons）；记录上残留
@@ -644,6 +646,7 @@ class HistoryRetryService(OwnerDelegator):
                 str(record.get("source_drive_key") or ""),
                 cached_source,
                 verify_checksum=False,
+                target_name=target_name,
             ))
         # 终态关联先落定，再做标题/年份/封面等装饰性更新：
         # 装饰性字段异常时记录仍带 finalize_key，后处理可把终态写回，不会卡在旧状态。

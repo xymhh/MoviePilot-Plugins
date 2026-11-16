@@ -323,13 +323,13 @@ class SameCacheKeySerializationTests(_RelayHarnessBase):
 
 
     def test_legacy_bin_cache_reused_and_renamed_to_new_name(self):
-        """旧名 .bin 完整缓存命中时复用并改名到新名（含伴随文件）。"""
+        """旧名 .bin 完整缓存命中时复用并改名到目标名（含伴随文件）。"""
         manager = self.make_manager(upload_file=self._ok_upload)
         cache_key = manager._cache_key("quark", self.file_item)
         legacy = manager._cache_path(cache_key)
         legacy.write_bytes(PAYLOAD)
         manager._mark_complete_cache(legacy, cache_key, self.file_item)
-        new_path = manager._cache_path(cache_key, self.file_item)
+        new_path = manager._target_cache_path("movie.mkv")
         manager._acquire_cache_ref(cache_key)  # 兄弟在飞，终态保留缓存以便断言
 
         public = manager.create(
@@ -340,7 +340,7 @@ class SameCacheKeySerializationTests(_RelayHarnessBase):
         task = self._wait_terminal(manager, public["id"])
 
         self.assertEqual(task["status"], "success")
-        self.assertTrue(new_path.is_file(), "命中旧名缓存时应改名到新名")
+        self.assertTrue(new_path.is_file(), "命中旧名缓存时应改名到目标名")
         self.assertFalse(legacy.exists(), "改名后旧名文件不应残留")
         self.assertTrue(
             manager._cache_meta_path(new_path).is_file(),
@@ -354,7 +354,10 @@ class CacheRefRetentionTests(_RelayHarnessBase):
 
     def test_sibling_in_flight_retains_then_next_task_deletes(self):
         manager = self.make_manager(upload_file=self._ok_upload)
-        cache_path = self._seed_complete_cache(manager)
+        self._seed_complete_cache(manager)
+        # 1.12.1 起任务用目标名落盘：旧命名缓存命中时改名成目标名，断言
+        # 要对着任务实际用的路径，而不是种子落下的旧命名。
+        cache_path = manager._target_cache_path("movie.mkv")
         cache_key = manager._cache_key("quark", self.file_item)
 
         manager._acquire_cache_ref(cache_key)  # 模拟兄弟任务在飞
@@ -445,9 +448,8 @@ class CacheRefRetentionTests(_RelayHarnessBase):
 
         manager = self.make_manager(download_file=download_file)
         manager_ref["manager"] = manager
-        cache_path = manager._cache_path(
-            manager._cache_key("quark", self.file_item), self.file_item
-        )
+        # 1.12.1 起任务用目标名落盘：取消时保留的也是目标名文件。
+        cache_path = manager._target_cache_path("movie.mkv")
         cache_key = manager._cache_key("quark", self.file_item)
         manager._acquire_cache_ref(cache_key)  # 兄弟在飞
 

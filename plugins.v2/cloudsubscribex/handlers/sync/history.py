@@ -147,6 +147,7 @@ class HistoryService(OwnerDelegator):
                     source_provider.key,
                     source_file,
                     verify_checksum=False,
+                    target_name=file_name,
                 ))
         if not item.get("discovered_via"):
             fallback_via = str(getattr(subscribe, "_discovered_via", "") or "").strip()

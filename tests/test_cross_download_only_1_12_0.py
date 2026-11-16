@@ -286,8 +286,9 @@ class DownloadOnlyTests(unittest.TestCase):
         self.assertEqual(Path(local_path).read_bytes(), PAYLOAD)
         self.assertEqual(upload.upload_file_calls, [])
         self.assertEqual(len(self.source.download_calls), 1)
-        # 任务结束不删缓存：文件归 MP 整理所有。
-        self.assertTrue(
+        # 任务结束不删缓存：文件归 MP 整理所有。1.12.1 起下载直接用目标名落盘。
+        self.assertTrue(Path(self.tempdir.name, "movie.mkv").is_file())
+        self.assertFalse(
             list(Path(self.tempdir.name).glob("cloud-transfer-*"))
         )
 
@@ -317,7 +318,8 @@ class DownloadOnlyTests(unittest.TestCase):
         self.assertEqual(done["status"], "success")
         self.assertEqual(done["method"], "fallback")
         self.assertEqual(len(upload.upload_file_calls), 1)
-        # 普通任务成功后缓存照常删除。
+        # 普通任务成功后缓存照常删除（1.12.1 起缓存就是目标名文件本身）。
+        self.assertFalse(Path(self.tempdir.name, "movie.mkv").exists())
         self.assertFalse(
             list(Path(self.tempdir.name).glob("cloud-transfer-*"))
         )

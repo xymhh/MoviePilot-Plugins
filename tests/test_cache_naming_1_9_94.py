@@ -1,9 +1,12 @@
 """跨盘缓存文件命名（1.9.94）：下载时用真实文件名命名、后缀改回媒体扩展名。
 
-固定契约：
-1. 新名 ``cloud-transfer-<hash>-<清洗后的源文件名>``，如
-   ``cloud-transfer-f0c9…-律界战争 S01E05.mp4``；缓存按源内容寻址，
-   文件名取 source_file.name，绝不用目标名（target_name）；
+固定契约（1.12.1 起目标名落盘，1.9.94 的源文件名命名改为无目标名时的退路）：
+1. 有目标名时新名就是清洗后的目标名（如
+   ``十万狂花入梦来 - S01E06 - 第6集.mkv``）；目标名不可用（空、无扩展名）
+   时退回旧命名 ``cloud-transfer-<hash>-<清洗后的源文件名>``（如
+   ``cloud-transfer-f0c9…-律界战争 S01E05.mp4``），源文件名也没有可用
+   扩展名时退回旧名 ``cloud-transfer-<hash>.bin``；缓存身份记在 meta
+   伴随文件里，不靠文件名；
 2. 源文件名没有可用扩展名时退回旧名 ``cloud-transfer-<hash>.bin``；
 3. 旧名缓存命中时在 cache_key 锁内改名迁移（含伴随文件），改名后
    ``_validate_complete_cache`` 仍通过；只读查找（cache_info）不改名；
@@ -149,17 +152,19 @@ def test_cache_path_uses_source_name_and_legacy_without_source():
         assert manager._cache_path(key, no_ext).name == f"cloud-transfer-{key}.bin"
 
 
-def test_temporary_path_uses_source_name_not_target_name():
+def test_temporary_path_uses_target_name_not_source_name():
+    # 1.12.1 起设计反转：下载直接用目标名落盘（交给 MP 整理时文件名本身
+    # 就能被识别），源文件名命名只作目标名不可用时的退路。
     with TemporaryDirectory() as tmp:
         manager = _make_manager(tmp)
         source = _make_source("源文件 S01E01.mkv")
         task = {
             "source_provider": "quark", "source_file": source,
-            "title": "目标名",
+            "title": "目标剧 S01E01.mkv",
         }
         path = manager._temporary_path(task)
-        assert "源文件 S01E01.mkv" in path
-        assert "目标名" not in path
+        assert path == str(Path(tmp) / "目标剧 S01E01.mkv")
+        assert "源文件 S01E01.mkv" not in path
 
 
 # ---------------------------------------------------------------- 旧名迁移
