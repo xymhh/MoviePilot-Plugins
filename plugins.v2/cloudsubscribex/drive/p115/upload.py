@@ -392,24 +392,16 @@ class P115UploadService(OwnerDelegator):
                 target, upload_id, **self._oss_proxy_kwargs()
             )
 
-    def _upload_proxy_url(self) -> str:
-        """上传代理地址（原始 URL）；未配置时返回空字符串。"""
-        proxies = getattr(self._owner, "_upload_proxies", None)
-        if isinstance(proxies, dict) and proxies:
-            url = str(proxies.get("https") or proxies.get("http") or "").strip()
-            if url:
-                return url
-        try:
-            return str(
-                getattr(self._owner, "_cross_transfer_upload_proxy", "") or ""
-            ).strip()
-        except Exception:
-            return ""
-
     def _oss2_proxy_dict(self) -> Dict[str, str]:
-        """oss2 数据面用的代理字典；未配置时返回空字典（直连）。"""
-        url = self._upload_proxy_url()
-        return {"http": url, "https": url} if url else {}
+        """oss2 数据面用的代理字典；1.12.12 起固定返回空字典（直连）。
+
+        根因（2026-11-17 实测）：插件的上传代理（mihomo:7890）传给
+        oss2 Bucket 后，分片上传全失败；但秒传只调 p115 API（代理对
+        其无效、实际直连）能成功，cd2 直连也能成功。p115disk 原版建
+        Bucket 时根本不传代理，也是直连。所以 oss2 数据面改走直连，
+        不再用上传代理；上传代理配置仍保留给 p115 客户端 API 侧。
+        """
+        return {}
 
     @staticmethod
     def _oss2_token_expiring(
