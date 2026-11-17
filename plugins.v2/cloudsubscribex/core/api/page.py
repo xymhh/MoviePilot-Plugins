@@ -138,7 +138,6 @@ def _resolve_subscribe_tmdb_id(subscribe: object):
 
 
 class PageApi(OwnerDelegator):
-    @staticmethod
     def api_vue_page_data(
             self,
             page: int = 1,

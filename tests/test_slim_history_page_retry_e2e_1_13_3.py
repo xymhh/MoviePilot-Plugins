@@ -310,7 +310,10 @@ class SlimHistoryPageRetryE2ETests(unittest.TestCase):
         return record
 
     def _page_failures(self, **kwargs):
-        result = self.page_api.api_vue_page_data(self.page_api, **kwargs)
+        # 按 MP 调用端点的方式调：不显式传 self。v1.13.3 曾把本方法标成
+        # @staticmethod 又留着 self 首参，MP 无实例调用缺 self 而报
+        # “请求参数不正确”，本用例显式传 self 把 bug 掩盖过去了。
+        result = self.page_api.api_vue_page_data(**kwargs)
         self.assertTrue(result["success"])
         return result["data"]
 
@@ -372,6 +375,19 @@ class SlimHistoryPageRetryE2ETests(unittest.TestCase):
             )
         # 拒绝重试不改行状态
         self.assertEqual(len(self.repo.list_retryable()), 1)
+
+    def test_page_data_is_instance_method_not_staticmethod(self):
+        # 回归（v1.13.3 线上事故）：api_vue_page_data 曾被标成
+        # @staticmethod 又留着 self 首参，MP 按端点签名无实例调用时
+        # 缺 self，页面报“请求参数不正确”，统计接口却正常。端点
+        # 必须是普通实例方法，且经实例取用时要绑定 self。
+        import inspect
+
+        raw = inspect.getattr_static(_PageApi, "api_vue_page_data")
+        self.assertNotIsInstance(raw, staticmethod)
+        bound = self.page_api.api_vue_page_data
+        self.assertTrue(inspect.ismethod(bound))
+        self.assertIs(bound.__self__, self.page_api)
 
 
 if __name__ == "__main__":
