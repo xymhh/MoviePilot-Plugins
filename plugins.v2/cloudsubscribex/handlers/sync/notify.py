@@ -189,7 +189,8 @@ class SyncNotificationService(OwnerDelegator):
                 if type_text:
                     meta.append(self._media_type_name(type_text))
                 size = int(detail.get("size") or 0)
-                if size > 0:
+                size_unknown = bool(detail.get("size_unknown"))
+                if size > 0 and not size_unknown:
                     meta.append(format_size(size))
                 source = str(detail.get("source") or "").strip()
                 if source:
@@ -225,7 +226,7 @@ class SyncNotificationService(OwnerDelegator):
                 card_lines = [f"{prefix}{icon} {headline}"]
                 field_values = (
                     ("类型", self._media_type_name(type_text)),
-                    ("大小", format_size(size) if size > 0 else ""),
+                    ("大小", format_size(size) if size > 0 and not size_unknown else ""),
                     ("来源", source),
                 )
                 for field_name, field_value in field_values:
@@ -234,6 +235,10 @@ class SyncNotificationService(OwnerDelegator):
                 text_cards.append("\n".join(card_lines))
                 if not first_image and detail.get("image"):
                     first_image = detail.get("image")
+            # 任一明细体积未知时注明（汇总数只是已知部分的和，不是全量）。
+            if any(detail.get("size_unknown") for detail in details):
+                text_lines.append("部分集数体积未知")
+                text_cards.append("部分集数体积未知")
             if len(text_lines) > 10:
                 text_lines = text_lines[:10]
                 text_lines.append(f"... 等共 {len(details)} 项")

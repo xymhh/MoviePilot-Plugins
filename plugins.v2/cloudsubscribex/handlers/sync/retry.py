@@ -52,6 +52,9 @@ class HistoryRetryService(OwnerDelegator):
     def _find_history_record(
             self, record_time: str, share_url: str, file_name: str
     ) -> Optional[Dict[str, Any]]:
+        indexed = self._find_retry_index_record(record_time, share_url, file_name)
+        if indexed is not None:
+            return indexed
         history = (self._get_data("history") or []) if self._get_data else []
         return next(
             (
@@ -62,6 +65,45 @@ class HistoryRetryService(OwnerDelegator):
             ),
             None,
         )
+
+    def _find_retry_index_record(
+            self, record_time: str, share_url: str, file_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """先查重试索引：有索引行时优先用它定位 history 记录；history
+        记录已被裁剪/删除时，用索引行拼一条可重试的记录 dict。
+
+        索引不可用（测试桩/异常）时返回 None，调用方回落 history 扫描。
+        """
+        try:
+            get_store = getattr(self, "_get_data_store", None)
+            if not callable(get_store):
+                return None
+            row = get_store().repositories.retry_index.get_by_identity(
+                record_time, share_url, file_name
+            )
+        except Exception as error:  # noqa: BLE001 - 索引不可用时回落
+            logger.debug(f"重试索引查询失败，回落历史扫描：{error}", exc_info=True)
+            return None
+        if not row:
+            return None
+        try:
+            from ...core.retry_index import index_row_to_history_dict
+        except Exception as error:  # noqa: BLE001 - 索引模块不可用时回落
+            logger.debug(f"重试索引转换失败，回落历史扫描：{error}", exc_info=True)
+            return None
+        history = (self._get_data("history") or []) if self._get_data else []
+        record_id = str(row.get("record_id") or "").strip()
+        if record_id:
+            found = next(
+                (
+                    item for item in history
+                    if str(item.get("record_id") or "").strip() == record_id
+                ),
+                None,
+            )
+            if found is not None:
+                return found
+        return index_row_to_history_dict(row)
 
     @staticmethod
     def _history_retry_key(record_time: str, share_url: str, file_name: str) -> str:

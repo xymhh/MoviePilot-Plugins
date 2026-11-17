@@ -134,52 +134,6 @@ class UpgradeBaselineService(OwnerDelegator):
             )
         return episode_files
 
-    def _plugin_history_episode_files(
-            self, subscribe, season: int
-    ) -> Dict[int, List[Dict[str, Any]]]:
-        """按显式 episode 字段读取插件转存历史，不依赖 STRM 文件名。"""
-        cache_key = normalize_platform_cache_key(
-            self._baseline_key(subscribe, season)
-        )
-        with self._baseline_cache_lock:
-            cached = self._baseline_plugin_cache.get(cache_key)
-            if cached is not None:
-                return self._copy_episode_items(cached)
-        tmdbid = self._int_or_zero(tmdb_id_of(subscribe))
-        title = str(getattr(subscribe, "name", "") or "")
-        episode_files: Dict[int, List[Dict[str, Any]]] = {}
-        for record in (self._get_data("history") or []) if self._get_data else []:
-            record_tmdbid = self._int_or_zero(record.get("tmdb_id"))
-            if tmdbid and record_tmdbid != tmdbid:
-                continue
-            if not tmdbid and str(record.get("title") or "") != title:
-                continue
-            if self._int_or_zero(record.get("season") or 1) != season:
-                continue
-            if str(record.get("status") or "") in {"失败", "转存失败", "已删除", "跳过"}:
-                continue
-            if record.get("landed") is False:
-                # 1.6.52 显式落盘自检已明确「没有实物」→ 直接丢弃，不再当已有版本
-                continue
-            episode = self._int_or_zero(record.get("episode"))
-            file_name = str(
-                record.get("source_file_name") or record.get("file_name") or ""
-            ).strip()
-            if not episode or not file_name:
-                continue
-            episode_files.setdefault(episode, []).append({
-                "file_name": file_name,
-                "file_size": self._int_or_zero(record.get("file_size")),
-                "target_file_name": str(record.get("file_name") or "").strip(),
-                "cloud_dir": str(record.get("cloud_dir") or "").strip(),
-                "source": "插件转存记录",
-            })
-        with self._baseline_cache_lock:
-            self._baseline_plugin_cache.set(
-                cache_key, self._copy_episode_items(episode_files)
-            )
-        return episode_files
-
     def _build_episode_baseline(
             self,
             subscribe,
@@ -187,11 +141,8 @@ class UpgradeBaselineService(OwnerDelegator):
             season: int,
             include_saved: bool = True,
     ) -> Dict[int, Dict[str, Any]]:
-        """合并整理历史、插件历史与媒体库路径；STRM 不提供文件大小。"""
+        """合并整理历史、手动基线与媒体库路径；STRM 不提供文件大小。"""
         candidates = self._transfer_history_episode_files(subscribe, season)
-        for episode, items in self._plugin_history_episode_files(
-                subscribe, season).items():
-            candidates.setdefault(episode, []).extend(items)
 
         manual_baseline = getattr(subscribe, "_manual_media_baseline", {}) or {}
         for episode, item in (manual_baseline.get("episodes") or {}).items():

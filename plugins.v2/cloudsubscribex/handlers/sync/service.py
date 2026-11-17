@@ -543,10 +543,6 @@ class SyncHandler:
             "sync:baseline_transfer", self, maxsize=256,
             ttl=self._RUNTIME_CACHE_TTL,
         )
-        self._baseline_plugin_cache = create_platform_ttl_cache(
-            "sync:baseline_plugin", self, maxsize=256,
-            ttl=self._RUNTIME_CACHE_TTL,
-        )
         self._baseline_media_server_cache = create_platform_ttl_cache(
             "sync:baseline_media_server", self, maxsize=256,
             ttl=self._RUNTIME_CACHE_TTL,
@@ -628,11 +624,9 @@ class SyncHandler:
             self._subscribe_calendar_cache.clear()
         with self._baseline_cache_lock:
             baseline_transfer = len(self._baseline_transfer_cache)
-            baseline_plugin = len(self._baseline_plugin_cache)
             baseline_media_server = len(self._baseline_media_server_cache)
             season_listing = len(getattr(self, "_season_listing_cache", {}) or {})
             self._baseline_transfer_cache.clear()
-            self._baseline_plugin_cache.clear()
             self._baseline_media_server_cache.clear()
             season_listing_cache = getattr(self, "_season_listing_cache", None)
             if season_listing_cache is not None:
@@ -644,7 +638,6 @@ class SyncHandler:
             "subscribe_defer": subscribe_defer,
             "subscribe_calendar": subscribe_calendar,
             "baseline_transfer": baseline_transfer,
-            "baseline_plugin": baseline_plugin,
             "baseline_media_server": baseline_media_server,
             "season_listing": season_listing,
         }

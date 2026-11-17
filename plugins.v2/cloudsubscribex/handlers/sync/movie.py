@@ -755,8 +755,12 @@ class MovieSyncProcessor(OwnerDelegator):
                                 f"{mediainfo.title} (平台优先级:{current_score})"
                             )
 
-                            # 收集转存详情用于通知
+                            # 收集转存详情用于通知：体积直接取转存结果，
+                            # 不再从 history 里补（history 表在 v1.13.2 删除）。
                             if not pending_key:
+                                movie_size = self._resource_size_bytes(
+                                    matched_file.get("size")
+                                )
                                 transfer_details.append({
                                     "type": "电影",
                                     "title": mediainfo.title,
@@ -770,7 +774,8 @@ class MovieSyncProcessor(OwnerDelegator):
                                         if history_item.get("transfer_mode") == "cross"
                                         else "transfer"
                                     ),
-                                    "size": self._detail_size(history_item, matched_file),
+                                    "size": movie_size,
+                                    "size_unknown": movie_size <= 0,
                                     "source": self._detail_source_text(history_item),
                                 })
 

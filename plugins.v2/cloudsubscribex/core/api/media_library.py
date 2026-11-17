@@ -1,7 +1,8 @@
 """媒体库 Webhook、播放与内容查询 API。"""
 
+import re
 from threading import RLock, Timer
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from app.chain.mediaserver import MediaServerChain
 from app.db import SessionFactory
@@ -63,12 +64,13 @@ class MediaLibraryApi(OwnerDelegator):
         raw_title = str(payload.get("Title") or "") if isinstance(payload, dict) else ""
         raw_desc = str(payload.get("Description") or "") if isinstance(payload, dict) else ""
 
+        keywords = self._deep_delete_title_keywords()
         is_deep_delete = (
                 event_name in {"deep.delete", "deep_delete", "deepdelete"}
                 or raw_event in {"deep.delete", "deep_delete", "deepdelete"}
                 or "deep.delete" in event_name
-                or "深度删除" in title or "深度删除" in raw_title
-                or "神医" in title or "神医" in raw_title
+                or any(kw and kw in title for kw in keywords)
+                or any(kw and kw in raw_title for kw in keywords)
                 or "Item Path:" in desc or "Item Path:" in raw_desc
                 or event_name in {"item.delete", "item.deleted", "library.deleted"}
         )
@@ -102,8 +104,27 @@ class MediaLibraryApi(OwnerDelegator):
                 f"已接收平台 Emby Webhook：{server_name} - {event_name}"
             )
         return scheduled
+    def _deep_delete_title_keywords(self) -> List[str]:
+        """深度删除标题关键词（配置 platform_deep_delete_title_keywords）。
+
+        插件未声明该键时回落默认值 ["深度删除", "神医"]；前端保存的是
+        字符串时按换行/逗号拆；空列表表示标题分支永不命中。
+        """
+        raw = getattr(self, "_platform_deep_delete_title_keywords", None)
+        if raw is None:
+            return ["深度删除", "神医"]
+        if isinstance(raw, str):
+            return [
+                part.strip()
+                for part in re.split(r"[\n,，]", raw)
+                if part.strip()
+            ]
+        if isinstance(raw, (list, tuple, set)):
+            return [str(item).strip() for item in raw if str(item).strip()]
+        return []
+
     def _handle_platform_deep_delete(self, event_info: Any) -> bool:
-        """按神医通知中的媒体服务器路径精确删除关联内容。"""
+        """按媒体服务器路径删除网盘内容（整目录档 + 逐文件档）。"""
         if not self._platform_deep_delete_enabled:
             logger.info("收到神医/媒体库深度删除事件，但网盘订阅设置中「联动删除」未开启，已跳过")
             return False
@@ -124,18 +145,18 @@ class MediaLibraryApi(OwnerDelegator):
             return False
         logger.info(
             f"收到深度删除请求：{'、'.join(self._path_leaf(p) or p for p in paths)}"
-            f"（{len(paths)} 个目标），开始匹配转存历史"
+            f"（{len(paths)} 个目标），开始按媒体库路径删除网盘内容"
         )
         result = self._sync_handler.delete_by_media_server_paths(paths)
         if not result.get("matched"):
             self._deep_delete_dedup.release(paths)
             logger.warning(
-                f"深度删除未匹配到对应的插件历史记录（目标路径：{paths}）"
+                f"深度删除未匹配到可删除的网盘内容（目标路径：{paths}）"
             )
             return False
         titles = [self._path_leaf(path) for path in paths]
         titles = [title for title in titles if title]
-        lines = [f"历史记录：{result['deleted']} 条"]
+        lines = []
         for field_name, field_key in (
                 ("网盘目录", "cloud_directories_deleted"),
                 ("网盘文件", "cloud_files_deleted"),
@@ -147,8 +168,8 @@ class MediaLibraryApi(OwnerDelegator):
         if result.get("skipped"):
             lines.append(f"跳过：{result['skipped']} 条")
         message = (
-            f"路径 {len(paths)} 个，匹配 {result['matched']} 条，"
-            f"删除历史 {result['deleted']} 条、网盘文件 "
+            f"路径 {len(paths)} 个，匹配 {result['matched']} 个目标，"
+            f"删除网盘文件 "
             f"{result.get('cloud_files_deleted', 0)} 个、网盘目录 "
             f"{result.get('cloud_directories_deleted', 0)} 个、STRM "
             f"{result.get('strm_deleted', 0)} 个"

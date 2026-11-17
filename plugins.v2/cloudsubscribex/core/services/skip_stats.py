@@ -24,6 +24,7 @@ class SkipStatsCollector:
     KIND_MISMATCH = "mismatch"           # 分享内容不是目标作品
     KIND_EPISODE_MISS = "episode_miss"   # 是这部剧，但资源集号不在缺失范围
     KIND_UNPARSABLE = "unparsable"       # 是这部剧，但解析不出季集号
+    KIND_DEDUP_SKIP = "dedup_skip"       # 同集已有更优版本，判重跳过
 
     #: 类型 -> 中文文案（与候选摘要同一套中文命名）。
     KIND_LABELS: Dict[str, str] = {
@@ -32,6 +33,7 @@ class SkipStatsCollector:
         KIND_MISMATCH: "剧名不符",
         KIND_EPISODE_MISS: "集号不符",
         KIND_UNPARSABLE: "无法解析集号",
+        KIND_DEDUP_SKIP: "同集已有更优版本",
     }
     #: 汇总文案里的类型顺序：先失效、后无可用文件、再内容类问题。
     KIND_ORDER: Tuple[str, ...] = (
@@ -40,6 +42,7 @@ class SkipStatsCollector:
         KIND_MISMATCH,
         KIND_EPISODE_MISS,
         KIND_UNPARSABLE,
+        KIND_DEDUP_SKIP,
     )
     #: 识别不出来源网盘时的兜底展示名。
     UNKNOWN_PROVIDER = "未知来源"

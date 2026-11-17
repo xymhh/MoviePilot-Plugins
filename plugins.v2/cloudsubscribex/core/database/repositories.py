@@ -23,6 +23,7 @@ from .models import (
     HistoryRecord,
     OfflinePendingTask,
     PointBudgetRecord,
+    RetryIndex,
     RuntimeRecord,
     SourceSha1Cache,
     SourceMissCache,
@@ -39,6 +40,11 @@ from ...search.types import normalize_resource_type, resource_type_from_url
 
 #: 历史台账默认保留条数（超过后按记录时间淘汰最旧）。可用环境变量覆盖。
 DEFAULT_HISTORY_RETENTION = 5000
+
+#: 重试索引留存（设计 §2）：失败行 90 天、待修复行 30 天；重试完成的行
+#: 在 history 翻成功时由同步删除，不走过期清理。
+RETRY_INDEX_FAILED_RETENTION_SECONDS = 90 * 86400
+RETRY_INDEX_REPAIR_RETENTION_SECONDS = 30 * 86400
 
 
 def history_retention_limit() -> int:
@@ -542,6 +548,115 @@ class HistoryRepository(DbOper):
             **summary,
             "recent": [copy.deepcopy(row.payload) for row in recent],
         }
+
+
+#: 重试索引行字段（与 RetryIndex 模型列一一对应；展示类字段不在此列）。
+RETRY_INDEX_FIELDS = tuple(
+    column.name for column in RetryIndex.__table__.columns
+)
+
+
+class RetryIndexRepository(DbOper):
+    """最小重试索引仓储（Phase 2 v1.13.1）：只存重试必需的字段。
+
+    表里只有三类行：失败（status=="失败"）、跨盘成功待修复
+    （status=="成功" 且 landed 为 False）、处理中（重试进行中）。
+    成功行只在待修复时才进表，所以 status=="成功" 本身就是待修复标记。
+    """
+
+    @db_query
+    def list_all(self, db: Session = None) -> List[Dict[str, Any]]:
+        return [row.to_dict() for row in RetryIndex.list(db)]
+
+    @db_query
+    def get_by_record_id(
+            self, record_id: str, db: Session = None
+    ) -> Optional[Dict[str, Any]]:
+        row = RetryIndex.get(db, str(record_id or "").strip())
+        return row.to_dict() if row is not None else None
+
+    @db_query
+    def get_by_identity(
+            self,
+            record_time: str,
+            share_url: str,
+            file_name: str,
+            db: Session = None,
+    ) -> Optional[Dict[str, Any]]:
+        row = db.scalars(
+            select(RetryIndex).where(
+                RetryIndex.record_time == str(record_time or ""),
+                RetryIndex.share_url == str(share_url or ""),
+                RetryIndex.file_name == str(file_name or ""),
+            )
+        ).first()
+        return row.to_dict() if row is not None else None
+
+    @db_query
+    def list_retryable(self, db: Session = None) -> List[Dict[str, Any]]:
+        """只列失败与待修复行（处理中的重试不列出）。"""
+        rows = db.scalars(
+            select(RetryIndex)
+            .where(or_(RetryIndex.status == "失败", RetryIndex.status == "成功"))
+            .order_by(RetryIndex.created_at.asc(), RetryIndex.record_id.asc())
+        ).all()
+        return [row.to_dict() for row in rows]
+
+    @db_update
+    def upsert_row(self, row: Dict[str, Any], db: Session = None) -> bool:
+        """按 record_id 插入或更新一行；无 record_id 时返回 False。"""
+        record_id = str((row or {}).get("record_id") or "").strip()
+        if not record_id:
+            return False
+        values = {
+            key: (row or {}).get(key)
+            for key in RETRY_INDEX_FIELDS
+        }
+        values["record_id"] = record_id
+        statement = sqlite_insert(RetryIndex).values(**values)
+        db.execute(statement.on_conflict_do_update(
+            index_elements=[RetryIndex.record_id],
+            set_={
+                key: getattr(statement.excluded, key)
+                for key in values if key != "record_id"
+            },
+        ))
+        return True
+
+    @db_update
+    def delete_by_record_ids(
+            self, record_ids: Iterable[str], db: Session = None
+    ) -> int:
+        ids = {
+            str(record_id or "").strip()
+            for record_id in (record_ids or [])
+            if str(record_id or "").strip()
+        }
+        if not ids:
+            return 0
+        result = db.execute(delete(RetryIndex).where(
+            RetryIndex.record_id.in_(sorted(ids))
+        ))
+        return int(result.rowcount or 0)
+
+    @db_update
+    def purge_old(
+            self, now: Optional[int] = None, db: Session = None
+    ) -> int:
+        """删过期行：失败行 90 天、待修复行 30 天；处理中行不走过期清理。"""
+        current = int(now or time.time())
+        failed_cutoff = current - RETRY_INDEX_FAILED_RETENTION_SECONDS
+        repair_cutoff = current - RETRY_INDEX_REPAIR_RETENTION_SECONDS
+        deleted = 0
+        deleted += int(db.execute(delete(RetryIndex).where(
+            RetryIndex.status == "失败",
+            RetryIndex.created_at < failed_cutoff,
+        )).rowcount or 0)
+        deleted += int(db.execute(delete(RetryIndex).where(
+            RetryIndex.status == "成功",
+            RetryIndex.created_at < repair_cutoff,
+        )).rowcount or 0)
+        return deleted
 
 
 class OfflinePendingRepository(DbOper):
@@ -1248,6 +1363,7 @@ class CloudSubscribeRepositories:
             db: Session = None,
     ):
         self.history = HistoryRepository(manager, db)
+        self.retry_index = RetryIndexRepository(manager, db)
         self.offline = OfflinePendingRepository(manager, db)
         self.checkin = CheckinRepository(manager, db)
         self.schedule = CheckinScheduleRepository(manager, db)

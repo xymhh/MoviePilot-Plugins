@@ -198,3 +198,51 @@ class AuthSession(CloudSubscribeBase):
     updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     payload: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
+
+
+class RetryIndex(CloudSubscribeBase):
+    """最小重试索引（Phase 2 v1.13.1）：只存重试必需的字段。
+
+    展示类字段（海报、评分、来源文本、跳过原因、缓存字段）一律不存。
+    record_time / type 沿用 history 记录的键名（HistoryRecord 用 record_time
+    存 time 值的既有约定）。行只分三种：失败（status=="失败"）、跨盘成功
+    待修复（status=="成功" 且 landed 为 False）、处理中（重试进行中）。
+    旧 history 的导入/同步见 core/retry_index.py；history 表本身在
+    v1.13.2 才删，本版两边并行。
+    """
+
+    __tablename__ = "retry_index"
+
+    record_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    record_time: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    share_url: Mapped[str] = mapped_column(String(2048), nullable=False, default="")
+    file_name: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    tmdb_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    type: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    season: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    episode: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    year: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    source_file_name: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_sha1: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    source_md5: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    transfer_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    source_drive_key: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    target_drive_key: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    cloud_dir: Mapped[str] = mapped_column(String(2048), nullable=False, default="")
+    finalize_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    failure_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    failure_reason: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    failure_retryable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    landed: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        Index("ix_retry_identity", "record_time", "share_url", "file_name"),
+        Index("ix_retry_status", "status"),
+        Index("ix_retry_created", "created_at"),
+    )

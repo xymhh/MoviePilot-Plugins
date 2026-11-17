@@ -205,23 +205,46 @@ class HistoryService(OwnerDelegator):
             logger.warning(f"记录下载历史失败：{error}")
             return False
 
-    def _detail_source_text(self, history_item: Optional[Dict[str, Any]]) -> str:
-        """通知里展示的网盘来源：跨盘写「源 → 目标」，同盘只写目标盘。"""
+    def _detail_source_text(
+            self,
+            history_item: Optional[Dict[str, Any]] = None,
+            *,
+            source_drive_name: str = "",
+            target_drive_name: str = "",
+    ) -> str:
+        """通知里展示的网盘来源：跨盘写「源 → 目标」，同盘只写目标盘。
+
+        显式传入的盘名优先（创建时就带真实来源）；未传时从记录里取；
+        目标盘仍为空时用当前挂载的网盘名兜底，避免来源整段消失。
+        """
         item = history_item or {}
-        target = str(
-            item.get("target_drive_name") or item.get("cloud_drive_name") or ""
-        ).strip()
+        source = str(source_drive_name or "").strip()
+        target = str(target_drive_name or "").strip()
+        if not source or not target:
+            item_source, item_target = self._detail_drive_names(item)
+            source = source or item_source
+            target = target or item_target
         if not target:
             # 部分后处理链路（文件落盘时才发通知）没有历史记录，
             # 直接用当前挂载的网盘名兜底，避免来源整段消失
             target = str(
                 getattr(getattr(self, "_cloud_drive", None), "name", "") or ""
             ).strip()
-        source = str(item.get("source_drive_name") or "").strip()
         # 跨盘才写「源 → 目标」；同盘只写目标盘名
         if source and target and source != target:
             return f"{source} → {target}"
         return target or source or ""
+
+    @staticmethod
+    def _detail_drive_names(
+            item: Dict[str, Any]
+    ) -> Tuple[str, str]:
+        """从一条记录里取（源盘名，目标盘名）。"""
+        target = str(
+            item.get("target_drive_name") or item.get("cloud_drive_name") or ""
+        ).strip()
+        source = str(item.get("source_drive_name") or "").strip()
+        return source, target
 
     @staticmethod
     def _detail_size(
@@ -246,6 +269,7 @@ class HistoryService(OwnerDelegator):
                 return size
         return 0
 
+    @staticmethod
     def _append_tv_transfer_detail(
             transfer_details: List[Dict[str, Any]],
             mediainfo: MediaInfo,
@@ -254,13 +278,34 @@ class HistoryService(OwnerDelegator):
             notification_kind: str = "transfer",
             size_bytes: int = 0,
             source_text: str = "",
+            file_names: Optional[List[str]] = None,
+            episode_sizes: Optional[Dict[int, int]] = None,
     ) -> None:
-        """按媒体季批量合并通知详情，避免逐集重复扫描列表。"""
+        """按媒体季批量合并通知详情，避免逐集重复扫描列表。
+
+        size_bytes 是本批集数的实际总字节（从转存结果累加）；传了
+        episode_sizes 时以它为准重新计算，并按集对齐 file_names；
+        任一集大小未知（<=0）时记 size_unknown=True，卡片不显示数字。
+        """
         normalized = sorted({
             int(episode) for episode in episodes if int(episode) > 0
         })
         if not normalized:
             return
+        sizes = {
+            int(episode): max(0, int(size or 0))
+            for episode, size in (episode_sizes or {}).items()
+            if int(episode) > 0
+        }
+        batch_size = (
+            sum(sizes.get(episode, 0) for episode in normalized)
+            if sizes else max(0, int(size_bytes or 0))
+        )
+        batch_unknown = (
+            any(sizes.get(episode, 0) <= 0 for episode in normalized)
+            if sizes else batch_size <= 0
+        )
+        names = [str(name).strip() for name in (file_names or []) if str(name).strip()]
         detail = next(
             (
                 item for item in transfer_details
@@ -271,10 +316,42 @@ class HistoryService(OwnerDelegator):
             None,
         )
         if detail:
+            merged_names = {}
+            for episode, name in zip(
+                    detail.get("episodes") or [], detail.get("file_names") or []
+            ):
+                if name:
+                    merged_names[int(episode)] = name
+            for episode, name in zip(normalized, names):
+                if name:
+                    merged_names[int(episode)] = name
             detail["episodes"] = sorted(
                 set(detail.get("episodes") or []) | set(normalized)
             )
-            detail["size"] = int(detail.get("size") or 0) + max(0, int(size_bytes or 0))
+            detail["file_names"] = [
+                merged_names[episode]
+                for episode in detail["episodes"]
+                if episode in merged_names
+            ]
+            if sizes or detail.get("episode_sizes"):
+                merged_sizes = dict(detail.get("episode_sizes") or {})
+                merged_sizes.update(sizes)
+                for episode in normalized:
+                    merged_sizes.setdefault(episode, 0)
+                detail["episode_sizes"] = merged_sizes
+                detail["size"] = sum(
+                    merged_sizes.get(episode, 0)
+                    for episode in detail["episodes"]
+                )
+                detail["size_unknown"] = any(
+                    merged_sizes.get(episode, 0) <= 0
+                    for episode in detail["episodes"]
+                )
+            else:
+                detail["size"] = int(detail.get("size") or 0) + batch_size
+                detail["size_unknown"] = bool(
+                    detail.get("size_unknown") or batch_unknown
+                )
             if source_text and not detail.get("source"):
                 detail["source"] = source_text
             return
@@ -286,8 +363,11 @@ class HistoryService(OwnerDelegator):
             "episodes": normalized,
             "image": mediainfo.get_poster_image(),
             "notification_kind": notification_kind,
-            "size": max(0, int(size_bytes or 0)),
+            "size": batch_size,
+            "size_unknown": batch_unknown,
             "source": source_text,
+            "file_names": names,
+            "episode_sizes": dict(sizes),
         })
 
     @staticmethod
@@ -1306,6 +1386,10 @@ class HistoryService(OwnerDelegator):
         tv_index: Dict[Tuple[str, str, int, str], Dict[str, Any]] = {}
         episode_sets: Dict[Tuple[str, str, int, str], Set[int]] = {}
         file_name_sets: Dict[Tuple[str, str, int, str], Set[str]] = {}
+        # 逐集体积是否完整：只有合并进来的明细全都带 episode_sizes，
+        # 汇总体积才能按逐集之和校验；finalize 路径的明细不带逐集体积，
+        # 合并后只保留按集未知标记，不修正汇总。
+        episode_sizes_complete: Dict[Tuple[str, str, int, str], bool] = {}
         for raw_detail in transfer_details:
             detail = copy.deepcopy(raw_detail)
             if detail.get("type") != "电视剧":
@@ -1328,31 +1412,71 @@ class HistoryService(OwnerDelegator):
             )
             current = tv_index.get(key)
             if current is None:
+                file_names = list(detail.get("file_names") or [])
                 file_name = str(detail.get("file_name") or "").strip()
-                if file_name:
-                    detail["file_names"] = [file_name]
-                    file_name_sets[key] = {file_name}
+                if file_name and file_name not in file_names:
+                    file_names.append(file_name)
+                if file_names:
+                    detail["file_names"] = file_names
+                    file_name_sets[key] = set(file_names)
                 episode_sets[key] = set(detail["episodes"])
+                episode_sizes_complete[key] = bool(detail.get("episode_sizes"))
                 tv_index[key] = detail
                 aggregated.append(detail)
                 continue
             episode_sets[key].update(detail["episodes"])
+            episode_sizes_complete[key] = bool(
+                episode_sizes_complete.get(key)
+                and detail.get("episode_sizes")
+            )
+            incoming_names = list(detail.get("file_names") or [])
             file_name = str(detail.get("file_name") or "").strip()
-            if file_name:
+            if file_name and file_name not in incoming_names:
+                incoming_names.append(file_name)
+            if incoming_names:
                 file_names = current.setdefault("file_names", [])
                 known_names = file_name_sets.setdefault(key, set(file_names))
-                if file_name not in known_names:
-                    known_names.add(file_name)
-                    file_names.append(file_name)
+                for name in incoming_names:
+                    if name not in known_names:
+                        known_names.add(name)
+                        file_names.append(name)
+            if detail.get("episode_sizes"):
+                merged_sizes = dict(current.get("episode_sizes") or {})
+                merged_sizes.update({
+                    int(episode): max(0, int(size or 0))
+                    for episode, size in detail["episode_sizes"].items()
+                    if int(episode) > 0
+                })
+                current["episode_sizes"] = merged_sizes
             if not current.get("image") and detail.get("image"):
                 current["image"] = detail["image"]
             current["size"] = int(current.get("size") or 0) + int(
                 detail.get("size") or 0
             )
+            current["size_unknown"] = bool(
+                current.get("size_unknown") or detail.get("size_unknown")
+            )
             if not current.get("source") and detail.get("source"):
                 current["source"] = detail["source"]
         for key, detail in tv_index.items():
             detail["episodes"] = sorted(episode_sets[key])
+            sizes = detail.get("episode_sizes")
+            if sizes:
+                if episode_sizes_complete.get(key):
+                    expected = sum(
+                        max(0, int(size or 0)) for size in sizes.values()
+                    )
+                    if int(detail.get("size") or 0) != expected:
+                        logger.warning(
+                            f"转存通知体积校验：{detail.get('title')} "
+                            f"S{detail.get('season')} 汇总 {detail.get('size')} "
+                            f"与逐集体积之和 {expected} 不一致，已按逐集修正"
+                        )
+                        detail["size"] = expected
+                detail["size_unknown"] = any(
+                    int(sizes.get(episode, 0) or 0) <= 0
+                    for episode in detail["episodes"]
+                )
         return aggregated
 
     def _send_finalized_batch(
@@ -2760,6 +2884,7 @@ class HistoryService(OwnerDelegator):
             self._notify_offline_pending_changed(pending_count)
         if deleted_indexes:
             self._delete_platform_transfer_histories(deletable_records)
+            self._delete_retry_index_rows(deletable_records)
 
         return {
             "deleted": len(deleted_indexes),
@@ -2768,6 +2893,29 @@ class HistoryService(OwnerDelegator):
             "skipped": skipped,
             **linked_stats,
         }
+
+    def _delete_retry_index_rows(self, records: List[Dict[str, Any]]) -> None:
+        """删 history 记录时同步删掉对应的重试索引行（v1.13.1）。
+
+        history 保存时的索引同步只处理仍在列表里的行，被删的行不在
+        列表里，须在这里显式清理；失败只记日志，不影响删除结果。
+        """
+        try:
+            get_store = getattr(self, "_get_data_store", None)
+            if not callable(get_store):
+                return
+            record_ids = []
+            for record in records or []:
+                try:
+                    record_id = self._ensure_history_record_id(record)
+                except Exception:  # noqa: BLE001 - 单条算不出 id 时跳过
+                    continue
+                if record_id:
+                    record_ids.append(record_id)
+            if record_ids:
+                get_store().repositories.retry_index.delete_by_record_ids(record_ids)
+        except Exception as error:  # noqa: BLE001 - 索引清理失败不影响删除
+            logger.debug(f"重试索引行删除失败：{error}", exc_info=True)
 
     def mark_history_records_success(
             self, identities: List[Dict[str, Any]]

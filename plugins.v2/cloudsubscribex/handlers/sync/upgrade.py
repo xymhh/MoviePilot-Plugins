@@ -663,6 +663,8 @@ class UpgradeService(OwnerDelegator):
                     batch_detail_episodes = []
                     batch_detail_size = 0
                     batch_detail_source = ""
+                    batch_detail_file_names: Dict[int, str] = {}
+                    batch_detail_episode_sizes: Dict[int, int] = {}
                     batch_success_episodes = []
                     for transfer_result in transfer_results:
                         item = transfer_result["item"]
@@ -717,8 +719,15 @@ class UpgradeService(OwnerDelegator):
                                 )
                             if not pending_key:
                                 batch_detail_episodes.append(episode)
-                                batch_detail_size += self._detail_size(
-                                    history_item, item
+                                # 体积与文件名直接取转存结果，不从 history 里补。
+                                batch_detail_episode_sizes[episode] = int(
+                                    item.get("candidate_size") or 0
+                                )
+                                batch_detail_file_names[episode] = str(
+                                    item.get("target_name") or file_name or ""
+                                ).strip()
+                                batch_detail_size += int(
+                                    item.get("candidate_size") or 0
                                 )
                                 if not batch_detail_source:
                                     batch_detail_source = self._detail_source_text(
@@ -738,11 +747,20 @@ class UpgradeService(OwnerDelegator):
                             if episode not in completed_episode_set
                         ]
                     try:
+                        ordered_episodes = sorted({
+                            int(episode) for episode in batch_detail_episodes
+                            if int(episode) > 0
+                        })
                         self._append_tv_transfer_detail(
-                            transfer_details, mediainfo, season, batch_detail_episodes,
+                            transfer_details, mediainfo, season, ordered_episodes,
                             notification_kind="upgrade",
                             size_bytes=batch_detail_size,
                             source_text=batch_detail_source,
+                            file_names=[
+                                batch_detail_file_names.get(episode, "")
+                                for episode in ordered_episodes
+                            ],
+                            episode_sizes=batch_detail_episode_sizes,
                         )
                     except TypeError as error:
                         # 插件热更新时新旧模块签名可能不一致（线上 1.7.84 报

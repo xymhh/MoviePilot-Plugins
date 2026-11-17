@@ -506,11 +506,17 @@ class EpisodeDedupSkipStatusContractTests(unittest.TestCase):
             return handle.read()
 
     def test_baseline_excludes_skipped_records(self):
-        """17. 跳过记录不得进入洗版基线（否则被当成已有的幻影版本）。"""
+        """17. 跳过记录不得进入洗版基线（否则被当成已有的幻影版本）。
+
+        v1.13.1：插件 history 不再是基线来源（_plugin_history_episode_files
+        与 _baseline_plugin_cache 已删除），「跳过」是插件 history 的状态
+        词，无路可进基线；剩下的三路（MP 整理历史、手动基线、媒体服务器）
+        都不读插件状态字段，基线文件里不再出现「跳过」。
+        """
         source = self._read("plugins.v2/cloudsubscribex/handlers/sync/baseline.py")
-        match = re.search(r"status.*?in \{([^}]*)\}", source)
-        self.assertIsNotNone(match, "未找到 baseline 的状态排除集合")
-        self.assertIn("跳过", match.group(1))
+        self.assertNotIn("_plugin_history_episode_files", source)
+        self.assertNotIn("_baseline_plugin_cache", source)
+        self.assertNotIn("跳过", source)
 
     def test_backend_terminal_status_includes_skipped(self):
         """18. 后端可删除判定与合并终态保护都认「跳过」。"""

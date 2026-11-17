@@ -11,8 +11,8 @@ from app.log import logger
 from app.schemas.types import MediaType
 
 from ...core import OwnerDelegator
+from ...core.episode_parse import VIDEO_SUFFIXES
 from ...core.media import list_subscribes_by_tmdb_id
-from ...utils.deep_delete_match import match_history_record_to_targets
 
 
 class HistoryCleanupService(OwnerDelegator):
@@ -114,76 +114,351 @@ class HistoryCleanupService(OwnerDelegator):
                 )
 
     def delete_by_media_server_paths(self, paths: List[str]) -> Dict[str, int]:
-        """按媒体服务器路径精确/词干匹配并联动删除终态历史与源文件。"""
-        normalized_targets = []
-        target_stems = set()
-        target_filenames = set()
+        """按媒体服务器路径删除网盘内容：整目录档先试，单文件档逐文件匹配。
 
+        不再读插件 history：整目录目标直接删云盘目录；单文件目标按
+        MetaInfo 季集匹配父目录内的视频文件再删；每个目标独立处理，
+        一个目标失败/跳过不影响其余目标。返回键沿用旧结构，
+        linked_deleted 改为经逐文件档删掉的文件数。
+        """
+        normalized_targets = []
         for path in paths:
             clean = self._normalize_media_server_path(path)
             if not clean:
                 continue
             normalized_targets.append(clean)
-            p = Path(clean)
-            target_filenames.add(p.name.casefold())
-            stem = p.stem.casefold()
-            if stem:
-                target_stems.add(stem)
 
-        if not normalized_targets or not self._get_data:
-            return {"matched": 0, "deleted": 0, "linked_deleted": 0,
-                    "cache_deleted": 0, "skipped": 0}
+        result = {
+            "matched": 0, "deleted": 0, "linked_deleted": 0,
+            "cache_deleted": 0, "skipped": 0,
+            "cloud_files_deleted": 0, "cloud_directories_deleted": 0,
+            "strm_deleted": 0, "local_directories_deleted": 0,
+        }
+        if not normalized_targets:
+            return result
 
+        dir_targets = []
+        file_targets = []
+        for target in normalized_targets:
+            if Path(target).suffix.lower() in VIDEO_SUFFIXES:
+                file_targets.append(target)
+            else:
+                dir_targets.append(target)
+
+        pseudo_records: List[Dict[str, Any]] = []
+        if dir_targets:
+            self._merge_deep_delete_result(
+                result, self._delete_cloud_media_by_server_paths(dir_targets)
+            )
+        if file_targets:
+            tier2, tier2_records = self._delete_cloud_files_by_server_paths(
+                file_targets
+            )
+            self._merge_deep_delete_result(result, tier2)
+            pseudo_records.extend(tier2_records)
+        if pseudo_records:
+            self._refresh_deleted_media(pseudo_records)
+            self._refresh_deleted_subscribe_notes(pseudo_records, [])
+        return result
+
+    @staticmethod
+    def _merge_deep_delete_result(
+            total: Dict[str, int], part: Dict[str, Any]
+    ) -> None:
+        """把一档的删除汇总并进总结果（键缺失按 0 计）。"""
+        for key in total:
+            total[key] += int(part.get(key) or 0)
+
+    def _delete_cloud_files_by_server_paths(
+            self, targets: List[str]
+    ) -> Tuple[Dict[str, int], List[Dict[str, Any]]]:
+        """逐文件档：单文件目标按 MetaInfo 季集匹配父目录内视频文件再删。
+
+        返回（汇总字典，本次删除的拟记录列表）。拟记录只带刷新媒体库
+        与订阅 note 所需的字段（cloud_dir/file_name/tmdb_id/season/
+        episodes），不写 history。
+        """
+        result = {
+            "matched": 0, "deleted": 0, "linked_deleted": 0,
+            "cache_deleted": 0, "skipped": 0,
+            "cloud_files_deleted": 0, "cloud_directories_deleted": 0,
+            "strm_deleted": 0, "local_directories_deleted": 0,
+        }
+        pseudo_records: List[Dict[str, Any]] = []
+        if not targets:
+            return result, pseudo_records
+        if not getattr(self, "_local_resource_path", ""):
+            result["skipped"] += len(targets)
+            return result, pseudo_records
+        if not getattr(self, "_cloud_directories", None) or not getattr(
+                self, "_cloud_batch_mutations", None
+        ):
+            logger.warning("深度删除逐文件档：网盘目录服务未初始化，已跳过")
+            result["skipped"] += len(targets)
+            return result, pseudo_records
+
+        local_root = Path(self._local_resource_path).expanduser().resolve(strict=False)
+        media_root_text = str(getattr(self, "_CLOUD_MEDIA_ROOT", "/") or "/")
+        media_root = PurePosixPath(media_root_text)
+
+        for target in targets:
+            records = self._delete_single_cloud_file_by_server_path(
+                target, local_root, media_root, result
+            )
+            pseudo_records.extend(records)
+        return result, pseudo_records
+
+    def _delete_single_cloud_file_by_server_path(
+            self,
+            target: str,
+            local_root: Path,
+            media_root: PurePosixPath,
+            result: Dict[str, int],
+    ) -> List[Dict[str, Any]]:
+        """处理一个单文件目标：定位父目录、按季集匹配、删文件、清本地 STRM。"""
+        try:
+            local_path, _reason = self._configured_media_path(target)
+        except Exception as error:
+            local_path = self._virtual_media_path(target)
+            if local_path is None:
+                logger.info(f"深度删除逐文件档：无法定位媒体路径，跳过 {target} - {error}")
+                result["skipped"] += 1
+                return []
+            logger.debug(
+                f"深度删除逐文件档：本地路径不存在，按路径映射推断 {local_path}"
+                f"（原路径 {target}；{error}）"
+            )
+        resolved = Path(local_path).expanduser().resolve(strict=False)
+        try:
+            relative = resolved.relative_to(local_root)
+        except ValueError:
+            logger.warning(f"深度删除逐文件档：路径越出媒体根，跳过 {resolved}")
+            result["skipped"] += 1
+            return []
+        # 至少保留「分类/媒体」两级边界，绝不删除媒体根或分类目录本身。
+        if len(relative.parts) < 2:
+            logger.warning(f"深度删除逐文件档：路径层级过浅，拒绝删除 {resolved}")
+            result["skipped"] += 1
+            return []
+        target_name = relative.parts[-1]
+        cloud_dir = str(media_root.joinpath(*relative.parts[:-1]))
+        if self._is_protected_cloud_directory(cloud_dir):
+            logger.warning(f"深度删除逐文件档：命中共保护目录，拒绝删除 {cloud_dir}")
+            result["skipped"] += 1
+            return []
+        try:
+            lookup = self._cloud_directories.resolve_directory(cloud_dir)
+        except Exception as error:
+            logger.warning(f"深度删除逐文件档：解析网盘目录失败 {cloud_dir} - {error}")
+            result["skipped"] += 1
+            return []
+        if not lookup.checked or not lookup.directory_id:
+            logger.info(f"深度删除逐文件档：网盘目录不存在，跳过 {cloud_dir}")
+            result["skipped"] += 1
+            return []
+        try:
+            listing = self._cloud_directories.list_directory(lookup.directory_id)
+        except Exception as error:
+            logger.warning(f"深度删除逐文件档：读取网盘目录失败 {cloud_dir} - {error}")
+            result["skipped"] += 1
+            return []
+        if not listing.checked:
+            logger.warning(f"深度删除逐文件档：网盘目录未确认，跳过 {cloud_dir}")
+            result["skipped"] += 1
+            return []
+
+        target_season, target_episodes = self._parse_media_season_episodes(
+            Path(target_name).stem
+        )
+        target_cf = str(target_name or "").casefold()
+        target_stem_cf = Path(target_name).stem.casefold()
         matched = []
-        for record in self._get_data("history") or []:
-            cloud_dir = str(record.get("cloud_dir") or "").strip()
-            file_name = str(record.get("file_name") or "").strip()
+        for item in listing.files:
+            if item.is_directory:
+                continue
+            if Path(item.name).suffix.lower() not in VIDEO_SUFFIXES:
+                continue
+            file_season, file_episodes = self._parse_media_season_episodes(
+                Path(item.name).stem
+            )
+            if target_episodes and file_episodes:
+                if (
+                        target_season is not None
+                        and file_season is not None
+                        and target_season != file_season
+                ):
+                    continue
+                if target_episodes & file_episodes:
+                    matched.append((item, file_season, file_episodes))
+                    continue
+            # 目标文件名解析不出季集时，回落 deep_delete_match 规则①②：
+            # 文件名或词干精确相等才算命中，匹配不到就跳过，不删。
+            if not target_episodes and (
+                    str(item.name or "").casefold() == target_cf
+                    or Path(item.name).stem.casefold() == target_stem_cf
+            ):
+                matched.append((item, file_season, file_episodes))
+        if not matched:
+            logger.info(f"深度删除逐文件档：父目录内无匹配文件，跳过 {target}")
+            result["skipped"] += 1
+            return []
+
+        tmdb_id = self._tmdb_id_from_path(cloud_dir) or self._tmdb_id_from_path(target)
+        pseudo_records = []
+        for item, file_season, file_episodes in matched:
+            season = file_season if file_season is not None else target_season
+            episodes = sorted(file_episodes) if file_episodes else sorted(target_episodes)
+            pseudo_records.append({
+                "cloud_dir": cloud_dir,
+                "file_name": item.name,
+                "tmdb_id": tmdb_id or "",
+                "season": season,
+                "episode": episodes[0] if episodes else None,
+                "episodes": episodes,
+            })
+
+        # 先清本地 STRM（与 _delete_history_linked_files_batch 同款）。
+        season_for_local = pseudo_records[0].get("season")
+        strm_deleted, local_dirs = self._delete_local_strm_for_cloud_files(
+            cloud_dir, [item for item, _, _ in matched], season_for_local
+        )
+        result["strm_deleted"] += strm_deleted
+        result["local_directories_deleted"] += local_dirs
+
+        matched_names = {item.name for item, _, _ in matched}
+        remaining = [
+            item for item in listing.files if item.name not in matched_names
+        ]
+        target_stems = {Path(item.name).stem.lower() for item, _, _ in matched}
+        if self._cloud_items_are_generated_metadata(remaining, target_stems):
+            # 删完只剩生成元数据：整目录删掉（与批量删同款），再按规则清父目录。
+            if self._is_protected_cloud_directory(cloud_dir):
+                logger.warning(f"深度删除逐文件档：命中共保护目录，拒绝删除 {cloud_dir}")
+                result["skipped"] += 1
+                return []
+            if self._cloud_mutations.delete_file(lookup.directory_id):
+                result["cloud_files_deleted"] += len(matched)
+                result["cloud_directories_deleted"] += 1
+                if self._is_season_directory(cloud_dir, pseudo_records[0]):
+                    result["cloud_directories_deleted"] += (
+                        self._cleanup_cloud_media_parent(cloud_dir)
+                    )
+                result["matched"] += 1
+                result["deleted"] += 1
+                result["linked_deleted"] += len(matched)
+                return pseudo_records
+            logger.warning(f"深度删除逐文件档：网盘目录删除失败 {cloud_dir}")
+            result["skipped"] += 1
+            return []
+        file_ids = [item.id for item, _, _ in matched]
+        deleted_ids = set(self._cloud_batch_mutations.delete_files(file_ids) or [])
+        deleted_count = len(deleted_ids)
+        if not deleted_count:
+            logger.warning(f"深度删除逐文件档：网盘文件删除失败 {cloud_dir}")
+            result["skipped"] += 1
+            return []
+        result["cloud_files_deleted"] += deleted_count
+        result["matched"] += 1
+        result["deleted"] += 1
+        result["linked_deleted"] += deleted_count
+        return [
+            record for record, (item, _, _) in zip(pseudo_records, matched)
+            if item.id in deleted_ids
+        ]
+
+    def _parse_media_season_episodes(
+            self, stem: str
+    ) -> Tuple[Optional[int], Set[int]]:
+        """按 MetaInfo 口径解析文件名词干的季集（与 _library_episode_exists 同款）。
+
+        解析不出时返回 (None, set())，调用方据此回落精确匹配。
+        """
+        stem = str(stem or "").strip()
+        if not stem:
+            return None, set()
+        try:
+            dedup_meta = getattr(self, "_dedup_meta_info", None)
+            if callable(dedup_meta):
+                meta = dedup_meta(stem, None)
+            else:
+                from app.core.metainfo import MetaInfo
+                meta = MetaInfo(stem)
+        except Exception:
+            return None, set()
+        episodes = list(getattr(meta, "episode_list", None) or [])
+        if not episodes and getattr(meta, "begin_episode", None):
+            episodes = [meta.begin_episode]
+        try:
+            episode_set = {int(episode) for episode in episodes}
+        except (TypeError, ValueError):
+            return None, set()
+        if not episode_set:
+            return None, set()
+        season = getattr(meta, "begin_season", None)
+        try:
+            season = int(season) if season is not None else None
+        except (TypeError, ValueError):
+            season = None
+        return season, episode_set
+
+    @staticmethod
+    def _tmdb_id_from_path(path: Any) -> str:
+        """从路径里解析 {tmdb-N} 标签；没有时返回空串。"""
+        match = re.search(r"\{tmdb-(\d+)\}", str(path or ""), re.IGNORECASE)
+        return match.group(1) if match else ""
+
+    def _delete_local_strm_for_cloud_files(
+            self,
+            cloud_dir: str,
+            items: List[Any],
+            season: Any,
+    ) -> Tuple[int, int]:
+        """删本地 STRM 及同名元数据（与 _delete_history_linked_files_batch 同款）。
+
+        返回（删除的 STRM 数，清理的本地目录数）。
+        """
+        if not getattr(self, "_path_mapper", None) or not self._local_resource_path:
+            return 0, 0
+        strm_deleted = 0
+        local_cleanup_targets: Dict[Path, Path] = {}
+        for item in items:
+            file_name = str(getattr(item, "name", "") or "").strip()
             if not file_name:
                 continue
-
-            record_ms_path = ""
-            if cloud_dir and self._local_resource_path:
-                try:
-                    local_path = self._path_mapper.local_path(
-                        local_root=self._local_resource_path,
-                        cloud_root=self._CLOUD_MEDIA_ROOT,
-                        cloud_dir=cloud_dir,
-                        file_name=file_name,
-                    )
-                    record_ms_path = self._normalize_media_server_path(
-                        self._media_server_notifier.media_server_path(local_path)
-                    )
-                except Exception as error:
-                    logger.debug(f"计算深度删除匹配路径失败：{file_name} - {error}", exc_info=True)
-
-            if match_history_record_to_targets(
-                    file_name, record_ms_path, target_filenames,
-                    target_stems, normalized_targets,
-            ):
-                matched.append(record)
-
-        if not matched:
-            # 兜底：该条目不是本插件转存的（无转存历史），但用户已在媒体服务器整剧删除，
-            # 按媒体库路径反推网盘目录直接删除，避免网盘残留。
-            fallback = self._delete_cloud_media_by_server_paths(normalized_targets)
-            if fallback.get("matched"):
-                return fallback
-            samples = []
-            for record in (self._get_data("history") or [])[:2000]:
-                cloud_dir = str(record.get("cloud_dir") or "").strip()
-                file_name = str(record.get("file_name") or "").strip()
-                if cloud_dir or file_name:
-                    samples.append(f"{cloud_dir}/{file_name}".strip("/"))
-                if len(samples) >= 3:
-                    break
-            logger.debug(
-                f"深度删除未命中诊断：目标={normalized_targets}，"
-                f"历史样本={samples}"
+            try:
+                strm_path = self._path_mapper.local_path(
+                    local_root=self._local_resource_path,
+                    cloud_root=self._CLOUD_MEDIA_ROOT,
+                    cloud_dir=cloud_dir,
+                    file_name=file_name,
+                )
+                if strm_path.is_file():
+                    strm_path.unlink()
+                    strm_deleted += 1
+                self._delete_local_metadata_for_stem(strm_path)
+                local_directory = strm_path.parent
+                media_directory = (
+                    local_directory.parent
+                    if self._is_season_directory(cloud_dir, {"season": season})
+                    else local_directory
+                )
+                local_cleanup_targets[local_directory] = media_directory
+            except Exception as error:
+                logger.warning(f"批量删除关联 STRM 失败：{file_name} - {error}")
+        local_directories_deleted = 0
+        for local_directory, media_directory in sorted(
+                local_cleanup_targets.items(),
+                key=lambda item: len(item[0].parts),
+                reverse=True,
+        ):
+            local_directories_deleted += self._cleanup_local_metadata_directory(
+                local_directory
             )
-            return {"matched": 0, "deleted": 0, "linked_deleted": 0,
-                    "cache_deleted": 0, "skipped": 0}
-        result = self.delete_history_records(matched, delete_linked_files=True)
-        return {"matched": len(matched), **result}
+            if media_directory != local_directory:
+                local_directories_deleted += self._cleanup_local_metadata_directory(
+                    media_directory
+                )
+        return strm_deleted, local_directories_deleted
 
     def _virtual_media_path(self, value: Any) -> Optional[Path]:
         """媒体库条目已被删除时，按「媒体服务器路径=本地路径」映射推断本地路径。

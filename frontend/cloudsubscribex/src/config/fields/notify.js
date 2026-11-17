@@ -58,8 +58,16 @@ export function createNotifySection(options) {
             key: "platform_deep_delete_enabled",
             label: "神医深度删除联动",
             type: "switch",
-            hint: "收到通知后同步清理网盘与历史",
+            hint: "收到通知后同步清理网盘",
             cols: 6,
+          },
+          {
+            key: "platform_deep_delete_title_keywords",
+            label: "深度删除标题关键词",
+            type: "textarea",
+            hint: "每行一个关键词；标题含任一关键词即触发深度删除。留空则标题不触发，仅保留事件名与 Item Path 匹配",
+            cols: 6,
+            show: enabled("platform_deep_delete_enabled"),
           },
           {
             key: "media_library_webhook_urls",

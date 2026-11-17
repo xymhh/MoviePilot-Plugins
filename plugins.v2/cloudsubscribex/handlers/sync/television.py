@@ -807,25 +807,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                             f"{mediainfo.title} S{season:02d}E{episode:02d} "
                                             f"按季集判重跳过：{dedup_reason}"
                                         )
-                                        history.append(
-                                            self._build_transfer_history_item(
-                                                mediainfo=mediainfo,
-                                                subscribe=subscribe,
-                                                status="跳过",
-                                                share_url=share_url,
-                                                file_name=file_name,
-                                                source_file_name=file_name,
-                                                cloud_dir="",
-                                                resource=resource_by_url.get(
-                                                    str(matched_file.get("url") or "").strip(),
-                                                    resource,
-                                                ),
-                                                season=season,
-                                                episode=episode,
-                                                file_size=candidate_size,
-                                                rule_score=current_score,
-                                                skip_reason=f"同集已有更优版本：{dedup_reason}",
-                                            )
+                                        self._record_skip_candidate(
+                                            SkipStatsCollector.KIND_DEDUP_SKIP,
+                                            share_url,
+                                            reason=f"同集已有更优版本：{dedup_reason}",
+                                            resource_title=mediainfo.title,
+                                            season=season,
+                                            episode=episode,
                                         )
                                         continue
                                     if dedup_action == "replace":
@@ -947,6 +935,8 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         batch_detail_episodes = {}
                         batch_detail_size: Dict[str, int] = {}
                         batch_detail_source: Dict[str, str] = {}
+                        batch_detail_file_names: Dict[str, Dict[int, str]] = {}
+                        batch_detail_episode_sizes: Dict[str, Dict[int, int]] = {}
                         completed_missing_episodes = set()
 
                         # 1.6.52 落盘自检：批内非 pending 的成功条目共用一次季目录列目录
@@ -1084,9 +1074,18 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     batch_detail_episodes.setdefault(
                                         notification_kind, []
                                     ).append(episode)
+                                    # 体积与文件名直接取转存结果，不从 history 里补。
+                                    batch_detail_episode_sizes.setdefault(
+                                        notification_kind, {}
+                                    )[episode] = int(item["file"].get("size") or 0)
+                                    batch_detail_file_names.setdefault(
+                                        notification_kind, {}
+                                    )[episode] = str(
+                                        item.get("target_name") or file_name or ""
+                                    ).strip()
                                     batch_detail_size[notification_kind] = (
                                         batch_detail_size.get(notification_kind, 0)
-                                        + self._detail_size(history_item, item)
+                                        + int(item["file"].get("size") or 0)
                                     )
                                     if not batch_detail_source.get(notification_kind):
                                         batch_detail_source[notification_kind] = (
@@ -1108,11 +1107,25 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             ]
                         for notification_kind, episodes in batch_detail_episodes.items():
                             try:
+                                names_by_episode = batch_detail_file_names.get(
+                                    notification_kind, {}
+                                )
+                                ordered_episodes = sorted({
+                                    int(episode) for episode in episodes
+                                    if int(episode) > 0
+                                })
                                 self._append_tv_transfer_detail(
-                                    transfer_details, mediainfo, season, episodes,
+                                    transfer_details, mediainfo, season, ordered_episodes,
                                     notification_kind=notification_kind,
                                     size_bytes=batch_detail_size.get(notification_kind, 0),
                                     source_text=batch_detail_source.get(notification_kind, ""),
+                                    file_names=[
+                                        names_by_episode.get(episode, "")
+                                        for episode in ordered_episodes
+                                    ],
+                                    episode_sizes=batch_detail_episode_sizes.get(
+                                        notification_kind
+                                    ),
                                 )
                             except TypeError as error:
                                 # 同上：模块新旧混用时签名可能不一致，通知失败不中断转存。

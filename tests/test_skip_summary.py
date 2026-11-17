@@ -633,8 +633,32 @@ class TestThreeKindsOrder(unittest.TestCase):
                 SkipStatsCollector.KIND_MISMATCH,
                 SkipStatsCollector.KIND_EPISODE_MISS,
                 SkipStatsCollector.KIND_UNPARSABLE,
+                # v1.13.1：判重跳过（同集已有更优版本）追加到末尾。
+                SkipStatsCollector.KIND_DEDUP_SKIP,
             ),
         )
+
+    def test_dedup_skip_kind_registered(self):
+        """v1.13.1：判重跳过（同集已有更优版本）进跳过统计。"""
+        self.assertEqual(SkipStatsCollector.KIND_DEDUP_SKIP, "dedup_skip")
+        self.assertEqual(
+            SkipStatsCollector.kind_label("dedup_skip"), "同集已有更优版本"
+        )
+        self.assertEqual(SkipStatsCollector.KIND_ORDER[-1],
+                        SkipStatsCollector.KIND_DEDUP_SKIP)
+
+    def test_dedup_skip_counted_with_season_episode(self):
+        collector = SkipStatsCollector()
+        collector.record(
+            SkipStatsCollector.KIND_DEDUP_SKIP, "115网盘",
+            reference="https://115.com/s/dedup",
+            reason="同集已有更优版本：目标目录扫描",
+            resource_title="玉簟秋", season=1, episode=14,
+        )
+        snapshot = collector.take()
+        self.assertEqual(snapshot["total"], 1)
+        self.assertEqual(snapshot["by_kind"], {"dedup_skip": 1})
+        self.assertIn("同集已有更优版本 1", SkipStatsCollector.format_summary(snapshot))
 
     def test_three_kinds_counted_in_kind_order(self):
         collector = SkipStatsCollector()

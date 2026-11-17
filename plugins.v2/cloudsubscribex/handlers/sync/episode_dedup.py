@@ -198,14 +198,14 @@ class EpisodeDedupService(OwnerDelegator):
                 "file_size": int(item.get("file_size") or 0),
                 "score": int(item.get("score") or item.get("rule_score") or 0),
                 "source": "插件基线",
-                # 保留原始来源（MoviePilot整理记录 / 插件转存记录 / 媒体服务器 …），
+                # 保留原始来源（MoviePilot整理记录 / 媒体服务器 …），
                 # 判重时据此决定要不要做「目标目录有实物」校验
                 "origin": str(item.get("source") or "").strip(),
             })
         return result
 
-    # 判重只信「有实物」的来源：整理记录与转存记录都可能是假成功
-    _HISTORY_BASELINE_SOURCES = frozenset({"MoviePilot整理记录", "插件转存记录"})
+    # 判重只信「有实物」的来源：整理记录也可能是假成功，须先做目标目录实物校验
+    _HISTORY_BASELINE_SOURCES = frozenset({"MoviePilot整理记录"})
 
     def _baseline_entry_backed_by_storage(
             self,

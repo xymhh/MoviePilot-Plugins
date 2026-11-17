@@ -665,6 +665,8 @@ class ResourceTransferService(OwnerDelegator):
             reason: str = "",
             resource_label: str = "",
             resource_title: str = "",
+            season: Any = None,
+            episode: Any = None,
     ) -> None:
         """记录被跳过的候选资源；统计缺失或异常时静默忽略，绝不影响转存主流程。"""
         try:
@@ -687,6 +689,8 @@ class ResourceTransferService(OwnerDelegator):
                 reason=reason,
                 reference=self._resource_log_reference(share_url),
                 resource_title=resource_title,
+                season=season,
+                episode=episode,
             )
         except Exception:  # noqa: BLE001 - 统计失败不得影响转存主流程
             return

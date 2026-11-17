@@ -308,6 +308,7 @@ class UIConfig:
             "emby_mediainfo_enabled": False,
             "platform_media_sync_enabled": False,
             "platform_deep_delete_enabled": False,
+            "platform_deep_delete_title_keywords": ["深度删除", "神医"],
             "timeout_enabled": True,
             "timeout_default_connect": 30,
             "timeout_default_pool": 15,

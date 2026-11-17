@@ -490,58 +490,6 @@ class FinalizeGateTests(unittest.TestCase):
         self.assertEqual(harness._recorded_platform, [])
 
 
-class _BaselineHarness(UpgradeBaselineService):
-    def __init__(self, history):
-        super().__init__(SimpleNamespace())
-        object.__setattr__(self, "_data", {"history": list(history or [])})
-        object.__setattr__(self, "_baseline_cache_lock", threading.RLock())
-        object.__setattr__(self, "_baseline_plugin_cache", _FakeTtlCache())
-
-    def _get_data(self, key):
-        return self._data.get(key)
-
-    def _storage(self):
-        return ""
-
-
-class _FakeTtlCache:
-    def __init__(self):
-        self._store = {}
-
-    def get(self, key):
-        return self._store.get(key)
-
-    def set(self, key, value):
-        self._store[key] = value
-
-
-class BaselineTrustTests(unittest.TestCase):
-    """g. landed=False 的插件历史条目被丢弃；无 landed 的老记录行为不变。"""
-
-    def test_landed_false_plugin_history_dropped(self):
-        harness = _BaselineHarness([
-            {
-                "tmdb_id": 123, "title": "Show", "season": 1, "episode": 1,
-                "status": "成功", "file_name": "Show - S01E01.mkv",
-                "source_file_name": "raw.mkv", "landed": False,
-            },
-        ])
-        result = harness._plugin_history_episode_files(_SUB, 1)
-        self.assertNotIn(1, result)
-
-    def test_legacy_record_without_landed_kept(self):
-        harness = _BaselineHarness([
-            {
-                "tmdb_id": 123, "title": "Show", "season": 1, "episode": 2,
-                "status": "成功", "file_name": "Show - S01E02.mkv",
-                "source_file_name": "raw.mkv",
-            },
-        ])
-        result = harness._plugin_history_episode_files(_SUB, 1)
-        self.assertIn(2, result)
-        self.assertEqual(result[2][0]["target_file_name"], "Show - S01E02.mkv")
-
-
 class PrepareHistoryGroupTests(unittest.TestCase):
     """h. unverified_count / failed_count / skip_reasons 聚合。"""
 

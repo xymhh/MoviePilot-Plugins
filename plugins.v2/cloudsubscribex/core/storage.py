@@ -139,7 +139,47 @@ class CloudSubscribeDataStore:
                 logger.info(
                     f"CloudSubscribe 频道来源已回填：{repaired_sources} 条"
                 )
+            imported = self._import_retry_index()
+            if imported:
+                logger.info(f"重试索引已从转存历史导入：{imported} 条")
             self._initialized = True
+
+    def _import_retry_index(self) -> int:
+        """启动时一次性从旧 history 导入失败/待修复行进重试索引（幂等）。
+
+        只导两类行（失败且可重试、跨盘成功但 landed=False），其余放弃；
+        失败只记日志，不阻塞启动。
+        """
+        try:
+            from .retry_index import import_retry_index_from_history
+        except Exception as error:  # noqa: BLE001 - 索引模块不可用时跳过导入
+            logger.debug(f"重试索引模块加载失败，跳过导入：{error}", exc_info=True)
+            return 0
+        try:
+            history = self.repositories.history.list_all()
+        except Exception as error:  # noqa: BLE001 - 历史读取失败时跳过导入
+            logger.debug(f"重试索引导入读取历史失败：{error}", exc_info=True)
+            return 0
+        try:
+            return import_retry_index_from_history(self.repositories, history)
+        except Exception as error:  # noqa: BLE001 - 导入失败不阻塞启动
+            logger.warning(f"重试索引导入失败：{error}", exc_info=True)
+            return 0
+
+    def _sync_retry_index(self, history: List[Dict[str, Any]]) -> None:
+        """history 落库后同步重试索引（只加/改/删重试相关的行）。
+
+        失败不阻塞 history 保存。
+        """
+        try:
+            from .retry_index import sync_retry_index_from_history
+        except Exception as error:  # noqa: BLE001 - 索引模块不可用时跳过同步
+            logger.debug(f"重试索引模块加载失败，跳过同步：{error}", exc_info=True)
+            return
+        try:
+            sync_retry_index_from_history(self.repositories, history)
+        except Exception as error:  # noqa: BLE001 - 同步失败不阻塞保存
+            logger.warning(f"重试索引同步失败：{error}", exc_info=True)
 
     def _migrate_legacy_sha1_cache(self) -> None:
         """把 1.7.97 的 source_sha1_cache.json 一次性并入数据库表。"""
@@ -221,6 +261,7 @@ class CloudSubscribeDataStore:
     def _save_database(self, key: str, value: Any) -> None:
         if key == self.HISTORY_KEY:
             self.repositories.history.replace_all(value or [])
+            self._sync_retry_index(value or [])
             self._history_cache = None
         elif key == self.OFFLINE_PENDING_KEY:
             self.repositories.offline.replace_all(value or {})

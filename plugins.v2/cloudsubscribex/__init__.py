@@ -6,6 +6,7 @@ import ast
 import copy
 import datetime
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as ThreadEvent, Lock, RLock, local, Thread
 from typing import Optional, Any, List, Dict, Tuple, Callable, Union
@@ -196,7 +197,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.13.0"
+    plugin_version = "1.13.1"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -383,6 +384,7 @@ class CloudSubscribeX(_PluginBase):
     _emby_mediainfo_enabled: bool = False
     _platform_media_sync_enabled: bool = False
     _platform_deep_delete_enabled: bool = False
+    _platform_deep_delete_title_keywords: list = ["深度删除", "神医"]
     _timeout_enabled: bool = True
     _timeout_default_connect: float = 30
     _timeout_default_pool: float = 15
@@ -693,6 +695,30 @@ class CloudSubscribeX(_PluginBase):
         except Exception as error:  # noqa: BLE001 - 抬不动不影响插件可用性
             logger.warning(f"提升进程文件句柄上限失败（不影响运行）：{error}")
 
+    @staticmethod
+    def _normalize_deep_delete_title_keywords(value: Any) -> List[str]:
+        """归一化深度删除标题关键词：列表原样去重，字符串按换行/逗号拆。
+
+        空列表表示标题分支永不命中（只剩事件名与 Item Path 两路），
+        此时记一条 warning，避免用户误以为配空就是全匹配。
+        """
+        if isinstance(value, str):
+            keywords = [
+                part.strip()
+                for part in re.split(r"[\n,，]", value)
+                if part.strip()
+            ]
+        elif isinstance(value, (list, tuple, set)):
+            keywords = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            keywords = []
+        if not keywords:
+            logger.warning(
+                "深度删除标题关键词为空：标题匹配分支将不触发，"
+                "仅保留事件名与 Item Path 匹配"
+            )
+        return keywords
+
     def _apply_plugin_config(
             self, config: Optional[Dict[str, Any]], reset_runtime: bool = False
     ) -> None:
@@ -733,6 +759,7 @@ class CloudSubscribeX(_PluginBase):
             "emby_mediainfo_enabled",
             "platform_media_sync_enabled",
             "platform_deep_delete_enabled",
+            "platform_deep_delete_title_keywords",
             "video_extensions",
             "subtitle_extensions",
         }
@@ -892,6 +919,7 @@ class CloudSubscribeX(_PluginBase):
         self._start_strm_increment()
         self._start_organize_schedule()
         self._start_history_state_maintenance()
+        self._start_retry_index_maintenance()
         # 配置保存可能改了开关/端口：apply 末尾同步一次代理运行态
         # （stop_service 在重载开头已经停过，这里按新配置重新决定起不起）。
         try:
@@ -1196,6 +1224,23 @@ class CloudSubscribeX(_PluginBase):
                 logger.info(f"已清扫 {result['swept']} 条超时转存历史")
         except Exception as error:  # noqa: BLE001
             logger.warning(f"历史状态周期维护失败：{error}")
+
+    def _start_retry_index_maintenance(self) -> None:
+        """每天清理一次过期的重试索引行（失败 90 天、待修复 30 天）。"""
+        self._scheduler_registry().ensure_job(
+            "cloudsubscribe_retry_index_maintenance",
+            func=lambda: self._run_retry_index_maintenance(),
+            trigger=IntervalTrigger(hours=24),
+        )
+
+    def _run_retry_index_maintenance(self) -> None:
+        try:
+            purged = self._get_data_store().repositories.retry_index.purge_old()
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"重试索引过期清理失败：{error}")
+            return
+        if purged:
+            logger.info(f"重试索引过期清理完成：删除 {purged} 条")
 
     def _start_organize_schedule(self) -> None:
         """按 Cron 定时扫描 115 整理源目录；默认关闭。"""
@@ -1719,6 +1764,14 @@ class CloudSubscribeX(_PluginBase):
         )
         self._platform_deep_delete_enabled = bool(
             config.get("platform_deep_delete_enabled", False)
+        )
+        self._platform_deep_delete_title_keywords = (
+            self._normalize_deep_delete_title_keywords(
+                config.get(
+                    "platform_deep_delete_title_keywords",
+                    ["深度删除", "神医"],
+                )
+            )
         )
         if self._subscribe_handler:
             self._subscribe_handler._notify = self._notify
