@@ -165,6 +165,30 @@ class RangeServer:
         self._server.server_close()
 
 
+def _wait_server_quiesced(server, timeout=5.0, stable_for=0.5):
+    """等 RangeServer 的字节计数落定再采样基线。
+
+    计数在服务端线程里加（do_GET 写完 body 后才 +=），中断的请求
+    可能还在服务端线程里写，主线程的 download_file 已经返回。
+    不等它落定就采样 first_round，上一轮的分片字节会算进下一轮——
+    CI（1.12.20）上曾因此多出正好 1 个分片（9437184 != 8388608）。
+    只等计数连续 stable_for 秒不变，最多 timeout 秒。
+    """
+    deadline = time.monotonic() + timeout
+    last = server.bytes_served
+    stable_since = time.monotonic()
+    while True:
+        time.sleep(0.05)
+        now = server.bytes_served
+        if now != last:
+            last = now
+            stable_since = time.monotonic()
+        elif time.monotonic() - stable_since >= stable_for:
+            return
+        if time.monotonic() > deadline:
+            return
+
+
 class NoJsonDownloadTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = TemporaryDirectory()
@@ -229,6 +253,7 @@ class NoJsonDownloadTests(unittest.TestCase):
         self.assertEqual(self._json_files(), [], "中断不得留下任何 .json 文件")
         self.assertTrue(target.is_file(), "preserve_partial 时半截文件必须保留")
 
+        _wait_server_quiesced(server)
         first_round = server.bytes_served
         resumed = self._service(
             server.base_url, concurrency=2, part_size=1024 * 1024
@@ -265,6 +290,7 @@ class NoJsonDownloadTests(unittest.TestCase):
             )
 
         transfer_module._PARTS_MEMORY.clear()  # 模拟重启
+        _wait_server_quiesced(server)
         first_round = server.bytes_served
         restarted = self._service(
             server.base_url, concurrency=2, part_size=1024 * 1024
