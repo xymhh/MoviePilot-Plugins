@@ -342,9 +342,13 @@ class SameCacheKeySerializationTests(_RelayHarnessBase):
         self.assertEqual(task["status"], "success")
         self.assertTrue(new_path.is_file(), "命中旧名缓存时应改名到目标名")
         self.assertFalse(legacy.exists(), "改名后旧名文件不应残留")
+        self.assertEqual(
+            manager._read_cache_owner_key(new_path), cache_key,
+            "登记表条目应随主文件改名",
+        )
         self.assertTrue(
-            manager._cache_meta_path(new_path).is_file(),
-            "伴随文件应随主文件改名",
+            manager._validate_complete_cache(new_path, cache_key, self.file_item),
+            "改名后完整缓存校验仍应通过",
         )
         manager._release_cache_ref(cache_key)
 
@@ -422,17 +426,15 @@ class CacheRefRetentionTests(_RelayHarnessBase):
         manager = self.make_manager(upload_file=self._ok_upload)
         cache_path = self._seed_complete_cache(manager)
         cache_key = manager._cache_key("quark", self.file_item)
-        meta_path = manager._cache_meta_path(cache_path)
 
         manager._acquire_cache_ref(cache_key)
         self.assertEqual(manager.delete_cache(cache_key), 0, "在用引用时必须跳过")
         self.assertTrue(cache_path.is_file())
-        self.assertTrue(meta_path.is_file())
 
         manager._release_cache_ref(cache_key)
         self.assertGreaterEqual(manager.delete_cache(cache_key), 1, "归零后允许删除")
         self.assertFalse(cache_path.exists())
-        self.assertFalse(meta_path.exists())
+        self.assertEqual(manager._read_cache_owner_key(cache_path), "")
 
     def test_cancel_with_sibling_retains_and_changes_message(self):
         """取消时若兄弟在飞：不删缓存，且消息不含「已清理中继缓存」。"""

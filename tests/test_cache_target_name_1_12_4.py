@@ -7,10 +7,10 @@ S01E06 - 第6集.mkv、/downloads/凡人修仙传 - S01E200 - 第200集.mkv）�
 目标名复用，不重下（S01E200 有 2 GB）。
 
 固定契约：
-1. 无标记旧目标名文件有伴随文件能证明归属（meta 里的 cache_key
-   对得上，或 parts 总量对得上）时，_resolve_cache_path 把它改名成
-   当前目标名（含 meta/parts/aria2 伴随文件），只读查找不改名；
-2. 归属对不上（meta 里是别人的 key）或没有任何伴随文件的裸文件时
+1. 无标记旧目标名文件在登记表里有归属标记（cache_key 对得上）时，
+   _resolve_cache_path 把它改名成当前目标名（含 .aria2 与登记表条目），
+   只读查找不改名；
+2. 归属对不上（登记表里是别人的 key）或没有任何登记（裸文件）时
    不迁移、不复用；
 3. 目标名本身无标记时不产生无标记候选，行为与此前一致。
 """
@@ -89,7 +89,7 @@ def _make_manager(download_path):
 
 def _seed_untagged(manager, tmp, source, with_aria2=True):
     """模拟 1.12.2/1.12.3 重试留下的无标记旧目标名文件：主文件 +
-    已完成 meta + .aria2。"""
+    登记表已完成条目 + .aria2。"""
     path = Path(tmp) / UNTAGGED
     path.write_bytes(CONTENT)
     manager._stamp_cache_owner(
@@ -116,10 +116,11 @@ def test_resolve_migrates_untagged_target_name_with_matching_stamp():
         assert resolved == target
         assert target.is_file()
         assert not seeded.exists()
-        assert (Path(tmp) / f"{TAGGED}.meta.json").is_file()
         assert (Path(tmp) / f"{TAGGED}.aria2").is_file()
         assert not (Path(tmp) / f"{UNTAGGED}.aria2").exists()
         assert manager._read_cache_owner_key(target) == key
+        assert manager._validate_complete_cache(target, key, source)
+        assert not [p for p in Path(tmp).iterdir() if p.name.endswith(".json")]
 
 
 def test_resolve_ignores_untagged_target_name_with_wrong_key():

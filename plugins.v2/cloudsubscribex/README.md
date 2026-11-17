@@ -70,4 +70,5 @@ cloudsubscribex_v<version>.zip
 
 老版本留下的 `source_sha1_cache.json`、`tg_monitor/*.json`、`strm_scan_state.json`、
 `ledger/candidate-ledger-*.jsonl` 会在升级后第一次启动时自动导入，并原地改名为 `*.migrated`
-（不删除，可回溯）。`*.parts.json`（下载分片续传标记）仍与被下载文件放在一起，属于临时工作文件。
+（不删除，可回溯）。1.12.19 起下载器不再写任何 `.json` 伴随文件（缓存归属 / 完整性 /
+续传改走进程内登记表）；旧版留下的 `*.meta.json` / `*.parts.json` 由启动残留清理直接删掉。

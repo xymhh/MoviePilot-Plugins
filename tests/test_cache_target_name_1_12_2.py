@@ -7,20 +7,19 @@ MP 整理认不出剧名。1.12.2 修好重试传目标名后，下次重试要�
 cloud-transfer-<hash>-…。
 
 固定契约：
-1. 源文件名文件有伴随文件能证明归属（meta 里的 cache_key 对得上，
-   或 parts 总量对得上）时，_resolve_cache_path 把它改名成目标名
-   （含 meta/parts/aria2 伴随文件），只读查找不改名；
-2. 源文件名文件归属对不上（meta 里是别人的 key）或没有任何伴随文件
+1. 源文件名文件在登记表里有归属标记（cache_key 对得上）时，
+   _resolve_cache_path 把它改名成目标名（含 .aria2 与登记表条目），
+   只读查找不改名；
+2. 源文件名文件归属对不上（登记表里是别人的 key）或没有任何登记
    （裸文件，无法证明是本次源的）时不迁移、不复用；
 3. _rename_cache_files 连 .aria2 控制文件一起改名（aria2 continue=true
    才能按新名断点续传）；delete_cache 删主文件时连 .aria2 一起删；
-4. residue 扫描：.aria2 随主文件进组；主文件已不在的孤 .aria2 只有能
-   证明是插件缓存的才清（同名 meta/parts 在，或主文件名本身就是
-   cloud-transfer 旧命名），MP 自身 aria2 留下的不动。
+4. residue 扫描：.aria2 随主文件进组；主文件已不在的孤 .aria2 只有
+   主文件名本身就是 cloud-transfer 旧命名时才清，MP 自身 aria2
+   留下的不动；旧版 .meta.json / .parts.json 见到直接删。
 """
 
 import hashlib
-import json
 import os
 import sys
 import time
@@ -98,7 +97,7 @@ def _make_manager(download_path):
 
 
 def _seed_source_named(manager, tmp, source, with_stamp=True, with_aria2=True):
-    """模拟 1.12.1 重试留下的源文件名文件：主文件 + 未完成 meta + .aria2。"""
+    """模拟 1.12.1 重试留下的源文件名文件：主文件 + 登记表未完成条目 + .aria2。"""
     path = Path(tmp) / SOURCE_NAME
     path.write_bytes(CONTENT)
     if with_stamp:
@@ -139,10 +138,10 @@ def test_resolve_migrates_source_named_cache_with_matching_stamp():
         assert resolved == target
         assert target.is_file()
         assert not seeded.exists()
-        assert (Path(tmp) / f"{TARGET}.meta.json").is_file()
         assert (Path(tmp) / f"{TARGET}.aria2").is_file()
         assert not (Path(tmp) / f"{SOURCE_NAME}.aria2").exists()
         assert manager._read_cache_owner_key(target) == key
+        assert not [p for p in Path(tmp).iterdir() if p.name.endswith(".json")]
 
 
 def test_resolve_ignores_source_named_cache_with_wrong_key():
@@ -204,10 +203,10 @@ def test_delete_cache_removes_aria2_sidecar():
         manager._stamp_cache_owner(target, key, source)
         (Path(tmp) / f"{TARGET}.aria2").write_bytes(b"aria2-control")
 
-        assert manager.delete_cache(key) == 3
+        assert manager.delete_cache(key) == 2
         assert not target.exists()
-        assert not (Path(tmp) / f"{TARGET}.meta.json").exists()
         assert not (Path(tmp) / f"{TARGET}.aria2").exists()
+        assert manager._read_cache_owner_key(target) == ""
 
 
 # ------------------------------------------------------- residue 认 .aria2
@@ -228,21 +227,24 @@ def test_residue_groups_aria2_with_old_scheme_main():
         assert not aria2.exists()
 
 
-def test_residue_cleans_lone_aria2_with_plugin_meta():
+def test_residue_cleans_legacy_meta_but_keeps_lone_aria2():
+    # 1.12.19：旧版 meta 是 litter，直接删；孤 .aria2 的主文件名不是
+    # cloud-transfer 旧命名，没有归属证据，不动（MP 自身 aria2 也可能
+    # 留下这种文件）。
     with TemporaryDirectory() as tmp:
         manager = _make_manager(tmp)
         source = _make_source(SOURCE_NAME)
         key = manager._cache_key("quark", source)
         meta = Path(tmp) / f"{SOURCE_NAME}.meta.json"
-        meta.write_text(json.dumps({"cache_key": key, "complete": False}))
+        meta.write_text('{"cache_key": "%s", "complete": false}' % key)
         _age(meta, 7)
         aria2 = _touch(tmp, f"{SOURCE_NAME}.aria2", 7, size=10)
 
         result = scan_residue(tmp)
 
-        assert result["deleted_files"] == 2
+        assert result["deleted_files"] == 1
         assert not meta.exists()
-        assert not aria2.exists()
+        assert aria2.exists()
 
 
 def test_residue_ignores_lone_aria2_without_plugin_evidence():

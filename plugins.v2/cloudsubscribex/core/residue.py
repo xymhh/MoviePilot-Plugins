@@ -3,13 +3,22 @@
 只处理插件的中继缓存：旧命名 ``cloud-transfer-<32位hash>`` 开头的文件
 （旧名 ``cloud-transfer-<hash>.bin`` 与新名
 ``cloud-transfer-<hash>-<源文件名>``，如
-``…-律界战争 S01E05.mp4``），及其自动改名副本 ``… (1)``、伴随文件
-``.meta.json`` / ``.parts.json``（含 ``.tmp``）与 aria2 控制文件 ``.aria2``；
-1.12.1 起目标名落盘的文件（文件名本身没有 hash）靠伴随文件认组：有
-``.meta.json`` 时按其中 ``cache_key`` 分组，无 meta 只有 ``.parts.json``
-时按文件名分组。1.12.2 起 ``.aria2`` 也随主文件进组，主文件已不在的孤
-``.aria2`` 只有能证明是插件缓存的才清（同名 meta/parts 在，或主文件名
-本身就是 cloud-transfer 旧命名），MP 自身 aria2 留下的不动。
+``…-律界战争 S01E05.mp4``），及其自动改名副本 ``… (1)`` 与 aria2
+控制文件 ``.aria2``（随主文件进组）。
+
+1.12.19 起下载器不再写任何 ``.json`` 伴随文件（缓存归属 / 完整性 /
+续传改走进程内登记表），所以：
+
+* 分组只剩 ``RESIDUE_PATTERN``（cloud-transfer-* 文件 + 随主文件的
+  ``.aria2``）。目标名落盘的文件（文件名本身没有 hash）不再分组，
+  一律不碰——在途文件靠 ``active_keys`` / ``active_names`` 保护，
+  已完成的早就被 MP 整理移走；
+* 旧版留下的 ``*.meta.json`` / ``*.parts.json``（含 ``.tmp`` 变体）
+  是插件伴随文件，新版再也不写，扫描时见到的都是旧 litter，
+  直接删掉，计入 ``deleted_files`` / ``freed_bytes``；
+* 主文件已不在的孤 ``.aria2``，只有主文件名本身就是 cloud-transfer
+  旧命名时才清；MP 自身 aria2 留下的不动。
+
 目录里其他文件一律不碰。
 
 两级判定：
@@ -24,7 +33,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import shutil
 import time
@@ -37,6 +45,11 @@ RESIDUE_PATTERN = re.compile(
     r"(?: \(\d+\))?"            # 下载器 AutoRename 的 (n) 变体
     r"(?:\.bin|\.[^./\\]+)"     # 扩展名：旧名 .bin / 新名媒体扩展
     r"(?:\.meta\.json(?:\.tmp)?|\.parts\.json(?:\.tmp)?)?$"
+)
+
+#: 旧版伴随文件后缀：新版下载器不再写，扫描时见到直接删（旧 litter）。
+_LEGACY_JSON_SUFFIXES = (
+    ".meta.json", ".parts.json", ".meta.json.tmp", ".parts.json.tmp",
 )
 
 _VARIANT_PATTERN = re.compile(r" \(\d+\)(?=\.[^./\\]+(?:\.|$))")
@@ -52,34 +65,6 @@ DEFAULT_PROTECT_RECENT_SECONDS = 10 * 60
 def _canonical(name: str) -> str:
     """去掉下载器 AutoRename 的 `` (n)`` 变体，便于与任务名比对。"""
     return _VARIANT_PATTERN.sub("", str(name or ""))
-
-
-def _read_meta_cache_key(meta_path: Path) -> str:
-    """读 meta 伴随文件里的 cache_key；非法返回 ''。"""
-    try:
-        payload = json.loads(meta_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        return ""
-    key = str(payload.get("cache_key") or "").strip().lower()
-    if len(key) != 32 or any(value not in "0123456789abcdef" for value in key):
-        return ""
-    return key
-
-
-def _sidecar_paths(entry: Path) -> list:
-    """entry 主文件现存的伴随文件（meta/parts/aria2 及其 .tmp 变体）。"""
-    paths = []
-    for suffix in (
-            ".meta.json", ".meta.json.tmp", ".parts.json", ".parts.json.tmp",
-            ".aria2",
-    ):
-        candidate = entry.with_name(f"{entry.name}{suffix}")
-        try:
-            if candidate.is_file():
-                paths.append(candidate)
-        except OSError:
-            continue
-    return paths
 
 
 def resolve_roots(*candidates: object) -> list:
@@ -157,6 +142,8 @@ def scan_residue(
     （``cloud-transfer-<32 位 hash>``，见
     ``CrossTransferTaskManager.active_cache_keys``），整组跳过；
     1.10.0 起残留清理靠它精确保护在途文件，不再只依赖修改时间。
+    旧版 ``.meta.json`` / ``.parts.json`` 伴随文件直接删（新版不再写，
+    见到的都是旧 litter），不进分组、不看保留期。
     """
     base = Path(root)
     result: Dict[str, object] = {
@@ -200,13 +187,18 @@ def scan_residue(
                 continue
         except OSError:
             continue
+        # 旧版伴随文件：新版下载器不再写，见到的都是旧 litter，直接删。
+        if entry.name.endswith(_LEGACY_JSON_SUFFIXES):
+            _delete_group([entry], result, pressure=False)
+            continue
+        if entry.name.endswith(".tmp"):
+            continue
         match = RESIDUE_PATTERN.match(entry.name)
         if match:
             group = groups.setdefault(match.group("key"), [])
             group.append(entry)
-            # .aria2 不进 RESIDUE_PATTERN 的伴随后缀，自己跟上主文件，
-            # 否则主文件删了它会孤零零留在目录里。meta/parts 已由模式
-            # 自身匹配进组，这里不再重复加（避免同一文件进组两次）。
+            # .aria2 不进 RESIDUE_PATTERN，自己跟上主文件，
+            # 否则主文件删了它会孤零零留在目录里。
             aria2_path = entry.with_name(f"{entry.name}.aria2")
             try:
                 aria2_exists = aria2_path.is_file()
@@ -215,67 +207,18 @@ def scan_residue(
             if aria2_exists and aria2_path not in group:
                 group.append(aria2_path)
             continue
-        # 目标名落盘的文件：文件名里没有 hash，靠伴随文件认组；伴随文件
-        # 本身随主文件进组，主文件已不在时才单独成组（避免只剩 sidecar 漏清）。
-        if entry.name.endswith(".tmp"):
-            continue
         if entry.name.endswith(".aria2"):
             main = entry.with_name(entry.name[: -len(".aria2")])
             if main.is_file():
-                # 主文件在：随主文件进组（上面 match 分支或 _sidecar_paths），
+                # 主文件在：随主文件进组（上面 match 分支），
                 # 这里不单独成组，避免同一文件进组两次。
                 continue
-            # 主文件已不在：只有能证明是插件缓存的才清（同名 meta/parts
-            # 在，或主文件名本身就是 cloud-transfer 旧命名），MP 自身
-            # aria2 留下的孤控制文件不动。
-            meta_path = main.with_name(f"{main.name}.meta.json")
-            parts_path = main.with_name(f"{main.name}.parts.json")
-            key = ""
-            try:
-                if meta_path.is_file():
-                    key = _read_meta_cache_key(meta_path)
-            except OSError:
-                key = ""
-            if key:
-                groups.setdefault(f"cloud-transfer-{key}", []).append(entry)
-            elif parts_path.is_file() or RESIDUE_PATTERN.match(main.name):
+            # 主文件已不在：只有主文件名本身就是 cloud-transfer 旧命名
+            # 才清；MP 自身 aria2 留下的孤控制文件不动。
+            if RESIDUE_PATTERN.match(main.name):
                 groups.setdefault(f"file:{main.name}", []).append(entry)
             continue
-        if entry.name.endswith(".meta.json"):
-            main = entry.with_name(entry.name[: -len(".meta.json")])
-            if main.is_file():
-                continue
-            key = _read_meta_cache_key(entry)
-            if key:
-                groups.setdefault(f"cloud-transfer-{key}", []).append(entry)
-            continue
-        if entry.name.endswith(".parts.json"):
-            main = entry.with_name(entry.name[: -len(".parts.json")])
-            if main.is_file():
-                continue
-            groups.setdefault(f"file:{main.name}", []).append(entry)
-            continue
-        meta_path = entry.with_name(f"{entry.name}.meta.json")
-        try:
-            has_meta = meta_path.is_file()
-        except OSError:
-            has_meta = False
-        if has_meta:
-            key = _read_meta_cache_key(meta_path)
-            if key:
-                group = groups.setdefault(f"cloud-transfer-{key}", [])
-                group.append(entry)
-                group.extend(_sidecar_paths(entry))
-                continue
-        parts_path = entry.with_name(f"{entry.name}.parts.json")
-        try:
-            has_parts = parts_path.is_file()
-        except OSError:
-            has_parts = False
-        if has_parts:
-            group = groups.setdefault(f"file:{entry.name}", [])
-            group.append(entry)
-            group.extend(_sidecar_paths(entry))
+        # 其它文件（目标名落盘的文件、无伴随文件的普通文件）一律不碰。
 
     stamp = time.time() if now is None else float(now)
     cutoff = stamp - max(0.0, float(min_age_seconds))

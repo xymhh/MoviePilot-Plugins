@@ -274,15 +274,12 @@ class RapidMissAbortTests(unittest.TestCase):
     def _cache_triples(self, manager, file_item):
         # 1.12.1 起任务用目标名落盘：按生产侧的解析口径取路径（只读查找，
         # 不触发改名迁移），否则断言会对着一个从不存在的旧命名路径放空炮。
+        # 1.12.19 起不再写 .meta.json / .parts.json，只剩缓存文件本身。
         cache_path = manager._lookup_cache_path(
             manager._cache_key("quark", file_item), file_item,
             target_name="movie.mkv",
         )
-        return (
-            cache_path,
-            manager._cache_meta_path(cache_path),
-            manager._cache_parts_path(cache_path),
-        )
+        return (cache_path,)
 
     def _seed_complete_cache(self, manager, file_item):
         cache_path = manager._cache_path(
@@ -305,7 +302,6 @@ class RapidMissAbortTests(unittest.TestCase):
         manager, files_service = self.make_manager(upload)
         file_item = make_file_item()
         cache_path = self._seed_complete_cache(manager, file_item)
-        meta_path = manager._cache_meta_path(cache_path)
 
         public = manager.create(
             source_key="quark", source_file=file_item,
@@ -321,7 +317,7 @@ class RapidMissAbortTests(unittest.TestCase):
         self.assertEqual(upload.upload_file_calls, [], "命中秒传不得真实上传")
         self.assertEqual(self.source.download_calls, [], "命中秒传不得本地下载")
         self.assertFalse(cache_path.exists(), "命中后缓存必须删除")
-        self.assertFalse(meta_path.exists(), "命中后 meta 必须删除")
+        self.assertTrue(self._no_cache_left(manager), "命中后不得残留任何文件")
         files_service.find_file.assert_called()
 
     def test_abort_probe_miss_with_sha1_aborts_without_download_or_upload(self):
@@ -401,7 +397,7 @@ class RapidMissAbortTests(unittest.TestCase):
             upload, rapid_miss_action="fallback",
         )
         file_item = make_file_item()
-        cache_path, meta_path, _parts = self._cache_triples(manager, file_item)
+        (cache_path,) = self._cache_triples(manager, file_item)
 
         public = manager.create(
             source_key="quark", source_file=file_item,
@@ -414,19 +410,19 @@ class RapidMissAbortTests(unittest.TestCase):
         self.assertEqual(task["phase"], "failed")
         self.assertEqual(task.get("abort_reason", ""), "")
         self.assertFalse(cache_path.exists(), "fallback 失败后完整缓存必须删除")
-        self.assertFalse(meta_path.exists(), "fallback 失败后 .meta.json 必须删除")
         self.assertTrue(
             self._no_cache_left(manager), "失败后缓存目录不得残留本任务文件"
         )
 
     def test_fallback_download_failure_deletes_partial_cache(self):
-        """1.10.0：下载中途失败时半截文件与 .parts.json 也必须删除（断点续传取消）。"""
+        """1.10.0：下载中途失败时半截文件必须删除；1.12.19 起下载器不再写
+        .parts.json，失败后缓存目录里什么都不剩。"""
         upload = FakeRapidUploadService(rapid_outcomes=[False])
         manager, _files_service = self.make_manager(
             upload, rapid_miss_action="fallback",
         )
         file_item = make_file_item()
-        cache_path, _meta, parts_path = self._cache_triples(manager, file_item)
+        (cache_path,) = self._cache_triples(manager, file_item)
 
         def _failing_download(item, local_path, progress_callback=None,
                               stop_requested=None, preserve_partial=True,
@@ -434,7 +430,6 @@ class RapidMissAbortTests(unittest.TestCase):
             target = Path(local_path)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(PAYLOAD[:5])
-            parts_path.write_text("{}", encoding="utf-8")
             raise RuntimeError("模拟下载中断")
 
         self.source.download_file = _failing_download
@@ -448,7 +443,6 @@ class RapidMissAbortTests(unittest.TestCase):
         self.assertEqual(task["status"], "failed")
         self.assertEqual(task["phase"], "failed")
         self.assertFalse(cache_path.exists(), "下载失败后半截文件必须删除")
-        self.assertFalse(parts_path.exists(), "下载失败后 .parts.json 必须删除")
         self.assertTrue(
             self._no_cache_left(manager), "失败后缓存目录不得残留本任务文件"
         )
@@ -458,7 +452,7 @@ class RapidMissAbortTests(unittest.TestCase):
         upload = FakeRapidUploadService(rapid_outcomes=[False])
         manager, _files_service = self.make_manager(upload)
         file_item = make_file_item(with_checksums=False)
-        cache_path, meta_path, _parts = self._cache_triples(manager, file_item)
+        (cache_path,) = self._cache_triples(manager, file_item)
 
         public = manager.create(
             source_key="quark", source_file=file_item,
@@ -469,7 +463,7 @@ class RapidMissAbortTests(unittest.TestCase):
         self.assertEqual(task["status"], "failed")
         self.assertEqual(task["phase"], "aborted")
         self.assertFalse(cache_path.exists(), "abort 必须删除完整缓存 .bin")
-        self.assertFalse(meta_path.exists(), "abort 必须删除 .meta.json")
+        self.assertTrue(self._no_cache_left(manager), "abort 后不得残留任何文件")
 
     def test_abort_multi_file_isolation(self):
         """多文件任务：单个文件中止不影响其它文件的转存。"""

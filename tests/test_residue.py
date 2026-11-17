@@ -89,6 +89,41 @@ class ResidueScanTest(unittest.TestCase):
             self.assertEqual(result["deleted_files"], 1)
             self.assertEqual(result["skipped_recent"], 1)
 
+    def test_legacy_json_files_are_always_deleted(self):
+        # 1.12.19：旧版 .meta.json / .parts.json（含 .tmp）是插件伴随文件，
+        # 新版再也不写，扫描时见到直接删，不看保留期、不进分组。
+        # /downloads 里那 34 个孤儿 .meta.json 就是这种情况（主文件已不在）。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            meta = self._touch(root, "movie.mkv.meta.json", 0.01, 5)
+            parts = self._touch(root, "movie.mkv.parts.json", 0.01, 5)
+            meta_tmp = self._touch(root, "other.meta.json.tmp", 0.01, 5)
+            parts_tmp = self._touch(root, "other.parts.json.tmp", 0.01, 5)
+            keep = self._touch(root, "movie.mkv", 5, 20)
+
+            result = scan_residue(root, now=time.time())
+
+            self.assertEqual(result["deleted_files"], 4)
+            self.assertFalse(meta.exists())
+            self.assertFalse(parts.exists())
+            self.assertFalse(meta_tmp.exists())
+            self.assertFalse(parts_tmp.exists())
+            self.assertTrue(keep.exists())
+
+    def test_legacy_json_deleted_even_when_main_file_is_fresh(self):
+        # 旧 meta 不再保护主文件那组：主文件新鲜照样跳过，meta 照样删。
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            main = self._touch(root, f"{KEY}.bin", 0.01, 100)
+            meta = self._touch(root, f"{KEY}.bin.meta.json", 0.01, 5)
+
+            result = scan_residue(root, now=time.time())
+
+            self.assertEqual(result["deleted_files"], 1)
+            self.assertEqual(result["skipped_recent"], 1)
+            self.assertTrue(main.exists())
+            self.assertFalse(meta.exists())
+
 
 class _Usage:
     def __init__(self, total: int, free: int):

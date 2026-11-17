@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import shutil
 import tempfile
@@ -297,6 +296,50 @@ class _ProgressGate:
         self._callback(done, total)
 
 
+#: 并行分段下载的断点续传状态（进程内内存，1.12.19 起不再写 .parts.json）：
+#: （目标路径字符串，文件总字节，分片字节）→ 已完成分片起点的集合。
+#: 下载成功后删条目；失败且不保留半截文件时也删；保留半截文件时留着，
+#: 同进程内下次调用可续传；进程重启后自然清空，从头下。
+_PARTS_MEMORY: dict[tuple[str, int, int], set[int]] = {}
+_PARTS_MEMORY_LOCK = Lock()
+
+
+def _parts_memory_key(target: Path, total: int, part_size: int) -> tuple[str, int, int]:
+    return (str(target), int(total), int(part_size))
+
+
+def _parts_memory_get(target: Path, total: int, part_size: int) -> set[int]:
+    with _PARTS_MEMORY_LOCK:
+        return set(
+            _PARTS_MEMORY.get(_parts_memory_key(target, total, part_size)) or set()
+        )
+
+
+def _parts_memory_add(target: Path, total: int, part_size: int, start: int) -> None:
+    with _PARTS_MEMORY_LOCK:
+        _PARTS_MEMORY.setdefault(
+            _parts_memory_key(target, total, part_size), set()
+        ).add(int(start))
+
+
+def _parts_memory_discard(target: Path) -> None:
+    """删掉该目标的全部内存续传条目（文件删了、或回落串行下载时调用）。"""
+    name = str(target)
+    with _PARTS_MEMORY_LOCK:
+        for key in [key for key in _PARTS_MEMORY if key[0] == name]:
+            _PARTS_MEMORY.pop(key, None)
+
+
+def _parts_memory_for(target: Path, total: int) -> tuple[int, set[int]]:
+    """返回该目标当前内存里的（分片字节，已完成分片起点集合）；没有返回 (0, set())。"""
+    name = str(target)
+    with _PARTS_MEMORY_LOCK:
+        for (key_name, key_total, part_size), completed in _PARTS_MEMORY.items():
+            if key_name == name and key_total == int(total):
+                return int(part_size), set(completed)
+    return 0, set()
+
+
 class HttpFileDownloadService:
     """把 Provider 的临时下载地址解析器适配为流式文件下载能力。
 
@@ -352,7 +395,7 @@ class HttpFileDownloadService:
             return 16 * 1024 * 1024
         target = total // max(1, self._concurrency * 2)
         target = max(self.MIN_PART_SIZE, min(self.MAX_PART_SIZE, target))
-        # 对齐到 4MB，parts.json 里的 part_size 才好比对
+        # 对齐到 4MB，内存续传按 part_size 比对
         return (target // (4 * 1024 * 1024)) * (4 * 1024 * 1024) or self.MIN_PART_SIZE
 
     def _create_session(self) -> requests.Session:
@@ -372,48 +415,27 @@ class HttpFileDownloadService:
         session.mount("https://", adapter)
         return session
 
-    @staticmethod
-    def _parts_path(target: Path) -> Path:
-        return target.with_name(f"{target.name}.parts.json")
-
-    @staticmethod
-    def _write_parts(path: Path, payload: dict) -> None:
-        temporary = path.with_name(f"{path.name}.tmp")
-        temporary.write_text(
-            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        temporary.replace(path)
-
     def _load_completed_ranges(
             self, target: Path, total: int, ranges: list[tuple[int, int]],
             part_size: int,
     ) -> set[int]:
-        parts_path = self._parts_path(target)
-        if not target.is_file() or not parts_path.is_file():
+        """读进程内内存里的已完成分片（1.12.19 起不再读 .parts.json）。
+
+        文件不存在、大小与 total 对不上、分片起点不在当前分片表里时，
+        一律返回空集（从头下），绝不把半截稀疏文件误认成已完成。
+        """
+        if not target.is_file():
             return set()
         try:
-            payload = json.loads(parts_path.read_text(encoding="utf-8"))
-            if (
-                    int(payload.get("version") or 0) != 1
-                    or int(payload.get("total") or 0) != total
-                    or int(payload.get("part_size") or 0) != part_size
-                    or target.stat().st_size != total
-            ):
+            if target.stat().st_size != total:
                 return set()
-            raw_completed = payload.get("completed") or []
-            if not isinstance(raw_completed, list):
-                return set()
-            valid_starts = {start for start, _ in ranges}
-            completed = {int(value) for value in raw_completed}
-            if (
-                    len(completed) != len(raw_completed)
-                    or not completed.issubset(valid_starts)
-            ):
-                return set()
-            return completed
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except OSError:
             return set()
+        completed = _parts_memory_get(target, total, part_size)
+        valid_starts = {start for start, _ in ranges}
+        if not completed.issubset(valid_starts):
+            return set()
+        return completed
 
     def _download_serial(
             self, refresher: _LinkRefresher, session: requests.Session,
@@ -570,21 +592,14 @@ class HttpFileDownloadService:
         )
 
         abort_event = Event()
-        parts_path = self._parts_path(target)
         completed = self._load_completed_ranges(target, total, ranges, part_size)
         if not completed:
             with target.open("wb") as handle:
                 handle.truncate(total)
-            self._write_parts(parts_path, {
-                "version": 1,
-                "total": total,
-                "part_size": part_size,
-                "completed": [],
-            })
         gate.seed(sum(end - start + 1 for start, end in ranges if start in completed))
         pending_ranges = [value for value in ranges if value[0] not in completed]
         if not pending_ranges:
-            parts_path.unlink(missing_ok=True)
+            _parts_memory_discard(target)
             gate.flush()
             return str(target)
 
@@ -596,12 +611,7 @@ class HttpFileDownloadService:
             )
             with progress_lock:
                 completed.add(start)
-                self._write_parts(parts_path, {
-                    "version": 1,
-                    "total": total,
-                    "part_size": part_size,
-                    "completed": sorted(completed),
-                })
+                _parts_memory_add(target, total, part_size, start)
 
         progress_lock = Lock()
         executor = ThreadPoolExecutor(
@@ -619,7 +629,7 @@ class HttpFileDownloadService:
             raise
         finally:
             executor.shutdown(wait=True, cancel_futures=True)
-        parts_path.unlink(missing_ok=True)
+        _parts_memory_discard(target)
         gate.flush()
         return str(target)
 
@@ -669,15 +679,15 @@ class HttpFileDownloadService:
                     # 403/失效链接也会走到这里，回退前先尝试换取新链接
                     refresher.get(refresh=True)
                     target.unlink(missing_ok=True)
-                    self._parts_path(target).unlink(missing_ok=True)
+                    _parts_memory_discard(target)
                     gate.seed(0)
             return self._download_serial(
                 refresher, session, file_item, target, gate, stop_requested,
             )
         except Exception:
-            if not preserve_partial or not self._parts_path(target).is_file():
+            if not preserve_partial:
                 target.unlink(missing_ok=True)
-                self._parts_path(target).unlink(missing_ok=True)
+                _parts_memory_discard(target)
             raise
         finally:
             session.close()
@@ -935,6 +945,12 @@ class CrossTransferTaskManager:
         self._cache_key_locks_guard = Lock()
         self._cache_refs: dict[str, int] = {}
         self._cache_refs_lock = Lock()
+        # 中继缓存登记表（进程内内存，1.12.19 起替代 .meta.json / .parts.json）：
+        # 绝对路径字符串 → {cache_key, size, sha1, md5, complete,
+        # parts（已完成分片起点集合）, part_size, total}。
+        # 只活在进程内，不写盘、不进任何数据键；进程重启后自然清空，
+        # 跨重启的缓存复用随之失效（本来就已死），从头下。
+        self._cache_registry: dict[str, dict] = {}
         # 源文件 SHA1 缓存：秒传未命中时本地文件会被删掉，但哈希留着，
         # 下次重试可以只走「零流量秒传探测」，不再重复下 5GB。
         self._hash_cache_get = hash_cache_get
@@ -1127,8 +1143,8 @@ class CrossTransferTaskManager:
         """源文件名落盘路径（1.12.1 历史重试漏传目标名时留下的文件）。
 
         文件名本身不带 hash，归属不能只凭名字认——调用方必须再用
-        :meth:`_is_our_cache_file` 按伴随文件（meta 里的 cache_key 或
-        parts 总量）核对是本次源的文件，才可迁移或复用。
+        :meth:`_is_our_cache_file` 按进程内登记表核对是本次源的文件，
+        才可迁移或复用。
         """
         if source is None:
             return None
@@ -1156,46 +1172,69 @@ class CrossTransferTaskManager:
             return None
         return self._cache_root() / clean
 
-    @staticmethod
-    def _read_cache_owner_key(path: Path) -> str:
-        """读 path 的 meta 伴随文件里的 cache_key；读不到返回 ''。"""
-        try:
-            payload = json.loads(
-                path.with_name(f"{path.name}.meta.json").read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return ""
-        key = str(payload.get("cache_key") or "").strip().lower()
-        if len(key) != 32 or any(value not in "0123456789abcdef" for value in key):
-            return ""
-        return key
+    # ---------------------------------------------------------- 登记表读写
+    # 用 manager 已有的 self._lock 保护（临界区都很短，只做字典读写）。
 
-    def _read_parts_total(self, path: Path) -> int:
-        """读 path 的 parts 伴随文件里的 total；读不到返回 0。"""
-        try:
-            payload = json.loads(
-                self._cache_parts_path(path).read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return 0
-        try:
-            return int(payload.get("total") or 0)
-        except (TypeError, ValueError):
-            return 0
+    def _registry_get(self, path: Path) -> dict | None:
+        """取登记表条目的快照（parts 集合也拷一份）；没有返回 None。"""
+        with self._lock:
+            entry = self._cache_registry.get(str(path))
+            if entry is None:
+                return None
+            snapshot = dict(entry)
+            snapshot["parts"] = set(entry.get("parts") or set())
+            return snapshot
+
+    def _registry_put(self, path: Path, entry: dict) -> None:
+        with self._lock:
+            self._cache_registry[str(path)] = dict(entry)
+
+    def _registry_drop(self, path: Path) -> None:
+        with self._lock:
+            self._cache_registry.pop(str(path), None)
+
+    def _registry_move(self, old_path: Path, new_path: Path) -> None:
+        with self._lock:
+            entry = self._cache_registry.pop(str(old_path), None)
+            if entry is not None:
+                self._cache_registry[str(new_path)] = entry
+
+    def _sync_registry_parts(self, path: Path, source) -> None:
+        """把 HttpFileDownloadService 内存里的并行分片进度同步进登记表。
+
+        登记表里没有该路径时什么都不做（没 stamp 过的文件不是本次缓存）。
+        """
+        total = int(getattr(source, "size", 0) or 0)
+        if total <= 0:
+            return
+        part_size, completed = _parts_memory_for(path, total)
+        if part_size <= 0:
+            return
+        with self._lock:
+            entry = self._cache_registry.get(str(path))
+            if entry is None:
+                return
+            entry["parts"] = set(completed)
+            entry["part_size"] = part_size
+            entry["total"] = total
+
+    def _read_cache_owner_key(self, path: Path) -> str:
+        """读登记表里 path 的 cache_key；没有登记返回 ''。"""
+        entry = self._registry_get(path)
+        if entry is None:
+            return ""
+        return str(entry.get("cache_key") or "").strip().lower()
 
     def _is_our_cache_file(self, path: Path, cache_key: str, source) -> bool:
-        """path 上的文件是否属于本次源：meta 认 cache_key；无 meta 时
-        断点续传的 parts 总量对得上才认（同名不同源的极端情况靠下载完的
-        SHA1 校验兜底，不会静默损坏）。"""
+        """path 上的文件是否属于本次源：只认登记表里的 cache_key。
+
+        登记表里没有该路径（跨重启的旧文件、别人下的裸文件）一律不认——
+        宁可重下或改名，绝不认错文件；完整性另由
+        :meth:`_validate_complete_cache` 按大小 + SHA1/MD5 校验兜底。
+        """
         if not path.is_file():
             return False
-        owner = self._read_cache_owner_key(path)
-        if owner:
-            return owner == cache_key
-        if self._cache_meta_path(path).is_file():
-            return False
-        expected = int(getattr(source, "size", 0) or 0)
-        return expected > 0 and self._read_parts_total(path) == expected
+        return self._read_cache_owner_key(path) == cache_key
 
     def _desired_cache_path(
             self, cache_key: str, source: CloudFile | None,
@@ -1248,9 +1287,8 @@ class CrossTransferTaskManager:
                 return desired
             return legacy
         # 1.12.2：1.12.1 历史重试漏传目标名，文件以源文件名落盘（如 06.mkv，
-        # 06.mkv.aria2、06.mkv.meta.json 都在）。源文件名不带 hash，改名前
-        # 必须按伴随文件核对归属（meta 里的 cache_key 或 parts 总量），
-        # 否则别家同名文件会被错改名。
+        # 06.mkv.aria2）。源文件名不带 hash，改名前
+        # 必须按登记表核对归属，否则别家同名文件会被错改名。
         source_path = self._source_cache_path(source)
         if (
                 source_path is not None
@@ -1264,7 +1302,7 @@ class CrossTransferTaskManager:
             return source_path
         # 1.12.4：目标名从本版起带 {tmdb-...} 标记，此前版本下载的文件
         # 用的是无标记的旧目标名（如“十万狂花入梦来 - S01E06 - 第6集.mkv”）。
-        # 与当前目标名只差一个标记，同样按伴随文件核对归属后改名复用，不重下。
+        # 与当前目标名只差一个标记，同样按登记表核对归属后改名复用，不重下。
         untagged_path = self._untagged_cache_path(target_name)
         if (
                 untagged_path is not None
@@ -1315,7 +1353,10 @@ class CrossTransferTaskManager:
         return desired
 
     def _rename_cache_files(self, old_path: Path, new_path: Path) -> bool:
-        """把旧名缓存连同伴随文件改名到新名；主文件改名失败返回 False。"""
+        """把旧名缓存连同 .aria2 改名到新名；主文件改名失败返回 False。
+
+        登记表条目也从旧路径键移到新路径键（没有条目时什么都不做）。
+        """
         try:
             old_path.replace(new_path)
         except OSError as error:
@@ -1324,31 +1365,18 @@ class CrossTransferTaskManager:
             )
             return False
         # aria2 控制文件也一起改名：改名后 aria2（continue=true）才能按新
-        # 名断点续传，否则已落盘的字节白下。aria2 没有 .tmp 变体，子循环
-        # 里那次不存在的 .tmp 尝试会被跳过。
+        # 名断点续传，否则已落盘的字节白下。
         aria2_old = old_path.with_name(f"{old_path.name}.aria2")
         aria2_new = new_path.with_name(f"{new_path.name}.aria2")
-        for old_comp, new_comp in (
-                (self._cache_meta_path(old_path), self._cache_meta_path(new_path)),
-                (self._cache_parts_path(old_path), self._cache_parts_path(new_path)),
-                (aria2_old, aria2_new),
-        ):
-            for old_variant, new_variant in (
-                    (old_comp, new_comp),
-                    (
-                        old_comp.with_name(f"{old_comp.name}.tmp"),
-                        new_comp.with_name(f"{new_comp.name}.tmp"),
-                    ),
-            ):
-                if not old_variant.is_file():
-                    continue
-                try:
-                    old_variant.replace(new_variant)
-                except OSError as error:  # noqa: BLE001 - 伴随文件改名失败不影响主文件
-                    logger.debug(
-                        f"中继缓存伴随文件改名失败：{old_variant.name}：{error}",
-                        exc_info=True,
-                    )
+        if aria2_old.is_file():
+            try:
+                aria2_old.replace(aria2_new)
+            except OSError as error:  # noqa: BLE001 - 伴随文件改名失败不影响主文件
+                logger.debug(
+                    f"中继缓存伴随文件改名失败：{aria2_old.name}：{error}",
+                    exc_info=True,
+                )
+        self._registry_move(old_path, new_path)
         return True
 
 
@@ -1366,26 +1394,11 @@ class CrossTransferTaskManager:
             str(data.get("source_provider") or ""), source_file
         )
 
-    @staticmethod
-    def _cache_meta_path(path: Path) -> Path:
-        return path.with_name(f"{path.name}.meta.json")
-
-    @staticmethod
-    def _cache_parts_path(path: Path) -> Path:
-        return path.with_name(f"{path.name}.parts.json")
-
     def _delete_cache_path(self, path: Path) -> int:
+        """删主文件 + .aria2，并删登记表条目；返回删掉的文件数。"""
         deleted = 0
         for candidate in (
                 path,
-                self._cache_meta_path(path),
-                self._cache_meta_path(path).with_name(
-                    f"{self._cache_meta_path(path).name}.tmp"
-                ),
-                self._cache_parts_path(path),
-                self._cache_parts_path(path).with_name(
-                    f"{self._cache_parts_path(path).name}.tmp"
-                ),
                 # aria2 控制文件：主文件删了它就是孤儿，不跟上会一直
                 # 堆在 /downloads 里（1.12.1 重试留下的 06.mkv.aria2
                 # 就是这么来的）。
@@ -1394,6 +1407,7 @@ class CrossTransferTaskManager:
             if candidate.is_file():
                 candidate.unlink(missing_ok=True)
                 deleted += 1
+        self._registry_drop(path)
         return deleted
 
     def _cache_key_lock(self, cache_key: str) -> Lock:
@@ -1443,8 +1457,9 @@ class CrossTransferTaskManager:
     def active_cache_names(self) -> set:
         """进行中任务持有的中继缓存文件名（目标名落盘后的实际文件名）。
 
-        残留清理用它保护没有 meta 伴随文件、只凭文件名分组的断点续传文件
-        （目标名文件）；有 meta 的文件靠 :meth:`active_cache_keys` 的组键保护。
+        残留清理用它保护目标名落盘的文件（文件名本身没有 hash，
+        residue 只认 cloud-transfer-* 命名）；cloud-transfer-* 命名的
+        文件靠 :meth:`active_cache_keys` 的组键保护。
         只读查找，不触发改名迁移。
         """
         names = set()
@@ -1473,7 +1488,7 @@ class CrossTransferTaskManager:
         return bool(cache_key) and self._cache_ref_count(cache_key) > 1
 
     def _delete_cache_path_for_task(self, task: dict | None, path: Path) -> int:
-        """任务级中继清理：仍有兄弟任务使用时保留文件（连同 meta/parts），供其复用。"""
+        """任务级中继清理：仍有兄弟任务使用时保留文件（连同 .aria2），供其复用。"""
         if self._cache_retained_for_others(task):
             logger.debug(
                 f"跨盘缓存仍被其它任务使用，保留不删：{path.name}"
@@ -1493,7 +1508,7 @@ class CrossTransferTaskManager:
             )
             return 0
         # 按 cache_key 查找：旧命名（cloud-transfer-<key>-<源文件名>／.bin）
-        # 按文件名匹配；目标名落盘的文件按 meta 伴随文件里的 cache_key 匹配。
+        # 按文件名匹配；目标名落盘的文件按登记表里的 cache_key 匹配。
         wanted = f"cloud-transfer-{normalized}"
         deleted = 0
         try:
@@ -1512,6 +1527,8 @@ class CrossTransferTaskManager:
                 deleted += 1
             except OSError as error:  # noqa: BLE001 - 单个文件删失败不影响其余
                 logger.debug(f"删除跨盘缓存失败：{entry.name}：{error}", exc_info=True)
+                continue
+            self._registry_drop(entry)
         for entry in entries:
             if not entry.is_file():
                 continue
@@ -1526,71 +1543,95 @@ class CrossTransferTaskManager:
             deleted += self._delete_cache_path(entry)
         return deleted
 
+    def _is_stale_partial_cache(self, path: Path, cache_key: str) -> bool:
+        """半截旧缓存是否可删：登记表里没有该路径（跨重启的旧文件，
+        内存状态已丢、没有续传依据），或登记表标为未完成、且没有兄弟
+        任务在用同一 cache_key。正在下载的别动：当前任务持有 1 个引用，
+        引用计数 > 1 说明还有兄弟任务在用。
+        """
+        entry = self._registry_get(path)
+        if entry is None:
+            return True
+        if entry.get("complete"):
+            return False
+        return self._cache_ref_count(cache_key) <= 1
+
     def _validate_complete_cache(
             self, path: Path, cache_key: str, source: CloudFile,
             verify_checksum: bool = True,
     ) -> bool:
-        meta_path = self._cache_meta_path(path)
-        if not path.is_file() or not meta_path.is_file():
+        """登记表里必须有该路径、cache_key 一致、complete=True、大小与
+        source 一致、磁盘文件大小一致；登记表里的 sha1/md5 有值时必须与
+        source 的一致。完整性只认登记表 complete=True，不认大小——
+        半截的预分配稀疏文件大小也是满的，绝不能误认完成。"""
+        entry = self._registry_get(path)
+        if entry is None:
+            return False
+        expected_size = int(source.size or 0)
+        if (
+                str(entry.get("cache_key") or "") != cache_key
+                or not entry.get("complete")
+                or int(entry.get("size") or 0) != expected_size
+                or expected_size <= 0
+        ):
             return False
         try:
-            metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-            expected_size = int(source.size or 0)
-            if (
-                    metadata.get("cache_key") != cache_key
-                    or not metadata.get("complete")
-                    or int(metadata.get("size") or 0) != expected_size
-                    or path.stat().st_size != expected_size
-            ):
+            if not path.is_file() or path.stat().st_size != expected_size:
                 return False
-            expected_sha1 = str(source.sha1 or "").lower()
-            expected_md5 = str(source.md5 or "").lower()
-            if (
-                    str(metadata.get("sha1") or "").lower() != expected_sha1
-                    or str(metadata.get("md5") or "").lower() != expected_md5
-            ):
-                return False
-            if not verify_checksum:
-                return expected_size > 0
-            if expected_sha1:
-                return file_checksum(str(path), "sha1").lower() == expected_sha1
-            if expected_md5:
-                return file_checksum(str(path), "md5").lower() == expected_md5
-            return expected_size > 0
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except OSError:
             return False
+        expected_sha1 = str(source.sha1 or "").lower()
+        expected_md5 = str(source.md5 or "").lower()
+        if (
+                str(entry.get("sha1") or "").lower() != expected_sha1
+                or str(entry.get("md5") or "").lower() != expected_md5
+        ):
+            return False
+        if not verify_checksum:
+            return True
+        if expected_sha1:
+            return file_checksum(str(path), "sha1").lower() == expected_sha1
+        if expected_md5:
+            return file_checksum(str(path), "md5").lower() == expected_md5
+        return True
 
     def _partial_cache_size(self, path: Path, source: CloudFile) -> int:
-        parts_path = self._cache_parts_path(path)
+        """已下字节：登记表里有并行分片进度时按它算，否则返回 0。
+
+        分片进度先从 HttpFileDownloadService 的进程内内存同步进登记表
+        （part_size/total 校验与旧 _read_parts_total 的逻辑一致）；
+        串行下载的半截文件没有分片进度，返回 0（与旧行为一致）。
+        """
+        self._sync_registry_parts(path, source)
+        entry = self._registry_get(path)
         expected_size = int(source.size or 0)
-        if expected_size <= 0 or not path.is_file() or not parts_path.is_file():
+        if entry is None or expected_size <= 0:
+            return 0
+        part_size = int(entry.get("part_size") or 0)
+        total = int(entry.get("total") or 0)
+        if part_size <= 0 or total != expected_size:
             return 0
         try:
-            payload = json.loads(parts_path.read_text(encoding="utf-8"))
-            part_size = int(payload.get("part_size") or 0)
-            if (
-                    int(payload.get("version") or 0) != 1
-                    or int(payload.get("total") or 0) != expected_size
-                    or part_size <= 0
-                    or path.stat().st_size != expected_size
-            ):
+            if not path.is_file() or path.stat().st_size != expected_size:
                 return 0
-            valid_starts = set(range(0, expected_size, part_size))
-            completed = {
-                int(value) for value in (payload.get("completed") or [])
-                if int(value) in valid_starts
-            }
-            if len(completed) != len(payload.get("completed") or []):
-                return 0
-            return sum(
-                min(part_size, expected_size - start) for start in completed
-            )
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        except OSError:
             return 0
+        completed = set(entry.get("parts") or set())
+        valid_starts = set(range(0, expected_size, part_size))
+        if not completed or not completed.issubset(valid_starts):
+            return 0
+        return sum(
+            min(part_size, expected_size - start) for start in completed
+        )
 
     def _mark_complete_cache(
             self, path: Path, cache_key: str, source: CloudFile,
     ) -> None:
+        """下载完成后把登记表该条目标成 complete=True。
+
+        先按老逻辑校验磁盘文件大小 + SHA1/MD5（不匹配仍抛 IOError），
+        不写任何文件。
+        """
         expected_size = int(source.size or 0)
         if expected_size <= 0 or path.stat().st_size != expected_size:
             raise IOError(
@@ -1602,42 +1643,46 @@ class CrossTransferTaskManager:
             raise IOError("本地缓存 SHA1 校验失败")
         if md5 and file_checksum(str(path), "md5").lower() != md5:
             raise IOError("本地缓存 MD5 校验失败")
-        meta_path = self._cache_meta_path(path)
-        temporary = meta_path.with_name(f"{meta_path.name}.tmp")
-        temporary.write_text(json.dumps({
-            "version": 1,
-            "cache_key": cache_key,
-            "complete": True,
-            "size": expected_size,
-            "sha1": sha1,
-            "md5": md5,
-        }, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-        temporary.replace(meta_path)
+        with self._lock:
+            entry = self._cache_registry.get(str(path))
+            if entry is None:
+                entry = {
+                    "cache_key": str(cache_key or "").strip().lower(),
+                    "size": expected_size,
+                    "sha1": sha1,
+                    "md5": md5,
+                    "complete": False,
+                    "parts": set(),
+                    "part_size": 0,
+                    "total": expected_size,
+                }
+                self._cache_registry[str(path)] = entry
+            entry["cache_key"] = str(cache_key or "").strip().lower()
+            entry["size"] = expected_size
+            entry["sha1"] = sha1
+            entry["md5"] = md5
+            entry["total"] = expected_size
+            entry["complete"] = True
 
     def _stamp_cache_owner(
             self, path: Path, cache_key: str, source: CloudFile,
     ) -> None:
-        """下载开始前写未完成 meta（complete=False），只记归属。
+        """下载开始前在登记表里记一条未完成条目（complete=False），只记归属。
 
         校验只认 complete=True，所以它不会被误当作完整缓存；成功后
-        :meth:`_mark_complete_cache` 会覆盖它。写失败不影响下载。
+        :meth:`_mark_complete_cache` 会把它标成完成。不写文件。
         """
-        try:
-            meta_path = self._cache_meta_path(path)
-            temporary = meta_path.with_name(f"{meta_path.name}.tmp")
-            temporary.write_text(json.dumps({
-                "version": 1,
-                "cache_key": cache_key,
-                "complete": False,
-                "size": int(getattr(source, "size", 0) or 0),
-                "sha1": str(getattr(source, "sha1", "") or "").lower(),
-                "md5": str(getattr(source, "md5", "") or "").lower(),
-            }, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
-            temporary.replace(meta_path)
-        except OSError as error:  # noqa: BLE001 - 归属标记写失败不影响下载
-            logger.debug(
-                f"中继缓存归属标记写入失败：{path.name}：{error}", exc_info=True,
-            )
+        size = int(getattr(source, "size", 0) or 0)
+        self._registry_put(path, {
+            "cache_key": str(cache_key or "").strip().lower(),
+            "size": size,
+            "sha1": str(getattr(source, "sha1", "") or "").lower(),
+            "md5": str(getattr(source, "md5", "") or "").lower(),
+            "complete": False,
+            "parts": set(),
+            "part_size": 0,
+            "total": size,
+        })
 
     def cache_info(
             self, source_key: str, source: CloudFile,
@@ -1867,7 +1912,6 @@ class CrossTransferTaskManager:
         source_file = task["source_file"]
         expected_size = int(source_file.size or task["total"] or 0)
         cache_path = Path(temporary_path)
-        parts_path = self._cache_parts_path(cache_path)
         download_done = Event()
         progress_changed = Event()
         download_error: list[BaseException] = []
@@ -1936,18 +1980,18 @@ class CrossTransferTaskManager:
                     raise InterruptedError
                 if download_error:
                     raise download_error[0]
-                if parts_path.is_file():
-                    try:
-                        payload = json.loads(parts_path.read_text(encoding="utf-8"))
-                        if self._ranges_cover(
-                                [int(value) for value in payload.get("completed") or []],
-                                int(payload.get("part_size") or 0),
-                                int(payload.get("total") or expected_size),
-                                start, end,
-                        ):
-                            return
-                    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                        logger.debug("wait_for_range 分支忽略异常", exc_info=True)
+                # 并行分片进度在登记表里（由下载器内存同步过来）：
+                # 覆盖了要上传的区间就可以开始传，不必等整文件下完。
+                self._sync_registry_parts(cache_path, source_file)
+                entry = self._registry_get(cache_path)
+                if entry is not None:
+                    part_size = int(entry.get("part_size") or 0)
+                    total = int(entry.get("total") or expected_size)
+                    if part_size > 0 and self._ranges_cover(
+                            sorted(entry.get("parts") or set()),
+                            part_size, total, start, end,
+                    ):
+                        return
                 if download_done.is_set():
                     if download_error:
                         raise download_error[0]
@@ -2387,7 +2431,7 @@ class CrossTransferTaskManager:
                 )
                 if (
                         cache_path.exists() and not cache_complete
-                        and not self._cache_parts_path(cache_path).is_file()
+                        and self._is_stale_partial_cache(cache_path, cache_key)
                 ):
                     self._delete_cache_path(cache_path)
                 if cache_complete:
@@ -2399,10 +2443,11 @@ class CrossTransferTaskManager:
                                  speed_bytes_per_second=0.0,
                                  message="已找到完整本地缓存，继续目标盘上传")
                 else:
-                    # 下载开始前先落一个未完成 meta（complete=False），只记归属：
-                    # 断点续传文件也有 cache_key，取消/失败后 delete_cache 与
-                    # residue 扫描都能按 key 认出它；成功后 _mark_complete_cache
-                    # 会用 complete=True 的 meta 覆盖它，校验只认 complete=True。
+                    # 下载开始前先在登记表里落一个未完成条目（complete=False），
+                    # 只记归属：断点续传文件也有 cache_key，取消/失败后
+                    # delete_cache 与 residue 扫描都能按 key 认出它；成功后
+                    # _mark_complete_cache 会把它标成 complete=True，
+                    # 校验只认 complete=True。
                     self._stamp_cache_owner(cache_path, cache_key, source_file)
                     download_message = f"正在从{source_name}下载到本地缓存"
                     downloader = source_provider.require(CloudDriveCapability.FILE_DOWNLOAD)
@@ -2680,8 +2725,8 @@ class CrossTransferTaskManager:
                 self._delete_cache_path_for_task(task, Path(temporary_path))
         except InterruptedError:
             # 手动取消即清空中继（含已下完的完整缓存）：只删本任务的
-            # cloud-transfer-<hash>-<源文件名>（或旧名 .bin）及其伴随文件
-            # .meta.json/.parts.json（含 .tmp 变体），不碰同目录下其它文件；
+            # cloud-transfer-<hash>-<源文件名>（或旧名 .bin）及其 .aria2，
+            # 不碰同目录下其它文件；
             # 同 cache_key 还有任务在用时保留。
             retained = (
                 'temporary_path' in locals() and temporary_path
@@ -2728,7 +2773,7 @@ class CrossTransferTaskManager:
         except Exception as error:
             # 1.10.0 起任务结束无论成败都删临时文件：失败不再保留完整
             # 缓存供重试（重试 = 完整重跑，重新从源盘下载），
-            # .parts.json 断点续传也随之取消；同 cache_key 还有兄弟
+            # 内存断点续传状态也随之失效；同 cache_key 还有兄弟
             # 任务在用时 _delete_cache_path_for_task 会保留文件。
             if 'temporary_path' in locals() and temporary_path:
                 self._delete_cache_path_for_task(task, Path(temporary_path))

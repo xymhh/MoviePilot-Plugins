@@ -5,14 +5,14 @@
    ``十万狂花入梦来 - S01E06 - 第6集.mkv``）；目标名不可用（空、无扩展名）
    时退回旧命名 ``cloud-transfer-<hash>-<清洗后的源文件名>``（如
    ``cloud-transfer-f0c9…-律界战争 S01E05.mp4``），源文件名也没有可用
-   扩展名时退回旧名 ``cloud-transfer-<hash>.bin``；缓存身份记在 meta
-   伴随文件里，不靠文件名；
+   扩展名时退回旧名 ``cloud-transfer-<hash>.bin``；缓存身份记在进程内
+   登记表里，不靠文件名、不写 .json 文件；
 2. 源文件名没有可用扩展名时退回旧名 ``cloud-transfer-<hash>.bin``；
-3. 旧名缓存命中时在 cache_key 锁内改名迁移（含伴随文件），改名后
+3. 旧名缓存命中时在 cache_key 锁内改名迁移（含 .aria2 与登记表条目），改名后
    ``_validate_complete_cache`` 仍通过；只读查找（cache_info）不改名；
 4. ``delete_cache`` 只按 cache_key 删，新名与旧名都要删干净；
-5. residue 正则同时匹配新名与旧名（含 `` (n)`` 变体与伴随文件），
-   目录里其他文件一律不碰。
+5. residue 正则同时匹配新名与旧名（含 `` (n)`` 变体），旧版
+   ``.meta.json`` / ``.parts.json`` 见到直接删，目录里其他文件一律不碰。
 """
 
 import hashlib
@@ -177,12 +177,6 @@ def test_legacy_cache_renamed_on_resolve_and_still_valid():
         key = manager._cache_key("quark", source)
         legacy = manager._legacy_cache_path(key)
         _write_complete_cache(manager, legacy, key, source)
-        parts = manager._cache_parts_path(legacy)
-        parts.write_text('{"version": 1}', encoding="utf-8")
-        meta_tmp = manager._cache_meta_path(legacy).with_name(
-            f"{manager._cache_meta_path(legacy).name}.tmp"
-        )
-        meta_tmp.write_text("{}", encoding="utf-8")
 
         resolved = manager._resolve_cache_path(key, source)
 
@@ -190,15 +184,12 @@ def test_legacy_cache_renamed_on_resolve_and_still_valid():
         assert resolved == new_path
         assert new_path.is_file()
         assert not legacy.exists()
-        assert manager._cache_meta_path(new_path).is_file()
-        assert manager._cache_parts_path(new_path).is_file()
-        assert manager._cache_meta_path(new_path).with_name(
-            f"{manager._cache_meta_path(new_path).name}.tmp"
-        ).is_file()
-        assert not manager._cache_meta_path(legacy).exists()
-        assert not parts.exists()
-        assert not meta_tmp.exists()
+        # 登记表条目随主文件改名：新路径认归属、校验仍通过，旧路径不再认。
+        assert manager._read_cache_owner_key(new_path) == key
+        assert manager._read_cache_owner_key(legacy) == ""
         assert manager._validate_complete_cache(new_path, key, source)
+        # 全程不写任何 .json 文件。
+        assert not [p for p in Path(tmp).iterdir() if p.name.endswith(".json")]
 
 
 def test_resolve_prefers_new_name_when_both_exist():
@@ -255,7 +246,6 @@ def test_delete_cache_removes_both_namings():
         key_a = manager._cache_key("quark", source_a)
         legacy_a = manager._legacy_cache_path(key_a)
         _write_complete_cache(manager, legacy_a, key_a, source_a)
-        manager._cache_parts_path(legacy_a).write_text("{}", encoding="utf-8")
         new_a = manager._cache_path(key_a, source_a)
         _write_complete_cache(manager, new_a, key_a, source_a)
         source_b = _make_source("另一部剧 S01E01.mkv")
@@ -263,12 +253,12 @@ def test_delete_cache_removes_both_namings():
         legacy_b = manager._legacy_cache_path(key_b)
         legacy_b.write_bytes(CONTENT)
 
-        assert manager.delete_cache(key_a) == 5
+        assert manager.delete_cache(key_a) == 2
         assert not legacy_a.exists()
-        assert not manager._cache_meta_path(legacy_a).exists()
-        assert not manager._cache_parts_path(legacy_a).exists()
         assert not new_a.exists()
-        assert not manager._cache_meta_path(new_a).exists()
+        # 登记表条目也清掉：删完后两个路径都不再认归属。
+        assert manager._read_cache_owner_key(legacy_a) == ""
+        assert manager._read_cache_owner_key(new_a) == ""
         assert legacy_b.is_file()
         assert manager.delete_cache(key_a) == 0
         assert manager.delete_cache("not-a-key") == 0
@@ -335,6 +325,8 @@ def test_residue_matches_new_naming_and_variants():
 
 
 def test_residue_groups_new_main_and_companions_by_key():
+    # 1.12.19：旧 meta 不再参与分组、也不保护主文件那组。
+    # 主文件过期照样按组删；meta 作为旧 litter 直接删，不看新旧。
     key_a = "cloud-transfer-" + "a" * 32
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -343,11 +335,9 @@ def test_residue_groups_new_main_and_companions_by_key():
 
         result = scan_residue(root, now=time.time())
 
-        # 同组最新 mtime 未过期，整组跳过
-        assert result["deleted_files"] == 0
-        assert result["skipped_recent"] == 1
-        assert old_main.exists()
-        assert fresh_meta.exists()
+        assert result["deleted_files"] == 2
+        assert not old_main.exists()
+        assert not fresh_meta.exists()
 
 
 def test_residue_new_naming_never_matches_unrelated():

@@ -3,7 +3,8 @@
 这些用例直连本地 HTTP 服务，不用 MP 运行时：
 * 分片并发下载必须字节级正确；
 * 分片大小自适应（8MB~64MB，按「每线程 2 片」）；
-* 断点续传：中断后保留 .parts.json 已下字节，恢复时只补缺口；
+* 断点续传：中断后保留半截文件与进程内内存续传状态，恢复时只补缺口；
+  全程不在磁盘上写任何 .json 文件；进程重启（内存清空）后从头下；
 * 5xx/断链 → 刷新直链 + 退避重试；
 * 源不支持 Range → 回落单线程顺序下载；
 * 进度回调必须节流（旧实现每 256KB 一次，写库写死）；
@@ -11,7 +12,6 @@
 """
 
 import hashlib
-import json
 import os
 import sys
 import threading
@@ -157,6 +157,12 @@ class DownloaderTests(unittest.TestCase):
         target = Path(self.tempdir.name) / name
         return service.download_file(file_item, str(target), **kwargs), target
 
+    def _json_files(self):
+        return [
+            path for path in Path(self.tempdir.name).iterdir()
+            if path.name.endswith(".json") or ".json." in path.name
+        ]
+
     def test_parallel_download_is_byte_exact(self):
         payload = os.urandom(5 * 1024 * 1024)
         server = RangeServer(payload)
@@ -165,6 +171,26 @@ class DownloaderTests(unittest.TestCase):
         _, target = self._download(service, FakeFile(len(payload)))
         self.assertEqual(target.read_bytes(), payload)
         self.assertGreaterEqual(len(server.requests), 4, "应当分段并发请求")
+
+    def test_parallel_download_writes_no_json_files(self):
+        # 1.12.19：完整并行下载全程不在磁盘上产生任何 .json 文件。
+        payload = os.urandom(5 * 1024 * 1024)
+        server = RangeServer(payload)
+        self.addCleanup(server.close)
+        service = self._service(server.base_url, concurrency=4, part_size=1024 * 1024)
+        _, target = self._download(service, FakeFile(len(payload)))
+        self.assertEqual(target.read_bytes(), payload)
+        self.assertEqual(self._json_files(), [], "并行下载不得写任何 .json 文件")
+
+    def test_serial_download_writes_no_json_files(self):
+        # 1.12.19：串行下载（源不支持 Range 时回落）同样不写 .json。
+        payload = os.urandom(2 * 1024 * 1024)
+        server = RangeServer(payload, ignore_range=True)
+        self.addCleanup(server.close)
+        service = self._service(server.base_url, concurrency=4, part_size=512 * 1024)
+        _, target = self._download(service, FakeFile(len(payload)))
+        self.assertEqual(target.read_bytes(), payload)
+        self.assertEqual(self._json_files(), [], "串行下载不得写任何 .json 文件")
 
     def test_part_size_adapts_to_size_and_concurrency(self):
         service = self._service("http://x/", concurrency=8)
@@ -178,6 +204,8 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(explicit._part_size_for(1024 ** 3), 4 * 1024 * 1024)
 
     def test_resume_downloads_only_missing_parts(self):
+        # 1.12.19：断点续传状态只活在进程内内存里，不写 .parts.json；
+        # 同进程内第二次调用（新 service 实例）复用已完成分片，只补缺口。
         payload = os.urandom(8 * 1024 * 1024)
         server = RangeServer(payload)
         self.addCleanup(server.close)
@@ -196,10 +224,9 @@ class DownloaderTests(unittest.TestCase):
                 FakeFile(len(payload)), str(target), progress, stop.is_set,
                 preserve_partial=True,
             )
-        parts_path = Path(str(target) + ".parts.json")
-        self.assertTrue(parts_path.is_file(), "中断必须保留 .parts.json")
-        completed = json.loads(parts_path.read_text())["completed"]
-        self.assertTrue(completed, "中断前完成的分片必须记账")
+        self.assertTrue(started.is_set(), "中断前必须有进度回调")
+        self.assertEqual(self._json_files(), [], "中断不得留下任何 .json 文件")
+        self.assertTrue(target.is_file(), "preserve_partial 时半截文件必须保留")
 
         first_round = server.bytes_served
         resumed = self._service(server.base_url, concurrency=2, part_size=1024 * 1024)
@@ -207,11 +234,44 @@ class DownloaderTests(unittest.TestCase):
             FakeFile(len(payload)), str(target), None, None, preserve_partial=True,
         )
         self.assertEqual(target.read_bytes(), payload)
-        self.assertFalse(parts_path.exists(), "完成后要清掉 .parts.json")
+        self.assertEqual(self._json_files(), [], "完成后不得留下任何 .json 文件")
         second_round = server.bytes_served - first_round
         self.assertLess(
             second_round, len(payload),
             "续传不应重下已完成的分片",
+        )
+
+    def test_restart_clears_resume_state_and_redownloads(self):
+        # 1.12.19：进程重启后内存续传状态消失（模拟：清掉内存字典），
+        # 下次调用从头下，不把半截稀疏文件误认完成。
+        payload = os.urandom(8 * 1024 * 1024)
+        server = RangeServer(payload)
+        self.addCleanup(server.close)
+        service = self._service(server.base_url, concurrency=2, part_size=1024 * 1024)
+        stop = threading.Event()
+
+        def progress(done, total):
+            if done >= 2 * 1024 * 1024:
+                stop.set()
+
+        target = Path(self.tempdir.name) / "restart.bin"
+        with self.assertRaises(InterruptedError):
+            service.download_file(
+                FakeFile(len(payload)), str(target), progress, stop.is_set,
+                preserve_partial=True,
+            )
+        self.assertEqual(self._json_files(), [], "中断不得留下任何 .json 文件")
+
+        transfer_module._PARTS_MEMORY.clear()  # 模拟进程重启：内存状态清空
+        first_round = server.bytes_served
+        restarted = self._service(server.base_url, concurrency=2, part_size=1024 * 1024)
+        restarted.download_file(
+            FakeFile(len(payload)), str(target), None, None, preserve_partial=True,
+        )
+        self.assertEqual(target.read_bytes(), payload)
+        self.assertEqual(
+            server.bytes_served - first_round, len(payload),
+            "内存状态清空后必须从头下，不能复用已完成分片",
         )
 
     def test_retries_on_server_error(self):

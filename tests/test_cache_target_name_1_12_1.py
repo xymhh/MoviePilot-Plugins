@@ -10,13 +10,12 @@
    只读查找（cache_info）不改名；
 3. 目标名已被别源占用时加 `` (8 位 hash)`` 区分；同一源复用目标名、
    断点续传（parts 总量对得上）时不改名；
-4. 缓存身份记在 meta 伴随文件里：``delete_cache`` 按 meta 里的 cache_key
-   删目标名文件；residue 扫描按 meta 分组（无 meta 只有 parts 时按文件名
-   分组，靠进行中任务名保护），目录里其他文件一律不碰。
+4. 缓存身份记在进程内登记表里：``delete_cache`` 按登记表里的 cache_key
+   删目标名文件；residue 只按 cloud-transfer-* 命名分组，旧版
+   ``.meta.json`` / ``.parts.json`` 见到直接删，目录里其他文件一律不碰。
 """
 
 import hashlib
-import json
 import os
 import sys
 import time
@@ -167,7 +166,6 @@ def test_legacy_cache_migrated_to_target_name_on_resolve():
         key = manager._cache_key("quark", source)
         legacy = manager._cache_path(key, source)
         _write_complete_cache(manager, legacy, key, source)
-        manager._cache_parts_path(legacy).write_text("{}", encoding="utf-8")
 
         resolved = manager._resolve_cache_path(key, source, target_name=TARGET)
 
@@ -175,11 +173,10 @@ def test_legacy_cache_migrated_to_target_name_on_resolve():
         assert resolved == target
         assert target.is_file()
         assert not legacy.exists()
-        assert manager._cache_meta_path(target).is_file()
-        assert manager._cache_parts_path(target).is_file()
-        assert not manager._cache_meta_path(legacy).exists()
-        assert not manager._cache_parts_path(legacy).exists()
+        # 登记表条目随主文件改名：新路径认归属、校验仍通过。
+        assert manager._read_cache_owner_key(target) == key
         assert manager._validate_complete_cache(target, key, source)
+        assert not [p for p in Path(tmp).iterdir() if p.name.endswith(".json")]
 
 
 def test_legacy_bin_migrated_to_target_name():
@@ -260,21 +257,39 @@ def test_same_source_reuses_target_name():
 
 
 def test_partial_same_source_resumes_target_name():
+    # 同一源的半截文件：登记表里有归属标记就复用目标名，不改名。
     with TemporaryDirectory() as tmp:
         manager = _make_manager(tmp)
         source = _make_source("06.mkv")
         key = manager._cache_key("quark", source)
         target = Path(tmp) / TARGET
         target.write_bytes(CONTENT)
-        manager._cache_parts_path(target).write_text(
-            json.dumps({
-                "version": 1, "total": len(CONTENT),
-                "part_size": 1024 * 1024, "completed": [],
-            }),
-            encoding="utf-8",
-        )
+        manager._stamp_cache_owner(target, key, source)
 
         assert manager._resolve_cache_path(key, source, target_name=TARGET) == target
+        assert manager._is_our_cache_file(target, key, source)
+
+
+def test_partial_cache_size_counts_memory_parts():
+    # 登记表里的分片进度按 part_size/total 校验后算已下字节；
+    # 没有分片进度时返回 0（串行半截文件也一样）。
+    with TemporaryDirectory() as tmp:
+        manager = _make_manager(tmp)
+        source = _make_source("06.mkv")
+        key = manager._cache_key("quark", source)
+        target = Path(tmp) / TARGET
+        target.write_bytes(CONTENT)
+        manager._stamp_cache_owner(target, key, source)
+
+        assert manager._partial_cache_size(target, source) == 0
+
+        part_size = 100
+        with manager._lock:
+            entry = manager._cache_registry[str(target)]
+            entry["parts"] = {0, 100, 200}
+            entry["part_size"] = part_size
+            entry["total"] = len(CONTENT)
+        assert manager._partial_cache_size(target, source) == 300
 
 
 # ---------------------------------------------------------------- 按 key 删除
@@ -292,9 +307,9 @@ def test_delete_cache_removes_target_named_by_meta():
         target_b = Path(tmp) / "另一部剧 S01E01.mkv"
         _write_complete_cache(manager, target_b, key_b, source_b)
 
-        assert manager.delete_cache(key_a) == 2
+        assert manager.delete_cache(key_a) == 1
         assert not target_a.exists()
-        assert not manager._cache_meta_path(target_a).exists()
+        assert manager._read_cache_owner_key(target_a) == ""
         assert target_b.is_file()
         assert manager.delete_cache(key_a) == 0
 
@@ -312,14 +327,17 @@ def test_stamp_marks_partial_owner_but_not_complete():
         assert manager._read_cache_owner_key(target) == key
         assert not manager._validate_complete_cache(target, key, source)
         assert manager._is_our_cache_file(target, key, source)
-        assert manager.delete_cache(key) == 2
+        assert manager.delete_cache(key) == 1
         assert not target.exists()
+        assert manager._read_cache_owner_key(target) == ""
 
 
 # ---------------------------------------------------------------- residue
 
 
-def test_residue_groups_target_named_by_meta():
+def test_residue_deletes_legacy_meta_but_keeps_target_named_main():
+    # 1.12.19：目标名文件不再分组（文件名没有 hash，residue 认不出归属，
+    # 一律不碰）；它旁边的旧版 .meta.json 是 litter，直接删。
     with TemporaryDirectory() as tmp:
         manager = _make_manager(tmp)
         source = _make_source("06.mkv")
@@ -328,17 +346,20 @@ def test_residue_groups_target_named_by_meta():
         main = root / TARGET
         _write_complete_cache(manager, main, key, source)
         _age(main, 3)
-        _age(manager._cache_meta_path(main), 3)
+        legacy_meta = root / f"{TARGET}.meta.json"
+        legacy_meta.write_text('{"cache_key": "%s"}' % key, encoding="utf-8")
+        _age(legacy_meta, 3)
 
         result = scan_residue(root, now=time.time())
 
-        assert result["deleted_files"] == 2
-        assert not main.exists()
-        assert not manager._cache_meta_path(main).exists()
+        assert result["deleted_files"] == 1
+        assert main.exists()
+        assert not legacy_meta.exists()
         assert result["errors"] == []
 
 
-def test_residue_skips_target_named_when_key_active():
+def test_residue_target_named_main_kept_regardless_of_active_key():
+    # 目标名文件本来就不进分组，active_keys 与它无关；旧 meta 照样删。
     with TemporaryDirectory() as tmp:
         manager = _make_manager(tmp)
         source = _make_source("06.mkv")
@@ -347,51 +368,57 @@ def test_residue_skips_target_named_when_key_active():
         main = root / TARGET
         _write_complete_cache(manager, main, key, source)
         _age(main, 3)
-        _age(manager._cache_meta_path(main), 3)
+        legacy_meta = root / f"{TARGET}.meta.json"
+        legacy_meta.write_text('{"cache_key": "%s"}' % key, encoding="utf-8")
+        _age(legacy_meta, 3)
 
         result = scan_residue(
             root, active_keys={f"cloud-transfer-{key}"}, now=time.time()
         )
 
-        assert result["deleted_files"] == 0
-        assert result["skipped_active"] == 1
+        assert result["deleted_files"] == 1
+        assert result["skipped_active"] == 0
         assert main.exists()
+        assert not legacy_meta.exists()
 
 
-def test_residue_groups_parts_only_by_filename():
+def test_residue_deletes_legacy_parts_but_keeps_main():
+    # 1.12.19：旧版 .parts.json 是 litter，直接删；主文件不进分组、不动。
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
         main = _touch(root, TARGET, 3, 100)
         parts = root / f"{TARGET}.parts.json"
         parts.write_text(
-            json.dumps({"version": 1, "total": 100, "part_size": 50, "completed": []}),
+            '{"version": 1, "total": 100, "part_size": 50, "completed": []}',
             encoding="utf-8",
         )
         _age(parts, 3)
 
         result = scan_residue(root, now=time.time())
 
-        assert result["deleted_files"] == 2
-        assert not main.exists()
+        assert result["deleted_files"] == 1
+        assert main.exists()
         assert not parts.exists()
 
 
-def test_residue_skips_parts_only_when_name_active():
+def test_residue_legacy_parts_deleted_even_when_name_active():
+    # 旧 parts 文件直接删，不受 active_names 保护（保护只针对分组内的文件）。
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
         main = _touch(root, TARGET, 3, 100)
         parts = root / f"{TARGET}.parts.json"
         parts.write_text(
-            json.dumps({"version": 1, "total": 100, "part_size": 50, "completed": []}),
+            '{"version": 1, "total": 100, "part_size": 50, "completed": []}',
             encoding="utf-8",
         )
         _age(parts, 3)
 
         result = scan_residue(root, active_names={TARGET}, now=time.time())
 
-        assert result["deleted_files"] == 0
-        assert result["skipped_active"] == 1
+        assert result["deleted_files"] == 1
+        assert result["skipped_active"] == 0
         assert main.exists()
+        assert not parts.exists()
 
 
 def test_residue_ignores_unrelated_target_named_file():
