@@ -9,6 +9,9 @@
 1.10.4：网盘整理不新增导航（1.10.3 的 AppPageOrganize 入口已撤），
 整理设置只留在配置页（organize 分组，高级设置里），整理台
 （OrganizePanel）随导航一起删除；网盘整理页不得复活。
+1.13.2：1.10.3 的渠道页合并已废止——渠道页只留 ChannelManager，
+频道监控（TgMonitor）独立成主侧栏导航（AppPageTgMonitor），
+签到状态（CheckinDashboard）只留 MP 首页 checkin widget。
 PluginWorkbench 按 mode="overview"|"history" 渲染总览与历史两页；Page 只做转发。
 
 用法：python3 scripts/check_frontend_entry.py [项目根]
@@ -27,10 +30,11 @@ def main(root: Path) -> int:
     app_page = components / "AppPage.vue"
     app_history = components / "AppPageHistory.vue"
     app_channels = components / "AppPageChannels.vue"
+    app_tg_monitor = components / "AppPageTgMonitor.vue"
     page = components / "Page.vue"
     errors: list[str] = []
 
-    for path in (workbench, app_page, app_history, app_channels, page):
+    for path in (workbench, app_page, app_history, app_channels, app_tg_monitor, page):
         if not path.exists():
             errors.append(f"缺少文件：{path}")
     if errors:
@@ -53,6 +57,7 @@ def main(root: Path) -> int:
     app_text = app_page.read_text(encoding="utf-8")
     history_text = app_history.read_text(encoding="utf-8")
     channels_text = app_channels.read_text(encoding="utf-8")
+    tg_monitor_text = app_tg_monitor.read_text(encoding="utf-8")
     page_text = page.read_text(encoding="utf-8")
 
     # 薄壳：不含页签，只转发 PluginWorkbench
@@ -67,11 +72,21 @@ def main(root: Path) -> int:
         if f'mode="{mode}"' not in text:
             errors.append(f"{name} 应以 mode=\"{mode}\" 转发 PluginWorkbench")
 
-    for component in ("ChannelManager", "TgMonitor", "CheckinDashboard"):
-        if component not in channels_text:
-            errors.append(f"AppPageChannels 未挂载 {component}（1.10.3 渠道页收拢）")
+    # 1.13.2：渠道页只留渠道管理；频道监控独立成导航；签到只留首页 widget。
+    if "ChannelManager" not in channels_text:
+        errors.append("AppPageChannels 未挂载 ChannelManager")
+    for component in ("TgMonitor", "CheckinDashboard"):
+        if component in channels_text:
+            errors.append(f"AppPageChannels 不应再挂载 {component}（1.13.2 已拆出）")
     if re.search(r"<v-tab\b", channels_text):
         errors.append("AppPageChannels 不应有页签")
+    if "TgMonitor" not in tg_monitor_text:
+        errors.append("AppPageTgMonitor 未挂载 TgMonitor")
+    for component in ("ChannelManager", "CheckinDashboard"):
+        if component in tg_monitor_text:
+            errors.append(f"AppPageTgMonitor 不应挂载 {component}")
+    if re.search(r"<v-tab\b", tg_monitor_text):
+        errors.append("AppPageTgMonitor 不应有页签")
 
     # 唯一实现：总览动态 + 历史整表都在 PluginWorkbench，不再有页签
     if re.search(r"<v-tab\b", wb_text):
@@ -94,6 +109,8 @@ def main(root: Path) -> int:
     vite = (root / "frontend" / "cloudsubscribex" / "vite.config.js").read_text(encoding="utf-8")
     if '"./AppPageHistory": "./src/components/AppPageHistory.vue"' not in vite:
         errors.append("vite 联邦缺少暴露：./AppPageHistory")
+    if '"./AppPageTgMonitor": "./src/components/AppPageTgMonitor.vue"' not in vite:
+        errors.append("vite 联邦缺少暴露：./AppPageTgMonitor（1.13.2 频道监控导航）")
     if "AppPageOrganize" in vite:
         errors.append("vite 联邦不应再暴露 ./AppPageOrganize（1.10.4 已删除）")
     if "AppPageResource" in vite:
@@ -125,7 +142,7 @@ def report(errors: list[str]) -> int:
         for line in errors:
             print(f"  - {line}")
         return 1
-    print("前端单入口校验通过：PluginWorkbench 双模式 + 侧栏历史/渠道页，Page 为转发壳")
+    print("前端单入口校验通过：PluginWorkbench 双模式 + 侧栏历史/渠道/频道监控页，Page 为转发壳")
     return 0
 
 

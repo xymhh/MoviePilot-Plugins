@@ -700,6 +700,8 @@ class MoviePilotRegistration(OwnerDelegator):
         # MP 探索页；历史记录没有 MP 代替，独立成侧栏导航。
         # 1.10.4：网盘整理不新增导航（1.10.3 的 organize 入口已撤），整理设置
         # 只留在配置页（organize 分组，高级设置里），整理台随导航一起删除。
+        # 1.13.2：渠道页拆三导航——频道监控（TgMonitor）从渠道页独立出来，
+        # 渠道页只留 ChannelManager；签到不新增导航（主页 checkin widget 已有）。
         return [
             {
                 "nav_key": "channels",
@@ -710,12 +712,20 @@ class MoviePilotRegistration(OwnerDelegator):
                 "order": 30,
             },
             {
+                "nav_key": "tg-monitor",
+                "title": "频道监控",
+                "icon": "mdi-telegram",
+                "section": "system",
+                "permission": "manage",
+                "order": 31,
+            },
+            {
                 "nav_key": "history",
                 "title": "转存记录",
                 "icon": "mdi-clipboard-text-clock-outline",
                 "section": "system",
                 "permission": "manage",
-                "order": 31,
+                "order": 32,
             },
         ]
 

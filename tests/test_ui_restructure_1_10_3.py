@@ -6,7 +6,9 @@
   PluginWorkbench（mode="history"），与总览共用同一份逻辑；
 - 1.10.4：网盘整理不新增导航（1.10.3 的 organize 入口已撤），整理设置
   只留在配置页（organize 分组，高级设置里），整理台随导航一起删除；
-- 频道监控与签到状态并进渠道页（AppPageChannels）；
+- 频道监控与签到状态并进渠道页（AppPageChannels）——1.13.2 已废止该合并：
+  频道监控独立成主侧栏导航（tg-monitor），签到只留 MP 首页 checkin widget，
+  渠道页只留 ChannelManager；
 - 网盘资源页与 resource/ 组件、useMediaData/useMediaDetail/
   useResourcePreview 一并删除；
 - 配置页默认只露常用 6 组，其余 6 组折叠进高级设置（本地记忆开关）。
@@ -74,18 +76,25 @@ def _exists(rel_path: str) -> bool:
 class TestSidebarNavRestructure(unittest.TestCase):
     def test_history_entry_declared_no_organize(self):
         # 1.10.4：网盘整理不新增导航，侧栏只剩渠道管理与转存记录。
+        # 1.13.2：频道监控从渠道页独立成导航，侧栏是渠道管理、频道监控、转存记录。
         nav = _registration().get_sidebar_nav()
         by_key = {item["nav_key"]: item for item in nav}
         self.assertEqual(
             [item["nav_key"] for item in nav],
-            ["channels", "history"],
+            ["channels", "tg-monitor", "history"],
         )
         self.assertNotIn("organize", by_key)
+        monitor = by_key["tg-monitor"]
+        self.assertEqual(monitor["title"], "频道监控")
+        self.assertEqual(monitor["section"], "system")
+        self.assertEqual(monitor["permission"], "manage")
+        self.assertEqual(monitor["order"], 31)
+        self.assertTrue(str(monitor["icon"]).startswith("mdi-"))
         history = by_key["history"]
         self.assertEqual(history["title"], "转存记录")
         self.assertEqual(history["section"], "system")
         self.assertEqual(history["permission"], "manage")
-        self.assertEqual(history["order"], 31)
+        self.assertEqual(history["order"], 32)
         self.assertTrue(str(history["icon"]).startswith("mdi-"))
 
     def test_all_entries_in_host_whitelist(self):
@@ -148,12 +157,15 @@ class TestWorkbenchThinShells(unittest.TestCase):
         )
 
     def test_channels_page_absorbs_tg_monitor_and_checkin(self):
+        # 1.10.3 的合并已由 1.13.2 废止：渠道页只留 ChannelManager，
+        # 频道监控独立成导航（见 test_channels_split_1_13_2.py），
+        # 签到只留 MP 首页 checkin widget。
         source = _read(
             "frontend/cloudsubscribex/src/components/AppPageChannels.vue"
         )
         self.assertIn("ChannelManager", source)
-        self.assertIn("TgMonitor", source)
-        self.assertIn("CheckinDashboard", source)
+        self.assertNotIn("TgMonitor", source)
+        self.assertNotIn("CheckinDashboard", source)
         self.assertNotIn("<v-tab", source)
 
     def test_vite_exposes_new_pages_not_resource(self):
