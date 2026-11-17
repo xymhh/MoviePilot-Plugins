@@ -7,13 +7,6 @@ from ...core.subscribe import MediaCandidate, SubscribeContext, SubscribeProvide
 from ...core.subscribe.provider import ranking_scan_limit
 from ...core.subscribe.registry import register
 
-PLATFORMS = {
-    "all": "", "tx": "3", "iqiyi": "2", "youku": "1",
-    "letv": "4", "mgtv": "7", "pptv": "6", "sohu": "5",
-}
-SERIES_TYPES = {"series": "4", "tv": "0", "web": "1", "variety": "2"}
-
-
 @register
 class MaoyanSubscribeProvider(SubscribeProvider):
     provider_id = "maoyan"
@@ -49,6 +42,3 @@ class MaoyanSubscribeProvider(SubscribeProvider):
                     item.source_meta["rank_key"] = "web_heat:all"
                     seen.add(item.unique_seed)
                     yield item
-
-def create_maoyan_provider() -> MaoyanSubscribeProvider:
-    return MaoyanSubscribeProvider()

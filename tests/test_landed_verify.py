@@ -429,6 +429,7 @@ class _HistoryHarness(HistoryService, LandedVerifyService):
         self._store[key] = value
 
     def _record_platform_transfer_histories(self, records, reconcile=False):
+        # 捕获桩：1.12.20 Phase 1 起生产代码不再调它，测试用它断言“没写”。
         self._recorded_platform.extend(records)
         return len(records)
 
@@ -469,7 +470,9 @@ class FinalizeGateTests(unittest.TestCase):
         harness._mark_offline_history_status_batch({"k1"}, "成功")
         self.assertEqual(record["status"], "成功")
         self.assertTrue(record["landed"])
-        self.assertEqual(len(harness._recorded_platform), 1)
+        # 1.12.20 Phase 1：history.py 里写平台历史的调用点已删，标记成功
+        # 不再往 MP 整理历史写记录（MP 的历史只由 MP 自己写）。
+        self.assertEqual(harness._recorded_platform, [])
 
     def test_mark_success_keeps_legacy_when_listing_unavailable(self):
         record = {
@@ -483,7 +486,8 @@ class FinalizeGateTests(unittest.TestCase):
         harness._mark_offline_history_status_batch({"k1"}, "成功")
         self.assertEqual(record["status"], "成功")
         self.assertIsNone(record.get("landed"))
-        self.assertEqual(len(harness._recorded_platform), 1)
+        # 1.12.20 Phase 1：同上，标记成功不再写平台历史记录。
+        self.assertEqual(harness._recorded_platform, [])
 
 
 class _BaselineHarness(UpgradeBaselineService):

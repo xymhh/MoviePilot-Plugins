@@ -169,7 +169,3 @@ class TmdbSubscribeProvider(SubscribeProvider):
                     vote_average=vote_float,
                     unique_seed=unique_key,
                 )
-
-
-def create_tmdb_provider() -> TmdbSubscribeProvider:
-    return TmdbSubscribeProvider()

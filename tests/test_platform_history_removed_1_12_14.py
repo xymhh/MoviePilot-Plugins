@@ -2,10 +2,10 @@
 
 固定契约（理清逻辑：MP 的整理历史是唯一账本，只有 MP 能写）：
 
-1. `_record_platform_transfer_histories` 是 no-op：无论记录是否
-   交给 MP 整理（skip_history 真/假）、无论开关，都返回 0、不碰
-   数据库——插件不再直写「PanSou → 115网盘CS版、复制」这类记录；
-2. `sync_platform_transfer_history` 不再镜像到 MP 表：只恢复插件
+1. `_record_platform_transfer_histories` 已在 1.12.20 删除：插件不再
+   直写「PanSou → 115网盘CS版、复制」这类记录，方法本身连同 5 处
+   调用一起删掉，不留 no-op 桩；
+2. `restore_history_posters` 不再镜像到 MP 表：只恢复插件
    自身 history 记录缺失的海报，不调用写入口；
 3. `remove_platform_transfer_history_mirror` 清理：删掉
    全部插件托管行（src 以 cloudsubscribe:// 开头，或 downloader
@@ -15,6 +15,7 @@
    加载失败、更新回滚到 1.12.11）。
 """
 
+import os
 import sys
 import unittest
 from unittest.mock import MagicMock
@@ -233,7 +234,6 @@ class _Service(PlatformHistoryService):
     """只测平台历史写入口与一次性清理，不依赖插件宿主。"""
 
     def __init__(self, session, data=None):
-        object.__setattr__(self, "_platform_transfer_history_enabled", True)
         object.__setattr__(self, "_platform_history_lock", None)
         object.__setattr__(self, "_is_upgrade_history", None)
         fake_drive = MagicMock()
@@ -264,30 +264,30 @@ def _install_session(session):
 
 
 class TestPlatformHistoryRemoved(unittest.TestCase):
-    def test_record_is_noop_for_unorganized(self):
-        """未交 MP 整理的记录也不写平台历史（返回 0、不碰数据库）。"""
-        session = _FakeSession()
-        _install_session(session)
-        service = _Service(session)
-        self.assertEqual(
-            service._record_platform_transfer_histories([_record()]), 0
+    def test_record_method_removed(self):
+        """写入口已删除：类上无此方法，生产代码无调用点，不留 no-op 桩。"""
+        # 注意：PlatformHistoryService 继承 OwnerDelegator（__getattr__ 委托
+        # 解析），hasattr(service, ...) 不可信——委托会让任意名字都“存在”。
+        self.assertNotIn(
+            "_record_platform_transfer_histories",
+            PlatformHistoryService.__dict__,
         )
-        self.assertEqual(session.added, [])
-        self.assertFalse(session.committed)
-
-    def test_record_is_noop_for_organized_and_reconcile(self):
-        """已交 MP 整理的记录、对账模式同样不写（返回 0）。"""
-        session = _FakeSession()
-        _install_session(session)
-        service = _Service(session)
-        self.assertEqual(
-            service._record_platform_transfer_histories(
-                [_record(skip_history=True)], reconcile=True
-            ),
-            0,
+        plugin_root = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "plugins.v2",
+            "cloudsubscribex",
         )
-        self.assertEqual(session.added, [])
-        self.assertFalse(session.committed)
+        for root, _dirs, files in os.walk(plugin_root):
+            for name in files:
+                if not name.endswith(".py"):
+                    continue
+                path = os.path.join(root, name)
+                with open(path, encoding="utf-8") as handle:
+                    self.assertNotIn(
+                        "_record_platform_transfer_histories(",
+                        handle.read(),
+                        path,
+                    )
 
     def test_mirror_cleanup_deletes_managed_rows_idempotent(self):
         """清理删掉插件托管行且幂等：第二次调用已无托管行可删，返回 0。"""
@@ -327,7 +327,7 @@ class TestPlatformHistoryRemoved(unittest.TestCase):
         _install_session(session)
         service = _Service(session, data={"history": [_record()]})
         # 海报恢复依赖下载历史桩（无海报可恢复），只断言不写 MP 表。
-        service.sync_platform_transfer_history()
+        service.restore_history_posters()
         self.assertEqual(session.added, [])
         self.assertFalse(session.committed)
 

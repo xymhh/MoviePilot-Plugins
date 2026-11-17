@@ -146,7 +146,3 @@ class AnilistSubscribeProvider(SubscribeProvider):
                     vote_average=vote_float,
                     unique_seed=unique_key,
                 )
-
-
-def create_anilist_provider() -> AnilistSubscribeProvider:
-    return AnilistSubscribeProvider()

@@ -9,6 +9,7 @@
 （若用户所需类型有命中，仍只返回该类型，保持原语义）。
 """
 
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -20,6 +21,14 @@ from plugin_env import (
     register_module,
     set_media_type,
 )
+
+# 这里注册的是 placeholders；加载完 search.py 必须把 cloudsubscribex.core.config
+# 还原，否则同进程内后续用例拿到缺属性的假 config，`from .core.config import ...`
+# 会 ImportError（1.12.20 白名单/参数表顶层 import 触发）。只还原 config 这
+# 一个模块——其它占位模块保持原样：宽幅还原会改写别的用例依赖的全局状态，
+# 全量曾因此坏过 manual_subscribe/tmdb_tag（core.media 的 media_identity
+# 被换成无返回值的 MagicMock）。
+_CONFIG_BEFORE_STUBS = sys.modules.get("cloudsubscribex.core.config")
 
 # ---- app.* 占位依赖 ----
 register_module("app", package=True)
@@ -102,6 +111,15 @@ search_api_module = load_module(
     "cloudsubscribex.core.api.search",
     "plugins.v2/cloudsubscribex/core/api/search.py",
 )
+
+# 只还原 cloudsubscribex.core.config（见文件头注释）。
+if _CONFIG_BEFORE_STUBS is None:
+    sys.modules.pop("cloudsubscribex.core.config", None)
+else:
+    sys.modules["cloudsubscribex.core.config"] = _CONFIG_BEFORE_STUBS
+    _core_parent = sys.modules.get("cloudsubscribex.core")
+    if _core_parent is not None:
+        setattr(_core_parent, "config", _CONFIG_BEFORE_STUBS)
 
 
 def _candidate(media_type, tmdb_id, title, year=2026):

@@ -560,49 +560,6 @@ class MovieDedupTests(unittest.TestCase):
         self.assertEqual(result[0]["file_name"], "完全不同的名字.mkv")
         self.assertEqual(result[0]["file_id"], "m1")
 
-    def test_movie_replace_sets_primary_and_extra(self):
-        """11. 电影多版本：replace 时主旧版本 + extra 列表。"""
-        files = [
-            _FakeCloudFile(id="m1", name="v1.mkv", size=100),
-            _FakeCloudFile(id="m2", name="v2.mkv", size=200),
-            _FakeCloudFile(id="m3", name="v3.mkv", size=300),
-        ]
-        handler = self._movie_handler(files=files)
-        versions = handler._find_cloud_movie_versions(_SUB, _MEDIA)
-        self.assertEqual(len(versions), 3)
-        action, old, reason = handler._movie_dedup_decision(
-            _SUB, _MEDIA, new_score=10, new_size=500, existing_versions=versions
-        )
-        self.assertEqual(action, "replace")
-        self.assertEqual(len(old), 3)
-
-    def test_movie_skip_when_existing_better(self):
-        """电影：已有更优 → skip。"""
-        files = [_FakeCloudFile(id="m1", name="best.mkv", size=1000)]
-        handler = self._movie_handler(files=files)
-        versions = handler._find_cloud_movie_versions(_SUB, _MEDIA)
-        # 注入高分旧版本
-        versions[0]["score"] = 20
-        action, _, reason = handler._movie_dedup_decision(
-            _SUB, _MEDIA, new_score=5, new_size=100, existing_versions=versions
-        )
-        self.assertEqual(action, "skip")
-
-    def test_movie_proceed_when_switch_off(self):
-        """电影：开关关闭 → proceed。"""
-        files = [_FakeCloudFile(id="m1", name="old.mkv", size=100)]
-        handler = self._movie_handler(files=files, episode_dedup_enabled=False)
-        versions = handler._find_cloud_movie_versions(_SUB, _MEDIA)
-        versions[0]["score"] = 20
-        action, _, _ = handler._movie_dedup_decision(
-            _SUB, _MEDIA, new_score=1, new_size=1, existing_versions=versions
-        )
-        self.assertEqual(action, "proceed")
-
-
-class FindCloudMovieFileTests(unittest.TestCase):
-    """_find_cloud_movie_file 兼容性：优先精确 stem，回退任一视频。"""
-
     def _handler(self, files):
         dirs = _FakeDirectories(files=files)
         handler = _make_handler(cloud_directories=dirs)
@@ -743,26 +700,6 @@ class TemplateNamedVersionTests(unittest.TestCase):
         )
         self.assertEqual(action, "replace")
         self.assertIn("评分提升", reason)
-
-    def test_movie_keep_when_matches_template(self):
-        """24. 电影侧同规则：无增益时模板命名保留，有增益仍替换。"""
-        files = [_FakeCloudFile(id="m1", name="正相反的你与我 (2024).mkv", size=100)]
-        dirs = _FakeDirectories(files=files)
-        handler = self._handler(
-            prefer_template_named_version=True, cloud_directories=dirs
-        )
-        versions = handler._find_cloud_movie_versions(_SUB, _MEDIA)
-        versions[0]["score"] = 3
-        action, _, reason = handler._movie_dedup_decision(
-            _SUB, _MEDIA, new_score=3, new_size=100, existing_versions=versions
-        )
-        self.assertEqual(action, "skip")
-        self.assertIn("已符合当前重命名模板", reason)
-        action, _, reason = handler._movie_dedup_decision(
-            _SUB, _MEDIA, new_score=99, new_size=9999, existing_versions=versions
-        )
-        self.assertEqual(action, "replace")
-        self.assertNotIn("已符合当前重命名模板", reason)
 
     def test_should_upgrade_candidate_accepts_existing_name(self):
         """25. 模板名不再一票否决：评分/体积有收益照样升级，只有无收益时才保留。"""

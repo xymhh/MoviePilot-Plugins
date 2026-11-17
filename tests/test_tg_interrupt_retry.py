@@ -65,7 +65,7 @@ class InterruptClassificationTest(unittest.TestCase):
             "matched_subscribe_id": 201,
         }
         item.update(extra)
-        self.monitor._save_items([item])
+        self.monitor._store.save(tg_module.ITEMS_KEY, [item])
         return item
 
     def test_interrupt_returns_to_queue(self):
@@ -130,7 +130,7 @@ class RetryFailedItemsTest(unittest.TestCase):
         self.tempdir.cleanup()
 
     def _seed(self, rows):
-        self.monitor._save_items(rows)
+        self.monitor._store.save(tg_module.ITEMS_KEY, rows)
 
     def test_only_items_with_subscribe_are_requeued(self):
         self._seed([
@@ -181,6 +181,21 @@ class RetryFailedItemsTest(unittest.TestCase):
         self.assertEqual(status["failed_count"], 1)
         # 同进程里别的用例可能已经触发过签名裁剪，这里只校验字段类型。
         self.assertIsInstance(status["restart_required"], bool)
+
+
+class MaxItemLinksTest(unittest.TestCase):
+    def test_max_item_links_matches_discovery(self):
+        """1.12.20 Phase 1：MAX_ITEM_LINKS 必须与手动转存接口上限同值。
+
+        唯一事实来源是 core/services/discovery.py 的 MAX_LINKS；tg_monitor
+        里故意不用顶层 import 引用它（那样会执行 core/services/__init__.py，
+        拉起 platform.py 的 app.db 导入），所以这里断言两者相等，漂移即失败。
+        """
+        discovery = load_module(
+            "cloudsubscribex.core.services.discovery",
+            "plugins.v2/cloudsubscribex/core/services/discovery.py",
+        )
+        self.assertEqual(tg_module.MAX_ITEM_LINKS, discovery.MAX_LINKS)
 
 
 if __name__ == "__main__":

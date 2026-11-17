@@ -178,13 +178,6 @@ class PluginEventHandler(OwnerDelegator):
         else:
             logger.debug(f"新增订阅即时搜索未入队，保留定时重试：id={sid}")
 
-    def on_subscribe_modified(self, event: Event):
-        """ 用户手动修改订阅站点时，不自动覆盖用户操作 """
-        sid = self._get_subscribe_id_from_event(event)
-        if not sid:
-            return
-        return
-
     def on_transfer_complete(self, event: Event):
         """PT 整理完成后异步进入网盘洗版上传。"""
         if (

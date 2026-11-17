@@ -97,7 +97,7 @@ def _job(src_path, state, storage="local"):
 
 class TestMpOrganizeTrackerHistory(unittest.TestCase):
     def setUp(self):
-        tracker_module.reset_mp_organizing()
+        tracker_module._MP_ORGANIZING.clear()
 
     def test_history_success_returns_succeeded_with_exact_dest(self):
         """历史有成功记录 → succeeded，detail 与 dest 均为精确 dest。"""
@@ -181,7 +181,7 @@ class TestMpOrganizeTrackerHistory(unittest.TestCase):
 
 class TestMpOrganizeTrackerPendingAndQueue(unittest.TestCase):
     def setUp(self):
-        tracker_module.reset_mp_organizing()
+        tracker_module._MP_ORGANIZING.clear()
 
     def test_manual_review_pending_is_failed_with_last_error(self):
         """人工复核登记 → failed，detail 为 last_error 原文（如上传失败）。"""
@@ -342,7 +342,7 @@ def _raising(*args, **kwargs):
 
 class TestMpOrganizingRegistryBySrc(unittest.TestCase):
     def setUp(self):
-        tracker_module.reset_mp_organizing()
+        tracker_module._MP_ORGANIZING.clear()
 
     def test_clear_by_src_removes_all_entries_with_same_src(self):
         """按源路径清除：同一 src 的多条登记（不同 parent）一次清掉。"""
@@ -367,7 +367,7 @@ class TestMpOrganizingRegistryBySrc(unittest.TestCase):
             SRC, "整理停滞（队头阻塞，后续任务排队中）"
         )
         for key in ("parent-1", "parent-2"):
-            entry = tracker_module.get_mp_organizing(key)
+            entry = tracker_module._MP_ORGANIZING.get(key)
             self.assertEqual(
                 entry["status_text"], "整理停滞（队头阻塞，后续任务排队中）"
             )

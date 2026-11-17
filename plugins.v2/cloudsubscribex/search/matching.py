@@ -140,11 +140,15 @@ def extract_season(value: object) -> Optional[int]:
 
 
 def normalize_season(value: Any, default: int = 1) -> int:
-    """规范化季号：None 或空字符串回退默认季号；0 视为真实的特别篇 S00。"""
-    try:
-        return max(0, int(default if value is None or value == "" else value))
-    except (TypeError, ValueError):
-        return default
+    """规范化季号：唯一实现见 handlers/sync/utils.py，此处仅作兼容转发。
+
+    顶层重导出会触发 handlers/__init__ 的导入环（它会拉起 SearchHandler /
+    SyncHandler，而 handlers/search/service.py 又在模块期 import
+    search.matching），故用函数内懒导入；调用方仍从 ..matching import。
+    """
+    from ..handlers.sync.utils import normalize_season as _normalize_season
+
+    return _normalize_season(value, default)
 
 
 def title_without_season(value: object) -> str:

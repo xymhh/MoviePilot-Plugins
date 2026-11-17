@@ -1,3 +1,3 @@
-from .provider import MikanSubscribeProvider, create_mikan_provider
+from .provider import MikanSubscribeProvider
 
-__all__ = ["MikanSubscribeProvider", "create_mikan_provider"]
+__all__ = ["MikanSubscribeProvider"]

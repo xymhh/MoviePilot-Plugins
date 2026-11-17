@@ -203,7 +203,3 @@ class NetflixSubscribeProvider(SubscribeProvider):
                     if entry[0] == token
                 }
         return value
-
-
-def create_netflix_provider() -> NetflixSubscribeProvider:
-    return NetflixSubscribeProvider()

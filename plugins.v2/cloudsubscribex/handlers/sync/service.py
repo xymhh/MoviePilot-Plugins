@@ -231,7 +231,6 @@ class SyncHandler:
         self._subtitle_traditional_to_simplified = bool(
             _get_val("subtitle_traditional_to_simplified", False)
         )
-        self._anime_pack_preferred = bool(_get_val("anime_pack_preferred", True))
         offline_timeout = _get_val("offline_timeout", 30)
         self._offline_timeout = max(10, min(int(offline_timeout or 30), 1440)) * 60
         self._OFFLINE_TIMEOUT = self._offline_timeout
@@ -432,9 +431,6 @@ class SyncHandler:
         self._video_extensions = list(_get_val("video_extensions", [".mkv", ".mp4", ".avi", ".iso"]))
         self._nfo_scrape_enabled = bool(_get_val("nfo_scrape_enabled", False))
         self._image_scrape_enabled = bool(_get_val("image_scrape_enabled", False))
-        self._platform_transfer_history_enabled = bool(
-            _get_val("platform_transfer_history_enabled", False)
-        )
         self._metadata_scraper = (
             MediaScraper(
                 nfo_enabled=self._nfo_scrape_enabled,

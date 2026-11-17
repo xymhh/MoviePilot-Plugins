@@ -4,7 +4,6 @@ import datetime
 from typing import Any, Dict, List
 
 from app.db import SessionFactory
-from app.db.site_oper import SiteOper
 from app.db.subscribe_oper import SubscribeOper
 
 try:
@@ -18,6 +17,146 @@ from .media import tmdb_id_of
 from ..utils.notify_template import DEFAULT_TEMPLATES
 
 DEFAULT_AUTO_SUBSCRIBE_USERNAME = "网盘订阅助手"
+
+
+#: 并发与冷却集中参数表（1.12.20 Phase 1）：七个值是唯一事实来源。
+#: UIConfig.get_default_config() 与各 _apply_*_config 的兜底默认值都从这里取；
+#: 数值一个都不许擅自改（改值要同步改这里与线上配置说明）。
+#: kind: "risk" = 风控约束（防网盘封控/限流）, "speed" = 速度目标（提速）。
+CONCURRENCY_AND_COOLDOWN_PARAMS: Dict[str, Dict[str, Any]] = {
+    "cross_transfer_upload_concurrency": {
+        "default": 4,
+        "kind": "speed",
+        "note": "115 上传分片并发度；0=单流顺序（最稳），>0 并发分片",
+    },
+    "cross_transfer_max_concurrent": {
+        "default": 2,
+        "kind": "speed",
+        "note": "同时转存任务数（并行度）；也约束同一时刻对 115 的并发压力",
+    },
+    "subscription_concurrency": {
+        "default": 2,
+        "kind": "speed",
+        "note": "订阅并发处理数",
+    },
+    "batch_interval": {
+        "default": 3,
+        "kind": "risk",
+        "note": "批次间隔（秒）：批次之间停顿节流，避免连续请求打满 115",
+    },
+    "transfer_risk_cooldown": {
+        "default": 1800,
+        "kind": "risk",
+        "note": "风控冷却（秒）：触发风控信号后静默时长",
+    },
+    "transfer_task_batch_size": {
+        "default": 50,
+        "kind": "speed",
+        "note": "每批处理文件数（吞吐）；过大则单批 API 量大",
+    },
+    "cross_transfer_daily_upload_limit_gb": {
+        "default": 900,
+        "kind": "risk",
+        "note": "每日真实上传上限（GB）：防 115 限流/封控；秒传命中 0 字节不计数",
+    },
+}
+
+#: _apply_plugin_config 的 setattr 白名单（1.12.20 Phase 1）：非默认键部分。
+#: 完整白名单见文件末尾 PLUGIN_CONFIG_KEYS = 默认键 + 本集合 + 签到后缀规则。
+#: 本集合的来源：config.get 读过但不在默认值里的键（各网盘/搜索源凭据键、
+#: 搜索源配置键）、normalize 迁移掉的历史键（block/takeover_platform_
+#: downloads、unblock_*，normalize 会先删掉它们，进白名单只是兜底）、
+#: 签到契约的 credential_keys（只出现在 definition 里，无 config.get 字面量）。
+#: 带 "_" 前缀的键来自驱动 definition 对内部属性名的读取，正常配置里不会
+#: 出现，列入仅作兜底。
+PLUGIN_CONFIG_EXTRA_KEYS: frozenset[str] = frozenset({
+    "_alipan_access_token",
+    "_alipan_refresh_token",
+    "_alipan_request_timeout",
+    "_cookies",
+    "_cross_transfer_upload_proxy",
+    "_guangya_access_token",
+    "_guangya_client_id",
+    "_guangya_device_id",
+    "_guangya_refresh_token",
+    "_guangya_request_timeout",
+    "_p123_request_timeout",
+    "_p123_token",
+    "_quark_checkin_url",
+    "_quark_cookie",
+    "_quark_request_timeout",
+    "_search_cache_ttl_minutes",
+    "_tianyi_access_token",
+    "_tianyi_cookie",
+    "_tianyi_refresh_token",
+    "_tianyi_request_timeout",
+    "_tianyi_session_key",
+    "_transfer_risk_cooldown",
+    "_yun139_authorization",
+    "_yun139_request_timeout",
+    "alipan_access_token",
+    "alipan_refresh_token",
+    "alipan_request_timeout",
+    "animegarden_exclude_re",
+    "apikey",
+    "auto_subscribe_media_type",
+    "block_platform_downloads",
+    "channel",
+    "checkin_auto_retry",
+    "checkin_cron",
+    "checkin_retry_count",
+    "cookies",
+    "dian115_email",
+    "dian115_password",
+    "exclude_keywords",
+    "guangya_access_token",
+    "guangya_client_id",
+    "guangya_device_id",
+    "guangya_refresh_token",
+    "guangya_request_timeout",
+    "hdhaven_password",
+    "hdhaven_username",
+    "hdhive_access_token",
+    "hdhive_api_key",
+    "hdhive_client_id",
+    "hdhive_password",
+    "hdhive_query_mode",
+    "hdhive_refresh_token",
+    "hdhive_request_interval",
+    "hdhive_token_expires_at",
+    "hdhive_username",
+    "host",
+    "juying_password",
+    "juying_username",
+    "keywords",
+    "magnet_metadata_url_template",
+    "p123_request_timeout",
+    "p123_token",
+    "pansou_cloud_types",
+    "pinglian_password",
+    "pinglian_username",
+    "quark_checkin_url",
+    "quark_cookie",
+    "quark_request_timeout",
+    "resource_type_order",
+    "scan_limit",
+    "takeover_platform_downloads",
+    "tianyi_access_token",
+    "tianyi_cookie",
+    "tianyi_refresh_token",
+    "tianyi_request_timeout",
+    "tianyi_session_key",
+    "unblock_end_time",
+    "unblock_start_time",
+    "woniu_password",
+    "woniu_username",
+    "yun139_authorization",
+    "yun139_request_timeout",
+})
+
+#: 签到动态键后缀：各渠道的 {provider}_checkin_enabled / {provider}_checkin_mode
+#: 由签到契约在运行期按渠道生成（见 core/checkin_manager.py），无法静态枚举。
+PLUGIN_CONFIG_KEY_SUFFIXES: tuple[str, ...] = ("_checkin_enabled", "_checkin_mode")
 
 
 class UIConfig:
@@ -169,7 +308,6 @@ class UIConfig:
             "emby_mediainfo_enabled": False,
             "platform_media_sync_enabled": False,
             "platform_deep_delete_enabled": False,
-            "platform_transfer_history_enabled": False,
             "timeout_enabled": True,
             "timeout_default_connect": 30,
             "timeout_default_pool": 15,
@@ -200,32 +338,32 @@ class UIConfig:
             "platform_download_policy": "block",
             "block_start_time": "18:00",
             "block_end_time": "23:59",
-            "transfer_task_batch_size": 50,
+            "transfer_task_batch_size": CONCURRENCY_AND_COOLDOWN_PARAMS["transfer_task_batch_size"]["default"],
             "sync_job_ledger_enabled": False,
             "cross_transfer_enabled": False,
             "cross_transfer_media_types": ["movie", "tv"],
             "cross_transfer_download_path": "/tmp",
             "cross_transfer_download_threads": 16,
-            "cross_transfer_max_concurrent": 2,
+            "cross_transfer_max_concurrent": CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_max_concurrent"]["default"],
             "cross_transfer_aria2_enabled": False,
             "cross_transfer_aria2_connections": 64,
             "cross_transfer_aria2_max_concurrent": 2,
             "cross_transfer_aria2_min_split_size": "1M",
             "cross_transfer_aria2_disk_cache": "32M",
             "cross_transfer_direct_stream": True,
-            "cross_transfer_upload_concurrency": 4,
+            "cross_transfer_upload_concurrency": CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_concurrency"]["default"],
             "cross_transfer_rapid_miss_action": "abort",
             # 真实上传 115 的代理（空=直连，只作用于 115 上传/API）
             "cross_transfer_upload_proxy": "",
             "cross_transfer_upload_proxy_username": "",
             "cross_transfer_upload_proxy_password": "",
             # 每日真实上传字节上限（GB），硬 clamp 1..900；秒传命中 0 字节不计数
-            "cross_transfer_daily_upload_limit_gb": 900,
+            "cross_transfer_daily_upload_limit_gb": CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_daily_upload_limit_gb"]["default"],
             "cross_transfer_residue_cleanup": True,
-            "subscription_concurrency": 2,
+            "subscription_concurrency": CONCURRENCY_AND_COOLDOWN_PARAMS["subscription_concurrency"]["default"],
             "batch_size": 20,
-            "batch_interval": 3,
-            "transfer_risk_cooldown": 1800,
+            "batch_interval": CONCURRENCY_AND_COOLDOWN_PARAMS["batch_interval"]["default"],
+            "transfer_risk_cooldown": CONCURRENCY_AND_COOLDOWN_PARAMS["transfer_risk_cooldown"]["default"],
             "skip_other_season_dirs": True,
             "cross_season_path_guard": True,
             "enable_cloud_upgrade": False,
@@ -264,7 +402,6 @@ class UIConfig:
             # 白名单模式下，与本频道关注订阅无关的消息是否仍进池子。
             # 关闭（默认）时只保留最近 50 条供回补匹配，其余不入池 ——
             # 否则频道里大量无关资源会把 500 条配额占满。
-            "tg_monitor_keep_unmatched": False,
             # 频道监控全局画质偏好（所有频道共用）：只做软偏好，同集先转
             # 最优画质，低画质保留兜底；识别不到画质默认放行。
             "tg_quality_preference_enabled": True,
@@ -392,16 +529,6 @@ class UIConfig:
             return []
 
     @staticmethod
-    def get_subscribe_options() -> List[Dict[str, Any]]:
-        items = []
-        for subscribe in UIConfig._subscribes():
-            prefix = "[剧]" if subscribe.type == MediaType.TV.value else "[影]"
-            suffix = f" ({subscribe.year})" if subscribe.year else ""
-            season = f" S{subscribe.season or 1}" if subscribe.type == MediaType.TV.value else ""
-            items.append({"title": f"{prefix} {subscribe.name}{suffix}{season}", "value": subscribe.id})
-        return items
-
-    @staticmethod
     def get_subscribe_options_grouped() -> List[Dict[str, Any]]:
         items = []
         for subscribe in UIConfig._subscribes():
@@ -423,17 +550,6 @@ class UIConfig:
                 }
             )
         return items
-
-    @staticmethod
-    def get_site_name_options() -> List[Dict[str, Any]]:
-        try:
-            with SessionFactory() as db:
-                sites = SiteOper(db=db).list() or []
-            names = sorted({str(site.name) for site in sites if site.name})
-            return [{"title": name, "value": name} for name in names]
-        except Exception as error:
-            logger.error(f"获取站点列表失败: {error}")
-            return []
 
     @staticmethod
     def get_media_server_options() -> List[Dict[str, Any]]:
@@ -583,3 +699,21 @@ class UIConfig:
         )
 
         return target
+
+
+#: _apply_plugin_config 的 setattr 白名单（1.12.20 Phase 1）：只允许已知
+#: 的插件配置键落到实例属性上。= UIConfig.get_default_config() 的全部顶层键
+#: + PLUGIN_CONFIG_EXTRA_KEYS。未知键由循环直接忽略并记 warning，绝不抛错。
+PLUGIN_CONFIG_KEYS: frozenset[str] = (
+    frozenset(UIConfig.get_default_config()) | PLUGIN_CONFIG_EXTRA_KEYS
+)
+
+
+def is_plugin_config_key(key: str) -> bool:
+    """判定配置键是否在白名单内（含签到动态键后缀规则）。"""
+    name = str(key or "")
+    if not name:
+        return False
+    if name in PLUGIN_CONFIG_KEYS:
+        return True
+    return name.endswith(PLUGIN_CONFIG_KEY_SUFFIXES)

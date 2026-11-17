@@ -97,11 +97,7 @@ class SubscriptionScoringService(OwnerDelegator):
     def _batch_re_score(self) -> dict:
         return self._score_subscriptions(force=False)
 
-    def api_batch_re_score(self) -> dict:
-        return self._batch_re_score()
 
     def _force_re_score(self) -> dict:
         return self._score_subscriptions(force=True)
 
-    def api_force_re_score(self) -> dict:
-        return self._force_re_score()

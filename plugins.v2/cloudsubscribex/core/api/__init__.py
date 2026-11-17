@@ -9,7 +9,6 @@ from .history import HistoryApi
 from .duplicate import DuplicateApi
 from .ledger import LedgerApi
 from .media_library import MediaLibraryApi
-from .organize import OrganizeApi
 from .page import PageApi
 from .qrcode import QRCodeService
 from .redirect import RedirectApi
@@ -29,7 +28,6 @@ __all__ = [
     "DuplicateApi",
     "LedgerApi",
     "MediaLibraryApi",
-    "OrganizeApi",
     "MoviePilotRegistration",
     "PageApi",
     "QRCodeService",

@@ -233,10 +233,10 @@ class OrganizingRuntimeTests(unittest.TestCase):
 
     def setUp(self):
         set_media_type()
-        _tracker().reset_mp_organizing()
+        _tracker()._MP_ORGANIZING.clear()
 
     def tearDown(self):
-        _tracker().reset_mp_organizing()
+        _tracker()._MP_ORGANIZING.clear()
 
     def test_download_only_success_parent_stays_on_download_page(self):
         _tracker().mark_mp_organizing("subscribe:1", _organizing_info())

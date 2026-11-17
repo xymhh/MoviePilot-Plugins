@@ -5,13 +5,11 @@
 """
 
 import datetime
-from typing import Any
 
 from app.log import logger
 
 from ..delegation import OwnerDelegator
-from ..services.candidate_ledger import read_records, summarize
-from ...utils.cache import cache_stats
+from ..services.candidate_ledger import read_records
 
 
 class LedgerApi(OwnerDelegator):
@@ -45,25 +43,7 @@ class LedgerApi(OwnerDelegator):
             logger.error(f"读取候选账本失败：{error}")
             return {"success": False, "message": str(error), "data": {"total": 0, "items": []}}
 
-    def api_ledger_summary(self, days: int = 7) -> dict:
-        """最近 N 天的候选去向聚合，用于页面顶部统计卡片。"""
-        store = self._ledger_store()
-        if store is None:
-            return {"success": True, "data": {"total": 0, "by_kind": {}, "by_provider": {}, "by_day": {}}}
-        try:
-            data: Any = summarize(store, days=max(1, min(int(days or 7), 30)))
-            return {"success": True, "data": data}
-        except Exception as error:  # noqa: BLE001
-            logger.error(f"聚合候选账本失败：{error}")
-            return {"success": False, "message": str(error), "data": {"total": 0}}
 
-    def api_cache_stats(self) -> dict:
-        """缓存健康度：编码失败 / 解码失败 / 命中率，用于判断缓存层是否退化。"""
-        try:
-            return {"success": True, "data": cache_stats()}
-        except Exception as error:  # noqa: BLE001
-            logger.error(f"读取缓存健康度失败：{error}")
-            return {"success": False, "message": str(error), "data": {}}
 
     def _ledger_store(self):
         """账本存储；插件还没初始化时返回 None，由调用方降级为空结果。"""

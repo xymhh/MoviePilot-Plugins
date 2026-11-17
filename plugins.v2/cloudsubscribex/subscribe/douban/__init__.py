@@ -1,3 +1,3 @@
-from .provider import DoubanSubscribeProvider, create_douban_provider
+from .provider import DoubanSubscribeProvider
 
-__all__ = ["DoubanSubscribeProvider", "create_douban_provider"]
+__all__ = ["DoubanSubscribeProvider"]

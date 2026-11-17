@@ -62,9 +62,15 @@ QUEUE_MAX = 200
 # 队列优先级：订阅仍缺集 → 先补集；订阅已齐 → 只可能洗版，排在后面。
 QUEUE_PRIORITY_MISSING = 0
 QUEUE_PRIORITY_UPGRADE = 1
-# 同一订阅一次合并提交的最大链接数（手动转存接口上限是 50）。
+# 同一订阅一次合并提交的最大链接数：手动转存接口上限是 50，这里按 20
+# 切块留足余量（值与 MAX_LINKS 不同是有意的，不要合一）。
 BATCH_LINK_LIMIT = 20
 # 合并后的单条队列单元最多保留多少链接/来源 id：再多也没收益，只涨请求体积。
+# 与手动转存接口上限同值：唯一事实来源是 core/services/discovery.py 的
+# MAX_LINKS。这里故意不用顶层 import 引用它——那样会执行
+# core/services/__init__.py（拉起 platform.py 的 app.db 导入），而加载
+# tg_monitor 的测试打桩装不下；改由 tests/test_tg_interrupt_retry.py 的
+# test_max_item_links_matches_discovery 断言两者相等，漂移即失败。
 MAX_ITEM_LINKS = 50
 # skipped/transferred 只是历史记录，最多占池子的 12%（500 条时约 60 条）；
 # 其余名额留给待处理条目。线上实测 104 条 skipped 会把列表淹掉。
@@ -366,34 +372,6 @@ def _split_terms(value: Any) -> List[str]:
     return [item.strip() for item in items if item.strip()]
 
 
-def _rule_whitelist(rule: Dict[str, Any]) -> List[int]:
-    """频道规则的订阅白名单；兼容 1.6.68 之前的单值 auto_subscribe_id。"""
-    raw_ids = rule.get("auto_subscribe_ids") or []
-    if isinstance(raw_ids, str):
-        text = raw_ids.strip()
-        if text.startswith("["):
-            try:
-                raw_ids = json.loads(text)
-            except (TypeError, ValueError):
-                raw_ids = _split_terms(text)
-        else:
-            raw_ids = _split_terms(text)
-    if not isinstance(raw_ids, (list, tuple, set)):
-        raw_ids = [raw_ids]
-    values: List[Any] = list(raw_ids)
-    if rule.get("auto_subscribe_id"):
-        values.append(rule.get("auto_subscribe_id"))
-    result: List[int] = []
-    for value in values:
-        try:
-            subscribe_id = int(value or 0)
-        except (TypeError, ValueError):
-            continue
-        if subscribe_id > 0 and subscribe_id not in result:
-            result.append(subscribe_id)
-    return result
-
-
 def _rule_mode(rule: Dict[str, Any]) -> str:
     """频道规则的监控模式。
 
@@ -679,7 +657,6 @@ class TgChannelMonitor:
             auto_transfer_handler: Any = None,
             auto_transfer_batch_handler: Any = None,
             subscribe_provider: Any = None,
-            keep_unmatched: bool = False,
     ) -> None:
         with self._lock:
             self._enabled = bool(enabled)
@@ -699,8 +676,6 @@ class TgChannelMonitor:
             self._auto_transfer_handler = auto_transfer_handler
             self._auto_transfer_batch_handler = auto_transfer_batch_handler
             self._subscribe_provider = subscribe_provider
-            # 旧开关保留但不再生效：未命中订阅一律忽略（1.7.89）。
-            self._keep_unmatched = False
             self._channels = [rule["channel"] for rule in self._channel_rules]
             # 旧字段保留，供 status/兼容读取；扫描只认每频道规则
             self._keywords = [str(item).lower() for item in keywords if str(item).strip()]
@@ -831,10 +806,6 @@ class TgChannelMonitor:
     def _load_items(self) -> List[dict]:
         with self._items_lock:
             return list(self._store.load(ITEMS_KEY, []) or [])
-
-    def _save_items(self, items: List[dict]) -> None:
-        with self._items_lock:
-            self._store.save(ITEMS_KEY, items)
 
     @staticmethod
     def _queue_priority(item: Dict[str, Any]) -> int:

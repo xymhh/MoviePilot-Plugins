@@ -71,9 +71,6 @@ _STALE_HISTORY_STATUSES = frozenset({STATUS_PROCESSING, STATUS_DOWNLOADING})
 class HistoryService(OwnerDelegator):
     """管理转存历史记录、关联文件与重试流程。"""
 
-    _METADATA_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
-    _SEASON_DIRECTORY_PATTERN = re.compile(r"^season[ ._-]*\d+$", re.IGNORECASE)
-    _PLATFORM_HISTORY_STORAGE = "cloudsubscribe"
     # 允许「批量手动标记成功」的来源状态：落盘自检查无实据的「待确认」，
     # 以及卡在队列里的「处理中」/「下载中」。终态（成功/失败/跳过）不在此列。
     _MANUAL_SUCCESS_STATUSES = frozenset({"待确认", "处理中", "下载中"})
@@ -575,82 +572,8 @@ class HistoryService(OwnerDelegator):
                     activated_pending_count = len(pending)
         if activated_pending_count:
             self._notify_offline_pending_changed(activated_pending_count)
-        self._record_platform_transfer_histories(platform_records)
         self.reconcile_orphan_finalize_records()
         return len(records)
-
-    def compact_workflow_history(self) -> List[Dict[str, Any]]:
-        """合并同一媒体季集的跨盘、洗版工作流记录并持久化。"""
-        if not self._get_data or not self._save_data:
-            return []
-        with self._offline_pending_lock:
-            history = [
-                copy.deepcopy(record)
-                for record in (self._get_data("history") or [])
-                if isinstance(record, dict)
-            ]
-            compacted: List[Dict[str, Any]] = []
-            scope_indexes: Dict[Tuple[str, ...], int] = {}
-            upgrade_scopes = {
-                scope
-                for record in history
-                if self._is_upgrade_history(record)
-                if (scope := self._upgrade_scope_identity(record))
-            }
-            for record in history:
-                self._ensure_history_record_id(record)
-                scope = self._upgrade_scope_identity(record)
-                index = scope_indexes.get(scope) if scope else None
-                should_merge = bool(
-                    index is not None
-                    and (
-                            scope in upgrade_scopes
-                            or (
-                                    self._is_workflow_history(record)
-                                    and self._is_workflow_history(compacted[index])
-                            )
-                    )
-                )
-                if not should_merge:
-                    compacted.append(record)
-                    if scope:
-                        scope_indexes[scope] = len(compacted) - 1
-                    continue
-                current = compacted[index]
-                latest, previous = (
-                    (record, current)
-                    if str(record.get("time") or "") >= str(current.get("time") or "")
-                    else (current, record)
-                )
-                is_upgrade = (
-                        self._is_upgrade_history(previous)
-                        or self._is_upgrade_history(latest)
-                )
-                merged = {**previous, **latest, "upgrade": is_upgrade}
-                merged["task_types"] = sorted(
-                    set(self._history_task_types(previous))
-                    | set(self._history_task_types(latest))
-                    | ({"upgrade"} if is_upgrade else set())
-                )
-                if is_upgrade:
-                    merged["upgrade_count"] = max(
-                        1,
-                        int(current.get("upgrade_count") or int(
-                            self._is_upgrade_history(current)
-                        )) + int(self._is_upgrade_history(record)),
-                    )
-                    merged["previous_file_name"] = str(
-                        previous.get("file_name") or ""
-                    )
-                    merged["previous_file_size"] = previous.get("file_size")
-                    merged["previous_rule_score"] = previous.get("rule_score")
-                compacted[index] = merged
-            if compacted != history:
-                self._save_data("history", compacted)
-                logger.info(
-                    f"跨盘/洗版历史已合并：{len(history)} 条 -> {len(compacted)} 条"
-                )
-            return compacted
 
     def _history_page_fields(self, record: Dict[str, Any]) -> Dict[str, str]:
         """生成历史页面所需的稳定标识、名称和可点击链接。"""
@@ -1109,7 +1032,6 @@ class HistoryService(OwnerDelegator):
                 self._save_data("history", history)
         if repaired:
             logger.info(f"已自动修复 {repaired} 条 STRM 已存在但状态未完成的历史记录")
-            self._record_platform_transfer_histories(repaired_records)
             if self._history_changed:
                 self._history_changed()
         return repaired
@@ -1621,7 +1543,6 @@ class HistoryService(OwnerDelegator):
                     platform_records.append(copy.deepcopy(item))
             if changed:
                 self._save_data("history", history)
-        self._record_platform_transfer_histories(platform_records)
         if changed and self._history_changed:
             self._history_changed()
         return matched_records

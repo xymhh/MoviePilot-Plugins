@@ -29,11 +29,22 @@ class NotExist:
 
 
 class MetaInfoStub:
-    def __init__(self, title=""):
+    """最小 MetaInfo 替身：只保留生产代码读写的属性。
+
+    生产代码（handlers/sync/naming.py）会以 custom_words= 构造它，
+    并读写 begin_season/begin_episode/episode_list；构造签名与属性
+    必须跟得上，否则后加载 naming.py 的用例会拿到不兼容的替身
+    （1.12.20：tmdb_tag 全量失败即因此起）。
+    """
+
+    def __init__(self, title="", custom_words=None, **kwargs):
         self.title = title
+        self.custom_words = custom_words
         self.year = None
         self.type = None
         self.begin_season = None
+        self.begin_episode = None
+        self.episode_list = []
 
 
 class MediaStub:

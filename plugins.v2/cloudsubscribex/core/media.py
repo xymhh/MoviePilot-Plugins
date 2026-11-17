@@ -48,9 +48,6 @@ def _present(value: Any) -> bool:
     return value not in (None, "", 0, "0")
 
 
-def normalize_season(value: Any, default: int = 1) -> int:
-    return max(0, int(default if value is None or value == "" else value))
-
 def normalize_media_source(value: Any) -> Optional[str]:
     """返回 v2/v3 均可识别的稳定媒体来源值。"""
     normalized = str(getattr(value, "value", value) or "").strip().casefold()

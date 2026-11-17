@@ -13,7 +13,7 @@ _archiver = load_module(
 
 class DatabaseArchiverTest(unittest.TestCase):
     def test_archive_empty_store_returns_safe_dict(self):
-        res = _archiver.archive_database(None)
+        res = _archiver.purge_expired_database_data(None)
         self.assertEqual(res["ledger_purged"], 0)
         self.assertEqual(res["jobs_purged"], 0)
         self.assertTrue(res["success"])
@@ -23,7 +23,7 @@ class DatabaseArchiverTest(unittest.TestCase):
         store.candidate_ledger.purge.return_value = 150
         store.sync_jobs.purge_expired.return_value = 45
 
-        res = _archiver.archive_database(store, keep_days_ledger=14, keep_days_jobs=7)
+        res = _archiver.purge_expired_database_data(store, keep_days_ledger=14, keep_days_jobs=7)
         self.assertEqual(res["ledger_purged"], 150)
         self.assertEqual(res["jobs_purged"], 45)
         self.assertTrue(res["success"])
@@ -35,7 +35,7 @@ class DatabaseArchiverTest(unittest.TestCase):
         store.candidate_ledger.purge.side_effect = RuntimeError("database locked")
         store.sync_jobs.purge_expired.return_value = 0
 
-        res = _archiver.archive_database(store)
+        res = _archiver.purge_expired_database_data(store)
         self.assertFalse(res["success"])
         self.assertEqual(res["ledger_purged"], 0)
 

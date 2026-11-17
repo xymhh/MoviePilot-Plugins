@@ -177,7 +177,3 @@ class DoubanSubscribeProvider(SubscribeProvider):
                     vote_average=vote_float,
                     unique_seed=unique_key,
                 )
-
-
-def create_douban_provider() -> DoubanSubscribeProvider:
-    return DoubanSubscribeProvider()

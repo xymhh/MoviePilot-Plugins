@@ -19,6 +19,7 @@ from .files import P115DirectoryReader, P115FileService
 from .upload_proxy import oss_request_kwargs
 from ...core import OwnerDelegator
 from ...core.error_text import describe_upload_error
+from ...core.file_hash import file_sha1
 from ...core.telemetry import api_meter, format_snapshot
 
 try:
@@ -312,11 +313,8 @@ class P115UploadService(OwnerDelegator):
 
     @staticmethod
     def _file_sha1(path: Path) -> str:
-        digest = hashlib.sha1()
-        with path.open("rb") as file:
-            while chunk := file.read(8 * 1024 * 1024):
-                digest.update(chunk)
-        return digest.hexdigest().upper()
+        """文件 SHA1：唯一实现见 core/file_hash.py（此处保留薄壳，因测试桩点）。"""
+        return file_sha1(path)
 
     def try_rapid_upload(
             self, local_path: str, save_path: str, target_name: str,

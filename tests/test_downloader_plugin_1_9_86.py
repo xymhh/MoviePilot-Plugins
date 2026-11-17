@@ -128,6 +128,11 @@ def _load_plugin_module():
     install_app_mocks(
         "app.core", "app.core.config", "app.api", "app.api.endpoints",
         "app.api.endpoints.plugin",
+        # 1.12.20 Phase 1：__init__.py 顶层 import 真实 core/config.py，
+        # 它需要 app.db / app.db.subscribe_oper / app.helper.mediaserver；
+        # _apply_plugin_config 里还 deferred import app.core.plugin。
+        "app.db", "app.db.subscribe_oper", "app.helper.mediaserver",
+        "app.core.plugin",
         "apscheduler", "apscheduler.schedulers",
         "apscheduler.schedulers.background",
         "apscheduler.triggers", "apscheduler.triggers.cron",

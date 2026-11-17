@@ -124,7 +124,3 @@ class BangumiSubscribeProvider(SubscribeProvider):
                 vote_average=vote_float,
                 unique_seed=unique_key,
             )
-
-
-def create_bangumi_provider() -> BangumiSubscribeProvider:
-    return BangumiSubscribeProvider()

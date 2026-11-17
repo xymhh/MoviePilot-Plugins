@@ -55,7 +55,3 @@ class MikanSubscribeProvider(SubscribeProvider):
             return detail
 
         yield from self.service.candidates(entries, str(year), load_detail)
-
-
-def create_mikan_provider() -> MikanSubscribeProvider:
-    return MikanSubscribeProvider()

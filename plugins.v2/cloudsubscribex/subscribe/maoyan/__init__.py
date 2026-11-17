@@ -1,3 +1,3 @@
-from .provider import MaoyanSubscribeProvider, create_maoyan_provider
+from .provider import MaoyanSubscribeProvider
 
-__all__ = ["MaoyanSubscribeProvider", "create_maoyan_provider"]
+__all__ = ["MaoyanSubscribeProvider"]

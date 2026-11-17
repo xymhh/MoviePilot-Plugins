@@ -731,8 +731,6 @@ class HistoryRetryService(OwnerDelegator):
             self.append_history_records([record], reopen_terminal=True)
         else:
             self._save_data("history", history)
-        if record["status"] == "成功":
-            self._record_platform_transfer_histories([record])
         logger.info(
             f"历史记录后处理完成：{cloud_dir.rstrip('/')}/{target_name}，"
             f"状态：{record['status']}"

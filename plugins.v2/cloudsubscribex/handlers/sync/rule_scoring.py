@@ -130,9 +130,6 @@ class UpgradeRuleScoringService(OwnerDelegator):
                 return version
         return None
 
-    def _upgrade_replaces_existing(self) -> bool:
-        return self._upgrade_mode != "coexist"
-
     @staticmethod
     def _coexist_target_name(
             target_name: str,

@@ -41,6 +41,11 @@ from .core import (
     resolve_component,
 )
 from .core.aria2 import configure_aria2, resolve_data_dir, shutdown_aria2
+from .core.config import (
+    CONCURRENCY_AND_COOLDOWN_PARAMS,
+    PLUGIN_CONFIG_EXTRA_KEYS as PLUGIN_CONFIG_EXTRA_KEYS,
+    is_plugin_config_key,
+)
 from .core.api import (
     AccountApi,
     ChannelsApi,
@@ -52,7 +57,6 @@ from .core.api import (
     HistoryApi,
     LedgerApi,
     MediaLibraryApi,
-    OrganizeApi,
     PageApi,
     QRCodeService,
     RedirectApi,
@@ -93,15 +97,7 @@ from .drive.scanner import DriverRegistry
 from .handlers import SearchHandler, SyncHandler, SubscribeHandler, WebhookHandler
 from .search.scanner import SearchSourceRegistry
 from .search.types import ensure_magnet_for_cloud_policy
-from .subscribe import (  # noqa: F401 - 导入即注册自动订阅渠道
-    create_anilist_provider,
-    create_bangumi_provider,
-    create_douban_provider,
-    create_maoyan_provider,
-    create_mikan_provider,
-    create_netflix_provider,
-    create_tmdb_provider,
-)
+from . import subscribe  # noqa: F401 - 导入即注册自动订阅渠道
 from .utils import FileMatcher, configure_magnet_metadata_url
 from .utils.file_parser import MediaFileParser
 from .utils.http_client import build_proxy_url, validate_proxy_address
@@ -115,7 +111,6 @@ _COMPONENT_TYPES = (
     SearchApi,
     ConfigApi,
     CheckinApi,
-    OrganizeApi,
     SyncApi,
     RuntimeApi,
     MediaLibraryApi,
@@ -203,7 +198,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.12.19"
+    plugin_version = "1.12.20"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -309,7 +304,6 @@ class CloudSubscribeX(_PluginBase):
     _tg_monitor_scan_limit: int = 20
     _tg_monitor_interval_minutes: int = 10
     _tg_monitor_max_items: int = 500
-    _tg_monitor_keep_unmatched: bool = False
     #: 渠道库（channels.json）：搜索源与 TG 监控频道的唯一运行来源。
     #: ``None`` 表示尚未按当前数据目录惰性创建。
     _channels: Optional[ChannelStore] = None
@@ -330,6 +324,22 @@ class CloudSubscribeX(_PluginBase):
     _subtitle_extensions: List[str] = [
         ".srt", ".ass", ".ssa", ".vtt", ".sub", ".sup", ".idx", ".smi", ".mks"
     ]
+
+    # 1.12.20 Phase 1：补齐只做 setattr 挂载的运行期属性（此前仅在方法内
+    # 赋值，类上未声明，配置应用前直接读取会走 OwnerDelegator 委托甚至报错）。
+    _cross_transfer_manager: Optional[Any] = None
+    _notify_templates: Dict[str, str] = {}
+    _organize_source_path: str = ""
+    _organize_max_files: int = 500
+    _organize_max_depth: int = 8
+    _organize_include_subtitles: bool = True
+    _organize_conflict_policy: str = "skip"
+    _organize_schedule_enabled: bool = False
+    _organize_schedule_cron: str = "0 4 * * *"
+    _organize_schedule_auto_execute: bool = True
+    _organize_schedule_notify: bool = True
+    _strm_scan_lock: Optional[Any] = None
+    _subscribe_search_recent: Dict[str, Any] = {}
 
     # 洗版配置
     _upgrade_subscribe_ids: list = []
@@ -376,7 +386,6 @@ class CloudSubscribeX(_PluginBase):
     _emby_mediainfo_enabled: bool = False
     _platform_media_sync_enabled: bool = False
     _platform_deep_delete_enabled: bool = False
-    _platform_transfer_history_enabled: bool = False
     _timeout_enabled: bool = True
     _timeout_default_connect: float = 30
     _timeout_default_pool: float = 15
@@ -531,9 +540,9 @@ class CloudSubscribeX(_PluginBase):
     def on_subscribe_added(self, event: Event):
         return self._get_component(PluginEventHandler).on_subscribe_added(event)
 
-    @eventmanager.register(EventType.SubscribeModified)
-    def on_subscribe_modified(self, event: Event):
-        return self._get_component(PluginEventHandler).on_subscribe_modified(event)
+    # 注意：有意不监听 EventType.SubscribeModified——用户手动修改订阅
+    # 站点时，不自动覆盖用户操作（1.12.20 随 Phase 1 取消注册，
+    # 原 PluginEventHandler.on_subscribe_modified 本就是空操作）。
 
     @eventmanager.register(ChainEventType.ResourceDownload)
     def on_resource_download(self, event: Event):
@@ -815,6 +824,11 @@ class CloudSubscribeX(_PluginBase):
 
         if config:
             for key, val in config.items():
+                # 1.12.20 Phase 1：只允许白名单配置键落到实例属性上；
+                # 白名单外的新键直接忽略并记 warning，绝不抛错。
+                if not is_plugin_config_key(key):
+                    logger.warning(f"忽略未知插件配置键：{key}（未进白名单）")
+                    continue
                 setattr(self, f"_{key}", val)
             # 渠道库是搜索源与 TG 频道的唯一运行来源：先迁移旧配置，
             # 再让 _apply_search_config / _apply_tg_monitor_config 读渠道库。
@@ -829,7 +843,7 @@ class CloudSubscribeX(_PluginBase):
         self._init_clients()
         self._init_handlers()
         if self._sync_handler:
-            self._sync_handler.sync_platform_transfer_history()
+            self._sync_handler.restore_history_posters()
             # 1.12.14/1.12.15：清理插件以前写进 MP 整理历史的镜像记录
             # （PanSou → 115网盘CS版、复制等），幂等、每次启动都跑；
             # 之后插件不再写这类记录，MP 的整理历史只剩 MP 自己写的账。
@@ -1511,9 +1525,6 @@ class CloudSubscribeX(_PluginBase):
         self._tg_monitor_max_items = max(50, min(max_items, 5000))
         # 白名单模式下与本频道关注订阅无关的消息是否仍入池。
         # 默认 False：只保留最近 50 条供回补匹配，其余不进池，避免占满配额。
-        self._tg_monitor_keep_unmatched = bool(
-            config.get("tg_monitor_keep_unmatched", False)
-        )
         quality_preferences = {
             "enabled": config.get("tg_quality_preference_enabled", True),
             "resolution_order": config.get(
@@ -1826,7 +1837,7 @@ class CloudSubscribeX(_PluginBase):
             logger.warning(f"115 上传代理配置无效，本次使用直连：{error}")
             self._cross_transfer_upload_proxy = ""
         self._cross_transfer_daily_upload_limit_gb = clamp_limit_gb(
-            config.get("cross_transfer_daily_upload_limit_gb", 900)
+            config.get("cross_transfer_daily_upload_limit_gb", CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_daily_upload_limit_gb"]["default"])
         )
         self._upload_quota = UploadQuota(
             self, self._cross_transfer_daily_upload_limit_gb
@@ -1872,7 +1883,7 @@ class CloudSubscribeX(_PluginBase):
                                                         600))
 
     def _apply_sync_config(self, config: Dict[str, Any]) -> None:
-        self._transfer_task_batch_size = int(config.get("transfer_task_batch_size", 50) or 50)
+        self._transfer_task_batch_size = int(config.get("transfer_task_batch_size", CONCURRENCY_AND_COOLDOWN_PARAMS["transfer_task_batch_size"]["default"]) or 50)
         self._sync_job_ledger_enabled = bool(
             config.get("sync_job_ledger_enabled", False)
         )
@@ -1886,7 +1897,7 @@ class CloudSubscribeX(_PluginBase):
         self._cross_transfer_download_path = str(config.get("cross_transfer_download_path", "") or "").strip()
         self._cross_transfer_download_threads = max(1,
                                                     min(int(config.get("cross_transfer_download_threads", 16) or 16), 256))
-        self._cross_transfer_max_concurrent = max(1, min(int(config.get("cross_transfer_max_concurrent", 2) or 2), 10))
+        self._cross_transfer_max_concurrent = max(1, min(int(config.get("cross_transfer_max_concurrent", CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_max_concurrent"]["default"]) or 2), 10))
         self._cross_transfer_aria2_enabled = bool(
             config.get("cross_transfer_aria2_enabled", False)
         )
@@ -1951,10 +1962,10 @@ class CloudSubscribeX(_PluginBase):
             config.get("cross_transfer_residue_cleanup", True)
         )
 
-        self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", 2) or 2), 5))
+        self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", CONCURRENCY_AND_COOLDOWN_PARAMS["subscription_concurrency"]["default"]) or 2), 5))
         self._batch_size = int(config.get("batch_size", 20) or 20)
-        self._batch_interval = max(0, min(float(config.get("batch_interval", 3) or 0), 60))
-        self._transfer_risk_cooldown = max(60, min(int(config.get("transfer_risk_cooldown", 1800) or 1800), 86400))
+        self._batch_interval = max(0, min(float(config.get("batch_interval", CONCURRENCY_AND_COOLDOWN_PARAMS["batch_interval"]["default"]) or 0), 60))
+        self._transfer_risk_cooldown = max(60, min(int(config.get("transfer_risk_cooldown", CONCURRENCY_AND_COOLDOWN_PARAMS["transfer_risk_cooldown"]["default"]) or 1800), 86400))
         self._skip_other_season_dirs = config.get("skip_other_season_dirs", True)
         # 跨季路径守卫：分享目录季号与目标季冲突时拒绝进候选（file_matcher 类级开关）
         self._cross_season_path_guard = bool(config.get("cross_season_path_guard", True))
@@ -2522,9 +2533,7 @@ class CloudSubscribeX(_PluginBase):
             logger.debug(f"关闭网盘客户端失败：{error}", exc_info=True)
         try:
             components = self.__dict__.get("_plugin_components", {})
-            platform_service = components.pop(PlatformIntegrationService, None)
-            if platform_service:
-                platform_service.close()
+            components.pop(PlatformIntegrationService, None)
         except Exception as error:
             logger.debug(f"关闭平台缓存失败：{error}", exc_info=True)
         # 统一调度器一次停全部：包括以前漏停的历史状态维护与 115 整理两个任务。

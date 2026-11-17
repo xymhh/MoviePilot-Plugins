@@ -236,7 +236,7 @@ class FinalizeMpWaitTests(unittest.TestCase):
         # 会覆盖 app.schemas.types 上的桩，模块级那次到执行时已失效。
         global MediaType
         MediaType = set_media_type()
-        _tracker().reset_mp_organizing()
+        _tracker()._MP_ORGANIZING.clear()
         self.service = DummyMpWaitService()
         self.abort_calls = []
         _stub(
@@ -325,7 +325,7 @@ class FinalizeMpWaitTests(unittest.TestCase):
         _tracker().mark_mp_organizing("parent-1", item["mp_organize"])
         self._run(item, ("queued", "MP 整理排队中", None))
         self.assertEqual(self.abort_calls, [])
-        entry = _tracker().get_mp_organizing("parent-1")
+        entry = _tracker()._MP_ORGANIZING.get("parent-1")
         self.assertEqual(
             entry["status_text"], "整理停滞（队头阻塞，后续任务排队中）"
         )
@@ -339,7 +339,7 @@ class FinalizeMpWaitTests(unittest.TestCase):
         }
         _tracker().mark_mp_organizing("parent-1", item["mp_organize"])
         self._run(item, ("queued", "MP 整理排队中", None))
-        entry = _tracker().get_mp_organizing("parent-1")
+        entry = _tracker()._MP_ORGANIZING.get("parent-1")
         self.assertEqual(entry["status_text"], "")
 
     def test_succeeded_locates_nested_dest_and_finalizes(self):
@@ -490,7 +490,7 @@ class MpOrganizePendingRecordTests(unittest.TestCase):
     def setUp(self):
         global MediaType
         MediaType = set_media_type()
-        _tracker().reset_mp_organizing()
+        _tracker()._MP_ORGANIZING.clear()
 
     @staticmethod
     def _fake_self():

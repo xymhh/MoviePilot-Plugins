@@ -147,13 +147,12 @@ class PlatformIntegrationService(OwnerDelegator):
         counts = {
             "platform_overview": len(list(self._overview_cache.items())),
             "agent_resources": len(list(self._agent_resource_cache.items())),
+            "link_selections": len(list(self._link_selection_cache.items())),
         }
         self._overview_cache.clear()
         self._agent_resource_cache.clear()
+        self._link_selection_cache.clear()
         return counts
-
-    def close(self) -> None:
-        pass
 
     @staticmethod
     def _agent_cache_key(session_id: str, search_id: str) -> str:

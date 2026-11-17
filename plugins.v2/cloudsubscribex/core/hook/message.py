@@ -32,10 +32,6 @@ class MessageRoutingHook(OwnerDelegator):
         "http://", "https://", "magnet:", "ed2k://", "thunder://", "www."
     )
 
-    @staticmethod
-    def _channel_value(channel: Any) -> str:
-        return str(getattr(channel, "value", channel) or "").strip().lower()
-
     def _message_payload(self, arguments: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not self._enabled or not self._direct_transfer_enabled:
             return None

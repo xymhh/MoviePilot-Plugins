@@ -65,7 +65,7 @@ class TestTriggerMpOrganizeTargetDirectory(unittest.TestCase):
         FakeDirectoryHelper.calls = []
         FakeDirectoryHelper.next_result = "found"
         FakeDirectoryHelper.last_conf = None
-        tracker.reset_mp_organizing()
+        tracker._MP_ORGANIZING.clear()
         self.mediainfo = MagicMock()
         self.mediainfo.type = MediaType.TV
         # 调用方传的 MediaInfo 默认带分类（真实 MP 识别结果有分类），
@@ -207,7 +207,7 @@ class TestMpOrganizeTrackerRegistry(unittest.TestCase):
     """v1.12.6 B：整理中登记表（只建登记表部分）。"""
 
     def setUp(self):
-        tracker.reset_mp_organizing()
+        tracker._MP_ORGANIZING.clear()
 
     def test_constants(self):
         self.assertEqual(tracker.MP_ORGANIZE_WAIT_TIMEOUT_SECONDS, 90 * 60)
@@ -221,14 +221,14 @@ class TestMpOrganizeTrackerRegistry(unittest.TestCase):
             "target_storage": "u115cs",
         }
         tracker.mark_mp_organizing("subscribe:35", info, "整理中")
-        entry = tracker.get_mp_organizing("subscribe:35")
+        entry = tracker._MP_ORGANIZING.get("subscribe:35")
         self.assertIsNotNone(entry)
         self.assertEqual(entry["mp_organize"], info)
         self.assertEqual(entry["status_text"], "整理中")
         self.assertIsInstance(entry["updated_at"], float)
         self.assertIn("subscribe:35", tracker.list_mp_organizing())
         tracker.clear_mp_organizing("subscribe:35")
-        self.assertIsNone(tracker.get_mp_organizing("subscribe:35"))
+        self.assertIsNone(tracker._MP_ORGANIZING.get("subscribe:35"))
         self.assertEqual(tracker.list_mp_organizing(), {})
 
     def test_mark_ignores_empty_task_id(self):
@@ -238,7 +238,7 @@ class TestMpOrganizeTrackerRegistry(unittest.TestCase):
     def test_reset_clears_all(self):
         tracker.mark_mp_organizing("a", {"src_path": "x"})
         tracker.mark_mp_organizing("b", {"src_path": "y"})
-        tracker.reset_mp_organizing()
+        tracker._MP_ORGANIZING.clear()
         self.assertEqual(tracker.list_mp_organizing(), {})
 
 

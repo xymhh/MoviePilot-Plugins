@@ -1,6 +1,5 @@
 """媒体伴随字幕的匹配、转存与本地落盘。"""
 
-import hashlib
 import html
 import re
 import shutil
@@ -28,6 +27,7 @@ except ImportError:
         zhconv_convert = None
 
 from ...core import CloudDriveCapability, CloudFile, OwnerDelegator
+from ...core.file_hash import file_sha1
 from ...utils import MediaFileParser
 
 
@@ -261,20 +261,13 @@ class SubtitleService(OwnerDelegator):
         if expected_size > 0 and path.stat().st_size != expected_size:
             return False
         if expected_sha1:
-            digest = hashlib.sha1()
-            with path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            return digest.hexdigest().upper() == expected_sha1.upper()
+            return file_sha1(path) == expected_sha1.upper()
         return True
 
     @staticmethod
     def _sha1_file(path: Path) -> str:
-        digest = hashlib.sha1()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest().upper()
+        """文件 SHA1：唯一实现见 core/file_hash.py。"""
+        return file_sha1(path)
 
     @staticmethod
     def _subtitle_matches_video(

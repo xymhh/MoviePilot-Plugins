@@ -11,6 +11,7 @@ from app.log import logger
 from app.schemas.types import MediaType
 
 from ...core import OwnerDelegator
+from ...core.file_hash import FileHashCancelled, file_sha1
 from ...core.media import list_subscribes_by_tmdb_id
 from ...core.state import STATUS_PROCESSING
 from ...utils import MediaFileParser
@@ -25,13 +26,11 @@ class PtUpgradeService(OwnerDelegator):
 
     @staticmethod
     def _file_sha1(path: Path, stop_event: Optional[ThreadEvent] = None) -> str:
-        digest = hashlib.sha1()
-        with path.open("rb") as file:
-            while chunk := file.read(8 * 1024 * 1024):
-                if stop_event and stop_event.is_set():
-                    raise _PtUploadCancelled("用户停止 PT 洗版上传")
-                digest.update(chunk)
-        return digest.hexdigest().upper()
+        """文件 SHA1：唯一实现见 core/file_hash.py；取消翻译为本地异常。"""
+        try:
+            return file_sha1(path, stop_event=stop_event)
+        except FileHashCancelled:
+            raise _PtUploadCancelled("用户停止 PT 洗版上传")
 
     @staticmethod
     def _staging_name(path: Path, checksum: str) -> str:

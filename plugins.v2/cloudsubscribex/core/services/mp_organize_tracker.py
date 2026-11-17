@@ -56,19 +56,9 @@ def clear_mp_organizing(parent_task_id: str) -> None:
     _MP_ORGANIZING.pop(str(parent_task_id or "").strip(), None)
 
 
-def get_mp_organizing(parent_task_id: str) -> Optional[Dict[str, object]]:
-    """取一项目的整理中登记项，没有返回 None。"""
-    return _MP_ORGANIZING.get(str(parent_task_id or "").strip())
-
-
 def list_mp_organizing() -> Dict[str, Dict[str, object]]:
     """返回全部整理中登记项的浅拷贝（调用方不要直接改原表）。"""
     return dict(_MP_ORGANIZING)
-
-
-def reset_mp_organizing() -> None:
-    """清空登记表，仅测试用。"""
-    _MP_ORGANIZING.clear()
 
 
 def _matching_mp_organizing_keys(src_path: str) -> list:

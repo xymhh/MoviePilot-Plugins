@@ -2566,7 +2566,6 @@ class PostprocessService(OwnerDelegator):
             ]
             history.extend(persisted_records)
             self._save_data("history", history)
-        self._record_platform_transfer_histories(persisted_records)
         item["success_episodes"] = (
             [] if item.get("transient_target") else success_episodes
         )

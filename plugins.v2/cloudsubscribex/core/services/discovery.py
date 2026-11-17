@@ -23,7 +23,8 @@ except Exception:  # noqa: BLE001
 
     logger = logging.getLogger(__name__)
 
-#: 手动转存接口单次链接上限；超出部分截断（与 tg_monitor 的 BATCH_LINK_LIMIT 一致）。
+#: 手动转存接口单次链接上限；超出部分截断。TG 自动转存按 20 切块
+# （core/tg_monitor.py BATCH_LINK_LIMIT），在 50 上限下留足余量。
 MAX_LINKS = 50
 
 

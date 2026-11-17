@@ -1,4 +1,9 @@
-"""同步记录与 MoviePilot 平台整理历史表 (TransferHistory) 的双向同步。"""
+"""插件自身 history 记录的海报恢复与 MP 整理历史镜像清理。
+
+1.12.14 起插件不再向 MP 的 TransferHistory 表写任何记录（MP 历史是唯一
+账本）；本模块只剩两件事：启动时恢复插件自身 history 记录缺失的海报，
+以及删除 1.12.14 之前插件写进 MP 历史的托管行。
+"""
 
 import re
 from pathlib import PurePosixPath
@@ -15,7 +20,7 @@ from ...drive.common import positive_int
 
 
 class PlatformHistoryService(OwnerDelegator):
-    """负责将插件的转存成功记录镜像到 MoviePilot 平台的 TransferHistory 表。"""
+    """恢复插件自身 history 记录的海报，并清理旧的 MP 历史镜像行。"""
 
     @staticmethod
     def _u115cs_storage_name() -> str:
@@ -188,20 +193,6 @@ class PlatformHistoryService(OwnerDelegator):
             for episode in episodes
         ]
 
-    def _record_platform_transfer_histories(
-            self,
-            records: List[Dict[str, Any]],
-            reconcile: bool = False,
-    ) -> int:
-        # 1.12.14：插件不再往 MP 的 TransferHistory 里写记录。
-        # MP 的整理历史是唯一账本，只有 MP 自己能写（do_transfer /
-        # 整理）；插件直写平台记录（PanSou → 115网盘CS版、复制）会
-        # 和 MP 自己的「本地 → 115网盘CS版、移动」成对出现，同一集
-        # 看起来整理了两遍。8 处写入点与启动对账都因此停用；已有
-        # 的插件记录由 remove_platform_transfer_history_mirror
-        # 在启动时清理（幂等）。
-        return 0
-
     @staticmethod
     def _history_image_from_download(record: Dict[str, Any]) -> Optional[str]:
         """从下载历史恢复旧版插件记录缺失的海报。"""
@@ -279,7 +270,7 @@ class PlatformHistoryService(OwnerDelegator):
             logger.error(f"清理整理历史失败：{error}")
             return 0
 
-    def sync_platform_transfer_history(self) -> int:
+    def restore_history_posters(self) -> int:
         """只恢复插件自身 history 记录缺失的海报，不再镜像到 MP 整理历史。
 
         1.12.14：MP 的整理历史是唯一账本，插件不再直写平台记录，
