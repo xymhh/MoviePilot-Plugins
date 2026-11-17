@@ -40,59 +40,6 @@ class RuntimeStateStore:
         self._store.repositories.runtime.delete(self._namespace, key)
 
 
-class LedgerStore:
-    """候选账本门面：追加、按天读、聚合、按天清理。"""
-
-    def __init__(self, store: "CloudSubscribeDataStore"):
-        self._store = store
-
-    def append(
-            self,
-            records: Any,
-            *,
-            run_id: str = "",
-            day: str = "",
-    ) -> int:
-        return self._store.repositories.ledger.append(
-            records, day=day, run_id=run_id
-        )
-
-    def read(
-            self,
-            *,
-            days: int = 1,
-            kind: str = "",
-            keyword: str = "",
-            limit: int = 200,
-            offset: int = 0,
-    ) -> Dict[str, Any]:
-        return self._store.repositories.ledger.read(
-            ledger_days(days),
-            kind=kind,
-            keyword=keyword,
-            limit=limit,
-            offset=offset,
-        )
-
-    def summary(self, *, days: int = 7) -> Dict[str, Any]:
-        return self._store.repositories.ledger.summary(ledger_days(days))
-
-    def purge(self, *, keep_days: int = 14) -> int:
-        keep = set(ledger_days(keep_days))
-        cutoff = min(keep) if keep else ""
-        return self._store.repositories.ledger.purge_before(cutoff)
-
-
-def ledger_days(days: int) -> List[str]:
-    """最近 N 天的日期串（含今天），用于账本分桶查询。"""
-    total = max(1, int(days or 1))
-    today = datetime.date.today()
-    return [
-        (today - datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
-        for offset in range(total)
-    ]
-
-
 class CloudSubscribeDataStore:
     """业务数据和可恢复运行状态按职责写入独立数据库。
 
@@ -387,11 +334,6 @@ class CloudSubscribeDataStore:
         self.initialize()
         return RuntimeStateStore(self, namespace)
 
-    def ledger_store(self) -> LedgerStore:
-        """候选账本存储。"""
-        self.initialize()
-        return LedgerStore(self)
-
     def load_scan_state(self) -> Optional[Dict[str, Any]]:
         self.initialize()
         return self.repositories.runtime.load("strm_scan", "state")
@@ -408,7 +350,6 @@ class CloudSubscribeDataStore:
         """把散落的 JSON 状态文件一次性并入数据库，原文件改名留档。"""
         self._migrate_legacy_tg_monitor()
         self._migrate_legacy_scan_state()
-        self._migrate_legacy_ledger()
 
     def _rename_legacy(self, path) -> None:
         try:
@@ -449,35 +390,6 @@ class CloudSubscribeDataStore:
             self.repositories.runtime.save("strm_scan", "state", payload)
             logger.info("STRM 续扫状态已并入数据库")
         self._rename_legacy(legacy)
-
-    def _migrate_legacy_ledger(self) -> None:
-        directory = self.manager.db_path.parent / "ledger"
-        if not directory.is_dir():
-            return
-        migrated = 0
-        for path in sorted(directory.glob("candidate-ledger-*.jsonl")):
-            day = path.stem[len("candidate-ledger-"):]
-            records: List[Dict[str, Any]] = []
-            try:
-                with path.open("r", encoding="utf-8") as handle:
-                    for line in handle:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            item = json.loads(line)
-                        except ValueError:
-                            continue
-                        if isinstance(item, dict):
-                            records.append(item)
-            except OSError as error:
-                logger.debug(f"候选账本旧文件读取失败（{path.name}）：{error}")
-                continue
-            if records:
-                migrated += self.repositories.ledger.append(records, day=day)
-            self._rename_legacy(path)
-        if migrated:
-            logger.info(f"候选账本已并入数据库：{migrated} 条")
 
     def close(self) -> None:
         with self._lock:

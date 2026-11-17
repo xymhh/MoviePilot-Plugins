@@ -1,4 +1,4 @@
-"""SyncHandler 转存入口的账本接线测试（P1）。"""
+"""SyncHandler 转存入口直路测试（v1.13.0 起账本已删除）。"""
 
 from __future__ import annotations
 
@@ -69,43 +69,11 @@ SyncHandler = _service_module.SyncHandler
 TransferOpsMixin = _service_module.TransferOpsMixin
 
 
-class FakeLedger:
-    def __init__(self, lease=None, reason="", success_result=True):
-        self.lease = lease
-        self.reason = reason
-        self.success_result = success_result
-        self.begin_kwargs = None
-        self.success_kwargs = None
-        self.failure_kwargs = None
+class SyncTransferWiringTests(unittest.TestCase):
+    """v1.13.0 起同步作业账本已删除：转存入口直接调实现，不再认领作业。"""
 
-    def begin(self, **kwargs):
-        self.begin_kwargs = kwargs
-        return self.lease, self.reason
-
-    def heartbeat(self, lease, **kwargs):
-        return True
-
-    def success(self, lease, **kwargs):
-        self.success_kwargs = kwargs
-        return self.success_result
-
-    def failure(self, lease, **kwargs):
-        self.failure_kwargs = kwargs
-        return True
-
-
-def _lease(reused: bool = False):
-    return SimpleNamespace(
-        job_key="k" * 64, job_id="job-1", owner="owner-1", reused=reused,
-    )
-
-
-class SyncTransferLedgerWiringTests(unittest.TestCase):
-    def _handler(
-            self, *, enabled=True, lease=None, reason="", impl_result=True,
-            impl_error=None):
+    def _handler(self, *, impl_result=True, impl_error=None):
         handler = SyncHandler.__new__(SyncHandler)
-        handler._sync_job_ledger_enabled = enabled
         handler._cloud_drive = SimpleNamespace(key="115")
         handler._stop_requested = lambda: False
         handler._resource_provider_for_url = lambda url: SimpleNamespace(key="115")
@@ -113,10 +81,8 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
             handler, TransferOpsMixin, "_transfer_file_impl",
             MagicMock(return_value=impl_result, side_effect=impl_error),
         )
-        ledger = FakeLedger(lease=lease, reason=reason)
-        handler._sync_job_ledger_instance = ledger
         handler._sync_pause_cache = None
-        return handler, ledger
+        return handler
 
     @staticmethod
     def _args():
@@ -133,11 +99,10 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
             "第17集.mp4",
         )
 
-    def test_flag_off_keeps_legacy_path(self):
-        handler, ledger = self._handler(enabled=False)
+    def test_transfer_file_calls_impl_directly(self):
+        handler = self._handler()
         self.assertTrue(handler._transfer_file(*self._args()))
         handler._transfer_file_impl.assert_called_once()
-        self.assertIsNone(ledger.begin_kwargs)
 
     def test_sync_paused_reads_global_switch(self):
         """暂停开关从 core.sync_pause 读取，且只认严格的 True。"""
@@ -163,119 +128,6 @@ class SyncTransferLedgerWiringTests(unittest.TestCase):
                 core_pkg.sync_pause = original
             else:
                 delattr(core_pkg, "sync_pause")
-
-    def test_global_pause_blocks_transfer_and_claim(self):
-        handler, ledger = self._handler(lease=_lease())
-        handler._sync_paused = lambda: True
-        self.assertFalse(handler._transfer_file(*self._args()))
-        handler._transfer_file_impl.assert_not_called()
-        self.assertIsNone(
-            ledger.begin_kwargs, "暂停时不该认领作业、不该消耗重试次数",
-        )
-
-    def test_unclaimed_job_does_not_transfer(self):
-        handler, ledger = self._handler(lease=None, reason="作业由其他 worker 持有")
-        self.assertFalse(handler._transfer_file(*self._args()))
-        handler._transfer_file_impl.assert_not_called()
-        self.assertIn("作业由其他 worker 持有", ledger.reason)
-
-    def test_reused_done_job_skips_transfer(self):
-        handler, ledger = self._handler(lease=_lease(reused=True))
-        self.assertTrue(handler._transfer_file(*self._args()))
-        handler._transfer_file_impl.assert_not_called()
-        self.assertIsNone(ledger.success_kwargs)
-
-    def test_success_marks_job_done(self):
-        handler, ledger = self._handler(lease=_lease())
-        self.assertTrue(handler._transfer_file(*self._args()))
-        handler._transfer_file_impl.assert_called_once()
-        self.assertEqual(ledger.begin_kwargs["target_provider"], "115")
-        self.assertEqual(ledger.begin_kwargs["source_provider"], "115")
-        self.assertEqual(ledger.begin_kwargs["source"]["sha1"], "a" * 40)
-        self.assertEqual(ledger.begin_kwargs["subscribe_id"], 42)
-        self.assertEqual(
-            ledger.begin_kwargs["verify_done"], handler._verify_sync_job_result,
-        )
-        self.assertEqual(ledger.success_kwargs["result_name"], "第17集.mp4")
-        self.assertEqual(ledger.success_kwargs["result_size"], 1024)
-
-    def test_reopen_flag_defaults_off(self):
-        handler, ledger = self._handler(lease=_lease())
-        self.assertTrue(handler._transfer_file(*self._args()))
-        self.assertFalse(
-            ledger.begin_kwargs["allow_reopen_dead_letter"],
-            "自动同步默认不重开死信",
-        )
-
-    def test_reopen_flag_passes_through(self):
-        handler, ledger = self._handler(lease=_lease())
-        self.assertTrue(
-            handler._transfer_file(
-                *self._args(), allow_reopen_dead_letter=True,
-            )
-        )
-        self.assertTrue(ledger.begin_kwargs["allow_reopen_dead_letter"])
-        self.assertIsNone(ledger.failure_kwargs)
-
-    def test_done_verifier_reports_exists_and_mismatch(self):
-        handler = SyncHandler.__new__(SyncHandler)
-        handler._cloud_directories = SimpleNamespace(
-            resolve_directory=lambda _: SimpleNamespace(
-                checked=True, directory_id="d1",
-            ),
-            list_directory=lambda _: SimpleNamespace(
-                checked=True,
-                files=(
-                    SimpleNamespace(
-                        name="第17集.mp4", size=1024, id="f1", is_directory=False,
-                    ),
-                ),
-            ),
-        )
-        result = SimpleNamespace(
-            target_path="/待整理", target_name="第17集.mp4",
-            result_name="第17集.mp4", result_size=1024,
-            result_file_id="f1",
-        )
-        self.assertEqual(handler._verify_sync_job_result(result), "exists")
-        result.result_size = 2048
-        self.assertEqual(handler._verify_sync_job_result(result), "mismatch")
-
-    def test_done_verifier_reports_missing_and_unknown(self):
-        handler = SyncHandler.__new__(SyncHandler)
-        handler._cloud_directories = SimpleNamespace(
-            resolve_directory=lambda _: SimpleNamespace(
-                checked=True, directory_id="d1",
-            ),
-            list_directory=lambda _: SimpleNamespace(
-                checked=True, files=(),
-            ),
-        )
-        result = SimpleNamespace(
-            target_path="/待整理", target_name="第17集.mp4",
-            result_name="第17集.mp4", result_size=1024,
-            result_file_id="",
-        )
-        self.assertEqual(handler._verify_sync_job_result(result), "missing")
-        handler._cloud_directories.resolve_directory = lambda _: SimpleNamespace(
-            checked=False, directory_id=None,
-        )
-        self.assertEqual(handler._verify_sync_job_result(result), "unknown")
-
-    def test_false_result_is_retryable(self):
-        handler, ledger = self._handler(lease=_lease(), impl_result=False)
-        self.assertFalse(handler._transfer_file(*self._args()))
-        self.assertTrue(ledger.failure_kwargs["retryable"])
-        self.assertFalse(ledger.failure_kwargs["canceled"])
-
-    def test_exception_marks_retryable_and_reraises(self):
-        handler, ledger = self._handler(
-            lease=_lease(), impl_error=RuntimeError("网络断开"),
-        )
-        with self.assertRaisesRegex(RuntimeError, "网络断开"):
-            handler._transfer_file(*self._args())
-        self.assertTrue(ledger.failure_kwargs["retryable"])
-        self.assertIn("RuntimeError", ledger.failure_kwargs["error"])
 
 
 if __name__ == "__main__":

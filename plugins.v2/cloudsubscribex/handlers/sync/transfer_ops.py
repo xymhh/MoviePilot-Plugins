@@ -582,143 +582,19 @@ class TransferOpsMixin(OwnerDelegator):
             stop_requested: Optional[Callable[[], bool]] = None,
             media_type: str = "",
             media: Optional[Dict[str, Any]] = None,
-            allow_reopen_dead_letter: bool = False,
     ) -> bool:
-        """转存入口：可选地先走同步作业账本，再执行原转存实现。
+        """转存入口：直接执行原转存实现。
 
-        开关关闭时行为与旧版完全一致。打开后，同一内容写同一目标位置只会
-        有一个 worker 真正执行；已完成的作业直接复用。
-
-        ``allow_reopen_dead_letter`` 仅供用户显式重试（转存记录点重试）
-        使用：账本里的死信作业先归零再认领。自动同步、字幕转存不传它，
-        死信仍会被账本挡住，不会无限重跑。
+        v1.13.0 起同步作业账本已删除，不再认领作业/续租/记账；同一内容
+        写同一目标的并发防护交给全局同步串行（sync_lock）与 MP 整理
+        队列的源路径去重。全局暂停仍在批量入口（batch_stop_requested）
+        检查，这里不重复拦截。
         """
         share_url = canonicalize_share_url(share_url)
-        if not bool(getattr(self, "_sync_job_ledger_enabled", False)):
-            return self._transfer_file_impl(
-                share_url, file_item, save_path, target_name, source_sha1,
-                parent_task_id, stop_requested, media_type, media,
-            )
-
-        if self._sync_paused():
-            logger.warning(
-                f"转存已暂停，跳过本次转存：{save_path}/{target_name}"
-            )
-            return self._fail_transfer(file_item, "转存已暂停")
-
-        should_stop = stop_requested or self._stop_requested
-        source = self._resource_provider_for_url(share_url)
-        source_provider = str(getattr(source, "key", "") or "share")
-        target_provider = str(getattr(self._cloud_drive, "key", "") or "")
-        effective_name = str(target_name or file_item.get("name") or "").strip()
-        source_ref = {
-            "sha1": source_sha1 or file_item.get("sha1") or "",
-            "md5": file_item.get("md5") or "",
-            "file_id": file_item.get("id") or "",
-            "size": file_item.get("size") or 0,
-        }
-        try:
-            ledger = self._get_sync_job_ledger()
-            lease, reason = ledger.begin(
-                target_provider=target_provider,
-                target_path=save_path,
-                target_name=effective_name,
-                source=source_ref,
-                source_provider=source_provider,
-                source_name=str(file_item.get("name") or ""),
-                subscribe_id=_safe_optional_int(file_item.get("subscribe_id")),
-                history_id=str(file_item.get("history_id") or "") or None,
-                payload={"entry": "sync_transfer"},
-                verify_done=self._verify_sync_job_result,
-                allow_reopen_dead_letter=allow_reopen_dead_letter,
-            )
-        except Exception as error:
-            logger.error(f"同步作业账本不可用，已阻止本次转存：{error}")
-            return self._fail_transfer(
-                file_item, f"同步作业账本不可用：{error}"
-            )
-        if lease is None:
-            logger.warning(
-                f"同步作业未认领，跳过本次转存：{save_path}/{effective_name}，"
-                f"原因={reason or '未知'}"
-            )
-            return self._fail_transfer(
-                file_item, f"同步作业未认领：{reason or '未知'}"
-            )
-        if lease.reused:
-            logger.info(
-                f"同步作业已完成，复用结果不重复转存：{save_path}/{effective_name}"
-            )
-            return True
-
-        heartbeat_stop = threading.Event()
-
-        def _heartbeat_loop() -> None:
-            while not heartbeat_stop.wait(self._SYNC_JOB_HEARTBEAT_SECONDS):
-                try:
-                    if not ledger.heartbeat(lease):
-                        logger.warning(
-                            f"同步作业续租失败，停止心跳：{lease.job_key}"
-                        )
-                        return
-                except Exception as error:
-                    logger.warning(f"同步作业续租异常，停止心跳：{error}")
-                    return
-
-        heartbeat_thread = threading.Thread(
-            target=_heartbeat_loop,
-            name="sync-job-heartbeat",
-            daemon=True,
+        return self._transfer_file_impl(
+            share_url, file_item, save_path, target_name, source_sha1,
+            parent_task_id, stop_requested, media_type, media,
         )
-        heartbeat_thread.start()
-        try:
-            success = self._transfer_file_impl(
-                share_url, file_item, save_path, target_name, source_sha1,
-                parent_task_id, stop_requested, media_type, media,
-            )
-        except Exception as error:
-            heartbeat_stop.set()
-            heartbeat_thread.join(timeout=1)
-            try:
-                ledger.failure(
-                    lease,
-                    error=f"{type(error).__name__}: {error}",
-                    retryable=True,
-                )
-            except Exception as ledger_error:
-                logger.error(f"同步作业失败记账异常：{ledger_error}")
-            raise
-        heartbeat_stop.set()
-        heartbeat_thread.join(timeout=1)
-
-        if success:
-            try:
-                recorded = ledger.success(
-                    lease,
-                    result_name=effective_name,
-                    result_size=file_item.get("size") or 0,
-                    result_method="legacy_transfer",
-                )
-            except Exception as ledger_error:
-                logger.error(f"同步作业完成记账异常：{ledger_error}")
-                recorded = False
-            if not recorded:
-                logger.warning(
-                    f"同步作业完成记账失败（文件可能已写入）：{save_path}/{effective_name}"
-                )
-            return True
-
-        canceled = bool(should_stop())
-        try:
-            ledger.failure(
-                lease,
-                error="用户停止" if canceled else "转存实现返回失败",
-                retryable=not canceled,
-                canceled=canceled,
-            )
-        except Exception as ledger_error:
-            logger.error(f"同步作业失败记账异常：{ledger_error}")
-        return False
 
     def _transfer_file_impl(
             self, share_url: str, file_item: Dict[str, Any], save_path: str,
@@ -1125,80 +1001,6 @@ class TransferOpsMixin(OwnerDelegator):
     def _transfer_failure_reason(self, file_id: str) -> str:
         cache = getattr(self, "_transfer_failure_reasons", None) or {}
         return str(cache.pop(str(file_id or "").strip(), "") or "")
-
-    def _verify_sync_job_result(self, result) -> str:
-        """回查 done 作业的目标文件，区分存在/删除/冲突/查不清。
-
-        只读网盘，不写任何状态；由 ``SyncJobLedger.begin`` 决定复用还是重开。
-        目录/列表查询失败一律返回 unknown，避免把网络错误当成文件丢失后重传。
-        """
-        path = str(getattr(result, "target_path", "") or "")
-        name = str(
-            getattr(result, "result_name", "")
-            or getattr(result, "target_name", "")
-            or ""
-        )
-        if not path or not name:
-            return self._SYNC_DONE_CHECK_UNKNOWN
-
-        directories = getattr(self, "_cloud_directories", None)
-        if directories is None:
-            return self._SYNC_DONE_CHECK_UNKNOWN
-        try:
-            lookup = directories.resolve_directory(path)
-        except Exception as error:
-            logger.debug(f"同步作业 done 回查目录失败：{path}，{error}")
-            return self._SYNC_DONE_CHECK_UNKNOWN
-        if not bool(getattr(lookup, "checked", False)):
-            return self._SYNC_DONE_CHECK_UNKNOWN
-        directory_id = getattr(lookup, "directory_id", None)
-        if directory_id is None:
-            return self._SYNC_DONE_CHECK_MISSING
-        try:
-            listing = directories.list_directory(directory_id)
-        except Exception as error:
-            logger.debug(f"同步作业 done 回查列表失败：{path}，{error}")
-            return self._SYNC_DONE_CHECK_UNKNOWN
-        if not bool(getattr(listing, "checked", False)):
-            return self._SYNC_DONE_CHECK_UNKNOWN
-
-        found = next(
-            (
-                item for item in (getattr(listing, "files", ()) or ())
-                if not bool(getattr(item, "is_directory", False))
-                and str(getattr(item, "name", "") or "") == name
-            ),
-            None,
-        )
-        if found is None:
-            return self._SYNC_DONE_CHECK_MISSING
-
-        expected_size = int(getattr(result, "result_size", 0) or 0)
-        actual_size = int(getattr(found, "size", 0) or 0)
-        if expected_size and actual_size and expected_size != actual_size:
-            return self._SYNC_DONE_CHECK_MISMATCH
-        expected_id = str(getattr(result, "result_file_id", "") or "")
-        actual_id = str(getattr(found, "id", "") or "")
-        if expected_id and actual_id and expected_id != actual_id:
-            return self._SYNC_DONE_CHECK_MISMATCH
-        return self._SYNC_DONE_CHECK_EXISTS
-
-    def _get_sync_job_ledger(self):
-        """惰性获取账本业务入口，避免未开启时加载数据库相关模块。"""
-        ledger = getattr(self, "_sync_job_ledger_instance", None)
-        if ledger is not None:
-            return ledger
-        plugin = self._plugin
-        store_getter = getattr(plugin, "_get_data_store", None)
-        if store_getter is None:
-            raise RuntimeError("宿主插件未提供数据存储")
-        store = store_getter()
-        if hasattr(store, "initialize"):
-            store.initialize()
-        from ...core.database.sync_job_ledger import SyncJobLedger
-        ledger = SyncJobLedger(store.repositories.sync_jobs)
-        self._sync_job_ledger_instance = ledger
-        return ledger
 
     @classmethod
     def _cleanup_cross_transfer_staging(

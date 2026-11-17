@@ -386,7 +386,7 @@ const subscribeNameById = computed(() => {
   return map
 })
 
-// 未转存的原因分类：账本明细（失效/集号不符…）> 同步给的订阅级原因 > 旧数据兜底。
+// 未转存的原因分类：同步给的订阅级原因 > 旧数据兜底。
 const REASON_KINDS = {
   invalid: { label: "分享失效", tone: "error" },
   empty: { label: "无可用文件", tone: "warning" },

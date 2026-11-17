@@ -7,7 +7,6 @@ from .config import ConfigApi
 from .doctor import DoctorApi
 from .history import HistoryApi
 from .duplicate import DuplicateApi
-from .ledger import LedgerApi
 from .media_library import MediaLibraryApi
 from .page import PageApi
 from .qrcode import QRCodeService
@@ -26,7 +25,6 @@ __all__ = [
     "DoctorApi",
     "HistoryApi",
     "DuplicateApi",
-    "LedgerApi",
     "MediaLibraryApi",
     "MoviePilotRegistration",
     "PageApi",

@@ -1058,60 +1058,12 @@ class TgChannelMonitor:
 
     def _resolve_skip_reason(
             self, row: Dict[str, Any], fallback: str = "",
-            cache: Optional[Dict[str, Tuple[str, str]]] = None,
     ) -> Tuple[str, str]:
-        """返回 (原因类型, 原因文案)：账本明细 > 本轮订阅级原因 > 兜底。"""
-        kind, text = self._ledger_skip_reason(row, cache)
-        if text:
-            return kind, self._shorten_skip_reason(text)
-        return "run", self._shorten_skip_reason(fallback)
+        """返回 (原因类型, 原因文案)：本轮订阅级原因 > 兜底。
 
-    def _ledger_skip_reason(
-            self, row: Dict[str, Any],
-            cache: Optional[Dict[str, Tuple[str, str]]] = None,
-    ) -> Tuple[str, str]:
-        """按分享链接查候选账本，拿到这条资源被跳过的具体原因。"""
-        links = [str(link) for link in (row.get("links") or []) if str(link)][:3]
-        if not links:
-            return "", ""
-        store = None
-        for attr in ("_get_data_store", "_storage"):
-            getter = getattr(self._owner, attr, None)
-            if not callable(getter):
-                continue
-            try:
-                store = getter().ledger_store()
-            except Exception as error:  # noqa: BLE001 - 账本只做增强
-                logger.debug(f"读取候选账本失败：{error}")
-                store = None
-            if store is not None:
-                break
-        if store is None:
-            return "", ""
-        for link in links:
-            hit = (cache or {}).get(link)
-            if hit is None:
-                hit = ("", "")
-                try:
-                    result = store.read(days=2, keyword=link, limit=10)
-                except Exception as error:  # noqa: BLE001
-                    logger.debug(f"查询候选账本失败：{error}")
-                    result = {}
-                for record in (result.get("items") or []):
-                    if str(record.get("kind") or "") == "push_submit":
-                        continue
-                    reference = str(record.get("reference") or "")
-                    if reference and reference != link:
-                        continue
-                    reason = str(record.get("reason") or "").strip()
-                    if reason:
-                        hit = (str(record.get("kind") or ""), reason)
-                        break
-                if cache is not None:
-                    cache[link] = hit
-            if hit[1]:
-                return hit
-        return "", ""
+        v1.13.0 起候选账本已删除，不再按分享链接查账本明细。
+        """
+        return "run", self._shorten_skip_reason(fallback)
 
     def _apply_group_outcome(
             self, item_ids: List[str], subscribe_id: int,
@@ -1135,13 +1087,11 @@ class TgChannelMonitor:
             )
             return
         if outcome == "skipped":
-            # 逐条落「为什么没转存」：优先账本里该分享链接的真实跳过原因，
-            # 其次用本轮同步的订阅级原因（已入库/未播出/识别失败…），
-            # 最后才退回笼统文案。
+            # 逐条落「为什么没转存」：用本轮同步的订阅级原因
+            # （已入库/未播出/识别失败…），最后才退回笼统文案。
             buckets: Dict[Tuple[str, str], List[str]] = {}
-            cache: Dict[str, Tuple[str, str]] = {}
             for row, item_id in zip(rows, item_ids):
-                kind, text = self._resolve_skip_reason(row, message, cache)
+                kind, text = self._resolve_skip_reason(row, message)
                 buckets.setdefault((kind, text), []).append(item_id)
             for (kind, text), ids in buckets.items():
                 self._mark_items(

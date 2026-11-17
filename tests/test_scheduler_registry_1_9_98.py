@@ -162,11 +162,6 @@ def _load_runtime_api_module():
             "plugins.v2/cloudsubscribex/core/task_center.py",
             ("collect_tasks",),
         ),
-        (
-            "cloudsubscribex.core.retry_policy",
-            "plugins.v2/cloudsubscribex/core/retry_policy.py",
-            ("is_dead_letter",),
-        ),
     ):
         _existing = sys.modules.get(_name)
         if (
@@ -512,52 +507,6 @@ class _FakePauseRepo:
         self._data[(namespace, key)] = payload
 
 
-class _FakeRow:
-    def __init__(self, job_key, state="queued", last_error="", attempt=0,
-                 max_attempts=3):
-        self.job_key = job_key
-        self.job_id = job_key
-        self.target_path = "/转存"
-        self.target_name = "测试"
-        self.state = state
-        self.last_error = last_error
-        self.attempt = attempt
-        self.max_attempts = max_attempts
-
-
-class _FakeSyncJobs:
-    def __init__(self):
-        self.rows = {}
-
-    def get_by_id(self, job_id):
-        return self.rows.get(job_id)
-
-    def get(self, job_key):
-        return self.rows.get(job_key)
-
-    def pause(self, job_key, reason):
-        row = self.rows.get(job_key)
-        if row is None or row.state not in ("queued", "retry_wait"):
-            return False
-        row.state = "paused"
-        return True
-
-    def resume(self, job_key, reason):
-        row = self.rows.get(job_key)
-        if row is None or row.state != "paused":
-            return False
-        row.state = "queued"
-        return True
-
-    def reopen_dead_letter(self, job_key, reason):
-        row = self.rows.get(job_key)
-        if row is None:
-            return False
-        row.state = "queued"
-        row.attempt = 0
-        return True
-
-
 class _FakeSession:
     def __init__(self, db):
         self.db = db
@@ -571,10 +520,9 @@ class _FakeSession:
 
 class _FakeStore:
     def __init__(self):
-        self.sync_jobs = _FakeSyncJobs()
         self.pause_repo = _FakePauseRepo()
         self.repositories = SimpleNamespace(
-            sync_jobs=self.sync_jobs, runtime=self.pause_repo
+            runtime=self.pause_repo
         )
         self.manager = SimpleNamespace(
             session=lambda write=False: _FakeSession(object())
@@ -620,38 +568,6 @@ class TaskApiTests(unittest.TestCase):
     def test_set_sync_pause_requires_paused_param(self):
         result = self.api.api_vue_set_sync_pause({})
         self.assertFalse(result["success"])
-
-    def test_pause_and_resume_task(self):
-        self.store.sync_jobs.rows["k1"] = _FakeRow("k1", state="queued")
-        result = self.api.api_vue_pause_task({"job_key": "k1"})
-        self.assertTrue(result["success"])
-        self.assertEqual(self.store.sync_jobs.rows["k1"].state, "paused")
-        result = self.api.api_vue_pause_task({"job_key": "k1"})
-        self.assertFalse(result["success"])
-        result = self.api.api_vue_resume_task({"job_key": "k1"})
-        self.assertTrue(result["success"])
-        self.assertEqual(self.store.sync_jobs.rows["k1"].state, "queued")
-        result = self.api.api_vue_resume_task({"job_key": "k1"})
-        self.assertFalse(result["success"])
-
-    def test_pause_task_requires_identifier(self):
-        result = self.api.api_vue_pause_task({})
-        self.assertFalse(result["success"])
-
-    def test_retry_dead_letter(self):
-        self.store.sync_jobs.rows["k1"] = _FakeRow(
-            "k1", state="failed", last_error="dead_letter: 转存失败",
-            attempt=3, max_attempts=3,
-        )
-        result = self.api.api_vue_retry_task({"job_key": "k1"})
-        self.assertTrue(result["success"])
-        self.assertEqual(self.store.sync_jobs.rows["k1"].state, "queued")
-
-    def test_retry_non_dead_letter_rejected(self):
-        self.store.sync_jobs.rows["k1"] = _FakeRow("k1", state="queued")
-        result = self.api.api_vue_retry_task({"job_key": "k1"})
-        self.assertFalse(result["success"])
-        self.assertIn("死信", result["message"])
 
 
 class PluginWiringTests(unittest.TestCase):

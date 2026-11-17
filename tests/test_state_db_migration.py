@@ -1,15 +1,14 @@
-"""运行期状态与候选账本入库测试（runtime_records / candidate_ledger_entries）。
+"""运行期状态入库测试（runtime_records）。
 
 背景：插件此前把 TG 监控池、STRM 续扫断点放在 ``tg_monitor/*.json`` 与
-``strm_scan_state.json``，候选账本放在 ``ledger/candidate-ledger-*.jsonl``。
-2026-10-28 统一到 ``cloudsubscribe.db``：
+``strm_scan_state.json``。2026-10-28 统一到 ``cloudsubscribe.db``：
 
 * ``runtime_records(namespace, record_key, payload, updated_at)`` —— TG 监控池/游标/状态、
-  STRM 续扫断点；
-* ``candidate_ledger_entries(day, ts, run_id, kind, provider, payload)`` —— 候选账本，
-  按天分桶、按天清理。
+  STRM 续扫断点。
 
 老文件在 ``CloudSubscribeDataStore.initialize()`` 里一次性导入并改名 ``.migrated``。
+（候选账本已随 v1.13.0 删除：``candidate_ledger_entries`` 表、``ledger/`` 旧文件
+迁移与本文件的账本用例一并移除。）
 
 运行：``cd <repo> && python -m pytest tests/test_state_db_migration.py -q``
 """
@@ -99,10 +98,6 @@ _db_pkg.CloudSubscribeRepositories = repositories_module.CloudSubscribeRepositor
 storage_module = _load_once(
     f"{PKG}.core.storage", os.path.join(plugin_dir, "core", "storage.py")
 )
-ledger_module = _load_once(
-    f"{PKG}.core.services.candidate_ledger",
-    os.path.join(plugin_dir, "core", "services", "candidate_ledger.py"),
-)
 tg_module = _load_once(
     f"{PKG}.core.tg_monitor",
     os.path.join(plugin_dir, "core", "tg_monitor.py"),
@@ -110,10 +105,6 @@ tg_module = _load_once(
 
 CloudSubscribeDataStore = storage_module.CloudSubscribeDataStore
 MonitorStore = tg_module._MonitorStore
-append_records = ledger_module.append_records
-read_records = ledger_module.read_records
-summarize = ledger_module.summarize
-purge_old = ledger_module.purge_old
 
 
 class _Owner:
@@ -166,70 +157,6 @@ class RuntimeRecordTest(unittest.TestCase):
         self.assertEqual(again.load("missing", {"x": 1}), {"x": 1})
 
 
-class LedgerTest(unittest.TestCase):
-    def setUp(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        self.data_dir = Path(tmp.name)
-        self.store = CloudSubscribeDataStore(_Owner(self.data_dir))
-        self.addCleanup(self.store.close)
-        self.ledger = self.store.ledger_store()
-
-    def test_append_and_read(self):
-        written = append_records(
-            self.ledger,
-            [
-                {"kind": "transferred", "provider": "夸克", "resource_title": "尚公主 4K"},
-                {"kind": "skipped", "provider": "115", "reason": "标题不符"},
-            ],
-            run_id="run-1",
-        )
-        self.assertEqual(written, 2)
-        result = read_records(self.ledger, days=1, limit=10)
-        self.assertEqual(result["total"], 2)
-        # 最新在后：倒序展示时 skipped 在前
-        self.assertEqual(result["items"][0]["kind"], "skipped")
-        self.assertEqual(result["items"][0]["run_id"], "run-1")
-        self.assertTrue(result["items"][0]["ts"])
-        only_skipped = read_records(self.ledger, days=1, kind="skipped")
-        self.assertEqual(only_skipped["total"], 1)
-        by_keyword = read_records(self.ledger, days=1, keyword="尚公主")
-        self.assertEqual(by_keyword["total"], 1)
-
-    def test_summary_counts_by_kind_provider_day(self):
-        append_records(self.ledger, [
-            {"kind": "skipped", "provider": "夸克"},
-            {"kind": "skipped", "provider": "夸克"},
-            {"kind": "transferred", "provider": "115"},
-        ])
-        data = summarize(self.ledger, days=7)
-        self.assertEqual(data["total"], 3)
-        self.assertEqual(data["by_kind"]["skipped"], 2)
-        self.assertEqual(data["by_provider"]["夸克"], 2)
-        self.assertEqual(sum(data["by_day"].values()), 3)
-
-    def test_purge_drops_old_days(self):
-        self.store.repositories.ledger.append(
-            [{"kind": "skipped", "provider": "夸克"}], day="2020-01-01"
-        )
-        append_records(self.ledger, [{"kind": "skipped", "provider": "夸克"}])
-        self.assertGreaterEqual(purge_old(self.ledger, keep_days=14), 1)
-        result = read_records(self.ledger, days=1)
-        self.assertEqual(result["total"], 1)
-
-    def test_clean_filters_and_truncates(self):
-        appended = append_records(self.ledger, [{
-            "kind": "skipped",
-            "provider": "夸克",
-            "reason": "x" * 500,
-            "raw": {"big": True},
-        }])
-        self.assertEqual(appended, 1)
-        item = read_records(self.ledger, days=1)["items"][0]
-        self.assertEqual(len(item["reason"]), 300)
-        self.assertNotIn("raw", item)
-
-
 class LegacyFileMigrationTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -248,15 +175,6 @@ class LegacyFileMigrationTest(unittest.TestCase):
             json.dumps({"cloud_root": "/媒体", "pending": [["cid", "/媒体/a"]]}),
             encoding="utf-8",
         )
-        ledger_dir = self.data_dir / "ledger"
-        ledger_dir.mkdir(parents=True)
-        (ledger_dir / "candidate-ledger-2026-10-27.jsonl").write_text(
-            "\n".join([
-                json.dumps({"kind": "skipped", "provider": "夸克", "reason": "失效"}),
-                json.dumps({"kind": "transferred", "provider": "115"}),
-            ]) + "\n",
-            encoding="utf-8",
-        )
 
     def test_all_legacy_files_imported_and_renamed(self):
         store = CloudSubscribeDataStore(_Owner(self.data_dir))
@@ -269,14 +187,10 @@ class LegacyFileMigrationTest(unittest.TestCase):
         self.assertEqual(
             store.load_scan_state()["cloud_root"], "/媒体"
         )
-        days = read_records(store.ledger_store(), days=3650, offset=0, limit=50)
-        self.assertEqual(days["total"], 2)
-
         for legacy in [
             self.data_dir / "tg_monitor" / "items.json",
             self.data_dir / "tg_monitor" / "state.json",
             self.data_dir / "strm_scan_state.json",
-            self.data_dir / "ledger" / "candidate-ledger-2026-10-27.jsonl",
         ]:
             self.assertFalse(legacy.exists(), f"{legacy.name} 迁移后必须改名")
             self.assertTrue(
@@ -291,9 +205,6 @@ class LegacyFileMigrationTest(unittest.TestCase):
         second = CloudSubscribeDataStore(_Owner(self.data_dir))
         self.addCleanup(second.close)
         second.initialize()
-        self.assertEqual(
-            read_records(second.ledger_store(), days=3650, limit=50)["total"], 2
-        )
         self.assertEqual(
             second.runtime_store("tg_monitor").load("state"), {"cursor": 7}
         )

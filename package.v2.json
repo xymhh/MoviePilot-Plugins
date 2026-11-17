@@ -3,7 +3,7 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.12.21",
+    "version": "1.13.0",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -366,6 +366,7 @@
       "v1.12.19": "下载器不再写 .json 伴随文件：缓存归属/完整性/续传改走进程内登记表（.meta.json 的 cache_key/complete、.parts.json 的分片进度都进内存，不写盘、不加新数据键），启动清理顺带清掉旧版留下的 .json 残留；半截稀疏文件只认登记表 complete=True，绝不按大小误认完成。",
       "v1.12.20": "重构 Phase 1（删死代码与 no-op，纯减法）：删平台历史写记录调用与重复入库判定等死代码、6 条手动整理台路由与推荐/详情/账本/重复/缓存/重打分/strm 分享路由、3 个前端零调用 composable 与 TgChannelRulesField、7 个订阅源 create_*_provider 工厂与 douban client/service、normalize_season/SHA1/季目录正则三处合一、clear_platform_cache 补清链接选择缓存、sync_platform_transfer_history 改名 restore_history_posters、下线 tg_monitor_keep_unmatched 与 on_subscribe_modified 注册、archiver.archive_database 改名 purge_expired_database_data、配置键白名单（未知键忽略并记 warning）与并发/冷却集中参数表。",
       "v1.12.21": "修 CI 偶发失败：test_restart_redownloads_from_scratch 的字节计数竞态——RangeServer 在服务端线程里计数，中断请求的写操作可能滞后于主线程采样，基线前先等计数落定（同修 test_in_process_parts_memory_resume 的同款采样）。仅改测试，插件代码不动。",
+      "v1.13.0": "Phase 2 第 1 步（v1.13.0）：删候选账本与同步账本——候选账本（candidate_ledger_entries 表、/ledger/list、cli ledger、TG 跳过原因的账本明细查询）与同步账本（sync_jobs 表、SyncJob 状态机/租约/死信重开、任务中心作业暂停/重试入口、/tasks/retry|pause|resume）全部删除，Alembic 删表迁移 20261117_03；失败分类补 429/rate limit/too many 关键词（429 文本现归 risk_control，仍可重试）。注意：同步账本开关 sync_job_ledger_enabled 默认是关闭的，但线上是开着的——删掉后同一内容写同一目标的并发防护改由全局同步串行（sync_lock）与 MP 整理队列的源路径去重兜底，历史重试不再经账本重开死信。任务中心改为只聚合非终态历史记录。",
       "v1.12.12": "oss2 分片上传改走直连，不再把上传代理传给 oss2 Bucket：插件配了上传代理（mihomo:7890）后，分片 PUT 全走代理失败，但秒传只调 p115 API（代理对其无效、实际直连）能成功，cd2 直连也成功；p115disk 原版建 Bucket 时根本不传代理。oss2 数据面现在直连，上传代理配置仍保留给 p115 客户端 API 侧。",
       "v1.12.11": "手动添加的平台整理历史改记「本地 → 115网盘CS版」：插件写 MP 整理历史时，来源把手动添加的跨盘转存标成「手动添加」、目标存网盘驱动名「115网盘」，而 MP 自己写的同一集记录是「本地 → 115网盘CS版」（移动），两边看着不一致，且「115网盘」与 MP 原生 115 存储同名、会误导；现在手动来源记「本地」（文件进 115 前在本地 /downloads 中转），目标改记 MP 存储名「115网盘CS版」。老记录靠插件启动时的对账自动替换（旧「手动添加 · …」不在新期望集合里会被删掉，新「本地 · …」会被加上；已交 MP 整理的仍跳过）。"
     }

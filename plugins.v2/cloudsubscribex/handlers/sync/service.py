@@ -140,13 +140,6 @@ class SyncHandler:
     _SUBSCRIBE_DEFER_CACHE_TTL = 32 * 24 * 60 * 60
     _SUBSCRIBE_CALENDAR_CACHE_TTL = 26 * 60 * 60
     _NOTIFICATION_BATCH_WINDOW_SECONDS = 2
-    _SYNC_JOB_HEARTBEAT_SECONDS = 15
-    # 与 core/database/sync_job_ledger.py 的 DONE_CHECK_* 保持同值；
-    # 这里不导入数据库模块，避免未开启账本时提前加载 SQLAlchemy。
-    _SYNC_DONE_CHECK_EXISTS = "exists"
-    _SYNC_DONE_CHECK_MISSING = "missing"
-    _SYNC_DONE_CHECK_MISMATCH = "mismatch"
-    _SYNC_DONE_CHECK_UNKNOWN = "unknown"
     _CLOUD_MEDIA_ROOT = "/"
     _OFFLINE_RESOURCE_URL_RE = re.compile(
         r"ed2k://\|file\|[^|\r\n]+\|\d+\|[0-9A-Fa-f]{32}"
@@ -235,9 +228,6 @@ class SyncHandler:
         self._offline_timeout = max(10, min(int(offline_timeout or 30), 1440)) * 60
         self._OFFLINE_TIMEOUT = self._offline_timeout
         self._cross_transfer_enabled = bool(_get_val("cross_transfer_enabled", False))
-        self._sync_job_ledger_enabled = bool(
-            _get_val("sync_job_ledger_enabled", False)
-        )
         cross_media_types = _get_val("cross_transfer_media_types", ("movie", "tv"))
         self._cross_transfer_media_types = {
             self._normalize_cross_transfer_media_type(value)

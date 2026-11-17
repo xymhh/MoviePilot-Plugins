@@ -73,7 +73,7 @@ _KEYWORD_RULES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     )),
     (KIND_RISK_CONTROL, (
         "风控", "请求过于频繁", "操作太频繁", "频率限制", "限流",
-        "账号异常",
+        "账号异常", "429", "rate limit", "too many",
     )),
     (KIND_LOCAL_CACHE_SPACE, (
         "跨盘缓存磁盘", "缓存磁盘", "缓存目录",

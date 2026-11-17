@@ -1,4 +1,4 @@
-"""候选提交统一入口（P2a）：submit_candidate 的契约与账本落库。"""
+"""候选提交统一入口（P2a）：submit_candidate 的契约。"""
 
 import unittest
 
@@ -18,33 +18,10 @@ Candidate = discovery.Candidate
 submit_candidate = discovery.submit_candidate
 
 
-class _FakeStore:
-    def __init__(self):
-        self.rows = []
-        self.run_ids = []
-
-    def append(self, items, run_id=""):
-        self.rows.extend(items)
-        self.run_ids.append(run_id)
-        return len(items)
-
-
-class _FakeDataStore:
-    def __init__(self):
-        self.store = _FakeStore()
-
-    def ledger_store(self):
-        return self.store
-
-
 class _Owner:
     def __init__(self, result=None):
-        self.data_store = _FakeDataStore()
         self.calls = []
         self._result = result if result is not None else {"success": True, "message": "转存 2 个文件"}
-
-    def _get_data_store(self):
-        return self.data_store
 
 
 class _FakeSyncApi:
@@ -134,23 +111,6 @@ class TestSubmitCandidate(unittest.TestCase):
         result = submit_candidate(owner, Candidate(links=["l"], subscribe_id=1))
         self.assertFalse(result.success)
         self.assertIn("boom", result.message)
-
-    def test_ledger_row_written(self):
-        owner = _Owner()
-        self._patch_sync()
-        submit_candidate(
-            owner,
-            Candidate(links=["l"], title="小城良方", subscribe_id=236,
-                      channel="@QukanMovie", message_id=9, run_id="run-1"),
-        )
-        rows = owner.data_store.store.rows
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["kind"], "push_submit")
-        self.assertEqual(rows[0]["provider"], "频道监控")
-        self.assertEqual(rows[0]["reference"], "tg:@QukanMovie/9")
-        self.assertEqual(rows[0]["subscribe_id"], 236)
-        self.assertEqual(rows[0]["resource_title"], "小城良方")
-        self.assertEqual(owner.data_store.store.run_ids, ["run-1"])
 
     def test_to_payload_keeps_success_message_contract(self):
         owner = _Owner(result={"success": False, "message": "库中已有"})

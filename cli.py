@@ -508,29 +508,6 @@ def cmd_progress(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def cmd_ledger(args: argparse.Namespace) -> int:
-    raw = call_plugin(args, "/ledger/list", params={"limit": args.limit})
-    payload = _unwrap(raw) or {}
-    items = payload.get("items") if isinstance(payload, dict) else payload
-    rows = []
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
-        rows.append([
-            str(item.get("ts") or "")[:19],
-            str(item.get("kind") or ""),
-            str(item.get("provider") or ""),
-            str(item.get("resource_title") or "")[:36],
-            str(item.get("reason") or "")[:40],
-        ])
-    human = render_table(["时间", "类型", "来源", "资源", "原因"], rows,
-                         max_cols={3: 34, 4: 40})
-    if isinstance(payload, dict) and payload.get("total") is not None:
-        human += f"\n\n共 {payload.get('total')} 条（近 {payload.get('days', '?')} 天）"
-    _emit(raw, args, human)
-    return EXIT_OK
-
-
 def cmd_duplicate(args: argparse.Namespace) -> int:
     raw = call_plugin(args, "/duplicate/list")
     payload = _unwrap(raw) or {}
@@ -657,10 +634,6 @@ def build_parser() -> argparse.ArgumentParser:
     progress.add_argument("--sort", choices=["missing", "default"], default="default",
                           help="missing=按缺集数从多到少")
     progress.set_defaults(func=cmd_progress)
-
-    ledger = subparsers.add_parser("ledger", parents=[common], help="同步作业账本")
-    ledger.add_argument("--limit", type=int, default=30, help="条数（默认 30）")
-    ledger.set_defaults(func=cmd_ledger)
 
     subparsers.add_parser("duplicate", parents=[common], help="重复订阅检测").set_defaults(func=cmd_duplicate)
 

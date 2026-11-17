@@ -270,7 +270,7 @@ export function getResourceTabIcon(type) {
 
 export const getResourceTypeIcon = getResourceTabIcon;
 
-// 非搜索渠道的来源枚举：历史/账本里会出现这些值（手动转存、旧数据），
+// 非搜索渠道的来源枚举：历史里会出现这些值（手动转存、旧数据），
 // 但目录里没有对应渠道，不补显示名就会直接把英文 key 露在界面上。
 const EXTRA_SOURCE_META = {
   manual: {key: "manual", name: "手动添加", icon: "mdi-pencil", color: "grey"},

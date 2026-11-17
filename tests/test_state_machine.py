@@ -148,14 +148,13 @@ class TestStateMachine(unittest.TestCase):
 
 
 class _SweepService(HistoryService):
-    def __init__(self, records, landed_infos, active=False):
+    def __init__(self, records, landed_infos):
         super().__init__(None)
         object.__setattr__(self, "_store", {
             "history": [dict(record) for record in records],
         })
         object.__setattr__(self, "_offline_pending_lock", threading.RLock())
         object.__setattr__(self, "_landed_infos", landed_infos)
-        object.__setattr__(self, "_active", active)
         object.__setattr__(self, "save_count", 0)
 
     def _get_data(self, key):
@@ -164,9 +163,6 @@ class _SweepService(HistoryService):
     def _save_data(self, key, value):
         self._store[key] = value
         object.__setattr__(self, "save_count", self.save_count + 1)
-
-    def _history_has_active_sync_job(self, record):
-        return self._active
 
     def verify_landed_records(self, records):
         return {
@@ -240,13 +236,9 @@ class TestSweepStaleHistory(unittest.TestCase):
         self.assertEqual(record["status"], state.STATUS_PROCESSING)
         self.assertEqual(service.save_count, 0)
 
-    def test_active_job_and_recent_record_are_skipped(self):
-        service = _SweepService(
-            [_stale_record("t1")],
-            {"t1": {"landed": True}},
-            active=True,
-        )
-        self.assertEqual(service.sweep_stale_history(now=1000 + 3601), 0)
+    def test_recent_record_is_not_swept(self):
+        # 未超时的记录不论是否已落盘都不清扫（v1.13.0 起同步作业账本
+        # 已删除，不再有“活动作业守卫”这一跳过原因）。
         service = _SweepService(
             [_stale_record("t1")], {"t1": {"landed": True}},
         )

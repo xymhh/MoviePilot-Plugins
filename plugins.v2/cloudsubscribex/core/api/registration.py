@@ -121,13 +121,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "获取历史记录聚合摘要",
             },
             {
-                "path": "/ledger/list",
-                "endpoint": self.api_ledger_list,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "查询候选资源账本（没转存的原因）",
-            },
-            {
                 "path": "/duplicate/list",
                 "endpoint": self.api_duplicate_list,
                 "methods": ["GET"],
@@ -315,14 +308,7 @@ class MoviePilotRegistration(OwnerDelegator):
                 "endpoint": self.api_vue_tasks,
                 "methods": ["GET"],
                 "auth": "bear",
-                "summary": "查看统一任务中心（作业与历史聚合）",
-            },
-            {
-                "path": "/tasks/retry",
-                "endpoint": self.api_vue_retry_task,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "任务中心手动重试死信作业",
+                "summary": "查看统一任务中心（历史聚合）",
             },
             {
                 "path": "/sync/pause",
@@ -337,20 +323,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "methods": ["POST"],
                 "auth": "bear",
                 "summary": "全局暂停/恢复转存",
-            },
-            {
-                "path": "/tasks/pause",
-                "endpoint": self.api_vue_pause_task,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "暂停单个排队中的任务",
-            },
-            {
-                "path": "/tasks/resume",
-                "endpoint": self.api_vue_resume_task,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "恢复暂停的任务",
             },
             {
                 "path": "/channels",

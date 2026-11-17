@@ -79,46 +79,6 @@ class SubmitResult:
         return payload
 
 
-def _ledger_store(owner: Any) -> Any:
-    """拿候选账本存储；拿不到返回 None（账本不能影响主流程）。"""
-    for attr in ("_get_data_store", "_storage"):
-        getter = getattr(owner, attr, None)
-        if not callable(getter):
-            continue
-        try:
-            return getter().ledger_store()
-        except Exception as error:  # noqa: BLE001
-            logger.debug(f"获取候选账本存储失败：{error}", exc_info=True)
-            return None
-    return None
-
-
-def _record_ledger(owner: Any, candidate: Candidate, result: SubmitResult) -> None:
-    """把这次提交写进候选账本（kind=push_submit），失败只记 debug。"""
-    store = _ledger_store(owner)
-    if store is None:
-        return
-    rows = [
-        {
-            "kind": "push_submit",
-            "provider": "频道监控",
-            "reason": (result.message or "")[:300],
-            "reference": result.via,
-            "resource_title": candidate.title,
-            "subscribe_id": candidate.subscribe_id or None,
-        }
-    ]
-    try:
-        try:
-            from .candidate_ledger import append_records
-        except ImportError:  # 单测精简环境下没有账本模块
-            store.append(rows, run_id=candidate.run_id)
-        else:
-            append_records(store, rows, run_id=candidate.run_id)
-    except Exception as error:  # noqa: BLE001
-        logger.debug(f"写候选账本失败：{error}", exc_info=True)
-
-
 def submit_candidate(
         owner: Any,
         candidate: Candidate,
@@ -126,16 +86,15 @@ def submit_candidate(
         wait: bool = True,
         extra_payload: Optional[Dict[str, Any]] = None,
 ) -> SubmitResult:
-    """提交一条推送候选：清洗链接 → 复用手动转存 → 记账本。
+    """提交一条推送候选：清洗链接 → 复用手动转存。
 
     Phase 2a 行为与旧的 ``_auto_transfer_tg_item`` **完全等价**：
-    仍然调 ``api_vue_start_manual_sync``，只是多了 via 与账本。
+    仍然调 ``api_vue_start_manual_sync``，只是多了 via。
     """
     links = candidate.clean_links()
     via = candidate.via()
     if not links:
         result = SubmitResult(success=False, message="没有可转存的网盘链接", via=via)
-        _record_ledger(owner, candidate, result)
         return result
 
     payload: Dict[str, Any] = {
@@ -159,7 +118,6 @@ def submit_candidate(
     except Exception as error:  # noqa: BLE001 - 提交异常要作为失败回给监控
         logger.warning(f"提交候选失败（{via}）：{error}")
         result = SubmitResult(success=False, message=str(error), via=via, links=len(links))
-        _record_ledger(owner, candidate, result)
         return result
 
     if not isinstance(raw, dict):
@@ -171,5 +129,4 @@ def submit_candidate(
         links=len(links),
         raw=raw,
     )
-    _record_ledger(owner, candidate, result)
     return result

@@ -1837,53 +1837,14 @@ class HistoryService(OwnerDelegator):
         except Exception:
             return False
 
-    def _history_has_active_sync_job(self, record: Dict[str, Any]) -> bool:
-        """同步作业账本里是否仍有对应活动作业；无账本/不可用时视为无。"""
-        plugin = getattr(self, "_plugin", None)
-        store_getter = getattr(plugin, "_get_data_store", None)
-        if not callable(store_getter):
-            return False
-        try:
-            store = store_getter()
-            if hasattr(store, "initialize"):
-                store.initialize()
-            repository = store.repositories.sync_jobs
-        except Exception:  # noqa: BLE001 - 账本不可用不能阻塞清扫
-            return False
-        try:
-            return bool(repository.has_active_history_job(
-                history_id=str(record.get("record_id") or ""),
-                target_path=str(record.get("cloud_dir") or ""),
-                target_name=str(record.get("file_name") or ""),
-            ))
-        except Exception as error:  # noqa: BLE001
-            logger.debug(f"查询活动同步作业失败：{error}", exc_info=True)
-            return False
-
     def maintain_history_states(self, now: Optional[float] = None) -> Dict[str, int]:
-        """周期维护：回收过期作业租约，再清扫超时非终态历史。"""
+        """周期维护：清扫超时非终态历史（同步作业账本已随 v1.13.0 删除）。"""
         timestamp = time.time() if now is None else float(now)
-        reclaimed = 0
-        plugin = getattr(self, "_plugin", None)
-        store_getter = getattr(plugin, "_get_data_store", None)
-        if callable(store_getter):
-            try:
-                store = store_getter()
-                if hasattr(store, "initialize"):
-                    store.initialize()
-                reclaimed = int(
-                    store.repositories.sync_jobs.reclaim_expired(now=int(timestamp))
-                    or 0
-                )
-                if reclaimed:
-                    logger.info(f"已回收 {reclaimed} 个过期同步作业租约")
-            except Exception as error:  # noqa: BLE001 - 维护任务失败不得影响主循环
-                logger.warning(f"回收过期同步作业租约失败：{error}")
         swept = self.sweep_stale_history(now=timestamp)
-        return {"reclaimed": reclaimed, "swept": swept}
+        return {"reclaimed": 0, "swept": swept}
 
     def sweep_stale_history(self, now: Optional[float] = None) -> int:
-        """清扫超时且无活动作业的非终态记录，让状态必然收敛。"""
+        """清扫超时非终态记录，让状态必然收敛。"""
         if not self._get_data or not self._save_data:
             return 0
         current = time.time() if now is None else float(now)
@@ -1894,8 +1855,6 @@ class HistoryService(OwnerDelegator):
             candidates = []
             for item in history:
                 if str(item.get("status") or "") not in _STALE_HISTORY_STATUSES:
-                    continue
-                if self._history_has_active_sync_job(item):
                     continue
                 if self._history_has_active_retry(item):
                     continue

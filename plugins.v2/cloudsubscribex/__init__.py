@@ -55,7 +55,6 @@ from .core.api import (
     MoviePilotRegistration,
     DuplicateApi,
     HistoryApi,
-    LedgerApi,
     MediaLibraryApi,
     PageApi,
     QRCodeService,
@@ -117,7 +116,6 @@ _COMPONENT_TYPES = (
     QRCodeService,
     RedirectApi,
     HistoryApi,
-    LedgerApi,
     DuplicateApi,
     TgMonitorApi,
     MessageRoutingHook,
@@ -198,7 +196,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.12.21"
+    plugin_version = "1.13.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -277,7 +275,6 @@ class CloudSubscribeX(_PluginBase):
     _platform_download_policy: str = "block"
 
     _transfer_task_batch_size: int = 50
-    _sync_job_ledger_enabled: bool = False
     _cross_transfer_enabled: bool = False
     _cross_transfer_media_types: list = ["movie", "tv"]
     _cross_transfer_download_path: str = ""
@@ -1884,9 +1881,6 @@ class CloudSubscribeX(_PluginBase):
 
     def _apply_sync_config(self, config: Dict[str, Any]) -> None:
         self._transfer_task_batch_size = int(config.get("transfer_task_batch_size", CONCURRENCY_AND_COOLDOWN_PARAMS["transfer_task_batch_size"]["default"]) or 50)
-        self._sync_job_ledger_enabled = bool(
-            config.get("sync_job_ledger_enabled", False)
-        )
         self._cross_transfer_enabled = bool(config.get("cross_transfer_enabled", False))
         raw_cross_types = config.get("cross_transfer_media_types", ["movie", "tv"])
         if isinstance(raw_cross_types, str):

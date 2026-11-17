@@ -73,17 +73,6 @@ PAGE_DATA_PAYLOAD = {
     "subscribes_progress": PROGRESS_CARDS,
 }
 
-LEDGER_PAYLOAD = {
-    "total": 1588, "days": 3, "today": "2026-11-02",
-    "items": [
-        {"kind": "push_submit", "provider": "频道监控",
-         "reason": "订阅搜索完成，未发现需要转存的新资源",
-         "reference": "tg:https://t.me/+xxx/108079",
-         "resource_title": "名称：嫁金钗 (2026) 4K 高码率 更25集",
-         "subscribe_id": 158, "ts": "2026-11-02T10:21:21"},
-    ],
-}
-
 DUPLICATE_PAYLOAD = {
     "duplicate_total": 1,
     "groups": [
@@ -164,9 +153,6 @@ class _Handler(BaseHTTPRequestHandler):
             return
         if path.endswith("/overview"):
             self._json({"success": True, "data": OVERVIEW_PAYLOAD})
-            return
-        if path.endswith("/ledger/list"):
-            self._json({"success": True, "data": LEDGER_PAYLOAD})
             return
         if path.endswith("/duplicate/list"):
             self._json({"success": True, "data": DUPLICATE_PAYLOAD})
@@ -343,13 +329,6 @@ class CliTests(unittest.TestCase):
         self.assertIn("总转存 2394", out)
         self.assertIn("失败 9", out)
 
-    def test_ledger_real_fields(self):
-        code, out, _ = self._run("--token", "good-token", "ledger")
-        self.assertEqual(code, cli.EXIT_OK)
-        self.assertIn("频道监控", out)
-        self.assertIn("订阅搜索完成", out)
-        self.assertIn("共 1588 条", out)
-
     def test_duplicate_real_fields(self):
         code, out, _ = self._run("--token", "good-token", "duplicate")
         self.assertEqual(code, cli.EXIT_OK)
@@ -434,7 +413,7 @@ class CliTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 cli.main(["--help"])
         text = out.getvalue()
-        for name in ("doctor", "overview", "history", "progress", "ledger",
+        for name in ("doctor", "overview", "history", "progress",
                      "duplicate", "sync", "raw"):
             self.assertIn(name, text)
 

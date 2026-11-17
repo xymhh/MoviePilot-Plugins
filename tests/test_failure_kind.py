@@ -66,6 +66,9 @@ class ClassifyTest(unittest.TestCase):
     def test_transient_kinds(self):
         cases = {
             "请求过于频繁，请稍后再试": failure.KIND_RISK_CONTROL,
+            "HTTP 429 Too Many Requests": failure.KIND_RISK_CONTROL,
+            "请求返回 429": failure.KIND_RISK_CONTROL,
+            "rate limit exceeded, retry later": failure.KIND_RISK_CONTROL,
             "目标网盘空间不足": failure.KIND_TARGET_SPACE,
             "跨盘缓存磁盘可用空间不足：剩余 924000000 字节，至少需要 2420000000 字节": failure.KIND_LOCAL_CACHE_SPACE,
             "提交离线下载失败": failure.KIND_OFFLINE_SUBMIT,

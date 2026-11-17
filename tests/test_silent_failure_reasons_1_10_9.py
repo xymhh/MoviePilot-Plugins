@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 
 from plugin_env import (
     ensure_package, install_app_mocks, install_core_delegation, load_module,
-    stub_component_method,
 )
 
 install_app_mocks(
@@ -86,35 +85,6 @@ TransferOpsMixin = _service_module.TransferOpsMixin
 # transfer_ops 里用的能力枚举（与 service 模块同一份 mock 对象，
 # 按 is 区分 SHARE_TRANSFER / FILE_QUERY）。
 _CAP = sys.modules["cloudsubscribex.handlers.sync.transfer_ops"].CloudDriveCapability
-
-
-class FakeLedger:
-    def __init__(self, lease=None, reason="", begin_error=None):
-        self.lease = lease
-        self.reason = reason
-        self.begin_error = begin_error
-        self.begin_kwargs = None
-        self.failure_kwargs = None
-
-    def begin(self, **kwargs):
-        if self.begin_error is not None:
-            raise self.begin_error
-        self.begin_kwargs = kwargs
-        return self.lease, self.reason
-
-    def heartbeat(self, lease, **kwargs):
-        return True
-
-    def success(self, lease, **kwargs):
-        return True
-
-    def failure(self, lease, **kwargs):
-        self.failure_kwargs = kwargs
-        return True
-
-
-def _lease():
-    return SimpleNamespace(job_key="k" * 64, job_id="job-1", owner="owner-1")
 
 
 def _provider(*, key, name, supports=True, share_transfer=None, file_query=None):
@@ -255,62 +225,6 @@ class ImplSilentGapTests(unittest.TestCase):
         reason = handler._transfer_failure_reason("fid1")
         self.assertIn("跨盘临时文件尚未可见", reason)
         self.assertIn("/staging/quark/05.mkv", reason)
-
-
-class LedgerWrapperTests(unittest.TestCase):
-    """账本包装的静默出口：返回 False 时必须留下原因。"""
-
-    def _handler(self, *, ledger):
-        handler = SyncHandler.__new__(SyncHandler)
-        handler._sync_job_ledger_enabled = True
-        handler._cloud_drive = SimpleNamespace(key="115")
-        handler._stop_requested = lambda: False
-        handler._resource_provider_for_url = lambda url: SimpleNamespace(key="115")
-        stub_component_method(
-            handler, TransferOpsMixin, "_transfer_file_impl",
-            MagicMock(return_value=True),
-        )
-        handler._sync_job_ledger_instance = ledger
-        handler._sync_pause_cache = None
-        return handler
-
-    @staticmethod
-    def _args():
-        return (
-            "https://115.com/s/example",
-            {
-                "id": "f1", "name": "05.mkv", "size": 1024,
-                "sha1": "a" * 40, "subscribe_id": "42",
-            },
-            "/待整理",
-            "05.mkv",
-        )
-
-    def test_paused_transfer_remembers_reason(self):
-        handler = self._handler(ledger=FakeLedger(lease=_lease()))
-        handler._sync_paused = lambda: True
-        self.assertFalse(handler._transfer_file(*self._args()))
-        self.assertEqual(
-            handler._transfer_failure_reason("f1"), "转存已暂停",
-        )
-
-    def test_unclaimed_lease_remembers_reason(self):
-        handler = self._handler(
-            ledger=FakeLedger(lease=None, reason="作业由其他 worker 持有"),
-        )
-        self.assertFalse(handler._transfer_file(*self._args()))
-        reason = handler._transfer_failure_reason("f1")
-        self.assertIn("同步作业未认领", reason)
-        self.assertIn("作业由其他 worker 持有", reason)
-
-    def test_ledger_begin_error_remembers_reason(self):
-        handler = self._handler(
-            ledger=FakeLedger(begin_error=RuntimeError("database is locked")),
-        )
-        self.assertFalse(handler._transfer_file(*self._args()))
-        reason = handler._transfer_failure_reason("f1")
-        self.assertIn("同步作业账本不可用", reason)
-        self.assertIn("database is locked", reason)
 
 
 class SameDriveMpOrganizeIdentityTests(unittest.TestCase):

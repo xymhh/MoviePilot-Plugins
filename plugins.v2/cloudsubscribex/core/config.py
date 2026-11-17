@@ -339,7 +339,6 @@ class UIConfig:
             "block_start_time": "18:00",
             "block_end_time": "23:59",
             "transfer_task_batch_size": CONCURRENCY_AND_COOLDOWN_PARAMS["transfer_task_batch_size"]["default"],
-            "sync_job_ledger_enabled": False,
             "cross_transfer_enabled": False,
             "cross_transfer_media_types": ["movie", "tv"],
             "cross_transfer_download_path": "/tmp",
