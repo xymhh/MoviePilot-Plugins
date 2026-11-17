@@ -939,12 +939,18 @@ class PluginEventHandler(OwnerDelegator):
                     )
                 except Exception as error:
                     logger.error(f"接管平台资源下载异常：{error}")
+            if not takeover_success:
+                # v1.14.0：接管失败时不取消 MP 下载，让 MP 自己下载，
+                # 否则这一集既没进离线、又被拦下，只能等下一轮订阅搜索；
+                # 失败若是系统性的（如下游取不到种子元数据），就永远到不了库。
+                logger.warning(
+                    "平台资源下载接管失败，未阻止平台下载："
+                    f"{torrent.title}"
+                )
+                return
             event_data.cancel = True
             event_data.source = "CloudSubscribe-平台资源下载接管"
-            event_data.reason = (
-                "平台资源已提交插件离线下载"
-                if takeover_success else "平台资源下载接管失败，已阻止平台下载"
-            )
+            event_data.reason = "平台资源已提交插件离线下载"
             return
 
         if all_plugin_managed and policy == "block":
