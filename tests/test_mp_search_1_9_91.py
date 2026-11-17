@@ -579,13 +579,13 @@ class TestModuleAndConfig(unittest.TestCase):
 
     def test_version_is_1_11_0(self):
         module = _load_plugin_module()
-        self.assertEqual(module.CloudSubscribeX.plugin_version, "1.12.17")
+        self.assertEqual(module.CloudSubscribeX.plugin_version, "1.12.18")
         with open(
             os.path.join(REPO_ROOT, "package.v2.json"), encoding="utf-8"
         ) as handle:
             package = json.load(handle)
         plugin = package["CloudSubscribeX"]
-        self.assertEqual(plugin["version"], "1.12.17")
+        self.assertEqual(plugin["version"], "1.12.18")
         self.assertIn("v1.10.0", plugin["history"])
         self.assertIn("中继", plugin["history"]["v1.10.0"])
         self.assertIn("v1.9.99", plugin["history"])

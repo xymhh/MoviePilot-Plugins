@@ -78,7 +78,42 @@ def _mp_filetransfer_progress():
         return None
 
 
-def _make_upload_progress_callback(file_name: str, total_size: int):
+def _report_upload_registry(key: str, file_name: str, uploaded: int, total: int) -> None:
+    """把字节进度记进插件进程内登记表（下载页任务卡的实时进度来源）。
+
+    惰性导入：登记表模块只在 MP 进程里被单测重载，顶层 import 会绑
+    到旧表，每次调用都重新取当前模块。登记表调用绝不能影响上传，
+    任何异常都静默吞掉。
+    """
+    try:
+        from ...core.upload_progress import report_upload_progress
+    except Exception:
+        return
+    try:
+        report_upload_progress(key, file_name, uploaded, total)
+    except Exception as error:
+        logger.debug(
+            f"{_LOG_PREFIX}上传进度登记失败：{file_name}，{error}",
+            exc_info=True,
+        )
+
+
+def _remove_upload_registry(key: str) -> None:
+    """上传完成时清掉登记表条目（下载页的上传卡随之消失）。"""
+    try:
+        from ...core.upload_progress import remove_upload_progress
+    except Exception:
+        return
+    try:
+        remove_upload_progress(key)
+    except Exception as error:
+        logger.debug(
+            f"{_LOG_PREFIX}上传进度清理失败：{key}，{error}",
+            exc_info=True,
+        )
+
+
+def _make_upload_progress_callback(file_name: str, total_size: int, key: str = None):
     """造一个上传进度回调：把字节进度写进 MP 的整理进度。
 
     MP 整理队列的进度是按**文件数**算的（已处理/总数），单文件整理
@@ -86,7 +121,13 @@ def _make_upload_progress_callback(file_name: str, total_size: int):
     这里把当前文件的字节百分比写进同一个 ProgressHelper，单文件时
     就是整体进度；多文件时至少能看到当前文件在走。MP 没在整理时
     ProgressHelper 未启用，update 是空操作，不会误报。
+
+    同时每次调用都把进度记进插件进程内登记表（不经过 1 秒节流，
+    速度靠登记表内部算），下载管理页据此投影实时上传任务卡；
+    传完（100%）时清掉登记表条目，卡片随之消失。key 默认是目标
+    文件名，storage.upload 传本地文件名，便于与整理任务对应。
     """
+    registry_key = str(key or file_name or "").strip() or file_name
     last_reported = [0.0]
 
     def _report(uploaded: int, total: int) -> None:
@@ -94,26 +135,29 @@ def _make_upload_progress_callback(file_name: str, total_size: int):
             return
         now = time.monotonic()
         finished = uploaded >= total
+        # 登记表每次调用都记（不节流）；MP 进度器仍按 1 秒节流。
+        _report_upload_registry(registry_key, file_name, uploaded, total)
         if not finished and now - last_reported[0] < _PROGRESS_MIN_INTERVAL:
             return
         last_reported[0] = now
         pct = max(0.0, min(100.0, uploaded / total * 100))
         helper = _mp_filetransfer_progress()
-        if helper is None:
-            return
-        try:
-            helper.update(
-                value=round(pct, 1),
-                text=(
-                    f"正在上传 {file_name}：{pct:.0f}%"
-                    f"（{uploaded / 1048576:.0f}MB/{total / 1048576:.0f}MB）"
-                ),
-            )
-        except Exception as error:
-            logger.debug(
-                f"{_LOG_PREFIX}上传进度上报失败：{file_name}，{error}",
-                exc_info=True,
-            )
+        if helper is not None:
+            try:
+                helper.update(
+                    value=round(pct, 1),
+                    text=(
+                        f"正在上传 {file_name}：{pct:.0f}%"
+                        f"（{uploaded / 1048576:.0f}MB/{total / 1048576:.0f}MB）"
+                    ),
+                )
+            except Exception as error:
+                logger.debug(
+                    f"{_LOG_PREFIX}上传进度上报失败：{file_name}，{error}",
+                    exc_info=True,
+                )
+        if finished:
+            _remove_upload_registry(registry_key)
 
     return _report
 
@@ -505,7 +549,7 @@ class U115CSStorage(StorageBase):
             if not upload.upload_file(
                     str(local_path), dir_path, final_name,
                     progress_callback=_make_upload_progress_callback(
-                        final_name, total_size
+                        final_name, total_size, key=local_path.name
                     ),
             ):
                 logger.warning(

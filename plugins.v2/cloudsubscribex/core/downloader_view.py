@@ -17,13 +17,14 @@ MP 进程内 MediaChain 解析，进程内按 tmdb_id 缓存（命中永久有�
 """
 
 import hashlib
+import re
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import quote
 
-from .episode_parse import parse_episodes_from_names
+from .episode_parse import EPISODE_TAG_PATTERN, parse_episodes_from_names
 
 # 下载管理页的标签名与下载器配置里的 type（插件类名）。
 DOWNLOADER_NAME = "网盘订阅助手"
@@ -189,10 +190,20 @@ def _phase_speed(task: Dict[str, Any], phase: str) -> Optional[str]:
 
     分路速度优先，没有分路字段时退回总速度（老任务字典只有 speed 字段）；
     另一路的速度即使有残值也不投——旧模板按有无点亮 ↑/↓，残值会亮错路。
-    organizing 档不给任何一路的速度。
+    organizing 档不给任何一路的速度，除非登记表里有正在走的上传：
+    有实时条目且 speed > 0 时给 ↑ 实时速度，否则仍返回 None。
     """
     if display_phase(task) == "organizing":
-        return None
+        if phase != "uploading":
+            return None
+        live = _live_upload_for_task(task)
+        if not live:
+            return None
+        try:
+            speed = float(live.get("speed") or 0)
+        except (TypeError, ValueError):
+            return None
+        return format_speed(speed) if speed > 0 else None
     if display_phase(task) != phase:
         return None
     key = (
@@ -211,9 +222,23 @@ def _task_progress(task: Dict[str, Any]) -> float:
 
     后处理阶段仍走原有总进度/后处理进度（95% 待收尾），不按阶段算——
     子任务都传完了不等于收尾做完了，显示 100% 会误导。
-    organizing 档同样只回落到任务自带进度，且上限 95%，绝不显示 100%。
+    organizing 档同样只回落到任务自带进度，且上限 95%，绝不显示 100%；
+    但登记表里有对应上传在走时，优先返回实时字节百分比（上限 99%），
+    让整理中的大文件在下载页能看到真进度，而不是 95% 的假进度。
     """
     if display_phase(task) == "organizing":
+        live = _live_upload_for_task(task)
+        if live:
+            try:
+                live_total = float(live.get("total") or 0)
+                live_uploaded = float(live.get("uploaded") or 0)
+            except (TypeError, ValueError):
+                live_total = 0.0
+                live_uploaded = 0.0
+            if live_total > 0:
+                pct = live_uploaded * 100.0 / live_total
+                if 0 < pct < 100:
+                    return min(99.0, pct)
         try:
             progress = float(task.get("progress") or 0)
         except (TypeError, ValueError):
@@ -512,6 +537,153 @@ def _default_torrent_cls() -> Any:
     return DownloaderTorrent
 
 
+_TMDB_TAG_PATTERN = re.compile(r"\{tmdb[=\-](\d+)\}")
+_HASH_SUFFIX_PATTERN = re.compile(r"\s*\([0-9a-fA-F]{6,}\)\s*$")
+
+
+def _parse_upload_media_title(file_name: str) -> str:
+    """从上传文件名解析媒体标题。
+
+    去扩展名、{tmdb-N} 标记、“ - S01E01 - …”后缀和“(hash)”后缀后
+    的第一段；解析不到就用去扩展名的 stem。
+    """
+    raw = str(file_name or "").strip()
+    stem = Path(raw).stem if raw else ""
+    cleaned = _TMDB_TAG_PATTERN.sub("", stem)
+    first = cleaned.split(" - ")[0].strip()
+    first = _HASH_SUFFIX_PATTERN.sub("", first).strip()
+    return first or stem
+
+
+def _parse_upload_tmdb_id(file_name: str) -> Optional[int]:
+    """从文件名 {tmdb-N} / {tmdb=N} 标记解析 tmdb_id；没有返回 None。"""
+    match = _TMDB_TAG_PATTERN.search(str(file_name or ""))
+    if not match:
+        return None
+    try:
+        value = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _format_left_time(total: float, uploaded: float, speed: float) -> Optional[str]:
+    """剩余时间文案：>=60 秒按“剩余约X分Y秒”，否则“剩余约X秒”。
+
+    没速度或已传完时返回 None（不瞎猜）。
+    """
+    try:
+        remaining = float(total or 0) - float(uploaded or 0)
+        rate = float(speed or 0)
+    except (TypeError, ValueError):
+        return None
+    if rate <= 0 or remaining <= 0:
+        return None
+    seconds = int(remaining / rate)
+    if seconds >= 60:
+        return f"剩余约{seconds // 60}分{seconds % 60}秒"
+    return f"剩余约{seconds}秒"
+
+
+def synthetic_upload_tasks() -> List[Dict[str, Any]]:
+    """把进行中的 115 上传投影成运行时任务字典（下载页任务卡）。
+
+    MP 整理队列里的整理没有对应的插件任务卡，运行时同步任务又早已
+    过期，所以上传进度只能从这里来：上传回调把字节进度记进进程内
+    登记表，这里每条在传记录造一张卡（真实百分比 + ↑ 速度 +
+    MB/MB + 剩余时间）。登记表模块每次调用都重新取——模块可能被
+    测试重载，顶层 import 会绑到旧表。
+    """
+    try:
+        from .upload_progress import snapshot_upload_progress
+    except Exception:
+        return []
+    try:
+        entries = snapshot_upload_progress()
+    except Exception:
+        return []
+    tasks: List[Dict[str, Any]] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            key = str(entry.get("key") or "").strip()
+            file_name = str(entry.get("file_name") or "").strip()
+            total = float(entry.get("total") or 0)
+            uploaded = float(entry.get("uploaded") or 0)
+            speed = float(entry.get("speed") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not key or not file_name or total <= 0:
+            continue
+        media_title = _parse_upload_media_title(file_name)
+        episode_match = EPISODE_TAG_PATTERN.search(file_name)
+        task: Dict[str, Any] = {
+            "id": (
+                "upload:"
+                + hashlib.sha1(f"{key}|{total}".encode("utf-8")).hexdigest()[:16]
+            ),
+            "title": (
+                f"{file_name} · {uploaded / 1048576:.0f}/{total / 1048576:.0f}MB"
+            ),
+            "media_title": media_title,
+            # 电视剧才进 media 投影（海报+季集）；电影/未知只显示名字，
+            # media_type 非“电视剧/电影”时 _task_media 返回 None。
+            "media_type": "电视剧" if episode_match else "",
+            "status": "transferring",
+            "transfer_phase": "uploading",
+            "total": total,
+            "uploaded_bytes": uploaded,
+            "upload_speed_bytes_per_second": speed,
+            "current_file": file_name,
+            "task_kind": "upload",
+        }
+        if episode_match:
+            # EPISODE_TAG_PATTERN 的季号组恒为数字，int 不会失败。
+            task["season"] = int(episode_match.group(1))
+        tmdb_id = _parse_upload_tmdb_id(file_name)
+        if tmdb_id:
+            task["tmdb_id"] = tmdb_id
+        left_time = _format_left_time(total, uploaded, speed)
+        if left_time:
+            task["left_time"] = left_time
+        tasks.append(task)
+    return tasks
+
+
+def _live_upload_for_task(task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """在上传登记表里找与任务对应的实时条目；找不到返回 None。
+
+    匹配顺序：key 精确匹配 → basename 匹配 → file_name 匹配。
+    key 是本地文件名，任务里的 current_file / transfer_file_names
+    可能是完整路径，先按原值比，再按 basename 比。
+    """
+    try:
+        from .upload_progress import snapshot_upload_progress
+    except Exception:
+        return None
+    try:
+        entries = snapshot_upload_progress()
+    except Exception:
+        return None
+    if not entries:
+        return None
+    names = _task_file_names(task)
+    if not names:
+        return None
+    basenames = [Path(name).name for name in names]
+    for entry in entries:
+        if entry.get("key") in names:
+            return entry
+    for entry in entries:
+        if entry.get("key") in basenames:
+            return entry
+    for entry in entries:
+        if entry.get("file_name") in names or entry.get("file_name") in basenames:
+            return entry
+    return None
+
+
 def task_to_torrent(
     task: Dict[str, Any],
     *,
@@ -541,6 +713,7 @@ def task_to_torrent(
         state=map_task_state(task.get("status")),
         dlspeed=_phase_speed(task, "downloading"),
         upspeed=_phase_speed(task, "uploading"),
+        left_time=task.get("left_time"),
         tags=None,
         save_path=str(path) if path else None,
         content_path=str(path) if path else None,

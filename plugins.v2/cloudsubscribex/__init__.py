@@ -203,7 +203,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.12.17"
+    plugin_version = "1.12.18"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -2262,13 +2262,28 @@ class CloudSubscribeX(_PluginBase):
             logger.warning(f"移除下载器条目失败：{error}")
 
     def _runtime_tasks_for_downloader(self) -> List[Dict[str, Any]]:
-        """取运行时任务快照；运行态未就绪时返回空列表。"""
+        """取运行时任务快照；运行态未就绪时返回空列表。
+
+        再把进行中的 115 上传（进程内登记表）合并进来：MP 整理队列
+        里的整理没有对应的插件任务卡，不合并下载页就看不到上传进度。
+        合并失败时只返回原任务，绝不影响下载页。
+        """
         try:
             tasks = self._serialize_runtime_tasks()
         except Exception as error:  # noqa: BLE001 - 运行态异常不影响下载页
             logger.debug(f"读取运行时任务失败：{type(error).__name__}: {error}")
             return []
-        return list(tasks or [])
+        merged = list(tasks or [])
+        try:
+            from .core.downloader_view import synthetic_upload_tasks
+
+            merged.extend(synthetic_upload_tasks())
+        except Exception as error:  # noqa: BLE001 - 合并失败只返回原任务
+            logger.debug(
+                f"合并上传任务失败：{type(error).__name__}: {error}",
+                exc_info=True,
+            )
+        return merged
 
     def list_torrents(self, status: Optional[Union[str, TorrentQueryStatus]] = None,
                       hashs: Optional[Union[list[str], str]] = None,
@@ -2322,6 +2337,9 @@ class CloudSubscribeX(_PluginBase):
         for hash_value in wanted:
             task_id = resolve_task_id(tasks, str(hash_value))
             if not task_id:
+                continue
+            if task_id.startswith("upload:"):
+                # 合成上传卡：上传走 MP 整理链，没法从下载页停止。
                 continue
             try:
                 result = self.api_stop_sync_task(settings.API_TOKEN, task_id)
