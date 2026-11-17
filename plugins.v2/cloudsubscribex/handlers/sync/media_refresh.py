@@ -27,6 +27,13 @@ class MediaRefreshMixin(OwnerDelegator):
             media_server_refresh_delay: int,
             emby_mediainfo_enabled: bool,
     ) -> None:
+        """更新通知开关与渠道类型，并重建媒体服务器通知器。
+
+        注意：这是 ``SyncHandler.update_notification_config`` 的唯一实现。
+        之前 ``SyncNotificationService`` 有一个同名轻量版（只改开关与
+        渠道类型、吞掉其余 5 个参数），因组件顺序排在前面而把它遮蔽，
+        导致启动后改通知 / 媒体刷新配置不生效（1.12.17 已删除轻量版）。
+        """
         self._notify = bool(notify)
         self._notification_type = notification_type
         self._notification_delay_seconds = max(
@@ -40,7 +47,8 @@ class MediaRefreshMixin(OwnerDelegator):
             delay_seconds=media_server_refresh_delay,
             emby_mediainfo_enabled=emby_mediainfo_enabled,
         )
-        old_notifier.close(flush=True)
+        if old_notifier is not None:
+            old_notifier.close(flush=True)
 
     def begin_notification_batch(self) -> bool:
         """开始一次同步任务的媒体目录通知聚合。"""

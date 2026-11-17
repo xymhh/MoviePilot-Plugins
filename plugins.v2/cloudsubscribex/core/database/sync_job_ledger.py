@@ -20,9 +20,12 @@ from .sync_job_state import (
     JOB_NEEDS_ATTENTION,
     JOB_PAUSED,
     JOB_RETRY_WAIT,
+    JOB_STATES,
     JOB_TRANSFERRING,
     JOB_VERIFYING,
+    TERMINAL_STATES,
     build_job_key,
+    can_transition,
     content_key,
     normalize_name,
     normalize_path,
@@ -321,7 +324,16 @@ class SyncJobLedger:
             canceled: bool = False,
             now: Optional[int] = None,
     ) -> bool:
-        """记录失败；可重试进 ``retry_wait``，否则 ``failed``/``canceled``。"""
+        """记录失败；可重试进 ``retry_wait``，否则 ``failed``/``canceled``。
+
+        from_state 取作业当前真实状态，不再硬编码 ``transferring``：
+        之前写死为 ``transferring`` 时，作业若已走到 ``verifying`` /
+        ``finalizing``（``success()`` 的中间态），底层 UPDATE 的
+        ``WHERE state = 'transferring'`` 匹配 0 行，失败静默记不上。
+        verifying / finalizing 到 failed 没有直达边（状态机只允许
+        retry_wait / needs_attention / canceled），不可重试的失败
+        在这两态落到 ``needs_attention``（可人工处理），不丢记录。
+        """
         if lease.reused:
             return True
         timestamp = int(now if now is not None else time.time())
@@ -329,27 +341,38 @@ class SyncJobLedger:
         attempt = int(getattr(row, "attempt", 0) or 0)
         max_attempts = int(getattr(row, "max_attempts", 3) or 3)
         message = str(error or "")[:2000]
+        current_state = str(getattr(row, "state", "") or "")
+        if current_state in TERMINAL_STATES:
+            return True
+        from_state = (
+            current_state if current_state in JOB_STATES else JOB_TRANSFERRING
+        )
         if canceled:
-            return self._repo.transition(
-                lease.job_key, JOB_TRANSFERRING, JOB_CANCELED,
-                owner=lease.owner, now=timestamp,
-                last_error=message, last_error_at=timestamp,
-                next_retry_at=0,
-            )
-        if retryable and attempt < max_attempts:
-            return self._repo.transition(
-                lease.job_key, JOB_TRANSFERRING, JOB_RETRY_WAIT,
-                owner=lease.owner, now=timestamp,
-                last_error=message, last_error_at=timestamp,
-                next_retry_at=timestamp + backoff_delay(attempt),
-            )
-        if retryable:
+            target = JOB_CANCELED
+        elif retryable and attempt < max_attempts:
+            target = JOB_RETRY_WAIT
+        else:
+            target = JOB_FAILED
+        if not can_transition(from_state, target):
+            # verifying / finalizing 阶段没有到 failed 的直达边。
+            if can_transition(from_state, JOB_NEEDS_ATTENTION):
+                target = JOB_NEEDS_ATTENTION
+            else:
+                logger.warning(
+                    f"同步作业失败无法记账：{lease.job_key} 处于 {from_state}，"
+                    f"无合法的失败去向"
+                )
+                return False
+        if target == JOB_FAILED and retryable:
             message = _dead_letter_message(message)
         return self._repo.transition(
-            lease.job_key, JOB_TRANSFERRING, JOB_FAILED,
+            lease.job_key, from_state, target,
             owner=lease.owner, now=timestamp,
             last_error=message, last_error_at=timestamp,
-            next_retry_at=0,
+            next_retry_at=(
+                timestamp + backoff_delay(attempt)
+                if target == JOB_RETRY_WAIT else 0
+            ),
         )
 
 

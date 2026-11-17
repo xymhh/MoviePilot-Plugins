@@ -174,10 +174,12 @@ class MpOrganizeTracker:
         :param mp_organize: trigger_mp_organize 成功时返回的 info
             （至少含 src_path；src_storage 缺省为 local）
         :return: (state, detail, dest_path|None)；state 为 queued /
-            running / succeeded / failed / missing 之一；succeeded 时
-            detail 与 dest_path 均为历史记录的 dest；failed 时 detail
-            为 MP 原因原文（截断到约 200 字）；MP 侧不可用时返回
-            missing，不抛异常。
+            running / succeeded / failed / missing / unavailable 之一；
+            succeeded 时 detail 与 dest_path 均为历史记录的 dest；failed
+            时 detail 为 MP 原因原文（截断到约 200 字）；missing 是三处
+            后端都健康但查无记录（MP 未受理）；unavailable 是 MP 侧不可用
+            （后端抛异常）——两者不能混同：missing 过宽限期可判“未受理”
+            而 abort，unavailable 只能继续等（受 90 分钟总超时约束）。
         """
         src_path = str((mp_organize or {}).get("src_path") or "").strip()
         src_storage = (
@@ -190,7 +192,7 @@ class MpOrganizeTracker:
             return self._poll_backends(src_path, src_storage)
         except Exception as error:
             logger.debug(f"MP 整理轮询失败：{error}", exc_info=True)
-            return ("missing", "MP 整理链不可用", None)
+            return ("unavailable", "MP 整理链不可用", None)
 
     def _poll_backends(
             self, src_path: str, src_storage: str

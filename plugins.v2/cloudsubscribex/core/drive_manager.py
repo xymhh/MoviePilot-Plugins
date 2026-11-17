@@ -168,6 +168,14 @@ class CloudDriveManager:
         def resource_supported(value: str) -> bool:
             if self.active_drive.supports_resource_type(value):
                 return True
+            if value == "magnet":
+                # Magnet 不对应任何网盘驱动：cloud 策略下由 115 离线下载
+                # 接管（events.py 的接管门控只看顺序里有没有 magnet），
+                # 收窄时按策略保留；block 策略仍按不支持处理。
+                return str(
+                    getattr(self._plugin, "_platform_download_policy", "block")
+                    or "block"
+                ) == "cloud"
             if not cross_enabled:
                 return False
             try:

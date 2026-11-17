@@ -254,8 +254,10 @@ class MpOrganizeMixin(OwnerDelegator):
         :return: (True, info) 表示 MP 已接受整理，info 里有触发时传给
             do_transfer 的源路径与解析到的目标目录；(False, info) 表示
             未触发，info 一定带 reason 码（disabled/no_source/not_video/
-            unavailable/no_source_file/no_target_dir/not_accepted）与中文
-            message，调用方按 reason 区分记录失败原因
+            unavailable/no_source_file/no_target_dir/already_in_library/
+            not_accepted/error）与中文 message，调用方按 reason 区分记录
+            失败原因。其中 already_in_library 不是失败（该集已在库，调用
+            方当成功处理）；error 是 do_transfer 抛出的异常原文。
         """
         if not self._mp_organize_enabled():
             return False, {

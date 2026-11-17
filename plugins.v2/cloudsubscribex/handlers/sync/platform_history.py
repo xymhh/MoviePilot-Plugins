@@ -239,14 +239,19 @@ class PlatformHistoryService(OwnerDelegator):
             all_managed: bool = False,
     ) -> int:
         """增量删除插件托管的整理历史，不触碰关联媒体文件。"""
-        sources = {
-            entry["src"]
-            for record in (records or [])
-            if isinstance(record, dict)
-            for entry in self._platform_history_entries(record)
-        }
-        if not all_managed and not sources:
-            return 0
+        # sources 只在增量删除时用（all_managed 时全删，不过滤）：
+        # 之前在函数入口就对全部记录调 _platform_history_entries，
+        # 全量清理分支算完也不用，白白做一次全量展开。
+        sources = set()
+        if not all_managed:
+            sources = {
+                entry["src"]
+                for record in (records or [])
+                if isinstance(record, dict)
+                for entry in self._platform_history_entries(record)
+            }
+            if not sources:
+                return 0
         try:
             from app.db.models.transferhistory import TransferHistory
             from sqlalchemy import or_

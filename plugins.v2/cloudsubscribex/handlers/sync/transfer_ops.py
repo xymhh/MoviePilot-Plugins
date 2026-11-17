@@ -959,6 +959,12 @@ class TransferOpsMixin(OwnerDelegator):
                             # v1.12.16：该集已在媒体库，目标已达成，不记
                             # 失败、不重试；本地 /downloads 的这份是多余
                             # 的重复来源，后续由缓存清理处理。
+                            # v1.12.17：显式置 _mp_organized，让这条记录
+                            # 拿到 skip_history（与同盘批量对齐）；但不
+                            # 置 mp_organize 身份、不登记 _mark_mp_organizing——
+                            # 这次根本没触发 MP 整理，finalize 没有可轮询
+                            # 的对象，置了反而会被判“MP 整理未受理”而 abort。
+                            file_item["_mp_organized"] = True
                             logger.info(
                                 f"该集已在媒体库，跳过 MP 整理：{result_name}，"
                                 f"库里已有 {info.get('existing_file') or ''}"

@@ -143,6 +143,21 @@ def configured_resource_types(configured: Any) -> List[str]:
     return values or list(RESOURCE_TYPE_ORDER)
 
 
+def ensure_magnet_for_cloud_policy(order: Any, policy: Any) -> tuple:
+    """cloud 策略下给资源类型顺序补 magnet，返回 (顺序, 是否补过)。
+
+    Magnet 接管（走 115 离线下载）的门控是 ``"magnet" in
+    _resource_type_order``（core/hook/events.py），但默认顺序只有
+    ["115", "ed2k"]——cloud 策略下每个平台 Magnet 接管都会走到
+    “接管失败，已阻止平台下载”。block 策略不补（不改变现有行为）。
+    """
+    values = [str(value).strip().lower() for value in (order or [])]
+    values = [value for value in values if value]
+    if str(policy or "block").strip().lower() == "cloud" and "magnet" not in values:
+        return [*values, "magnet"], True
+    return values, False
+
+
 def resource_type_from_url(value: str) -> str:
     """根据标准链接 scheme 或域名识别内部资源类型。"""
     target = str(value or "").strip()

@@ -311,8 +311,9 @@ class TestMpOrganizeTrackerPendingAndQueue(unittest.TestCase):
         )
         self.assertEqual(poller.poll(_mp_organize())[0], "succeeded")
 
-    def test_mp_backend_unavailable_returns_missing_without_raise(self):
-        """MP 侧 import/查询抛异常 → missing，不抛异常。"""
+    def test_mp_backend_unavailable_returns_unavailable_without_raise(self):
+        """1.12.17：MP 侧 import/查询抛异常 → unavailable（不是 missing），
+        不抛异常。missing 只留给“三处后端都健康但查无记录”。"""
         history = FakeHistoryOper()
         history.get_success_by_src = _raising
         poller = MpOrganizeTracker(
@@ -321,7 +322,7 @@ class TestMpOrganizeTrackerPendingAndQueue(unittest.TestCase):
             jobview=FakeJobview(),
         )
         state, detail, dest = poller.poll(_mp_organize())
-        self.assertEqual(state, "missing")
+        self.assertEqual(state, "unavailable")
         self.assertEqual(detail, "MP 整理链不可用")
         self.assertIsNone(dest)
 

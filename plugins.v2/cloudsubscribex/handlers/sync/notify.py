@@ -23,18 +23,6 @@ class SyncNotificationService(OwnerDelegator):
         self._notification_batch: List[Dict[str, Any]] = []
         self._notification_batch_timer: Optional[threading.Timer] = None
 
-    def update_notification_config(
-            self,
-            notify: bool,
-            notification_type: NotificationType,
-            **kwargs,
-    ) -> None:
-        """更新通知开关与渠道类型。"""
-        if hasattr(self, "_notify"):
-            self._notify = bool(notify)
-        if hasattr(self, "_notification_type"):
-            self._notification_type = notification_type
-
     def send_transfer_notification(
             self, transfer_details: List[Dict[str, Any]], total_count: int
     ) -> None:

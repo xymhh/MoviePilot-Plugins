@@ -92,6 +92,7 @@ from .core.subscribe import AutoSubscribeService
 from .drive.scanner import DriverRegistry
 from .handlers import SearchHandler, SyncHandler, SubscribeHandler, WebhookHandler
 from .search.scanner import SearchSourceRegistry
+from .search.types import ensure_magnet_for_cloud_policy
 from .subscribe import (  # noqa: F401 - 导入即注册自动订阅渠道
     create_anilist_provider,
     create_bangumi_provider,
@@ -202,7 +203,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.12.16"
+    plugin_version = "1.12.17"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1840,6 +1841,17 @@ class CloudSubscribeX(_PluginBase):
             for item in configured_resource_order
             if str(item).strip().lower() in supported_resource_types
         ))
+        # 注意：_platform_download_policy 在 _apply_sync_config 里才落到
+        # self 上（后于本函数），这里必须从 config 字典里读，不能读 self。
+        download_policy = str(config.get("platform_download_policy", "block") or "block")
+        self._resource_type_order, magnet_added = ensure_magnet_for_cloud_policy(
+            self._resource_type_order, download_policy,
+        )
+        if magnet_added:
+            logger.warning(
+                "平台下载策略为 cloud，已自动把 Magnet 加入资源类型顺序"
+                "（Magnet 走 115 离线下载接管）"
+            )
         configured_metadata_url = str(config.get(
             "magnet_metadata_url_template",
             "https://itorrents.org/torrent/{info_hash}.torrent",

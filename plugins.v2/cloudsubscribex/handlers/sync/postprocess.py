@@ -1090,6 +1090,7 @@ class PostprocessService(OwnerDelegator):
                 postprocess_detail="文件处理完成",
             )
         ctx.completed += 1
+        self._log_episode_telemetry(item, pending_key, "成功", getattr(ctx, "now", None))
 
     def _abort_single_item(
             self,
@@ -1119,6 +1120,7 @@ class PostprocessService(OwnerDelegator):
         ctx.pending.pop(pending_key, None)
         ctx.committed_keys.add(pending_key)
         ctx.failed += 1
+        self._log_episode_telemetry(item, pending_key, "失败", getattr(ctx, "now", None))
         task_id = self._postprocess_task_id(item)
         if task_id and self._postprocess_task_update:
             self._postprocess_task_update(
@@ -1129,6 +1131,62 @@ class PostprocessService(OwnerDelegator):
                 postprocess_active=False,
                 postprocess_detail=f"定位失败：{reason}",
             )
+
+    def _log_episode_telemetry(
+            self,
+            item: Dict[str, Any],
+            pending_key: str,
+            outcome: str,
+            now: float,
+    ) -> None:
+        """终态耗时行（1.12.17 Phase 0-10，速度面验收的观测手段）。
+
+        一集只在终态记一行：总耗时、下载段、MP 整理等待段（有 MP 整
+        理身份时）+ 进程累计 115 API 快照。MP 整理内的上传发生在 MP
+        链里，不在插件计时内——那段就是“整理等待”。只在终态记
+        （提交成功 / abort / 死任务），重试中途不记，避免刷屏。
+        计量是观测手段：telemetry 解析失败时静默跳过，绝不能影响结算。
+        """
+        try:
+            from ...core.telemetry import api_meter, format_snapshot
+        except Exception:
+            return
+        try:
+            now = float(now) if now else time.time()
+            file_name = str(item.get("file_name") or pending_key)
+            created_at = float(item.get("created_at") or now)
+            total = max(0.0, now - created_at)
+            segments = [f"总={total:.1f}s"]
+            downloaded_at = item.get("download_completed_at")
+            if downloaded_at:
+                segments.append(
+                    f"下载={max(0.0, float(downloaded_at) - created_at):.1f}s"
+                )
+            mp_organize = item.get("mp_organize")
+            if isinstance(mp_organize, dict) and mp_organize.get("triggered_at"):
+                segments.append(
+                    "整理等待="
+                    f"{max(0.0, now - float(mp_organize['triggered_at'])):.1f}s"
+                )
+            size = item.get("size") or item.get("file_size")
+            size_text = ""
+            if size:
+                size_text = f" {float(size) / 1048576:.2f}MB"
+            ep_text = ""
+            try:
+                season = int(item.get("season") or 0)
+                episode = int(item.get("episode") or 0)
+                if season and episode:
+                    ep_text = f" S{season:02d}E{episode:02d}"
+            except (TypeError, ValueError):
+                ep_text = ""
+            logger.info(
+                f"集耗时：{file_name}{ep_text}{size_text} 结果={outcome} "
+                f"{' '.join(segments)} "
+                f"累计={format_snapshot(api_meter.snapshot())}"
+            )
+        except Exception as error:
+            logger.debug(f"集耗时记录失败：{error}", exc_info=True)
 
     def _finalize_ready_item(
             self,
@@ -1496,12 +1554,14 @@ class PostprocessService(OwnerDelegator):
             ctx.finalized_details.extend(finalized)
             ctx.notification_contexts.append((item, pending_key))
             ctx.completed += len(finalized)
+            self._log_episode_telemetry(item, pending_key, "成功", getattr(ctx, "now", None))
         else:
             self._add_offline_blacklist(
                 item.get("share_url") or pending_key,
                 "Magnet 下载完成但未匹配到目标媒体文件",
             )
             ctx.failed += 1
+            self._log_episode_telemetry(item, pending_key, "失败", getattr(ctx, "now", None))
 
     def _track_mp_organize_stall(
             self,
@@ -1572,7 +1632,7 @@ class PostprocessService(OwnerDelegator):
             or ctx.now
         )
         if (
-                state in {"queued", "running", "missing"}
+                state in {"queued", "running", "missing", "unavailable"}
                 and ctx.now - triggered_at > MP_ORGANIZE_WAIT_TIMEOUT_SECONDS
         ):
             self._abort_single_item(
@@ -1585,8 +1645,13 @@ class PostprocessService(OwnerDelegator):
                 item, pending_key, f"MP 整理失败：{detail}", ctx
             )
             return ("abort", None, "")
-        if state in {"queued", "running"}:
-            text = "MP 整理排队中" if state == "queued" else "MP 整理进行中"
+        if state in {"queued", "running", "unavailable"}:
+            # unavailable 是 MP 侧不可用（不是“未受理”）：继续等，不走
+            # missing 的宽限期 abort，只受 90 分钟总超时约束。
+            if state == "unavailable":
+                text = "MP 整理链不可用，等待恢复"
+            else:
+                text = "MP 整理排队中" if state == "queued" else "MP 整理进行中"
             self._update_postprocess_progress(
                 item, pending_key, "organize", text
             )

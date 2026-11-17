@@ -94,11 +94,31 @@ def ledger_days(days: int) -> List[str]:
 
 
 class CloudSubscribeDataStore:
-    """业务数据和可恢复运行状态按职责写入独立数据库。"""
+    """业务数据和可恢复运行状态按职责写入独立数据库。
+
+    数据键清单（新键流程：先在这里声明键 + 配好 ``_save_database`` /
+    ``_load_database`` 分支，再写调用方；否则 ``save_data`` 抛 ValueError、
+    ``get_data`` 永远返回 None——1.12.14 就是这么回滚的）：
+
+    ==============================  ==========  ============================
+    键                              归属        读写方
+    ==============================  ==========  ============================
+    ``history``                     持久        history 仓储
+    ``pending_offline_strm``        持久        offline 仓储
+    ``checkin_schedule_state``      持久        schedule 仓储
+    ``*_checkin_history``           持久        checkin 仓储（按渠道）
+    ``*_sub_points_history``        持久        budget 仓储（按渠道）
+    ``legacy_id_migration``         持久        runtime 仓储（namespace
+                                                ``migration``，一次性留痕）
+    ``account_info_cache``          运行期      account 仓储
+    ``*_auth_session``              运行期      auth 仓储（按渠道）
+    ==============================  ==========  ============================
+    """
 
     HISTORY_KEY = "history"
     OFFLINE_PENDING_KEY = "pending_offline_strm"
     SCHEDULE_KEY = "checkin_schedule_state"
+    LEGACY_MIGRATION_KEY = "legacy_id_migration"
     RUNTIME_KEYS = {
         "account_info_cache",
     }
@@ -133,6 +153,7 @@ class CloudSubscribeDataStore:
                 cls.HISTORY_KEY,
                 cls.OFFLINE_PENDING_KEY,
                 cls.SCHEDULE_KEY,
+                cls.LEGACY_MIGRATION_KEY,
             }
             or normalized.endswith("_checkin_history")
             or normalized.endswith("_sub_points_history")
@@ -232,6 +253,8 @@ class CloudSubscribeDataStore:
             return self.repositories.offline.load_all()
         if key == self.SCHEDULE_KEY:
             return self.repositories.schedule.load()
+        if key == self.LEGACY_MIGRATION_KEY:
+            return self.repositories.runtime.load("migration", key)
         if key.endswith("_checkin_history"):
             return self.repositories.checkin.list_provider(
                 self._checkin_provider(key)
@@ -256,6 +279,8 @@ class CloudSubscribeDataStore:
             self.repositories.offline.replace_all(value or {})
         elif key == self.SCHEDULE_KEY:
             self.repositories.schedule.save(value or {})
+        elif key == self.LEGACY_MIGRATION_KEY:
+            self.repositories.runtime.save("migration", key, value or {})
         elif key.endswith("_checkin_history"):
             self.repositories.checkin.replace_provider(
                 self._checkin_provider(key), value or []

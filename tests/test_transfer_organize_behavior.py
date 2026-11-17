@@ -273,6 +273,70 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         self.mediainfo.title = "美国人质"
         self.subscribe = MagicMock()
 
+    def test_cross_download_already_in_library_marks_mp_organized(self):
+        """1.12.17：跨盘下载后触发 MP 整理返回 already_in_library 时，
+        file_item 必须置 _mp_organized=True（记录才能拿到 skip_history，
+        与同盘批量对齐）；同时不能置 mp_organize 身份——这次根本没触发
+        MP 整理，finalize 没有可轮询的对象，置了反而会被判“未受理”。"""
+        from types import SimpleNamespace as _NS
+
+        source = MagicMock(key="quark", name="夸克网盘")
+        source.supports = MagicMock(return_value=True)
+        self.handler._resource_provider_for_url = MagicMock(return_value=source)
+        self.handler._cloud_drive = MagicMock(key="p115")
+        self.handler._cloud_drive.supports = MagicMock(return_value=True)
+        self.handler._is_cloud_resource_url = lambda url: True
+        self.handler._cross_transfer_enabled = True
+        self.handler._normalize_cross_transfer_media_type = lambda *a: ""
+        fake_item = _NS(
+            id="quark-file-1", name="玫瑰战争 S01E24.mp4", size=1024,
+            sha1="A" * 40, md5="B" * 32, playback_values={}, native={},
+        )
+        self.handler._cloud_file_from_dict = MagicMock(return_value=fake_item)
+        manager = MagicMock()
+        manager.create_from_cloud_file.return_value = {"id": "task-1"}
+        manager.wait.return_value = True
+        manager.list.return_value = [{
+            "id": "task-1",
+            "method": "download_only",
+            "result_local_path": "/downloads/玫瑰战争 S01E24.mp4",
+            "result_file_name": "玫瑰战争 S01E24.mp4",
+        }]
+        self.handler._cross_transfer_manager = manager
+        self.handler._mp_organize_enabled = lambda: True
+        self.handler.trigger_mp_organize = MagicMock(return_value=(
+            False,
+            {
+                "reason": "already_in_library",
+                "message": "该集已在媒体库",
+                "existing_file": "玫瑰战争 {tmdb-299276} - S01E24 - 第24集.mp4",
+            },
+        ))
+
+        file_item = {
+            "id": "quark-file-1",
+            "name": "玫瑰战争 S01E24.mp4",
+            "size": 1024,
+            "sha1": "A" * 40,
+        }
+        ok = self.handler._transfer_file_impl(
+            "https://pan.quark.cn/s/sample",
+            file_item,
+            "/downloads",
+            "玫瑰战争 S01E24.mp4",
+            media_type="tv",
+            media={
+                "tmdb_id": 299276,
+                "media_type": "tv",
+                "season": 1,
+                "year": 2026,
+                "media_title": "玫瑰战争",
+            },
+        )
+        self.assertTrue(ok)
+        self.assertTrue(file_item.get("_mp_organized"))
+        self.assertNotIn("mp_organize", file_item)
+
     def test_partial_transfer_preserves_parent_folder_when_organize_disabled(self):
         """场景：Issue #10 核心问题——关闭整理时，哪怕仅转存一部分（更02集），也必须保留母文件夹。"""
         self.handler._organize_after_transfer = False

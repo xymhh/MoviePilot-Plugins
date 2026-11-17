@@ -738,6 +738,76 @@ class SyncJobLedgerTests(unittest.TestCase):
         )
         self.assertEqual(self._row(lease.job_key).state, JOB_CANCELED)
 
+    def test_failure_from_verifying_retryable_goes_retry_wait(self):
+        """1.12.17：verifying 阶段的可重试失败要记进 retry_wait，而不是
+        因 from_state 写死 transferring 而静默记不上。"""
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(self.repo.transition(
+            lease.job_key, JOB_TRANSFERRING, JOB_VERIFYING,
+        ))
+        self.assertTrue(
+            self.ledger.failure(lease, error="校验失败", retryable=True, now=1000)
+        )
+        row = self._row(lease.job_key)
+        self.assertEqual(row.state, JOB_RETRY_WAIT)
+        self.assertEqual(row.next_retry_at, 1060)
+
+    def test_failure_from_verifying_non_retryable_goes_needs_attention(self):
+        """verifying 到 failed 没有直达边：不可重试的失败落到
+        needs_attention（可人工处理），不丢记录。"""
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(self.repo.transition(
+            lease.job_key, JOB_TRANSFERRING, JOB_VERIFYING,
+        ))
+        self.assertTrue(
+            self.ledger.failure(lease, error="校验失败", retryable=False, now=1000)
+        )
+        self.assertEqual(self._row(lease.job_key).state, JOB_NEEDS_ATTENTION)
+
+    def test_failure_from_finalizing_goes_to_legal_target(self):
+        """finalizing 阶段：可重试进 retry_wait，不可重试进
+        needs_attention（failed 同样没有直达边）。"""
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(self.repo.transition(
+            lease.job_key, JOB_TRANSFERRING, JOB_VERIFYING,
+        ))
+        self.assertTrue(self.repo.transition(
+            lease.job_key, JOB_VERIFYING, JOB_FINALIZING,
+        ))
+        self.assertTrue(
+            self.ledger.failure(lease, error="收尾失败", retryable=True, now=1000)
+        )
+        self.assertEqual(self._row(lease.job_key).state, JOB_RETRY_WAIT)
+
+        lease, reason = self._begin(self.ledger, target_name="第18集.mp4")
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(self.repo.transition(
+            lease.job_key, JOB_TRANSFERRING, JOB_VERIFYING,
+        ))
+        self.assertTrue(self.repo.transition(
+            lease.job_key, JOB_VERIFYING, JOB_FINALIZING,
+        ))
+        self.assertTrue(
+            self.ledger.failure(lease, error="收尾失败", retryable=False, now=1000)
+        )
+        self.assertEqual(self._row(lease.job_key).state, JOB_NEEDS_ATTENTION)
+
+    def test_failure_on_terminal_job_is_noop(self):
+        lease, reason = self._begin(self.ledger)
+        self.assertIsNotNone(lease, reason)
+        self.assertTrue(
+            self.ledger.success(
+                lease, result_name="第17集.mp4", result_size=1024,
+            )
+        )
+        self.assertTrue(
+            self.ledger.failure(lease, error="事后失败", retryable=False)
+        )
+        self.assertEqual(self._row(lease.job_key).state, JOB_DONE)
+
     def test_invalid_source_is_rejected_without_enqueue(self):
         lease, reason = self.ledger.begin(
             target_provider="115",

@@ -19,6 +19,7 @@ from .files import P115DirectoryReader, P115FileService
 from .upload_proxy import oss_request_kwargs
 from ...core import OwnerDelegator
 from ...core.error_text import describe_upload_error
+from ...core.telemetry import api_meter, format_snapshot
 
 try:
     from p115client import check_response
@@ -262,6 +263,19 @@ class P115UploadService(OwnerDelegator):
         """
         return str(getattr(self, "_last_upload_error", "") or "")
 
+    def _upload_stat(self) -> Dict[str, Any]:
+        """本次尝试的计量小字典（backend/rapid/parts）。
+
+        upload_file 每轮尝试开始时重置；内层方法（_upload_via_oss2 /
+        _upload_via_p115oss）边跑边填。直接调内层方法时也可能没有
+        初始化过，这里兜底建一个，绝不因计量抛错。
+        """
+        stats = getattr(self, "_upload_stats", None)
+        if not isinstance(stats, dict):
+            stats = {"backend": "", "rapid": False, "parts": 0}
+            self._upload_stats = stats
+        return stats
+
     def _oss_proxy_kwargs(self) -> Dict[str, Any]:
         """OSS 数据面（分片 PUT / 元数据）的代理参数；未配置时为空字典。
 
@@ -331,6 +345,7 @@ class P115UploadService(OwnerDelegator):
             pid=int(lookup.directory_id or 0),
         )
         check_response(response)
+        api_meter.record("rapid:hit" if response.get("reuse") else "rapid:miss")
         if not response.get("reuse"):
             return False
         self._target_file_cache.clear()
@@ -490,6 +505,7 @@ class P115UploadService(OwnerDelegator):
         单片失败只重传该片）→ complete 回调。成功（含秒传）返回 True，
         失败抛异常（由调用方决定是否整文件重传）。
         """
+        self._upload_stat().update({"backend": "oss2"})
         # -- Step 1: 初始化上传（带重试）--
         def read_range_hash(range_str: str) -> str:
             start, end = (int(part) for part in range_str.split("-", 1))
@@ -551,8 +567,11 @@ class P115UploadService(OwnerDelegator):
             )
         # 秒传命中：不用传，直接成功。
         if init_resp.get("reuse"):
+            api_meter.record("rapid:hit")
+            self._upload_stat()["rapid"] = True
             logger.info(f"115 秒传成功：{upload_name}")
             return True
+        api_meter.record("rapid:miss")
 
         # 上传会话信息：顶层与 data 里都可能放，两边都看。
         data = init_resp.get("data") or {}
@@ -607,6 +626,7 @@ class P115UploadService(OwnerDelegator):
                                 data=OssSizedFileAdapter(fileobj, num_to_upload),
                             )
                             parts.append(OssPartInfo(part_number, result.etag))
+                            api_meter.record("oss2:part", bytes_=num_to_upload)
                             last_part_error = None
                             break
                         except Exception as error:
@@ -639,6 +659,7 @@ class P115UploadService(OwnerDelegator):
                 bucket.abort_multipart_upload(object_name, upload_id)
             raise
 
+        self._upload_stat()["parts"] = len(parts)
         # -- Step 3: 完成上传并回调 115 --
         headers = {
             "X-oss-callback": oss2_b64encode(
@@ -671,6 +692,7 @@ class P115UploadService(OwnerDelegator):
         oss2 路子失败时的回落通道：走 client.upload_file，数据面
         session 带代理（见 _oss_proxy_kwargs）。失败抛异常。
         """
+        self._upload_stat().update({"backend": "p115oss", "parts": -1})
         part_size = upload_part_size(file_size)
         # p115oss.upload_file 会把 request_kwargs 透传给 OSS 分片 PUT，
         # 在这里传 session=<ProxyManager> 才能真正让上传数据走代理。
@@ -699,6 +721,8 @@ class P115UploadService(OwnerDelegator):
                 **upload_kwargs,
             )
         check_response(response)
+        # p115oss 内部分片在外部库里看不到，只按整文件记一次。
+        api_meter.record("p115oss:file", bytes_=file_size)
 
     def upload_file(
             self,
@@ -737,7 +761,12 @@ class P115UploadService(OwnerDelegator):
         # cd2 走同一代理正常），先回落旧路子（p115oss）保证上传能走通，
         # 同时把 oss2 的原错记下来以便定位。
         last_error: Optional[Exception] = None
+        started_at = time.monotonic()
+        file_size = 0
         for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
+            # 本次尝试的后端/秒传/分片数：内层方法边跑边填，终态日志只读
+            # 最后一次尝试的结果（重试会覆盖）。
+            self._upload_stats = {"backend": "", "rapid": False, "parts": 0}
             try:
                 file_size = source.stat().st_size
                 if OSS2_AVAILABLE:
@@ -786,6 +815,10 @@ class P115UploadService(OwnerDelegator):
                     progress_callback(file_size, file_size)
                 logger.info(f"115 本地文件上传完成：{source.name} -> {save_path}/{upload_name}")
                 self._last_upload_error = ""
+                api_meter.record("upload:success", bytes_=file_size)
+                self._log_upload_telemetry(
+                    source.name, file_size, time.monotonic() - started_at, ok=True
+                )
                 return True
             except Exception as error:
                 last_error = error
@@ -807,8 +840,29 @@ class P115UploadService(OwnerDelegator):
         self._last_upload_error = (
             f"115 本地文件上传失败：{source.name}，{detail}"
         )
+        api_meter.record("upload:failure", bytes_=file_size)
+        self._log_upload_telemetry(
+            source.name, file_size, time.monotonic() - started_at, ok=False
+        )
         logger.error(f"115 本地文件上传失败：{source.name}，{detail}")
         return False
+
+    def _log_upload_telemetry(
+            self, name: str, file_size: int, seconds: float, *, ok: bool
+    ) -> None:
+        """终态计量行：一次上传花了多久、走哪个后端、秒传与否、几片，
+        以及进程累计快照（风控面验收用，见 core/telemetry.py）。"""
+        stats = getattr(self, "_upload_stats", None) or {}
+        backend = stats.get("backend") or "未知"
+        rapid = "是" if stats.get("rapid") else "否"
+        parts = stats.get("parts")
+        parts_text = f"{parts}片" if isinstance(parts, int) and parts >= 0 else "未知"
+        logger.info(
+            f"115 上传计量：{name} {file_size / 1048576:.2f}MB "
+            f"{seconds:.1f}s {'成功' if ok else '失败'} 后端={backend} "
+            f"秒传={rapid} 分片={parts_text} "
+            f"累计={format_snapshot(api_meter.snapshot())}"
+        )
 
     def upload_from_link(
             self,
@@ -864,12 +918,14 @@ class P115UploadService(OwnerDelegator):
             )
             check_response(init_response)
             if init_response.get("reuse"):
+                api_meter.record("rapid:hit")
                 self._target_file_cache.clear()
                 logger.info(
                     f"115 SHA1 秒传完成：{target_name} -> "
                     f"{save_path}/{target_name}"
                 )
                 return "rapid"
+            api_meter.record("rapid:miss")
 
             part_size = upload_part_size(file_size)
             concurrency = self._upload_concurrency()
@@ -1018,13 +1074,15 @@ class P115UploadService(OwnerDelegator):
                                 f"源盘第 {part_number} 分片读取不完整："
                                 f"{len(data)}/{length}"
                             )
-                        return oss_multipart_upload_part(
+                        result = oss_multipart_upload_part(
                             target, upload_id, data, part_number=part_number,
                             reporthook=lambda count, number=part_number: report(
                                 number, count
                             ),
                             **proxy_kwargs,
                         )
+                        api_meter.record("p115oss:part", bytes_=length)
+                        return result
                     except InterruptedError:
                         raise
                     except Exception as error:  # noqa: BLE001 - 单片失败重试一次

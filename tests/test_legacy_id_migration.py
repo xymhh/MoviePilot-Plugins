@@ -57,9 +57,30 @@ class _Row:
 
 
 class _FakeOwner:
-    """按 SDK 契约实现的宿主桩：只记录调用，不碰真实库。"""
+    """按 SDK 契约实现的宿主桩：只记录调用，不碰真实库。
+
+    ``save_data`` 按真实 ``CloudSubscribeDataStore`` 的白名单校验
+    （见 ``core/storage.py`` 的键清单）：未声明的键抛 ValueError——
+    1.12.14 式事故必须在这里就变成测试失败，而不是线上回滚。
+    """
 
     plugin_version = "1.6.49"
+
+    # 与真实 store 的 handles() 保持一致的镜像；数据键治理测试
+    #（test_data_key_governance_1_12_17.py）负责校验真实 store。
+    _DECLARED_KEYS = {
+        "history",
+        "pending_offline_strm",
+        "checkin_schedule_state",
+        "legacy_id_migration",
+        "account_info_cache",
+    }
+    _DECLARED_SUFFIXES = ("_checkin_history", "_sub_points_history", "_auth_session")
+
+    @classmethod
+    def _handles_key(cls, key) -> bool:
+        text = str(key or "")
+        return text in cls._DECLARED_KEYS or text.endswith(cls._DECLARED_SUFFIXES)
 
     def __init__(self, data_root: Path, legacy_config=None, legacy_data=None,
                  legacy_db: bytes = None, target_db: bytes = None,
@@ -96,6 +117,8 @@ class _FakeOwner:
         self.calls.append(("save_data", key, plugin_id))
         if key in self.fail_keys:
             raise RuntimeError(f"写入失败：{key}")
+        if not self._handles_key(key):
+            raise ValueError(f"未声明的数据键不能持久化：{key}")
         self.saved[key] = value
 
     def get_config(self, plugin_id=None):
@@ -186,17 +209,20 @@ class TestLegacyIdMigration(unittest.TestCase):
         )
         LegacyIdMigrator(owner).migrate(None)
         self.assertEqual(owner.saved["history"], [1])
-        self.assertEqual(owner.saved["checkin"], {"a": 1})
         self.assertNotIn(None, owner.saved)
+        # "checkin" 不是真实 store 声明的键：逐键搬运时跳过并告警，
+        # 不牵连其余键（与真实 save_data 的 ValueError 语义一致）。
+        self.assertNotIn("checkin", owner.saved)
+        self.assertTrue(logger_ref.warning.called)
 
     def test_single_key_failure_does_not_stop_others(self):
         owner = self._owner(
             legacy_config={"enabled": True},
-            legacy_data={"history": [1], "checkin": {"a": 1}},
+            legacy_data={"history": [1], "p115_checkin_history": {"days": 3}},
             fail_keys=("history",),
         )
         LegacyIdMigrator(owner).migrate(None)
-        self.assertEqual(owner.saved["checkin"], {"a": 1})
+        self.assertEqual(owner.saved["p115_checkin_history"], {"days": 3})
         self.assertNotIn("history", owner.saved)
         self.assertTrue(logger_ref.warning.called)
 

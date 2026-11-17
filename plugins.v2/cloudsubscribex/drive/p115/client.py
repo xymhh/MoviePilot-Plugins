@@ -398,7 +398,23 @@ class P115ClientManager:
         :param func: 要调用的函数
         :return: 函数返回值
         """
+        self._record_control_call(func)
         return self.rate_limiter.call(func, *args, **kwargs)
+
+    @staticmethod
+    def _record_control_call(func: Callable) -> None:
+        """控制面调用计量（core/telemetry.py，1.12.17 风控面观测）。
+
+        调用前记一次（含失败的尝试——风控看的是发出去的量）。计量
+        是观测手段：解析失败（测试替身环境）时静默跳过，绝不能影响
+        调用本身。
+        """
+        try:
+            from ...core.telemetry import api_meter
+        except Exception:
+            return
+        name = getattr(func, "__name__", "") or "unknown"
+        api_meter.record(f"control:{name}")
 
     def close(self) -> None:
         pass

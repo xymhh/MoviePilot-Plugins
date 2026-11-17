@@ -27,7 +27,10 @@ from app.log import logger
 class LegacyIdMigrator:
     """把旧插件 ID 下的配置、持久化数据与私有数据库搬到当前插件 ID。"""
 
-    # 迁移留痕键：既是「已迁移过」的判据，也是事后排查用得到的事实记录
+    # 迁移留痕键：既是「已迁移过」的判据，也是事后排查用得到的事实记录。
+    # 必须与 CloudSubscribeDataStore.LEGACY_MIGRATION_KEY 一致且已在
+    # core/storage.py 声明，否则真实 save_data 抛 ValueError、get_data
+    # 永远返回 None（1.12.14 式事故）；数据键治理测试负责盯住这一点。
     MARKER_KEY = "legacy_id_migration"
 
     def __init__(
@@ -68,13 +71,16 @@ class LegacyIdMigrator:
             return config
         migrated_keys = self._migrate_data(legacy_id)
         database_copied = self._copy_database(legacy_id)
-        self._owner.save_data(self.MARKER_KEY, {
-            "from_plugin_id": legacy_id,
-            "migrated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "config_keys": len(migrated),
-            "data_keys": len(migrated_keys),
-            "database_copied": database_copied,
-        })
+        try:
+            self._owner.save_data(self.MARKER_KEY, {
+                "from_plugin_id": legacy_id,
+                "migrated_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "config_keys": len(migrated),
+                "data_keys": len(migrated_keys),
+                "database_copied": database_copied,
+            })
+        except Exception as error:  # noqa: BLE001 - 留痕写不进不该拦住已完成的迁移
+            logger.warning(f"迁移留痕写入失败（迁移本身已完成）：{error}")
         logger.info(
             f"已从旧插件 {legacy_id} 迁移到独立 ID {self._owner.__class__.__name__}"
             f"（{self._owner.plugin_version}）：配置 {len(migrated)} 项、"
