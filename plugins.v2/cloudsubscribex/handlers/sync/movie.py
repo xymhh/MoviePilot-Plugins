@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from app.log import logger
-from app.schemas import MediaInfo
 from app.schemas.types import MediaType
 
 from ...core import OwnerDelegator
@@ -43,19 +42,23 @@ class MovieSyncProcessor(OwnerDelegator):
         :param transferred_count: 当前已转存数量
         :return: 更新后的转存数量
         """
-        track_points = not manual_resources
         # 本轮没转存时的真实原因，供频道监控展示。
-        self._owner._last_skip_reason = ""
+        # Phase 3a 第 3 项：开场（停止检查 + 预算 + mediainfo）与资源搜索
+        # 收进 SubscribeFlowService，TV/电影共用。
         try:
-            if self._stop_requested():
-                self._owner._last_skip_reason = "已手动停止"
+            if self.check_subscribe_stopped():
                 return transferred_count
             logger.debug(f"处理电影订阅：{subscribe.name} ({subscribe.year})")
 
-            # 加载该订阅的历史积分花费（用 tmdb_id 作为唯一标识）
-            sub_key = self.subscription_budget_key(subscribe, MediaType.MOVIE)
-            if track_points and self._search_handler:
-                self._search_handler.reset_subscription_budgets(sub_key)
+            # 加载该订阅的历史积分花费（用 tmdb_id 作为唯一标识）；
+            # Phase 3a 第 3 项：开场准备收进 SubscribeFlowService
+            # （mediainfo 也在这里解析，后面的洗版基线直接用它）。
+            prepared = self.prepare_subscribe_entry(
+                subscribe, MediaType.MOVIE, manual_resources,
+            )
+            if prepared is None:
+                return transferred_count
+            track_points, sub_key, mediainfo = prepared
 
             # v1.13.3：洗版基线不再从插件 history 取（history 表已删）；
             # 现有版本基线只认媒体服务器文件、手动基线与网盘回退三处，
@@ -65,14 +68,6 @@ class MovieSyncProcessor(OwnerDelegator):
 
             # 原生 best_version 决定是否为洗版订阅，插件范围进一步限制处理对象。
             is_best_version = manual_upgrade or self._is_cloud_upgrade_subscribe(subscribe)
-
-            mediainfo: MediaInfo = self._subscribe_mediainfo(
-                subscribe, MediaType.MOVIE
-            )
-            if not mediainfo:
-                logger.warning(f"无法识别媒体信息：{subscribe.name}")
-                self._owner._last_skip_reason = "无法识别媒体信息"
-                return transferred_count
 
             # 洗版电影需要先建立现有版本基线，否则同名文件只能被当作普通订阅完成。
             existing_movie = None
@@ -207,45 +202,18 @@ class MovieSyncProcessor(OwnerDelegator):
                     self._owner._last_skip_reason = "库中已存在该电影，无需转存"
                     return transferred_count
 
-            # 手动资源直接进入现有匹配转存链，否则查询搜索源。
-            self._set_task_phase(
-                subscribe,
-                "处理手动网盘资源" if manual_resources else "搜索候选资源",
-                45,
+            # 手动资源直接进入现有匹配转存链，否则查询搜索源；
+            # Phase 3a 第 3 项：资源搜索收进 SubscribeFlowService。
+            source_order, source_results = self.collect_subscribe_resources(
+                subscribe, mediainfo, MediaType.MOVIE,
+                manual_resources=manual_resources,
+                phase_label="搜索候选资源",
+                phase_progress=45,
             )
             if manual_resources:
-                source_order = ["manual"]
-                source_results = {
-                    "manual": [dict(resource) for resource in manual_resources]
-                }
                 logger.info(
                     f"手动处理电影 {mediainfo.title}："
                     f"收到 {len(source_results['manual'])} 个资源链接"
-                )
-            else:
-                source_order = self._search_handler.get_enabled_sources(
-                    media_type=MediaType.MOVIE
-                )
-
-                def on_movie_search_progress(data: Dict[str, Any]) -> None:
-                    completed = data.get("completed", 0)
-                    total = max(1, data.get("total", 1))
-                    current_prog = 45 + int((completed / total) * 20)  # 45% -> 65%
-                    self._set_task_phase(
-                        subscribe,
-                        data.get("summary") or "搜索候选资源",
-                        current_prog,
-                        search_active=data.get("active", False),
-                        search_channels=data.get("channels", []),
-                        search_total_results=data.get("total_results", 0),
-                    )
-
-                source_results = self._search_handler.search_sources(
-                    sources=source_order,
-                    mediainfo=mediainfo,
-                    media_type=MediaType.MOVIE,
-                    subscribe=subscribe,
-                    progress_callback=on_movie_search_progress,
                 )
             resource_batches = self._build_transfer_resource_batches(
                 source_order, source_results
@@ -578,39 +546,67 @@ class MovieSyncProcessor(OwnerDelegator):
                             90,
                             clear_search=True,
                         )
-                        success = True
-                        if not direct_cloud_resource:
-                            transfer_target_name = (
-                                target_name
-                                if (organize_enabled and not self._is_offline_url(share_url))
-                                else None
+                        # 1.6.48 判重：主旧版本走 postprocess 备份删除，其余成功后批量删除
+                        # （管线 STRM 登记要 upgrade_old_*，先算好放进 item）。
+                        primary_old = dedup_movie_versions[0] if dedup_movie_versions else None
+                        extra_old_versions = dedup_movie_versions[1:] if len(dedup_movie_versions) > 1 else []
+                        if primary_old:
+                            upgrade_old_cloud_dir = str(primary_old.get("cloud_dir") or "")
+                            upgrade_old_file_name = str(primary_old.get("file_name") or "")
+                            upgrade_old_file_id = str(primary_old.get("file_id") or "")
+                            if int(primary_old.get("file_size") or 0):
+                                upgrade_old_size = int(primary_old.get("file_size") or 0)
+                        else:
+                            upgrade_old_cloud_dir = existing_movie[0] if existing_movie else ""
+                            upgrade_old_file_name = existing_movie[1] if existing_movie else ""
+                            upgrade_old_file_id = (
+                                getattr(existing_movie[2], "id", "")
+                                if existing_movie else ""
                             )
-                            success = self._timed_sync_call(
-                                "share_transfer",
-                                self._transfer_file,
-                                share_url,
-                                matched_file,
-                                staging_dir if not organize_enabled else self._cloud_transfer_path,
-                                transfer_target_name,
-                                matched_file.get("sha1"),
-                                media_type="movie",
-                            )
+                        # Phase 3a 第 1 项：电影走同一条入库管线（单文件、
+                        # 首个成功即停、不做落盘自检）。转存 + 字幕 + STRM
+                        # 登记都在管线里；MP 整理由管线 organize 阶段触发
+                        # （与旧 _transfer_file 尾巴同口径）。
+                        pipeline_results = self._run_ingest_pipeline(
+                            [{
+                                "file": matched_file,
+                                "target_name": target_name,
+                                "target_dir": save_dir,
+                                "episode": 1,
+                                "score": current_score,
+                                "is_upgrade": is_upgrade,
+                                "resource": resource,
+                                "subtitle_files": list(share_files or []),
+                                "success_episodes": (
+                                    [] if transient_target else [1]
+                                ),
+                                "notification_episodes": None,
+                                "upgrade_old_cloud_dir": upgrade_old_cloud_dir,
+                                "upgrade_old_file_name": upgrade_old_file_name,
+                                "upgrade_old_file_id": upgrade_old_file_id,
+                                "upgrade_old_size": upgrade_old_size,
+                            }],
+                            mediainfo=mediainfo,
+                            subscribe=subscribe,
+                            season=None,
+                            sub_key=sub_key,
+                            share_url=share_url,
+                            media_type="movie",
+                            track_subscription=not transient_target,
+                            transient_target=transient_target,
+                            stop_on_first_success=True,
+                            verify_landed=False,
+                        )
+                        pipeline_result = (
+                            pipeline_results[0] if pipeline_results else {}
+                        )
+                        success = bool(pipeline_result.get("success"))
                         if not success:
                             if self._stop_requested():
                                 logger.info(
                                     f"用户已停止转存：{mediainfo.title}"
                                 )
                                 break
-
-                        subtitles = []
-                        if success and not self._is_offline_url(share_url):
-                            subtitles = self._transfer_companion_subtitles(
-                                share_url=share_url,
-                                files=share_files,
-                                video_file=matched_file,
-                                target_video_name=target_name,
-                                media_type="movie",
-                            )
 
                         # 记录历史
                         history_item = self._build_transfer_history_item(
@@ -630,10 +626,17 @@ class MovieSyncProcessor(OwnerDelegator):
                         )
                         if history_item.get("status") == "失败":
                             failure_reason = str(
-                                self._transfer_failure_reason(
-                                    str(matched_file.get("id") or "")
-                                ) or ""
+                                pipeline_result.get("failure_reason") or ""
                             ).strip()
+                            if (
+                                    not failure_reason
+                                    and pipeline_result.get("transferred")
+                                    and not pipeline_result.get("strm_path")
+                                    and not pipeline_result.get("pending_key")
+                            ):
+                                # 转存成功但 STRM 登记失败（管线已把 success
+                                # 置 False）：沿用旧文案，别让记录空着原因。
+                                failure_reason = "文件已转存但后处理任务登记失败"
                             if failure_reason:
                                 apply_failure(history_item, failure_reason)
                         history.append(history_item)
@@ -643,64 +646,9 @@ class MovieSyncProcessor(OwnerDelegator):
                             movie_transferred = True
                             movie_history_score = current_score
                             self._set_task_phase(subscribe, "登记文件后处理", 95)
-                            # 1.6.48 判重：主旧版本走 postprocess 备份删除，其余成功后批量删除
-                            primary_old = dedup_movie_versions[0] if dedup_movie_versions else None
-                            extra_old_versions = dedup_movie_versions[1:] if len(dedup_movie_versions) > 1 else []
-                            if primary_old:
-                                upgrade_old_cloud_dir = str(primary_old.get("cloud_dir") or "")
-                                upgrade_old_file_name = str(primary_old.get("file_name") or "")
-                                upgrade_old_file_id = str(primary_old.get("file_id") or "")
-                                if int(primary_old.get("file_size") or 0):
-                                    upgrade_old_size = int(primary_old.get("file_size") or 0)
-                            else:
-                                upgrade_old_cloud_dir = existing_movie[0] if existing_movie else ""
-                                upgrade_old_file_name = existing_movie[1] if existing_movie else ""
-                                upgrade_old_file_id = (
-                                    getattr(existing_movie[2], "id", "")
-                                    if existing_movie else ""
-                                )
-                            strm_path, pending_key = self._generate_or_queue_strm(
-                                share_url,
-                                save_dir,
-                                target_name,
-                                mediainfo,
-                                source_sha1=matched_file.get("sha1"),
-                                file_size=self._resource_size_bytes(matched_file.get("size")),
-                                subscribe_id=(
-                                    None if transient_target else getattr(subscribe, "id", None)
-                                ),
-                                success_episodes=[] if transient_target else [1],
-                                sub_key=sub_key,
-                                transient_target=transient_target,
-                                target_subscribe=(
-                                    self._serialize_pending_target_subscribe(subscribe)
-                                    if transient_target else None
-                                ),
-                                skip_history=bool(resource.get("skip_history")),
-                                staging_dir=staging_dir,
-                                staging_name=(
-                                        matched_file.get("staging_name") or file_name
-                                ),
-                                upgrade=is_upgrade,
-                                upgrade_mode=self._upgrade_mode,
-                                upgrade_old_cloud_dir=upgrade_old_cloud_dir,
-                                upgrade_old_file_name=upgrade_old_file_name,
-                                upgrade_old_file_id=upgrade_old_file_id,
-                                upgrade_old_size=upgrade_old_size,
-                                subtitles=subtitles,
-                            )
-                            if not strm_path and not pending_key:
-                                apply_failure(
-                                    history_item,
-                                    "文件已转存但后处理任务登记失败",
-                                )
-                                transferred_count = max(0, transferred_count - 1)
-                                movie_transferred = False
-                                movie_history_score = 0
-                                logger.error(
-                                    f"文件已转存但后处理任务登记失败：{target_name}"
-                                )
-                                continue
+                            # STRM 登记已在管线 confirm 阶段完成；转存成功但
+                            # 登记失败时管线已把 success 置 False，不会走到这里。
+                            pending_key = pipeline_result.get("pending_key") or ""
                             if pending_key:
                                 history_item["finalize_key"] = pending_key
                                 transition(
@@ -723,12 +671,8 @@ class MovieSyncProcessor(OwnerDelegator):
                                     season=0,
                                     episode=1,
                                 )
-                            if strm_path:
-                                self._media_server_notifier.notify(
-                                    path=strm_path,
-                                    mediainfo=mediainfo,
-                                    file_name=target_name,
-                                )
+                            # 媒体库通知已在管线 confirm 阶段发出（strm_path
+                            # 生成即通知），这里不再重复通知。
                             logger.info(
                                 f"{'已登记网盘电影整理' if direct_cloud_resource else '成功转存电影'}："
                                 f"{mediainfo.title} (平台优先级:{current_score})"

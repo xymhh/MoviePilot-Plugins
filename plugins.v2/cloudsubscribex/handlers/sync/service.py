@@ -66,6 +66,7 @@ from .pt_upgrade import PtUpgradeService
 from .resources import ResourceTransferService
 from .retry import HistoryRetryService
 from .rule_scoring import UpgradeRuleScoringService
+from .subscribe_flow import SubscribeFlowService
 from .subtitles import SubtitleService
 from .television import TelevisionSyncProcessor
 from .transfer_details import TransferDetailsService
@@ -113,6 +114,7 @@ _COMPONENT_TYPES = (
     SyncMetadataService,
     SyncNamingService,
     SyncNotificationService,
+    SubscribeFlowService,
     PlatformHistoryService,
     MediaRefreshMixin,
     MpOrganizeMixin,

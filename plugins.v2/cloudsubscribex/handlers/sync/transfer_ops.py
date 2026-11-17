@@ -89,6 +89,97 @@ class TransferOpsMixin(OwnerDelegator):
     """转存执行：秒传/跨盘/失败记录/结果核验/暂存清理。"""
 
 
+    def _filter_entry_dedup_items(
+            self,
+            matched_items: List[Dict[str, Any]],
+            mediainfo: MediaInfo,
+            subscribe,
+            season: int,
+    ) -> Tuple[List[Dict[str, Any]], Dict[int, Dict[str, Any]]]:
+        """入口预检（Phase 3a 第 2 项）：已在库的项直接跳过。
+
+        复用 ``_collect_episode_versions``（一次季目录列目录 + 基线
+        并集，走 ``_season_listing_cache``）+ ``_episode_dedup_decision``；
+        决策 skip 的项不下载不转存，返回的 results 里 success=True、
+        skip_history=True，调用方按已处理计入（不记失败、不重试、
+        不进落盘自检、不发转存通知）。proceed/replace 的项原样放行
+        （replace 的旧版删除仍由 finalize/洗版路径按原有流程处理，
+        这里只做入口跳过）。
+        判重关闭、查不到版本、查库异常时全部放行（fail-open）；
+        最终兜底仍是 trigger_mp_organize 内的 MP 查库（第 12 项）。
+        返回 (kept_items, {原下标: 跳过结果})。
+        """
+        items = list(matched_items or [])
+        if not items:
+            return items, {}
+        try:
+            if not self._episode_dedup_active():
+                return items, {}
+        except Exception as error:
+            logger.debug(f"入口判重开关不可用（放行全部）：{error}", exc_info=True)
+            return items, {}
+        try:
+            versions = self._collect_episode_versions(
+                subscribe, mediainfo, season
+            )
+        except Exception as error:
+            logger.debug(f"入口判重查库失败（放行全部）：{error}", exc_info=True)
+            return items, {}
+        if not versions:
+            return items, {}
+        kept: List[Dict[str, Any]] = []
+        skipped: Dict[int, Dict[str, Any]] = {}
+        for index, item in enumerate(items):
+            try:
+                episode_no = int(item.get("episode"))
+            except (TypeError, ValueError):
+                kept.append(item)
+                continue
+            if episode_no not in versions:
+                kept.append(item)
+                continue
+            file_dict = item.get("file") or {}
+            try:
+                new_size = int(file_dict.get("size") or 0)
+            except (TypeError, ValueError):
+                new_size = 0
+            try:
+                new_score = int(
+                    item.get("score") or item.get("new_score") or 0
+                )
+            except (TypeError, ValueError):
+                new_score = 0
+            action, _old, reason = self._episode_dedup_decision(
+                subscribe,
+                mediainfo,
+                season,
+                episode_no,
+                new_score,
+                new_size,
+                versions,
+                new_file_name=str(file_dict.get("name") or ""),
+            )
+            if action != "skip":
+                kept.append(item)
+                continue
+            logger.info(
+                f"{getattr(mediainfo, 'title', '')} "
+                f"S{int(season):02d}E{episode_no:02d} 入口判重跳过：{reason}"
+            )
+            skipped[index] = {
+                "item": item,
+                "file_id": str(file_dict.get("id") or ""),
+                "success": True,
+                "pending_key": "",
+                "failure_reason": "",
+                "skip_history": True,
+                "dedup_reason": reason,
+                # 管线 confirm 阶段不给跳过项做落盘自检（没转存），landed
+                # 恒为 None，与 _run_ingest_pipeline 的结果口径一致。
+                "landed": None,
+            }
+        return kept, skipped
+
     def _transfer_episode_items(
             self,
             matched_items: List[Dict[str, Any]],
@@ -100,48 +191,21 @@ class TransferOpsMixin(OwnerDelegator):
             track_subscription: bool = True,
             transient_target: bool = False,
     ) -> List[Dict[str, Any]]:
-        """在同一任务内拆批完成全部剧集转存。"""
-        items = list(matched_items or [])
-        if not items:
-            return []
-        batch_size = self._transfer_task_batch_size
-        batch_count = (len(items) + batch_size - 1) // batch_size
-        if batch_count > 1:
-            logger.info(
-                f"匹配 {len(items)} 个文件，将按每批最多 {batch_size} 个"
-                f"分 {batch_count} 批在当前任务内处理"
-            )
-        results = []
-        for batch_index, offset in enumerate(range(0, len(items), batch_size), 1):
-            if self._stop_requested():
-                break
-            batch_items = items[offset:offset + batch_size]
-            if batch_count > 1:
-                logger.debug(
-                    f"开始处理转存批次 {batch_index}/{batch_count}："
-                    f"文件={len(batch_items)}"
-                )
-                self._set_task_phase(
-                    subscribe,
-                    f"正在转存第 {batch_index}/{batch_count} 批剧集",
-                    90 + int((batch_index / batch_count) * 4),
-                )
-            batch_results = self._transfer_episode_batch(
-                batch_items,
-                share_url,
-                mediainfo,
-                subscribe,
-                season,
-                sub_key,
-                track_subscription=track_subscription,
-                transient_target=transient_target,
-            )
-            results.extend(batch_results)
-            if self._stop_requested():
-                break
-            if batch_index < batch_count and not self._wait_transfer_batch_interval():
-                break
-        return results
+        """在同一任务内拆批完成全部剧集转存（Phase 3a 第 1 项：薄封装，走
+        ``_run_ingest_pipeline``，TV 口径：入口判重 + 补满缺集 + 落盘确认）。"""
+        return self._run_ingest_pipeline(
+            matched_items,
+            mediainfo=mediainfo,
+            subscribe=subscribe,
+            season=season,
+            sub_key=sub_key,
+            share_url=share_url,
+            media_type="tv",
+            track_subscription=track_subscription,
+            transient_target=transient_target,
+            stop_on_first_success=False,
+            verify_landed=True,
+        )
 
     def _wait_transfer_batch_interval(self) -> bool:
         """在任务内批次之间等待，并允许停止请求及时中断。"""
@@ -152,41 +216,23 @@ class TransferOpsMixin(OwnerDelegator):
             time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
         return True
 
-    def _transfer_episode_batch(
+    def _ingest_stage_transfer(
             self,
-            matched_items: List[Dict[str, Any]],
+            selected_items: List[Dict[str, Any]],
             share_url: str,
             mediainfo: MediaInfo,
-            subscribe,
             season: int,
-            sub_key: str,
-            track_subscription: bool = True,
-            transient_target: bool = False,
-    ) -> List[Dict[str, Any]]:
-        """执行一个剧集转存批次及对应后处理。"""
-        selected_items = list(matched_items or [])
-        if not selected_items:
-            return []
-        if self._stop_requested():
-            return []
+            organize_enabled: bool,
+            rename_items: Dict[str, Any],
+            cloud_resource: bool,
+            direct_cloud_resource: bool,
+            file_ids: List[str],
+    ) -> Tuple[List[Dict[str, Any]], List[str], bool]:
+        """管线 stage（落盘/暂存）：同盘直存 / 跨盘下载 / 批量转存三路。
 
-        file_ids = [str(item["file"]["id"]) for item in selected_items]
-        cloud_resource = self._is_cloud_resource_url(share_url)
-        direct_cloud_resource = (
-                cloud_resource and self._is_direct_cloud_resource_url(share_url)
-        )
-        organize_enabled = getattr(self, "_organize_after_transfer", True)
-        rename_items = {}
-        for item in selected_items:
-            file_item = item["file"]
-            item_url = str(file_item.get("url") or share_url).strip()
-            rename_items[str(file_item["id"])] = {
-                "sha1": file_item.get("sha1"),
-                "target_name": (
-                    None if (not organize_enabled or self._is_offline_url(item_url)) else item["target_name"]
-                ),
-                "url": item_url,
-            }
+        Phase 3a 第 1 项：从 ``_transfer_episode_batch`` 原样移出，只改
+        签名与返回值。返回 (processed_items, success_ids, cross_batch)。
+        """
         try:
             source_provider = self._resource_provider_for_url(share_url)
             provider_key = getattr(source_provider, "key", "") or getattr(
@@ -472,7 +518,29 @@ class TransferOpsMixin(OwnerDelegator):
                 self._activate_share_transfer_cooldown(locals().get("provider_key", "default"))
             raise
 
-        success_id_set = {str(file_id) for file_id in (success_ids or [])}
+        return processed_items, success_ids, cross_batch
+
+    def _ingest_stage_organize(
+            self,
+            processed_items: List[Dict[str, Any]],
+            success_id_set: set,
+            mediainfo: MediaInfo,
+            season: int,
+            share_url: str,
+            cross_batch: bool,
+            direct_cloud_resource: bool,
+            organize_enabled: bool,
+            media_type: str = "tv",
+    ) -> set:
+        """管线 organize（MP 整理 + 伴随字幕）。
+
+        Phase 3a 第 1 项：从 ``_transfer_episode_batch`` 原样移出。MP 整理
+        只在同盘直存且整理开启时触发（跨盘、直链不触发，与旧口径一致；
+        电影同样触发——电影今天经 ``_transfer_file_impl`` 尾巴触发 MP 整理，
+        管线只是把它收进同一处）。字幕调用按 media_type 分支：TV 传季集，
+        电影不传季集（单电影字幕匹配口径不变）。
+        返回已接手 MP 整理的 file_id 集合。
+        """
         # P1：同盘 115 直存成功后立即交 MP 整理，记录进 MP 媒体整理；
         # 跨盘、直链、整理关闭时不触发（跨盘是 P2 的事）。
         mp_organized_ids = set()
@@ -486,16 +554,48 @@ class TransferOpsMixin(OwnerDelegator):
             if str(item["file"]["id"]) not in success_id_set:
                 continue
             subtitle_files = item.get("subtitle_files") or []
+            if media_type == "tv":
+                subtitle_input_files = [item["file"], *subtitle_files]
+                sub_season, sub_episode = season, item.get("episode")
+            else:
+                # 电影：subtitle_files 就是整包分享文件列表（含视频本身），
+                # 原样传（与 movie.py 旧调用一致）；季集不传，避免单电影
+                # 字幕匹配被当成按集匹配。
+                subtitle_input_files = list(subtitle_files or [item["file"]])
+                sub_season, sub_episode = None, None
             item["subtitles"] = self._transfer_companion_subtitles(
                 share_url=str(item["file"].get("url") or share_url),
-                files=[item["file"], *subtitle_files],
+                files=subtitle_input_files,
                 video_file=item["file"],
                 target_video_name=item["target_name"],
-                media_type="tv",
-                season=season,
-                episode=item.get("episode"),
+                media_type=media_type,
+                season=sub_season,
+                episode=sub_episode,
                 transferred_ids=transferred_subtitle_ids,
             ) if subtitle_files else []
+        return mp_organized_ids
+
+    def _ingest_stage_confirm(
+            self,
+            processed_items: List[Dict[str, Any]],
+            success_id_set: set,
+            mp_organized_ids: set,
+            share_url: str,
+            mediainfo: MediaInfo,
+            subscribe,
+            season: int,
+            sub_key: str,
+            track_subscription: bool = True,
+            transient_target: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """管线 confirm 前半（STRM 登记 + 结果组装）。
+
+        Phase 3a 第 1 项：从 ``_transfer_episode_batch`` 原样移出。结果比
+        旧版多两个字段：``strm_path``（即时生成的 STRM 路径，没有为空）与
+        ``transferred``（文件本身是否转存成功，区别于“转存成功但 STRM 登记
+        失败”——电影入口靠它区分两种失败）。落盘确认（verify_landed）不在
+        这里，在 ``_run_ingest_pipeline`` 的批后统一做。
+        """
         batch_strm_results = self._generate_or_queue_strm_batch(
             [
                 {
@@ -552,6 +652,7 @@ class TransferOpsMixin(OwnerDelegator):
         for item in processed_items:
             file_id = str(item["file"]["id"])
             success = file_id in success_id_set
+            transferred = file_id in success_id_set
             strm_path, pending_key = batch_strm_results.get(file_id, (None, ""))
             if success and not strm_path and not pending_key:
                 logger.error(
@@ -569,11 +670,213 @@ class TransferOpsMixin(OwnerDelegator):
                 "file_id": file_id,
                 "success": success,
                 "pending_key": pending_key,
+                "strm_path": strm_path,
+                "transferred": transferred,
                 "failure_reason": (
-                    "" if success else self._transfer_failure_reason(file_id)
+                    "" if success else (
+                        # 转存成功但 STRM 登记失败：不是转存失败，别让
+                        # 调用方按转存失败重试（电影入口靠这句区分）。
+                        "文件已转存但后处理任务登记失败"
+                        if transferred and not strm_path and not pending_key
+                        else self._transfer_failure_reason(file_id)
+                    )
                 ),
             })
         return results
+
+    def _transfer_episode_batch(
+            self,
+            matched_items: List[Dict[str, Any]],
+            share_url: str,
+            mediainfo: MediaInfo,
+            subscribe,
+            season: int,
+            sub_key: str,
+            track_subscription: bool = True,
+            transient_target: bool = False,
+            media_type: str = "tv",
+    ) -> List[Dict[str, Any]]:
+        """执行一个转存批次及对应后处理（Phase 3a 第 1 项：管线编排）。
+
+        本体只剩编排：stage → organize → confirm，三个阶段见
+        ``_ingest_stage_*``。media_type="movie" 时走同一条管线（电影
+        入口用；字幕与季集按 media_type 分支，见 organize 阶段）。
+        """
+        selected_items = list(matched_items or [])
+        if not selected_items:
+            return []
+        if self._stop_requested():
+            return []
+
+        file_ids = [str(item["file"]["id"]) for item in selected_items]
+        cloud_resource = self._is_cloud_resource_url(share_url)
+        direct_cloud_resource = (
+                cloud_resource and self._is_direct_cloud_resource_url(share_url)
+        )
+        organize_enabled = getattr(self, "_organize_after_transfer", True)
+        rename_items = {}
+        for item in selected_items:
+            file_item = item["file"]
+            item_url = str(file_item.get("url") or share_url).strip()
+            rename_items[str(file_item["id"])] = {
+                "sha1": file_item.get("sha1"),
+                "target_name": (
+                    None if (not organize_enabled or self._is_offline_url(item_url)) else item["target_name"]
+                ),
+                "url": item_url,
+            }
+        processed_items, success_ids, cross_batch = self._ingest_stage_transfer(
+            selected_items, share_url, mediainfo, season,
+            organize_enabled, rename_items, cloud_resource,
+            direct_cloud_resource, file_ids,
+        )
+        success_id_set = {str(file_id) for file_id in (success_ids or [])}
+        mp_organized_ids = self._ingest_stage_organize(
+            processed_items, success_id_set, mediainfo, season, share_url,
+            cross_batch, direct_cloud_resource, organize_enabled,
+            media_type=media_type,
+        )
+        return self._ingest_stage_confirm(
+            processed_items, success_id_set, mp_organized_ids, share_url,
+            mediainfo, subscribe, season, sub_key,
+            track_subscription=track_subscription,
+            transient_target=transient_target,
+        )
+
+    def _run_ingest_pipeline(
+            self,
+            items: List[Dict[str, Any]],
+            *,
+            mediainfo: MediaInfo,
+            subscribe,
+            season: int,
+            sub_key: str,
+            share_url: str = "",
+            media_type: str = "tv",
+            track_subscription: bool = True,
+            transient_target: bool = False,
+            stop_on_first_success: bool = False,
+            verify_landed: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """一条入库管线（Phase 3a 第 1 项）。
+
+        acquire（调用方已完成：搜索/匹配出 items）→ dedup gate（TV 入口
+        预检，电影不做）→ stage（落盘/暂存）→ organize（MP 整理 + 伴随字
+        幕）→ confirm（STRM 登记 + 落盘确认）。差异只用参数表达：批量 vs
+        单文件（调用方传的 items 数量）、首个成功即停 vs 补满缺集
+        （stop_on_first_success）、是否落盘确认（verify_landed）。
+        电影走同一条管线：media_type="movie"、season 归一为 None（电影
+        无季）、verify_landed=False（电影今天不做落盘自检）。重试不走管
+        线（retry.py：记录级 media/target/failure 定制，显式重传单条记录）。
+
+        结果每条都带 ``landed``：verify_landed 时为落盘自检结果（成功且
+        非 pending 且非跳过才查；查不到实测数据时为 None），不 verify 时
+        为 None。调用方（television.py）直接读它，不再另调一次自检。
+        """
+        items = list(items or [])
+        if not items:
+            return []
+        if not share_url:
+            share_url = str(((items[0] or {}).get("file") or {}).get("url") or "")
+        all_items = list(items)
+        if media_type != "tv":
+            season = None
+        skipped_results: Dict[int, Dict[str, Any]] = {}
+        if media_type == "tv":
+            kept_items, skipped_results = self._filter_entry_dedup_items(
+                items, mediainfo, subscribe, season
+            )
+            items = kept_items
+            if not items:
+                return [
+                    skipped_results[index] for index in sorted(skipped_results)
+                ]
+        batch_size = self._transfer_task_batch_size
+        batch_count = (len(items) + batch_size - 1) // batch_size
+        if batch_count > 1:
+            logger.info(
+                f"匹配 {len(items)} 个文件，将按每批最多 {batch_size} 个"
+                f"分 {batch_count} 批在当前任务内处理"
+            )
+        results: List[Dict[str, Any]] = []
+        for batch_index, offset in enumerate(range(0, len(items), batch_size), 1):
+            if self._stop_requested():
+                break
+            batch_items = items[offset:offset + batch_size]
+            if batch_count > 1:
+                logger.debug(
+                    f"开始处理转存批次 {batch_index}/{batch_count}："
+                    f"文件={len(batch_items)}"
+                )
+                self._set_task_phase(
+                    subscribe,
+                    f"正在转存第 {batch_index}/{batch_count} 批剧集",
+                    90 + int((batch_index / batch_count) * 4),
+                )
+            batch_results = self._transfer_episode_batch(
+                batch_items,
+                share_url,
+                mediainfo,
+                subscribe,
+                season,
+                sub_key,
+                track_subscription=track_subscription,
+                transient_target=transient_target,
+                media_type=media_type,
+            )
+            results.extend(batch_results)
+            if stop_on_first_success and any(
+                    result.get("success") for result in batch_results
+            ):
+                break
+            if self._stop_requested():
+                break
+            if batch_index < batch_count and not self._wait_transfer_batch_interval():
+                break
+        if verify_landed:
+            # 1.6.52 落盘自检：批内非 pending 的成功条目共用一次季目录列目录
+            # （复用判重缓存，不额外打网盘），拿到结果后再决定状态。原来在
+            # television.py 里每轮调一次，现收进管线 confirm 阶段（同一轮
+            # 一次调用，时机与原来一致：全部内批次跑完后）。
+            verify_items = [
+                {
+                    "key": str(index),
+                    "file_id": str(result.get("file_id") or ""),
+                    "target_name": str(
+                        (result.get("item") or {}).get("target_name") or ""
+                    ),
+                }
+                for index, result in enumerate(results)
+                # 入口判重跳过的项本轮没转存，不进落盘自检（库里已有版本的
+                # 名字未必等于 target_name，自检会误判）。
+                if result.get("success")
+                and not result.get("pending_key")
+                and not result.get("skip_history")
+            ]
+            verify_map = self.verify_landed_items(
+                subscribe, mediainfo, season, verify_items
+            )
+            for index, result in enumerate(results):
+                result["landed"] = verify_map.get(str(index))
+        else:
+            for result in results:
+                result["landed"] = None
+        if not skipped_results:
+            return results
+        # 跳过结果按原下标拼回（中途停止导致批次结果不全时，未回来的
+        # 项直接缺席，不错位）。
+        by_file_id = {
+            str(result.get("file_id") or ""): result for result in results
+        }
+        merged: List[Dict[str, Any]] = []
+        for index, item in enumerate(all_items):
+            if index in skipped_results:
+                merged.append(skipped_results[index])
+                continue
+            file_id = str((item.get("file") or {}).get("id") or "")
+            if file_id in by_file_id:
+                merged.append(by_file_id[file_id])
+        return merged
 
     def _transfer_file(
             self, share_url: str, file_item: Dict[str, Any], save_path: str,
@@ -841,9 +1144,14 @@ class TransferOpsMixin(OwnerDelegator):
                             # 这次根本没触发 MP 整理，finalize 没有可轮询
                             # 的对象，置了反而会被判“MP 整理未受理”而 abort。
                             file_item["_mp_organized"] = True
+                            existing = info.get("existing_file")
                             logger.info(
-                                f"该集已在媒体库，跳过 MP 整理：{result_name}，"
-                                f"库里已有 {info.get('existing_file') or ''}"
+                                f"该集已在媒体库，跳过 MP 整理：{result_name}"
+                                + (
+                                    f"，库里已有 {existing}"
+                                    if existing
+                                    else ""
+                                )
                             )
                             return True
                         if reason == "no_target_dir":

@@ -222,6 +222,24 @@ class TestDownloaderEntryWiring(unittest.TestCase):
         init_body = source[init_at:source.index("def _ensure_notify_template_defaults", init_at)]
         self.assertIn("self._ensure_downloader_entry()", init_body)
 
+    def test_apply_config_reregisters_entry(self):
+        """静态断言：_apply_plugin_config 三个出口都要重登下载器条目。
+
+        v1.15.0：2026-11-18 线上条目丢过一次，init_plugin 外的热更新
+        路径原来从不重登。无变化 return、热更新 return、全量末尾各一次。
+        """
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "plugins.v2", "cloudsubscribex", "__init__.py",
+        )
+        source = open(path, encoding="utf-8").read()
+        apply_at = source.index("def _apply_plugin_config")
+        apply_body = source[apply_at:source.index("def _strm_scan_time_budget", apply_at)]
+        self.assertEqual(
+            apply_body.count("self._ensure_downloader_entry()"), 3,
+            "三个出口（无变化/热更新/全量末尾）各调一次",
+        )
+
 
 class TestPluginListTorrents(unittest.TestCase):
     def test_lists_runtime_tasks(self):

@@ -4,7 +4,6 @@ from datetime import date
 from typing import Any, Dict, List, Optional, Set
 
 from app.log import logger
-from app.schemas import MediaInfo
 from app.schemas.types import MediaType
 from app.utils.string import StringUtils
 
@@ -117,7 +116,6 @@ class TelevisionSyncProcessor(OwnerDelegator):
             history: List[dict],
             transfer_details: List[Dict[str, Any]],
             transferred_count: int,
-            exclude_ids: Set[int],
             manual_resources: Optional[List[Dict[str, Any]]] = None,
             allow_upgrade: bool = True,
             manual_upgrade: bool = False,
@@ -131,15 +129,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
         :param history: 历史记录列表
         :param transfer_details: 转存详情列表
         :param transferred_count: 当前已转存数量
-        :param exclude_ids: 排除的订阅ID集合
         :return: 更新后的转存数量
         """
-        track_points = not manual_resources
         # 本轮没转存时的真实原因，供频道监控展示（不再是笼统的「未发现新资源」）。
-        self._owner._last_skip_reason = ""
+        # Phase 3a 第 3 项：开场（停止检查 + 预算 + mediainfo）与资源搜索
+        # 收进 SubscribeFlowService，TV/电影共用。
         try:
-            if self._stop_requested():
-                self._owner._last_skip_reason = "已手动停止"
+            if self.check_subscribe_stopped():
                 return transferred_count
             # 原生 best_version 决定洗版订阅，插件范围进一步限制处理对象。
             # 无订阅绑定的手动提交（如 Emby 电影院卡片转存）没有洗版策略可继承：
@@ -163,7 +159,6 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     history=history,
                     transfer_details=transfer_details,
                     transferred_count=transferred_count,
-                    exclude_ids=exclude_ids,
                     target_episodes=target_episodes,
                     manual_upgrade=manual_upgrade,
                     manual_resources=manual_resources,
@@ -175,19 +170,15 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 f"订阅记录缺失 {subscribe.lack_episode} 集"
             )
 
-            # 加载该订阅的历史积分花费（用 tmdb_id + 季数作为唯一标识）
-            sub_key = self.subscription_budget_key(subscribe, MediaType.TV)
-            if track_points and self._search_handler:
-                self._search_handler.reset_subscription_budgets(sub_key)
-
-            mediainfo: MediaInfo = self._subscribe_mediainfo(
-                subscribe, MediaType.TV, cache=False
+            # 加载该订阅的历史积分花费（用 tmdb_id + 季数作为唯一标识）；
+            # Phase 3a 第 3 项：开场准备收进 SubscribeFlowService。
+            prepared = self.prepare_subscribe_entry(
+                subscribe, MediaType.TV, manual_resources,
+                mediainfo_kwargs={"cache": False},
             )
-
-            if not mediainfo:
-                logger.warn(f"无法识别媒体信息：{subscribe.name}")
-                self._owner._last_skip_reason = "无法识别媒体信息"
+            if prepared is None:
                 return transferred_count
+            track_points, sub_key, mediainfo = prepared
 
             self._set_task_phase(subscribe, "核对播出范围", 20)
             if not transient_target:
@@ -393,10 +384,16 @@ class TelevisionSyncProcessor(OwnerDelegator):
             # 成功转存的集数列表
             success_episodes = []
 
-            # 手动资源作为单一来源进入现有匹配转存链。
-            enabled_sources = (
-                ["manual"] if manual_resources
-                else self._search_handler.get_enabled_sources()
+            # 手动资源作为单一来源进入现有匹配转存链；
+            # Phase 3a 第 3 项：资源搜索收进 SubscribeFlowService。
+            enabled_sources, prefetched_results = self.collect_subscribe_resources(
+                subscribe, mediainfo, MediaType.TV,
+                manual_resources=manual_resources,
+                season=season,
+                target_episodes=missing_episodes,
+                target_episode_air_dates=target_episode_air_dates,
+                phase_label="搜索缺失剧集",
+                phase_progress=55,
             )
 
             if not enabled_sources:
@@ -404,39 +401,6 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 self._owner._last_skip_reason = "未启用可用的搜索源"
                 return transferred_count
 
-            prefetched_results = (
-                {"manual": [dict(resource) for resource in manual_resources]}
-                if manual_resources else {}
-            )
-            self._set_task_phase(
-                subscribe,
-                "处理手动网盘资源" if manual_resources else "搜索缺失剧集",
-                55,
-            )
-            if not manual_resources:
-                def on_tv_search_progress(data: Dict[str, Any]) -> None:
-                    completed = data.get("completed", 0)
-                    total = max(1, data.get("total", 1))
-                    current_prog = 45 + int((completed / total) * 20)  # 45% -> 65%
-                    self._set_task_phase(
-                        subscribe,
-                        data.get("summary") or "搜索缺失剧集",
-                        current_prog,
-                        search_active=data.get("active", False),
-                        search_channels=data.get("channels", []),
-                        search_total_results=data.get("total_results", 0),
-                    )
-
-                prefetched_results = self._search_handler.search_sources(
-                    sources=enabled_sources,
-                    mediainfo=mediainfo,
-                    media_type=MediaType.TV,
-                    season=season,
-                    target_episodes=missing_episodes,
-                    target_episode_air_dates=target_episode_air_dates,
-                    subscribe=subscribe,
-                    progress_callback=on_tv_search_progress,
-                )
             resource_batches = self._build_transfer_resource_batches(
                 enabled_sources, prefetched_results
             )
@@ -509,7 +473,6 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         logger.debug(f"跳过重复分享链接：{resource_title}")
                         continue
                     seen_share_urls.add(share_url)
-                    resource_urls = [share_url]
                     resource_by_url = {
                         str(item.get("url") or "").strip(): item
                         for item in candidate_resources
@@ -653,17 +616,18 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             )
                             continue
 
-                        for current_url in resource_urls:
-                            share_files.extend(self._validated_resource_files(
-                                current_url,
-                                resource_title=resource_title,
-                                target_season=(season if self._skip_other_season_dirs else None),
-                                log_prefix=search_prefix,
-                                target_file_ids=selected_file_ids,
-                                target_file_names=selected_file_names,
-                                recognition_work_id=getattr(mediainfo, "tmdb_id", None),
-                                recognition_season=season,
-                            ))
+                        # Phase 3a 第 3 项：resource_urls 恒为单元素
+                        # [share_url]，循环是死结构，直接调一次。
+                        share_files.extend(self._validated_resource_files(
+                            share_url,
+                            resource_title=resource_title,
+                            target_season=(season if self._skip_other_season_dirs else None),
+                            log_prefix=search_prefix,
+                            target_file_ids=selected_file_ids,
+                            target_file_names=selected_file_names,
+                            recognition_work_id=getattr(mediainfo, "tmdb_id", None),
+                            recognition_season=season,
+                        ))
                         if not share_files:
                             continue
                         # 自动搜索源常见“标题写 A、分享里是 B”的挂羊头资源；
@@ -939,28 +903,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         batch_detail_episode_sizes: Dict[str, Dict[int, int]] = {}
                         completed_missing_episodes = set()
 
-                        # 1.6.52 落盘自检：批内非 pending 的成功条目共用一次季目录列目录
-                        # （复用判重缓存，不额外打网盘），拿到结果后再决定状态。
-                        verify_map = self.verify_landed_items(
-                            subscribe,
-                            mediainfo,
-                            season,
-                            [
-                                {
-                                    "key": str(index),
-                                    "file_id": str(
-                                        transfer_result.get("file_id") or ""
-                                    ),
-                                    "target_name": str(
-                                        transfer_result["item"].get("target_name")
-                                        or ""
-                                    ),
-                                }
-                                for index, transfer_result in enumerate(transfer_results)
-                                if transfer_result["success"]
-                                and not transfer_result["pending_key"]
-                            ],
-                        )
+                        # 1.6.52 落盘自检：Phase 3a 第 1 项已收进管线 confirm
+                        # 阶段（_run_ingest_pipeline 批后统一做，一轮一次
+                        # 季目录列目录），结果挂在每条 transfer_result 的
+                        # "landed" 上；这里只读，不再另调一次自检。
+                        # （入口判重跳过的项本轮没转存，管线不给它做自检，
+                        # landed 为 None；库里已有版本的名字未必等于
+                        # target_name，自检会误判。）
 
                         # 处理结果
                         for index, transfer_result in enumerate(transfer_results):
@@ -998,7 +947,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     apply_failure(history_item, failure_reason)
                             history.append(history_item)
 
-                            landed_info = verify_map.get(str(index))
+                            landed_info = transfer_result.get("landed")
                             landed_blocked = (
                                     success
                                     and not pending_key
@@ -1024,6 +973,14 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                         f"记「待确认」"
                                     )
                             if success:
+                                if transfer_result.get("skip_history"):
+                                    # Phase 3a 第 2 项：入口判重已跳过——云盘
+                                    # 已有更优版本，不下载不转存。只记一条
+                                    # 成功历史、不重试本轮；不计入成功集数
+                                    # 与通知（Emby 里还没有它，订阅进度仍
+                                    # 以实际入库为准），下一资源仍可尝试更
+                                    # 好的版本。
+                                    continue
                                 if pending_key:
                                     history_item["finalize_key"] = pending_key
                                     transition(

@@ -57,6 +57,14 @@ _upgrade = load_module(
     "cloudsubscribex.handlers.sync.upgrade",
     "plugins.v2/cloudsubscribex/handlers/sync/upgrade.py",
 )
+# Phase 3a 第 3 项：订阅入口开场/搜索收进 SubscribeFlowService；下面
+# FakeOwner 把三个方法委托给真实组件（不用 MagicMock：__getattr__ 给
+# 未定义方法返回的 MagicMock 恒真，check_subscribe_stopped 会直接返回）。
+_subscribe_flow = load_module(
+    "cloudsubscribex.handlers.sync.subscribe_flow",
+    "plugins.v2/cloudsubscribex/handlers/sync/subscribe_flow.py",
+)
+SubscribeFlowService = _subscribe_flow.SubscribeFlowService
 TelevisionSyncProcessor = _television.TelevisionSyncProcessor
 UpgradeService = _upgrade.UpgradeService
 
@@ -121,6 +129,25 @@ class FakeOwner:
 
     def _is_cloud_upgrade_subscribe(self, subscribe):
         return False
+
+    # Phase 3a 第 3 项：订阅入口公共流程（真实组件实现，宿主即 owner）。
+    def check_subscribe_stopped(self):
+        return SubscribeFlowService(self).check_subscribe_stopped()
+
+    def prepare_subscribe_entry(
+            self, subscribe, media_type, manual_resources=None,
+            mediainfo_kwargs=None,
+    ):
+        return SubscribeFlowService(self).prepare_subscribe_entry(
+            subscribe, media_type, manual_resources, mediainfo_kwargs
+        )
+
+    def collect_subscribe_resources(
+            self, subscribe, mediainfo, media_type, **kwargs
+    ):
+        return SubscribeFlowService(self).collect_subscribe_resources(
+            subscribe, mediainfo, media_type, **kwargs
+        )
 
     def _episode_dedup_active(self):
         # 显式关闭判重门：__getattr__ 的 MagicMock 默认为真，会污染转存路径。
@@ -255,7 +282,7 @@ class ManualShareDedupeTest(unittest.TestCase):
             history=[],
             transfer_details=[],
             transferred_count=0,
-            exclude_ids=set(),
+
             manual_resources=[_manual_resource()],
             manual_upgrade=False,
             transient_target=transient_target,
@@ -306,16 +333,24 @@ class ManualUpgradeScopeTest(unittest.TestCase):
                 return {}
 
             def _build_episode_baseline(self, subscribe, mediainfo, season, include_saved=True):
-                return {}
+                # 1.15.0（Phase 3a 第 4 项）：真实网盘扫描已收进 _build 内部，
+                # upgrade 不再另调 _timed_sync_call/_scan_cloud_resource_episode_files；
+                # 这里直接返回旧版合并后的基线（E05 已有 5GB 旧文件，评分 20）。
+                return {
+                    5: {
+                        "file_name": "兰香如故.S01E05.mkv",
+                        "file_size": 5_000_000_000,
+                        "source": "真实网盘文件",
+                        "score": 20,
+                        "rule_score": 20,
+                        "cloud_dir": "/电视剧/国剧/兰香如故 (2026)/Season 01",
+                        "target_file_name": "兰香如故.S01E05.mkv",
+                        "cloud_file_id": "old-5",
+                    },
+                }
 
             def _get_mp_rule_score(self, *args, **kwargs):
                 return 20
-
-            def _timed_sync_call(self, name, func, *args, **kwargs):
-                old_file = types.SimpleNamespace(
-                    name="兰香如故.S01E05.mkv", size=5_000_000_000, id="old-5"
-                )
-                return True, {5: old_file}, "/电视剧/国剧/兰香如故 (2026)/Season 01"
 
             def _validated_resource_files(self, url, resource_title="",
                                           target_season=None, log_prefix="",
@@ -339,7 +374,7 @@ class ManualUpgradeScopeTest(unittest.TestCase):
             history=[],
             transfer_details=[],
             transferred_count=0,
-            exclude_ids=set(),
+
             manual_upgrade=False,
             manual_resources=[_manual_resource()],
         )

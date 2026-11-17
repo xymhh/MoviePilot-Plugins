@@ -1,6 +1,5 @@
 """媒体文件命名、目标分类路径计算与资源扫描服务。"""
 
-import copy
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -75,6 +74,7 @@ except Exception:
     CategoryHelper = None
 
 from ...core import CloudFile, OwnerDelegator
+from ...core.episode_parse import parse_season_episode
 from ...core.media import media_identity
 from ...utils import FileMatcher, MediaFileParser
 from ...utils.share_recognize import episode_from_name, rescue_tail_episodes_from_names
@@ -402,28 +402,48 @@ class SyncNamingService(OwnerDelegator):
         return ""
 
     @classmethod
-    def _effective_mediainfo(cls, subscribe, mediainfo: MediaInfo) -> MediaInfo:
-        """使用订阅卡片的展示信息与平台分类生成整理专用媒体副本。"""
-        effective_media = copy.deepcopy(mediainfo)
+    def _enrich_mediainfo_with_subscribe(
+            cls, subscribe, mediainfo: MediaInfo
+    ) -> MediaInfo:
+        """用订阅卡片的展示信息覆盖媒体副本（标题/年份/分类）。
+
+        由唯一实现 ``resolve_effective_mediainfo`` 在深拷贝后调用；
+        不直接改调用方传入的 mediainfo。
+        """
         subscribe_title = str(getattr(subscribe, "name", "") or "").strip()
         if subscribe_title:
-            effective_media.title = subscribe_title
+            mediainfo.title = subscribe_title
         subscribe_year = getattr(subscribe, "year", None)
         if subscribe_year:
-            effective_media.year = subscribe_year
+            mediainfo.year = subscribe_year
 
-        cat = cls._resolve_classification_category(subscribe, effective_media)
+        cat = cls._resolve_classification_category(subscribe, mediainfo)
         if cat:
-            effective_media.category = cat
-            effective_media.library_category = cat
-            if classify_media and getattr(effective_media, "classification", None) is None:
+            mediainfo.category = cat
+            mediainfo.library_category = cat
+            if classify_media and getattr(mediainfo, "classification", None) is None:
                 try:
-                    c = classify_media(effective_media)
+                    c = classify_media(mediainfo)
                     if getattr(c, "classification", None) is not None:
-                        effective_media.classification = c.classification
+                        mediainfo.classification = c.classification
                 except Exception:
                     logger.debug("_effective_mediainfo 分支忽略异常", exc_info=True)
-        return effective_media
+        return mediainfo
+
+    @classmethod
+    def _effective_mediainfo(cls, subscribe, mediainfo: MediaInfo) -> MediaInfo:
+        """使用订阅卡片的展示信息与平台分类生成整理专用媒体副本。
+
+        薄适配：唯一实现见 ``handlers/sync/utils.py`` 的
+        ``resolve_effective_mediainfo``（Phase 3a 第 6 项）。
+        """
+        from .utils import resolve_effective_mediainfo
+
+        return resolve_effective_mediainfo(
+            mediainfo=mediainfo,
+            subscribe=subscribe,
+            enrich=cls._enrich_mediainfo_with_subscribe,
+        )
 
     def _resolve_resource_season_dir(
             self,
@@ -544,13 +564,15 @@ class SyncNamingService(OwnerDelegator):
             custom_words_list = [w for w in (cw.split("\n") if isinstance(cw, str) else list(cw)) if w.strip()]
 
         for file_name in file_names:
-            file_meta = MetaInfo(Path(str(file_name)).stem, custom_words=custom_words_list)
-            file_season = file_meta.begin_season or season
+            # 季集解析唯一入口：MetaInfo 口径 + 单文件兜底（见
+            # core/episode_parse.parse_season_episode）。
+            file_season, episodes = parse_season_episode(
+                Path(str(file_name)).stem,
+                custom_words_list,
+                season=season,
+            )
             if file_season != season:
                 continue
-            episodes = list(getattr(file_meta, "episode_list", None) or [])
-            if not episodes and file_meta.begin_episode:
-                episodes = [file_meta.begin_episode]
             for episode in episodes:
                 if start_episode is not None and episode < start_episode:
                     continue
@@ -567,52 +589,49 @@ class SyncNamingService(OwnerDelegator):
             start_episode: int,
             total_episode: int,
     ) -> Tuple[bool, Dict[int, CloudFile], str]:
-        """一次读取目标季目录，返回真实存在的逐集网盘文件。"""
-        cloud_media_root = getattr(self, "_CLOUD_MEDIA_ROOT", "/")
-        cloud_dir = self._resolve_resource_season_dir(
-            cloud_media_root, subscribe, mediainfo, season
+        """一次读取目标季目录，返回真实存在的逐集网盘文件。
+
+        Phase 3a 第 4 项：列目录走 ``_season_dir_files``（与
+        ``_collect_episode_versions`` / ``_build_episode_baseline`` 共用
+        ``_season_listing_cache``，同一季只列一次目录）。返回的仍是
+        ``CloudFile``（按 ``file_id``/``file_name``/``file_size`` 重建），
+        调用方（upgrade / pt_upgrade / ``_scan_cloud_resource_episodes``）
+        只读 ``.name``/``.size``/``.id``，行为不变。
+        """
+        verified, cloud_path, files = self._season_dir_files(
+            subscribe, mediainfo, season
         )
-        if not cloud_dir:
-            return False, {}, ""
-        cloud_path = cloud_dir.as_posix()
-        cloud_directories = getattr(self, "_cloud_directories", None)
-        if not cloud_directories:
-            return False, {}, cloud_path
-
-        lookup = cloud_directories.resolve_directory(cloud_path)
-        if not lookup.checked:
-            return False, {}, cloud_path
-        if lookup.directory_id is None:
-            return True, {}, cloud_path
-
-        listing = cloud_directories.list_directory(lookup.directory_id)
-        if not listing.checked:
+        if not verified:
             return False, {}, cloud_path
         episode_files: Dict[int, CloudFile] = {}
         upgrade_mode = getattr(self, "_upgrade_mode", "largest")
-        for item in listing.files:
-            if item.is_directory:
-                continue
-            name = item.name
+        for item in files:
+            name = str(item.get("file_name") or "")
             if not MediaFileParser.is_video(name):
                 continue
             episodes = self._parse_resource_episode_names(
                 [name], season, start_episode, total_episode, subscribe=subscribe
             )
+            candidate = CloudFile(
+                id=str(item.get("file_id") or ""),
+                name=name,
+                is_directory=False,
+                size=int(item.get("file_size") or 0),
+            )
             for episode in episodes:
                 current = episode_files.get(episode)
                 if not current:
-                    episode_files[episode] = item
+                    episode_files[episode] = candidate
                     continue
                 current_size = int(getattr(current, "size", 0) or 0)
-                candidate_size = int(getattr(item, "size", 0) or 0)
+                candidate_size = int(getattr(candidate, "size", 0) or 0)
                 prefer_candidate = (
                     candidate_size < current_size
                     if upgrade_mode == "smallest"
                     else candidate_size > current_size
                 )
                 if prefer_candidate:
-                    episode_files[episode] = item
+                    episode_files[episode] = candidate
         return True, episode_files, cloud_path
 
     def _cloud_drive_name(self) -> str:

@@ -754,7 +754,6 @@ class SyncExecutionService(OwnerDelegator):
             logger.debug("当前没有电影或电视剧订阅")
             return True
 
-        exclude_ids = set(self._exclude_subscribes or [])
         all_subscribes = movie_subscribes + tv_subscribes
         excluded_count = 0
         deferred_count = 0
@@ -911,7 +910,6 @@ class SyncExecutionService(OwnerDelegator):
                         self._run_subscription_group,
                         group,
                         [],
-                        exclude_ids,
                         manual_resources,
                     ): group
                     for group in grouped_subscribes.values()

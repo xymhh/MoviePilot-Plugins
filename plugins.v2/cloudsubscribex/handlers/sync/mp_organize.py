@@ -56,55 +56,20 @@ class MpOrganizeMixin(OwnerDelegator):
     ) -> Optional[Any]:
         """确定一次整理用的有效 MediaInfo。
 
+        薄适配：唯一实现见 ``handlers/sync/utils.py`` 的
+        ``resolve_effective_mediainfo``（Phase 3a 第 6 项）。
         mediainfo 非空就直接用它；否则用 media 字典拼一个最小
-        MediaInfo（title/tmdb_id/year/season/category 有就带上，
-        type 必须能确定）。拼不出 type 时返回 None——没有类型时
-        DirectoryHelper.get_dir 会按 priority 0 回落到“夸克追更”
-        条目，解析出的目标目录是错的，不如直接不触发。
+        MediaInfo，拼不出 type 时返回 None。
         """
-        if mediainfo is not None:
-            return mediainfo
-        if not isinstance(media, dict):
-            return None
-        try:
-            from app.core.context import MediaInfo
-            from app.schemas.types import MediaType
-        except Exception as error:
-            logger.debug(
-                f"MP 整理触发不可用（宿主未提供 MediaInfo）：{error}",
-                exc_info=True,
-            )
-            return None
-        raw_type = media.get("media_type")
-        if raw_type is None:
-            return None
-        if isinstance(raw_type, str):
-            text = raw_type.strip().lower()
-            if text in ("tv", "电视剧", "电视剧集"):
-                mtype = MediaType.TV
-            elif text in ("movie", "电影"):
-                mtype = MediaType.MOVIE
-            else:
-                return None
-        else:
-            mtype = raw_type
-        kwargs: Dict[str, Any] = {"type": mtype}
-        title = media.get("media_title") or media.get("title")
-        if title:
-            kwargs["title"] = str(title)
-        for key in ("tmdb_id", "year", "season", "category"):
-            if media.get(key) not in (None, ""):
-                kwargs[key] = media[key]
-        try:
-            return MediaInfo(**kwargs)
-        except Exception as error:
-            logger.debug(f"拼最小 MediaInfo 失败：{error}", exc_info=True)
-            return None
+        from .utils import resolve_effective_mediainfo
+
+        return resolve_effective_mediainfo(mediainfo=mediainfo, media=media)
 
     def _resolve_mp_target_directory(
             self,
             mediainfo: Any = None,
             media: Optional[Dict[str, Any]] = None,
+            effective: Any = None,
     ) -> Optional[object]:
         """用不带 src_path 的 get_dir 解析 MP 整理目标目录条目。
 
@@ -112,9 +77,11 @@ class MpOrganizeMixin(OwnerDelegator):
         媒体类型匹配目录条目；带 src_path 时 MP 会按源路径前缀匹配，
         本地 /downloads 的文件会被匹配到“夸克追更”条目，library_path
         是 /转存/，文件就进不了媒体库。解析不到或宿主未提供
-        DirectoryHelper 时返回 None。
+        DirectoryHelper 时返回 None。``effective`` 由调用方传入时不
+        再重复解析（Phase 3a 第 6 项：trigger 内只调一次）。
         """
-        effective = self._effective_mediainfo(mediainfo, media)
+        if effective is None:
+            effective = self._effective_mediainfo(mediainfo, media)
         if effective is None:
             return None
         try:
@@ -134,106 +101,159 @@ class MpOrganizeMixin(OwnerDelegator):
             logger.debug(f"解析 MP 整理目标目录失败：{error}", exc_info=True)
             return None
 
-    def _library_episode_exists(
-            self,
-            library_path: str,
-            file_name: str,
-            season: Any = None,
-    ) -> Optional[str]:
-        """查目标媒体库目录里是否已有同集文件，有则返回已存在的文件名。
+    def _parse_file_season_episodes(
+            self, stem: str, season: Any = None
+    ) -> Tuple[Optional[int], list]:
+        """解析文件名词干的季集（Phase 3a 第 7 项唯一入口）。
 
-        按 MetaInfo 口径比对季集（不是按文件名精确比对）：库里那份
-        可能是带 {tmdb-} 标记的、也可能是不带标记的 mp4/mkv，只要
-        季集相同就算重复。查不到、解析不出集号、目录不存在、列目录
-        失败时都返回 None（放行整理）：一次网络抖动不能拦住正常入库，
-        且目录不存在时该集一定不在库里。
+        唯一入口 ``parse_season_episode`` 不可导入时（精简测试环境）
+        退回 MetaInfo 直解析；生产环境一定走唯一入口。
         """
         try:
-            from pathlib import Path as _Path
-        except Exception:
-            return None
-        stem = str(_Path(str(file_name or "")).stem or "").strip()
-        if not stem:
-            return None
+            from ...core.episode_parse import parse_season_episode
+
+            return parse_season_episode(stem, season=season)
+        except Exception as error:  # noqa: BLE001 - 唯一入口不可用时退回 MetaInfo 直解析
+            logger.debug(f"季集解析唯一入口不可用，退回 MetaInfo：{error}", exc_info=True)
         try:
-            dedup_meta = getattr(self, "_dedup_meta_info", None)
-            if callable(dedup_meta):
-                meta = dedup_meta(stem, None)
-            else:
-                from app.core.metainfo import MetaInfo
-                meta = MetaInfo(stem)
+            from app.core.metainfo import MetaInfo
+
+            meta = MetaInfo(stem)
         except Exception:
-            return None
+            return None, []
         episodes = list(getattr(meta, "episode_list", None) or [])
         if not episodes and getattr(meta, "begin_episode", None):
             episodes = [meta.begin_episode]
-        if not episodes:
+        return getattr(meta, "begin_season", None), episodes
+
+    def _episode_exists_in_library_via_mp(
+            self,
+            mediainfo: Any = None,
+            media: Optional[Dict[str, Any]] = None,
+            season: Any = None,
+            file_name: str = "",
+            effective: Any = None,
+    ) -> Optional[bool]:
+        """入库前用 MP 自己的 get_no_exists_info 问媒体库（Emby 口径）
+        这集在不在（Phase 3a 第 12 项）。
+
+        返回 True=已在库（跳过整理），False=不在库（继续整理），
+        None=查不出来（身份缺失/季集解析不出/宿主异常——fail-open，
+        继续整理，绝不拦正常入库）。
+
+        不自己钻媒体库文件夹列目录：MP 的整理去重只看算出的目标路径
+        存不存在，剧集文件夹是按重命名格式算出来的，插件手算会随
+        格式改动而错位；MP 下载链的 get_no_exists_info 按 tmdb id +
+        季问 Emby，是 MP 自己的按集查库口径。给 mediainfo 拼的季集
+        列表就是待查的这几集，MP 返回的缺集里没有它们即已在库。
+        电影没有季集：MP 说整部存在即已在库。
+
+        ``effective`` 由调用方传入时不再重复解析（Phase 3a 第 6 项：
+        一次整理只解析一次有效 MediaInfo）。
+        """
+        if effective is None:
+            effective = self._effective_mediainfo(mediainfo, media)
+        if effective is None:
             return None
         try:
-            target_episodes = {int(episode) for episode in episodes}
-        except (TypeError, ValueError):
-            return None
-        file_season = getattr(meta, "begin_season", None)
-        cloud_directories = getattr(self, "_cloud_directories", None)
-        if cloud_directories is None:
-            return None
-        target_dir = str(library_path or "").strip().rstrip("/") or "/"
-        try:
-            lookup = cloud_directories.resolve_directory(target_dir)
-        except Exception:
-            return None
-        if not getattr(lookup, "checked", False):
-            return None
-        if getattr(lookup, "directory_id", None) is None:
-            return None
-        try:
-            listing = cloud_directories.list_directory(lookup.directory_id)
-        except Exception:
-            return None
-        if not getattr(listing, "checked", False):
-            return None
-        try:
-            from ...utils.file_parser import MediaFileParser
-        except Exception:
-            return None
-        for item in getattr(listing, "files", []) or []:
-            if getattr(item, "is_directory", False):
-                continue
-            name = str(getattr(item, "name", "") or "")
-            if not MediaFileParser.is_video(name):
-                continue
-            try:
-                if callable(dedup_meta):
-                    item_meta = dedup_meta(_Path(name).stem, None)
-                else:
-                    from app.core.metainfo import MetaInfo
-                    item_meta = MetaInfo(_Path(name).stem)
-            except Exception:
-                continue
-            item_season = getattr(item_meta, "begin_season", None)
-            if item_season is None:
-                item_season = season
-            if (
-                    file_season is not None and item_season is not None
-                    and int(file_season) != int(item_season)
-            ):
-                continue
-            item_episodes = list(
-                getattr(item_meta, "episode_list", None) or []
+            from app.chain.download import DownloadChain
+            from app.core.metainfo import MetaInfo
+            from app.schemas.types import MediaType
+        except Exception as error:
+            logger.debug(
+                f"MP 查库不可用（宿主未提供下载链）：{error}", exc_info=True
             )
-            if not item_episodes and getattr(
-                    item_meta, "begin_episode", None
-            ):
-                item_episodes = [item_meta.begin_episode]
+            return None
+        tmdb_id = getattr(effective, "tmdb_id", None)
+        if tmdb_id in (None, "") and isinstance(media, dict):
+            tmdb_id = media.get("tmdb_id")
+        if tmdb_id in (None, ""):
+            return None
+        mtype = getattr(effective, "type", None)
+        if mtype is None:
+            return None
+        try:
+            import copy as _copy
+
+            probe_media = _copy.deepcopy(effective)
+            probe_media.media_source = (
+                getattr(effective, "media_source", None) or "themoviedb"
+            )
+            probe_media.media_id = (
+                getattr(effective, "media_id", None) or str(tmdb_id)
+            )
+            meta = MetaInfo(getattr(effective, "title", "") or "")
+            meta.year = getattr(effective, "year", None)
+            meta.type = mtype
+            chain = getattr(self, "download_chain", None) or DownloadChain()
+            if mtype == MediaType.MOVIE:
+                exists, _no_exists = chain.get_no_exists_info(
+                    meta=meta, mediainfo=probe_media
+                )
+                return bool(exists)
+            if mtype != MediaType.TV:
+                return None
+            file_season, episodes = (None, [])
+            stem = str(Path(str(file_name or "")).stem or "").strip()
+            if stem:
+                file_season, episodes = self._parse_file_season_episodes(
+                    stem, season=season
+                )
+            target_season = file_season
+            if target_season is None:
+                target_season = season
+            if target_season is None and isinstance(media, dict):
+                target_season = media.get("season")
+            if target_season is None:
+                target_season = getattr(effective, "season", None)
+            if target_season is None or not episodes:
+                return None
             try:
-                if any(
-                        int(episode) in target_episodes
-                        for episode in item_episodes
-                ):
-                    return name
+                target_season = int(target_season)
+                targets = sorted({int(episode) for episode in episodes})
             except (TypeError, ValueError):
-                continue
-        return None
+                return None
+            if not targets:
+                return None
+            probe_media.season = target_season
+            probe_media.seasons = {target_season: list(targets)}
+            meta.begin_season = target_season
+            exists, no_exists = chain.get_no_exists_info(
+                meta=meta, mediainfo=probe_media
+            )
+        except Exception as error:
+            logger.debug(f"MP 查库失败（放行整理）：{error}", exc_info=True)
+            return None
+        if exists:
+            return True
+        # exists=False：按 MP 的 _append_no_exists 语义读 no_exists——
+        # 缺集条目 episodes=[] 表示整季缺失（不是“没有缺集”），目标
+        # 集全部算缺失；没有目标季的条目时该季齐全；no_exists 为空
+        # 则是 MP 没能查出来（识别失败等），fail-open，不拦整理。
+        if not no_exists:
+            return None
+        missing: set = set()
+        season_seen = False
+        for season_map in (no_exists or {}).values():
+            for key, info in (season_map or {}).items():
+                try:
+                    if int(key) != target_season:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                season_seen = True
+                absent = getattr(info, "episodes", None) or []
+                if not absent:
+                    # 整季缺失：待查的这几集全都不在库里。
+                    missing.update(targets)
+                    continue
+                try:
+                    missing.update(int(episode) for episode in absent)
+                except (TypeError, ValueError):
+                    continue
+        if not season_seen:
+            return True
+        return not any(episode in missing for episode in targets)
 
     def trigger_mp_organize(
             self,
@@ -308,8 +328,12 @@ class MpOrganizeMixin(OwnerDelegator):
                     "reason": "no_source_file",
                     "message": "MP 整理未触发：本地挂载未见刚保存的文件，文件未进媒体库",
                 }
+            # Phase 3a 第 6 项：一次整理只解析一次有效 MediaInfo，
+            # 目标目录解析复用同一份，不再重复拼最小 MediaInfo。
             effective = self._effective_mediainfo(mediainfo, media)
-            conf = self._resolve_mp_target_directory(mediainfo, media)
+            conf = self._resolve_mp_target_directory(
+                mediainfo, media, effective=effective
+            )
             if conf is None:
                 logger.debug(
                     f"MP 整理暂不触发：未解析到目标目录：{local_path}"
@@ -318,26 +342,26 @@ class MpOrganizeMixin(OwnerDelegator):
                     "reason": "no_target_dir",
                     "message": "MP 整理未触发：未解析到目标目录，文件未进媒体库，下一轮重试",
                 }
-            # v1.12.16：入库前先查库里有没有这集。同一集从两个来源各下
-            # 一份时，两边都会触发 MP 整理，文件名一不一样（带 {tmdb-}
-            # 标记/不带、mp4/mkv）就互相覆盖不了，全进库了（玫瑰战争
-            # E24/E25）。查到已存在就跳过，不触发、不记失败、不重试。
-            existing = self._library_episode_exists(
-                str(getattr(conf, "library_path", "") or ""),
-                file_name,
-                season if season is not None else (
+            # Phase 3a 第 12 项：入库前用 MP 自己的 get_no_exists_info
+            # （Emby 口径）问这集在不在。旧 _library_episode_exists
+            # 只列媒体库根目录一层，子文件夹里的文件看不见，同一集
+            # 两份照样进库（玫瑰战争 E24/E25、多喜一家人 E05/E06）；
+            # MP 的整理去重只看算出的目标路径，剧集文件夹是按重命名
+            # 格式算出来的，插件不自己钻文件夹。查不出来（None）就
+            # 放行整理，绝不拦正常入库。
+            exists = self._episode_exists_in_library_via_mp(
+                mediainfo, media,
+                season=season if season is not None else (
                     media.get("season") if isinstance(media, dict) else None
                 ),
+                file_name=file_name,
+                effective=effective,
             )
-            if existing:
-                logger.info(
-                    f"该集已在媒体库，跳过 MP 整理：{local_path}，"
-                    f"库里已有 {existing}"
-                )
+            if exists is True:
+                logger.info(f"该集已在媒体库，跳过 MP 整理：{local_path}")
                 return False, {
                     "reason": "already_in_library",
-                    "message": f"该集已在媒体库，跳过整理：库里已有 {existing}",
-                    "existing_file": existing,
+                    "message": "该集已在媒体库，跳过整理",
                 }
             mtype = None
             if effective is not None:

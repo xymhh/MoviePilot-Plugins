@@ -231,8 +231,12 @@ def _frozen_plugin_history_episode_files(self, subscribe, season: int) -> Dict[i
     return result
 
 
-def _old_build_episode_baseline(self, subscribe, mediainfo, season, include_saved=True):
-    """冻结副本：v1.13.0 的 `_build_episode_baseline`（四路全开），仅供奇偶校验。"""
+def _old_build_episode_baseline(self, subscribe, mediainfo, season, include_saved=True, score_cache=None):
+    """冻结副本：v1.13.0 的 `_build_episode_baseline`（四路全开），仅供奇偶校验。
+
+    1.15.0（Phase 3a 第 4 项）：调用方会传 ``score_cache``（一次查询内评分
+    共享）；旧实现没有共享缓存，这里接受并忽略该参数，只保证算出的基线不变。
+    """
     candidates = self._transfer_history_episode_files(subscribe, season)
     for episode, items in self._plugin_history_episode_files(subscribe, season).items():
         candidates.setdefault(episode, []).extend(items)
@@ -438,6 +442,10 @@ def _make_parity_handler(*, old, scan_files, mp_candidates, plugin_history,
     handler._platform_target = SyncNamingService._platform_target.__get__(handler, EpisodeDedupService)
     handler._platform_target_file = SyncNamingService._platform_target_file.__get__(handler, EpisodeDedupService)
     handler._resolve_resource_season_dir = SyncNamingService._resolve_resource_season_dir.__get__(handler, EpisodeDedupService)
+    handler._parse_resource_episode_names = SyncNamingService._parse_resource_episode_names.__get__(handler, EpisodeDedupService)
+    # 1.15.0（Phase 3a 第 4 项）：新 _build_episode_baseline 内部调
+    # _scan_cloud_resource_episode_files 做真实网盘文件覆盖，须绑上。
+    handler._scan_cloud_resource_episode_files = SyncNamingService._scan_cloud_resource_episode_files.__get__(handler, EpisodeDedupService)
     handler._find_cloud_movie_file = SyncNamingService._find_cloud_movie_file.__get__(handler, EpisodeDedupService)
     handler._cloud_drive_name = lambda: "测试网盘"
     handler._upgrade_mode = "largest"
@@ -491,6 +499,9 @@ def _make_parity_handler(*, old, scan_files, mp_candidates, plugin_history,
         handler._build_episode_baseline = _old_build_episode_baseline.__get__(handler, EpisodeDedupService)
     else:
         handler._build_episode_baseline = UpgradeBaselineService._build_episode_baseline.__get__(handler, EpisodeDedupService)
+        # 1.15.0（Phase 3a 第 4 项）：新 _build 内部调同组件的 gather；本
+        # harness 的 handler 是裸 EpisodeDedupService 实例，跨组件方法须手动绑。
+        handler._gather_episode_version_candidates = UpgradeBaselineService._gather_episode_version_candidates.__get__(handler, EpisodeDedupService)
     return handler
 
 

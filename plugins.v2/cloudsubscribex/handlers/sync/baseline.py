@@ -3,7 +3,7 @@
 import json
 import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from app.db import SessionFactory
 from app.schemas import MediaInfo
@@ -134,14 +134,32 @@ class UpgradeBaselineService(OwnerDelegator):
             )
         return episode_files
 
-    def _build_episode_baseline(
+    def _gather_episode_version_candidates(
             self,
             subscribe,
             mediainfo: MediaInfo,
             season: int,
-            include_saved: bool = True,
-    ) -> Dict[int, Dict[str, Any]]:
-        """合并整理历史、手动基线与媒体库路径；STRM 不提供文件大小。"""
+            score_cache: Optional[Dict[tuple, int]] = None,
+    ) -> Dict[int, List[Dict[str, Any]]]:
+        """收集逐集现有版本的全部候选（整理历史 + 手动基线 + 媒体服务器）。
+
+        Phase 3a 第 4 项：洗版三处合一的共享候选层。``_build_episode_baseline``
+        与 ``_collect_episode_versions``（经 ``_baseline_episode_versions``）
+        都走这里，不再各写一份候选收集。评分结果写进 ``score_cache``（同一
+        查询内同名同体积只评一次）；不传时用一次性的本地缓存。
+        """
+        cache = score_cache if score_cache is not None else {}
+
+        def _score(rule_title: str, file_size: int) -> int:
+            score_key = (str(rule_title or "").strip(), int(file_size or 0))
+            score = cache.get(score_key)
+            if score is None:
+                score = self._get_mp_rule_score(
+                    rule_title, file_size, subscribe, season, mediainfo
+                )
+                cache[score_key] = score
+            return int(score or 0)
+
         candidates = self._transfer_history_episode_files(subscribe, season)
 
         manual_baseline = getattr(subscribe, "_manual_media_baseline", {}) or {}
@@ -194,46 +212,134 @@ class UpgradeBaselineService(OwnerDelegator):
                 "source": "媒体服务器",
             })
 
-        baseline: Dict[int, Dict[str, Any]] = {}
-        score_cache: Dict[tuple, int] = {}
+        scored: Dict[int, List[Dict[str, Any]]] = {}
         for episode, items in candidates.items():
-            scored = []
+            scored_items = []
             for item in items:
                 rule_title = str(
                     item.get("rule_title") or item["file_name"]
                 ).strip()
-                score_key = (rule_title, int(item["file_size"] or 0))
-                score = score_cache.get(score_key)
-                if score is None:
-                    score = self._get_mp_rule_score(
-                        rule_title, item["file_size"], subscribe, season, mediainfo
-                    )
-                    score_cache[score_key] = score
-                scored.append({**item, "score": score, "rule_score": score})
-            if scored:
-                baseline[int(episode)] = max(
-                    scored,
-                    key=lambda item: (
-                        int(item.get("score") or 0),
-                        (
-                            int(int(item.get("file_size") or 0) > 0)
-                            if self._upgrade_mode == "smallest" else 0
-                        ),
-                        (
-                            -int(item.get("file_size") or 0)
-                            if self._upgrade_mode == "smallest"
-                            else int(item.get("file_size") or 0)
-                        ),
+                score = _score(rule_title, int(item["file_size"] or 0))
+                scored_items.append(
+                    {**item, "score": score, "rule_score": score}
+                )
+            if scored_items:
+                scored[int(episode)] = scored_items
+        return scored
+
+    def _build_episode_baseline(
+            self,
+            subscribe,
+            mediainfo: MediaInfo,
+            season: int,
+            include_saved: bool = True,
+            score_cache: Optional[Dict[tuple, int]] = None,
+    ) -> Dict[int, Dict[str, Any]]:
+        """每集现有最佳版本（Phase 3a 第 4 项：洗版三处合一）。
+
+        候选来自 ``_gather_episode_version_candidates``（整理历史、手动基线、
+        媒体服务器），真实网盘文件来自 ``_scan_cloud_resource_episode_files``
+        （与 ``_collect_episode_versions`` 共用 ``_season_dir_files`` 的缓存
+        列目录结果，同一季只列一次目录）；评分结果在 ``score_cache`` 内共享，
+        同一查询内同名同体积只评一次。STRM 不提供文件大小。
+        """
+        cache = score_cache if score_cache is not None else {}
+        candidates = self._gather_episode_version_candidates(
+            subscribe, mediainfo, season, score_cache=cache
+        )
+        # 真实网盘文件覆盖：旧版这段在 upgrade.py 里（基线 + 扫描两次查询再手
+        # 动合并），现收进基线内部。扫描失败时只丢覆盖信息，不丢基线本身。
+        try:
+            cloud_valid, cloud_episode_files, cloud_dir = (
+                self._scan_cloud_resource_episode_files(
+                    subscribe=subscribe,
+                    mediainfo=mediainfo,
+                    season=season,
+                    start_episode=max(
+                        1, int(getattr(subscribe, "start_episode", 1) or 1)
+                    ),
+                    total_episode=max(
+                        0, int(getattr(subscribe, "total_episode", 0) or 0)
                     ),
                 )
-                media_server_size = self._int_or_zero(
-                    (media_server_items.get(int(episode)) or {}).get("size")
-                )
-                if media_server_size and not int(
-                        baseline[int(episode)].get("file_size") or 0
-                ):
-                    baseline[int(episode)]["file_size"] = media_server_size
-                    baseline[int(episode)]["size_source"] = "媒体服务器"
+            )
+        except Exception as error:
+            logger.debug(
+                f"洗版基线网盘扫描失败：{mediainfo.title_year}，{error}"
+            )
+            cloud_valid, cloud_episode_files, cloud_dir = False, {}, ""
+
+        baseline: Dict[int, Dict[str, Any]] = {}
+        for episode, items in candidates.items():
+            best = dict(max(
+                items,
+                key=lambda item: (
+                    int(item.get("score") or 0),
+                    (
+                        int(int(item.get("file_size") or 0) > 0)
+                        if self._upgrade_mode == "smallest" else 0
+                    ),
+                    (
+                        -int(item.get("file_size") or 0)
+                        if self._upgrade_mode == "smallest"
+                        else int(item.get("file_size") or 0)
+                    ),
+                ),
+            ))
+            media_server_size = max(
+                (
+                    self._int_or_zero(item.get("file_size"))
+                    for item in items
+                    if str(item.get("source") or "") == "媒体服务器"
+                ),
+                default=0,
+            )
+            if media_server_size and not int(best.get("file_size") or 0):
+                best["file_size"] = media_server_size
+                best["size_source"] = "媒体服务器"
+            if cloud_valid:
+                cloud_file = cloud_episode_files.get(int(episode))
+                if cloud_file:
+                    cloud_name = str(getattr(cloud_file, "name", "") or "")
+                    cloud_size = int(getattr(cloud_file, "size", 0) or 0)
+                    if not int(best.get("file_size") or 0):
+                        best["file_size"] = cloud_size
+                        best["size_source"] = "真实网盘文件"
+                    best.update({
+                        "cloud_dir": cloud_dir,
+                        "target_file_name": cloud_name,
+                        "cloud_file_id": str(
+                            getattr(cloud_file, "id", "") or ""
+                        ),
+                    })
+            baseline[int(episode)] = best
+
+        if cloud_valid:
+            for episode, cloud_file in cloud_episode_files.items():
+                episode_number = int(episode)
+                if episode_number in baseline:
+                    continue
+                cloud_name = str(getattr(cloud_file, "name", "") or "")
+                cloud_size = int(getattr(cloud_file, "size", 0) or 0)
+                score_key = (cloud_name, cloud_size)
+                score = cache.get(score_key)
+                if score is None:
+                    score = self._get_mp_rule_score(
+                        cloud_name, cloud_size, subscribe, season, mediainfo
+                    )
+                    cache[score_key] = score
+                baseline[episode_number] = {
+                    "file_name": cloud_name,
+                    "file_size": cloud_size,
+                    "source": "真实网盘文件",
+                    "score": int(score or 0),
+                    "rule_score": int(score or 0),
+                    "cloud_dir": cloud_dir,
+                    "target_file_name": cloud_name,
+                    "cloud_file_id": str(
+                        getattr(cloud_file, "id", "") or ""
+                    ),
+                }
 
         if include_saved:
             for episode, score in self._read_ep_priority(subscribe).items():

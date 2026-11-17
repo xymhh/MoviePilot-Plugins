@@ -12,6 +12,7 @@ from app.log import logger
 from app.schemas import MediaInfo
 
 from ...core import OwnerDelegator
+from ...core.episode_parse import parse_season_episode
 from ...utils.cache import normalize_platform_cache_key
 from ...utils.file_parser import MediaFileParser
 from ...utils.quality_compare import compare_quality
@@ -104,8 +105,14 @@ class EpisodeDedupService(OwnerDelegator):
             subscribe,
             mediainfo: MediaInfo,
             season: int,
+            score_cache: Optional[Dict[tuple, int]] = None,
     ) -> Dict[int, List[Dict[str, Any]]]:
-        """扫描目标季目录，用 MetaInfo 解析每条视频的季集，返回全部版本。"""
+        """扫描目标季目录，用 MetaInfo 解析每条视频的季集，返回全部版本。
+
+        Phase 3a 第 4 项：评分结果写进 ``score_cache``（同一查询内同名同体积
+        只评一次）；不传时用一次性的本地缓存。调用方 ``_collect_episode_versions``
+        会把同一个缓存传给基线侧，实现一次查询内评分共享。
+        """
         verified, cloud_path, files = self._season_dir_files(
             subscribe, mediainfo, season
         )
@@ -113,6 +120,7 @@ class EpisodeDedupService(OwnerDelegator):
             return {}
 
         result: Dict[int, List[Dict[str, Any]]] = {}
+        cache = score_cache if score_cache is not None else {}
         custom_words = None
         raw_words = getattr(subscribe, "custom_words", None)
         if raw_words:
@@ -124,17 +132,26 @@ class EpisodeDedupService(OwnerDelegator):
 
         for item in files:
             name = str(item.get("file_name") or "")
-            file_meta = self._dedup_meta_info(Path(name).stem, custom_words)
-            file_season = getattr(file_meta, "begin_season", None) or season
+            # 季集解析唯一入口：MetaInfo 口径 + 单文件兜底（见
+            # core/episode_parse.parse_season_episode）。
+            file_season, episodes = parse_season_episode(
+                Path(name).stem,
+                custom_words,
+                season=season,
+                meta_factory=self._dedup_meta_info,
+            )
             if file_season != season:
                 continue
-            episodes = list(getattr(file_meta, "episode_list", None) or [])
-            if not episodes and getattr(file_meta, "begin_episode", None):
-                episodes = [file_meta.begin_episode]
             size = int(item.get("file_size") or 0)
             file_id = str(item.get("file_id") or "")
             # 目录扫描出的旧版本同样要按规则组评分，否则会被当成 0 分而被无条件替换
-            score = self._get_mp_rule_score(name, size, subscribe, season, mediainfo)
+            score_key = (name, size)
+            score = cache.get(score_key)
+            if score is None:
+                score = self._get_mp_rule_score(
+                    name, size, subscribe, season, mediainfo
+                )
+                cache[score_key] = score
             for episode in episodes:
                 result.setdefault(int(episode), []).append({
                     "file_id": file_id,
@@ -166,12 +183,26 @@ class EpisodeDedupService(OwnerDelegator):
             subscribe,
             mediainfo: MediaInfo,
             season: int,
+            score_cache: Optional[Dict[tuple, int]] = None,
     ) -> Dict[int, List[Dict[str, Any]]]:
-        """从插件基线取逐集版本（含 file_id / cloud_dir，覆盖文件名无季集的情况）。"""
+        """从插件基线取逐集版本（含 file_id / cloud_dir，覆盖文件名无季集的情况）。
+
+        Phase 3a 第 4 项：评分缓存由 ``_collect_episode_versions`` 一次查询
+        内共享（经 ``_build_episode_baseline`` 透传给 gather）；基线侧仍只
+        取每集最佳（与判重旧口径一致，见 _collect 的说明）。
+        """
         try:
-            baseline = self._build_episode_baseline(
-                subscribe, mediainfo, season, include_saved=False
-            )
+            try:
+                baseline = self._build_episode_baseline(
+                    subscribe, mediainfo, season, include_saved=False,
+                    score_cache=score_cache,
+                )
+            except TypeError:
+                # 鸭子类型的 _build 实现（测试替身/旧覆盖）可能不接受
+                # score_cache；缓存只是优化，不带它重试一次。
+                baseline = self._build_episode_baseline(
+                    subscribe, mediainfo, season, include_saved=False,
+                )
         except Exception as error:
             logger.debug(f"判重基线构建失败：{mediainfo.title_year}，{error}")
             return {}
@@ -255,9 +286,15 @@ class EpisodeDedupService(OwnerDelegator):
 
         基线里的历史条目先过一遍「目标目录有没有实物」的校验：查无实据的按缺失处理
         （自动修复缺失集），只留日志说明，绝不静默丢弃。
+
+        Phase 3a 第 4 项：一次查询内只评一次分——同一个 ``score_cache``
+        传给季目录扫描与基线侧（``_baseline_episode_versions`` →
+        ``_build_episode_baseline`` → gather），同名同体积的规则评分只算一次；
+        列目录也只列一次（``_season_dir_files`` 的缓存）。
         """
         merged: Dict[int, List[Dict[str, Any]]] = {}
         seen: Dict[int, set] = {}
+        score_cache: Dict[tuple, int] = {}
 
         def _add(episode: int, entry: Dict[str, Any]) -> None:
             key = entry.get("file_id") or (
@@ -271,7 +308,9 @@ class EpisodeDedupService(OwnerDelegator):
             bucket.add(key)
             merged.setdefault(episode, []).append(entry)
 
-        scanned = self._scan_episode_versions_in_dir(subscribe, mediainfo, season)
+        scanned = self._scan_episode_versions_in_dir(
+            subscribe, mediainfo, season, score_cache=score_cache
+        )
         for episode, entries in scanned.items():
             for entry in entries:
                 _add(int(episode), entry)
@@ -287,7 +326,7 @@ class EpisodeDedupService(OwnerDelegator):
         }
 
         for episode, entries in self._baseline_episode_versions(
-                subscribe, mediainfo, season
+                subscribe, mediainfo, season, score_cache=score_cache
         ).items():
             for entry in entries:
                 if not self._baseline_entry_backed_by_storage(

@@ -195,7 +195,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.14.0"
+    plugin_version = "1.15.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -768,6 +768,10 @@ class CloudSubscribeX(_PluginBase):
                 if self._applied_config.get(key) != config.get(key)
             }
             if not changed_keys:
+                # v1.15.0：配置没变也重登一次下载器条目（幂等、条目已在
+                # 时不写）；2026-11-18 线上条目丢过一次，init_plugin 外
+                # 的热更新路径原来从不重登，运行中丢了无人恢复。
+                self._ensure_downloader_entry()
                 return
             if changed_keys <= hot_keys:
                 self._show_sidebar_nav = bool(config.get("show_sidebar_nav", True))
@@ -797,6 +801,8 @@ class CloudSubscribeX(_PluginBase):
                 from app.core.plugin import PluginManager
                 PluginManager().clear_plugin_agent_tools_cache()
                 logger.info("基础开关或扩展名/通知配置已热更新，网盘与搜索客户端保持运行")
+                # v1.15.0：热更新出口也重登下载器条目（同上）。
+                self._ensure_downloader_entry()
                 return
         self.stop_service(preserve_subscribe_queue=not reset_runtime)
         self._stop_event = ThreadEvent()
@@ -938,6 +944,9 @@ class CloudSubscribeX(_PluginBase):
             )
             self._auto_subscribe_onlyonce = False
             self._persist_config_values(auto_subscribe_onlyonce=False)
+
+        # v1.15.0：配置应用完成重登下载器条目（同上）。
+        self._ensure_downloader_entry()
 
     def _strm_scan_time_budget(self) -> int:
         """STRM 全量校准单次时间预算（秒）；读取失败或负数按 0（不限）处理。"""

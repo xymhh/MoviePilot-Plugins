@@ -18,6 +18,7 @@ from plugin_env import (
 
 install_app_mocks(
     "app.chain",
+    "app.chain.download",
     "app.chain.storage",
     "app.chain.transfer",
     "app.schemas.file",
@@ -59,6 +60,18 @@ class FakeTransferChain:
     def do_transfer(self, fileitem, **kwargs):
         FakeTransferChain.calls.append((fileitem, kwargs))
         return FakeTransferChain.next_result
+
+
+class FakeDownloadChain:
+    """get_no_exists_info 替身：默认“不在库”（缺集为空），整理放行。
+
+    v1.15.0 起 trigger_mp_organize 入库前先问 MP 这集在不在；
+    这些用例测的是 do_transfer 触发本身，不测查库分流，所以桩
+    一律回答“不在库”。查库分流见 test_mp_organize_duplicate_1_12_16。
+    """
+
+    def get_no_exists_info(self, meta, mediainfo):
+        return False, {}
 
 
 class FakeMediaInfo:
@@ -121,6 +134,7 @@ class FakeDirectoryHelper:
 
 register_module("app.chain.storage", StorageChain=FakeStorageChain)
 register_module("app.chain.transfer", TransferChain=FakeTransferChain)
+register_module("app.chain.download", DownloadChain=FakeDownloadChain)
 register_module("app.schemas.file", FileItem=FakeFileItem)
 register_module("app.core.context", MediaInfo=FakeMediaInfo)
 # _resolve 先试 app.helper.directory 再试 app.application.directory：
@@ -141,6 +155,7 @@ def _install_stubs():
     """
     register_module("app.chain.storage", StorageChain=FakeStorageChain)
     register_module("app.chain.transfer", TransferChain=FakeTransferChain)
+    register_module("app.chain.download", DownloadChain=FakeDownloadChain)
     register_module("app.schemas.file", FileItem=FakeFileItem)
     register_module("app.core.context", MediaInfo=FakeMediaInfo)
     register_module("app.helper.directory", DirectoryHelper=FakeDirectoryHelper)

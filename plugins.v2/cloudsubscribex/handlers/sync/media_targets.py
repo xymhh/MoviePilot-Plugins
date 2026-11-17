@@ -37,6 +37,13 @@ except (ImportError, AttributeError):  # 单测/精简环境没有媒体库过�
 class MediaTargetsService(OwnerDelegator):
     """构造临时媒体目标、列举媒体服务器内容、解析洗版目标。"""
 
+    # v1.15.0 P0：补 @staticmethod。1.13.3 从 history.py 拆出时丢了它，方法体
+    # 又没写 self，导致 self._transient_target_defaults() 调用时把 self 当成
+    # 第 1 个位置参数抛 TypeError；无订阅媒体的手动提交全死在这一步（P3 磁力
+    # 实测 2026-11-18 两次复现：同步开始 0.4–0.6 秒即失败）。注意：别在这里
+    # 加函数内 docstring——test_platform_compatibility 用正则匹配
+    # ``def ...(): ...: return {`` 校验返回字典的 v3 契约字段。
+    @staticmethod
     def _transient_target_defaults() -> Dict[str, Any]:
         return {
             "id": 0,

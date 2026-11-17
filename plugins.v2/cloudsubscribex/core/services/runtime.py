@@ -633,7 +633,6 @@ class SyncRuntimeService(OwnerDelegator):
             self,
             subscribes: List[Any],
             history_seed: List[dict],
-            exclude_ids: set,
             manual_resources: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         # v1.13.3：history_seed 恒为空列表（旧的插件 history 快照已删，
@@ -695,7 +694,6 @@ class SyncRuntimeService(OwnerDelegator):
                         history=local_history,
                         transfer_details=transfer_details,
                         transferred_count=0,
-                        exclude_ids=exclude_ids,
                         manual_resources=manual_resources,
                         manual_upgrade=manual_upgrade,
                         target_episodes=target_episodes,

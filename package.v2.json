@@ -3,7 +3,7 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.14.0",
+    "version": "1.15.0",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -372,6 +372,7 @@
       "v1.13.3": "Phase 2 第 3 步（v1.13.3）：删插件 history——转存记录页瘦身为失败记录页（只列重试索引里的失败/待修复/处理中行），history_records 表删掉（Alembic 20261117_05），清扫器删掉，通知只剩洗版完成；失败记录从 retry_index 来，可重试/删除/标记成功；旧版转存记录不再保留，缺集重新搜索会重新生成。",
       "v1.13.4": "修 v1.13.3 失败记录页打不开：api_vue_page_data 瘦页重写时误标 @staticmethod 又留着 self 首参，MP 无实例调用缺 self，列表接口报“请求参数不正确”；去掉装饰器恢复普通实例方法。e2e 改按 MP 方式调用并加回归断言。",
       "v1.14.0": "P3 缺口修复（v1.14.0）：cloud 策略下接管失败时不再取消 MP 下载——之前接管返回 False 或抛异常仍置 cancel=True，这一集既没进 115 离线、又被拦下，只能等下一轮订阅搜索；现改为接管失败/异常时不取消，让 MP 自己下载（fail-open）。回归测试 tests/test_takeover_failopen_1_14_0.py。",
+      "v1.15.0": "Phase 3a（v1.15.0）：入库管线合一 + 判重/解析/基线收敛——TV 与电影走同一条入库管线（_run_ingest_pipeline：入口判重门 → 转存 → MP 整理+字幕 → STRM 登记，TV 批后落盘自检结果挂在每条结果的 landed 上）；入口预检（_filter_entry_dedup_items，跳过项 success+skip_history、不下载不转存）+ 整理入口改调 MP 原生 get_no_exists_info 查库（_library_episode_exists 单层列目录的盲点修掉，整季缺失 episodes=[] 判缺、无法识别时 fail-open）；季集解析合一（core/episode_parse.parse_season_episode）；_effective_mediainfo 合一（handlers/sync/utils.resolve_effective_mediainfo）；文件在哪唯一入口（_locate_cloud_file：dest 精确 + 单目录四策略 + 递归复用同一匹配）；洗版基线三合一（_gather_episode_version_candidates + 共享季目录缓存/评分缓存）；MP 改名后文件名以 MP 历史 dest 为准反向同步（只同步 file_name，不动 cloud_dir）；TV/电影入口编排合一（SubscribeFlowService：开场 + 资源搜索，exclude_ids 死线程删除，resource_urls 单元素循环删除）；P0：_transient_target_defaults 补 @staticmethod（无订阅手动提交 TypeError 修掉）；配置热更新三个出口重登下载器条目。",
       "v1.12.12": "oss2 分片上传改走直连，不再把上传代理传给 oss2 Bucket：插件配了上传代理（mihomo:7890）后，分片 PUT 全走代理失败，但秒传只调 p115 API（代理对其无效、实际直连）能成功，cd2 直连也成功；p115disk 原版建 Bucket 时根本不传代理。oss2 数据面现在直连，上传代理配置仍保留给 p115 客户端 API 侧。",
       "v1.12.11": "手动添加的平台整理历史改记「本地 → 115网盘CS版」：插件写 MP 整理历史时，来源把手动添加的跨盘转存标成「手动添加」、目标存网盘驱动名「115网盘」，而 MP 自己写的同一集记录是「本地 → 115网盘CS版」（移动），两边看着不一致，且「115网盘」与 MP 原生 115 存储同名、会误导；现在手动来源记「本地」（文件进 115 前在本地 /downloads 中转），目标改记 MP 存储名「115网盘CS版」。老记录靠插件启动时的对账自动替换（旧「手动添加 · …」不在新期望集合里会被删掉，新「本地 · …」会被加上；已交 MP 整理的仍跳过）。"
     }

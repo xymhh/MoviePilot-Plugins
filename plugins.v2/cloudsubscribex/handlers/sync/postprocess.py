@@ -760,21 +760,20 @@ class PostprocessService(OwnerDelegator):
                 return str(val).strip().upper()
         return ""
 
-    def _locate_cloud_file(
+    def _match_cloud_file_in_index(
             self,
-            dir_path: str,
+            file_index: Any,
             candidate_names: List[str],
             target_hash: str,
-            ctx: PostprocessBatchContext,
             item: Optional[Dict[str, Any]] = None,
     ) -> Optional[Any]:
-        """在指定网盘目录下快速定位目标物理文件（精确名 O(1) 优先，哈希 O(1) 次之，模糊名与剧集集数容错兜底）。"""
-        if not dir_path:
-            return None
-        valid, file_index = self._cloud_directory_snapshot(dir_path, ctx.directory_snapshots)
-        if not valid or not file_index:
-            return None
+        """在已取到的文件索引里按 1–4 策略匹配（Phase 3a 第 5 项：
+        单层快照与递归树共用的同一套匹配逻辑）。
 
+        1. 精确名称 O(1)；2. 哈希 O(1)；3. 边界前后缀与网盘重名副本
+        容错（如 URL 截断名、特殊编码名或 115 自动生成的 "(1)"、
+        "_1" 副本）；4. 剧集季集 O(1) 索引智能定位。
+        """
         # 1. 精确名称查找 (O(1))
         for name in candidate_names:
             if name and name in file_index:
@@ -830,6 +829,81 @@ class PostprocessService(OwnerDelegator):
 
         return None
 
+    def _locate_cloud_files_in_tree(
+            self, root_path: str, max_depth: int = 6
+    ) -> List[Any]:
+        """递归列出某目录树下的全部文件（Phase 3a 第 5 项：递归树定位
+        的唯一原语；_locate_cloud_file 的递归策略与 magnet finalize
+        共用）。列目录失败时返回 []（不抛），调用方按“没找到”处理。
+        """
+        root = str(root_path or "").strip()
+        if not root:
+            return []
+        try:
+            files = self._cloud_query.list_files_recursive(
+                root, max_depth=max_depth
+            )
+        except Exception as error:
+            logger.debug(f"递归列目录失败：{root}，{error}", exc_info=True)
+            return []
+        return list(files or [])
+
+    def _locate_cloud_file(
+            self,
+            dir_path: str,
+            candidate_names: List[str],
+            target_hash: str,
+            ctx: PostprocessBatchContext,
+            item: Optional[Dict[str, Any]] = None,
+            dest_path: Optional[str] = None,
+            recursive: bool = False,
+    ) -> Optional[Any]:
+        """在指定网盘目录下定位目标物理文件（Phase 3a 第 5 项：唯一实现）。
+
+        策略按顺序、命中即返：
+        0. dest 策略（dest_path 非空时）：只对 dest 父目录取快照、按
+           dest 文件名精确查；查不到直接返回 None，不进后续策略
+           （dest 是 MP 历史的精确路径，模糊匹配会抓错文件）。
+        1–4. 单层快照匹配（见 _match_cloud_file_in_index：精确名 /
+           哈希 / 前后缀容错 / 季集索引）。
+        5. 递归树策略（recursive=True 时）：递归列出 dir_path 下的
+           文件树，对树里的文件复用同一套 1–4 策略。
+        """
+        if dest_path:
+            dest = str(dest_path or "").strip()
+            if not dest:
+                return None
+            dest_parent = str(Path(dest).parent)
+            dest_name = Path(dest).name
+            if not dest_name:
+                return None
+            valid, file_index = self._cloud_directory_snapshot(
+                dest_parent, ctx.directory_snapshots
+            )
+            if not valid or not file_index or dest_name not in file_index:
+                return None
+            return file_index[dest_name]
+        if not dir_path:
+            return None
+        valid, file_index = self._cloud_directory_snapshot(dir_path, ctx.directory_snapshots)
+        # 只看 valid：空目录的快照是空 dict（falsy），但它是有效实测数据，
+        # 仍要进递归树策略（文件可能在子目录里）；无效快照才直接返回。
+        if not valid or file_index is None:
+            return None
+        found = self._match_cloud_file_in_index(
+            file_index, candidate_names, target_hash, item
+        )
+        if found is not None:
+            return found
+        if not recursive:
+            return None
+        tree_files = self._locate_cloud_files_in_tree(dir_path)
+        if not tree_files:
+            return None
+        return self._match_cloud_file_in_index(
+            DirectoryFileIndex(tree_files), candidate_names, target_hash, item
+        )
+
     def _mp_organize_tracker(self) -> Any:
         """返回 MP 整理轮询器（每轮 finalize 新建）。
 
@@ -864,22 +938,14 @@ class PostprocessService(OwnerDelegator):
     ) -> Optional[Any]:
         """按 MP 历史 dest 的完整嵌套路径直查文件。
 
-        MP 整理出的文件在“剧名/Season 1/”两层子目录下，平铺扫描看不见；
-        这里只对 dest 的父目录取一次单层快照、按精确文件名查。
+        薄包装：唯一实现见 _locate_cloud_file 的 dest 策略（精确路径，
+        不进模糊/季集兜底）。MP 整理出的文件在“剧名/Season 1/”两层
+        子目录下，平铺扫描看不见；这里只对 dest 的父目录取一次单层
+        快照、按精确文件名查。
         """
-        dest = str(dest_path or "").strip()
-        if not dest:
-            return None
-        dest_parent = str(Path(dest).parent)
-        dest_name = Path(dest).name
-        if not dest_name:
-            return None
-        valid, file_index = self._cloud_directory_snapshot(
-            dest_parent, ctx.directory_snapshots
+        return self._locate_cloud_file(
+            "", [], "", ctx, dest_path=dest_path
         )
-        if not valid or not file_index or dest_name not in file_index:
-            return None
-        return file_index[dest_name]
 
     def _has_existing_cloud_file(
             self, item: Dict[str, Any], pending_key: str, ctx: PostprocessBatchContext
@@ -1784,6 +1850,17 @@ class PostprocessService(OwnerDelegator):
             if found is not None:
                 item["moved_at"] = ctx.now
                 ctx.moved_files[pending_key] = found
+                # Phase 3a 第 11 项：MP 整理已按 MP 自己的格式改名，
+                # 实际落盘名以 MP 历史的 dest 文件名为准——把 pending
+                # 项的文件名反向同步成 dest 的真实值，后续 STRM/字幕/
+                # 终态都用它，不再用插件自己算的目标名去定位。
+                # 注意只同步文件名，不动 cloud_dir：cloud_dir 是 STRM
+                # 落点与终态记录的媒体库目录，dest 父目录可能是 /转存/
+                # 下的嵌套路径（S01E234 回归用例），同步过去会把 STRM
+                # 写错地方。
+                actual_name = str(getattr(found, "name", "") or "").strip()
+                if actual_name:
+                    item["file_name"] = actual_name
                 return ("located", found, str(Path(str(dest_path)).parent))
             return ("dest_missed", None, "")
         # 未知态：当作等待处理，只复查、不计失败。
@@ -1856,6 +1933,10 @@ class PostprocessService(OwnerDelegator):
                 target_file = mp_found
                 already_moved = True
                 staging_dir = mp_dest_dir or staging_dir
+                # Phase 3a 第 11 项：本地 file_name 跟着 MP 的实际落盘名
+                # 走（_poll_mp_organize_state 里已把 item["file_name"]
+                # 同步成 dest 文件名），后续 STRM/终态都用真实名。
+                file_name = str(item.get("file_name") or file_name)
             elif mp_action == "dest_missed":
                 mp_dest_missed = True
 
@@ -2372,10 +2453,14 @@ class PostprocessService(OwnerDelegator):
             except Exception as e:
                 logger.debug(f"精准定位离线任务文件异常，回退扫描：{e}", exc_info=True)
         if not files:
-            staging_path = item.get("staging_dir") or "/"
-            files = self._cloud_query.list_files_recursive(staging_path, max_depth=6)
+            # Phase 3a 第 5 项：递归树列目录走唯一原语
+            # _locate_cloud_files_in_tree（与 _locate_cloud_file 的
+            # 递归策略同一实现；失败返回 []，不抛）。
+            files = self._locate_cloud_files_in_tree(
+                item.get("staging_dir") or "/"
+            )
         if not files and item.get("cloud_dir") and item.get("cloud_dir") != item.get("staging_dir"):
-            files = self._cloud_query.list_files_recursive(item.get("cloud_dir"), max_depth=6)
+            files = self._locate_cloud_files_in_tree(item.get("cloud_dir"))
         video_files = [
             file_item for file_item in files
             if MediaFileParser.is_video(str(file_item.get("name") or ""))

@@ -18,6 +18,72 @@ VIDEO_SUFFIXES = {
 }
 
 
+def parse_season_episode(
+    stem: str,
+    custom_words=None,
+    season: int | None = None,
+    meta_factory=None,
+    episode_fallback=None,
+) -> tuple:
+    """用 MetaInfo 解析文件名主干，返回 ``(season, episodes)``。
+
+    四处季集解析的唯一入口（episode_dedup / naming / metadata 的
+    MetaInfo 解析 + share_recognize 的单文件兜底都收进这里）：
+    先走 MetaInfo（``episode_list``，无则 ``begin_episode``）；
+    认不出集号时再走单文件兜底（开头数字 + 画质词，如
+    ``14 DV.mkv → E14``，见 ``utils.share_recognize.episode_from_name``）。
+    ``season`` 只作季号缺省，不参与集号判定；``meta_factory`` /
+    ``episode_fallback`` 只为单测打桩，生产调用方不传。
+    """
+    text = str(stem or "").strip()
+    if not text:
+        return season, []
+    factory = meta_factory
+    if factory is None:
+        try:
+            from app.core.metainfo import MetaInfo
+
+            factory = lambda value, words: MetaInfo(
+                value, custom_words=words
+            )
+        except Exception:
+            factory = None
+    meta = None
+    if factory is not None:
+        try:
+            meta = factory(text, custom_words)
+        except Exception:
+            meta = None
+    found_season = None
+    episodes: list = []
+    if meta is not None:
+        found_season = getattr(meta, "begin_season", None)
+        episodes = list(getattr(meta, "episode_list", None) or [])
+        if not episodes and getattr(meta, "begin_episode", None):
+            episodes = [meta.begin_episode]
+    if not episodes:
+        fallback = episode_fallback
+        if fallback is None:
+            try:
+                from ..utils.share_recognize import episode_from_name
+
+                fallback = episode_from_name
+            except Exception:
+                fallback = None
+        if fallback is not None:
+            try:
+                single = fallback(text, found_season or season)
+            except Exception:
+                single = None
+            if single is not None:
+                episodes = [single]
+    try:
+        parsed = sorted({int(episode) for episode in episodes if int(episode) > 0})
+    except (TypeError, ValueError):
+        parsed = []
+    return (found_season or season), parsed
+
+
 def parse_episodes_from_names(
     file_names: Iterable[str], season: int
 ) -> Set[int]:

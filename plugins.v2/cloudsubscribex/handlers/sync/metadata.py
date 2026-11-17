@@ -14,6 +14,7 @@ from app.schemas.types import MediaType
 
 from .utils import normalize_season
 from ...core import OwnerDelegator
+from ...core.episode_parse import parse_season_episode
 from ...core.media import (
     apply_media_identity,
     legacy_media_ids,
@@ -146,10 +147,13 @@ class SyncMetadataService(OwnerDelegator):
             getattr(subscribe, "name", ""), media_type
         )
         expected_year = str(getattr(subscribe, "year", "") or "").strip()
-        subscribe_meta = MetaInfo(str(getattr(subscribe, "name", "") or ""))
+        # 订阅名里是否自带季标记（如“XX 第二季”/“XX S02”）：季集解析唯一入口。
+        subscribe_season, _ = parse_season_episode(
+            str(getattr(subscribe, "name", "") or "")
+        )
         season_specific_tv = (
                 media_type == MediaType.TV
-                and subscribe_meta.begin_season is not None
+                and subscribe_season is not None
         )
         scores: Dict[int, int] = {}
         for candidate in candidates or []:

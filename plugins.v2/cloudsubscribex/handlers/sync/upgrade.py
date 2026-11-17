@@ -68,7 +68,6 @@ class UpgradeService(OwnerDelegator):
             history: List[dict],
             transfer_details: List[Dict[str, Any]],
             transferred_count: int,
-            exclude_ids: Set[int],
             target_episodes: Optional[Set[int]] = None,
             manual_upgrade: bool = False,
             manual_resources: Optional[List[Dict[str, Any]]] = None,
@@ -86,7 +85,6 @@ class UpgradeService(OwnerDelegator):
         :param history: 历史记录列表
         :param transfer_details: 转存详情列表
         :param transferred_count: 当前已转存数量
-        :param exclude_ids: 排除的订阅ID集合
         :return: 更新后的转存数量
         """
         from app.db.subscribe_oper import SubscribeOper
@@ -107,61 +105,16 @@ class UpgradeService(OwnerDelegator):
                 return transferred_count
 
             # 读取已有评分，并以整季整理历史、插件历史和 Emby 构建统一基线。
+            # Phase 3a 第 4 项：基线 + 真实网盘扫描 + 合并三合一（见
+            # _build_episode_baseline），这里只调合并后的查询，不再两次查询
+            # 再手动合并。注意行为变化：季目录列不出来时旧版直接跳过本轮洗版，
+            # 新版按整理历史/媒体服务器基线继续（实测拿不到时判重校验 fail-open，
+            # 不会把已有集误判成缺集）。
             self._set_upgrade_phase(subscribe, "建立洗版基线", 20)
             existing_ep_pri = self._read_ep_priority(subscribe)
             baseline = self._build_episode_baseline(
                 subscribe, mediainfo, season, include_saved=True
             )
-            cloud_valid, cloud_episode_files, cloud_dir = self._timed_sync_call(
-                "cloud_scan",
-                self._scan_cloud_resource_episode_files,
-                subscribe=subscribe,
-                mediainfo=mediainfo,
-                season=season,
-                start_episode=max(1, int(subscribe.start_episode or 1)),
-                total_episode=max(0, int(subscribe.total_episode or 0)),
-            )
-            if not cloud_valid:
-                logger.warning(
-                    f"【洗版转存】{mediainfo.title} S{season:02d} "
-                    "无法确认真实网盘文件，本轮跳过洗版"
-                )
-                return transferred_count
-
-            verified_baseline = {}
-            for episode, baseline_item in baseline.items():
-                item_data = dict(baseline_item or {})
-                cloud_file = cloud_episode_files.get(episode)
-                if cloud_file:
-                    cloud_name = str(getattr(cloud_file, "name", "") or "")
-                    cloud_size = int(getattr(cloud_file, "size", 0) or 0)
-                    if not int(item_data.get("file_size") or 0):
-                        item_data["file_size"] = cloud_size
-                        item_data["size_source"] = "真实网盘文件"
-                    item_data.update({
-                        "cloud_dir": cloud_dir,
-                        "target_file_name": cloud_name,
-                        "cloud_file_id": str(getattr(cloud_file, "id", "") or ""),
-                    })
-                verified_baseline[int(episode)] = item_data
-            for episode, cloud_file in cloud_episode_files.items():
-                if int(episode) not in verified_baseline:
-                    cloud_name = str(getattr(cloud_file, "name", "") or "")
-                    cloud_size = int(getattr(cloud_file, "size", 0) or 0)
-                    score = self._get_mp_rule_score(
-                        cloud_name, cloud_size, subscribe, season, mediainfo
-                    )
-                    verified_baseline[int(episode)] = {
-                        "file_name": cloud_name,
-                        "file_size": cloud_size,
-                        "source": "真实网盘文件",
-                        "score": score,
-                        "rule_score": score,
-                        "cloud_dir": cloud_dir,
-                        "target_file_name": cloud_name,
-                        "cloud_file_id": str(getattr(cloud_file, "id", "") or ""),
-                    }
-            baseline = verified_baseline
             if target_episodes is not None:
                 normalized_targets = {
                     int(episode) for episode in target_episodes if int(episode) > 0
@@ -191,7 +144,6 @@ class UpgradeService(OwnerDelegator):
                     subscribe=subscribe, history=history,
                     transfer_details=transfer_details,
                     transferred_count=transferred_count,
-                    exclude_ids=exclude_ids,
                     allow_upgrade=False,
                     manual_resources=manual_resources,
                     manual_upgrade=False,
@@ -701,6 +653,12 @@ class UpgradeService(OwnerDelegator):
                         history.append(history_item)
 
                         if success:
+                            if transfer_result.get("skip_history"):
+                                # Phase 3a 第 2 项：入口判重已跳过——云盘
+                                # 已有更优版本，不下载不转存。只记一条
+                                # 成功历史；不计入洗版成功集数与通知，
+                                # 下一资源仍可尝试更好的版本。
+                                continue
                             transferred_count += 1
                             upgrade_downloaded += 1
                             upgrade_episodes.add(episode)

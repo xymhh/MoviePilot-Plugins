@@ -369,7 +369,8 @@ class HistoryCleanupService(OwnerDelegator):
     def _parse_media_season_episodes(
             self, stem: str
     ) -> Tuple[Optional[int], Set[int]]:
-        """按 MetaInfo 口径解析文件名词干的季集（与 _library_episode_exists 同款）。
+        """按 MetaInfo 口径解析文件名词干的季集（与 parse_season_episode
+        同款，见 core/episode_parse.py）。
 
         解析不出时返回 (None, set())，调用方据此回落精确匹配。
         """
