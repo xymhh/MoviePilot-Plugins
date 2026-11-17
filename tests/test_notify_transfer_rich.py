@@ -82,13 +82,16 @@ class MediaTypeLabelTest(unittest.TestCase):
 
 
 class TransferDetailLineTest(unittest.TestCase):
+    """v1.13.3：通知只剩洗版一种，详情行渲染走同一路径（kind 一律 upgrade；
+    跨盘来源仍在 source 文案里以“夸克 → 115”呈现，不再有 🔀 前缀）。"""
+
     def test_movie_line_has_type_size_and_source(self):
         service = _service()
         service._send_transfer_notification_now([{
             "type": "电影",
             "title": "杀手",
             "year": "2020",
-            "notification_kind": "transfer",
+            "notification_kind": "upgrade",
             "size": 2 * 1024 ** 3,
             "source": "115网盘",
         }])
@@ -103,13 +106,13 @@ class TransferDetailLineTest(unittest.TestCase):
             "title": "尚公主",
             "season": 1,
             "episodes": [9, 10],
-            "notification_kind": "cross_transfer",
+            "notification_kind": "upgrade",
             "size": 1024 ** 3,
             "source": "夸克 → 115",
         }])
         text = _sent_text(service)
         self.assertIn(
-            "🔀 📺 尚公主 S01 E09, E10\n类型：剧集\n大小：1.0 GB\n来源：夸克 → 115", text
+            "⬆️ 📺 尚公主 S01 E09, E10\n类型：剧集\n大小：1.0 GB\n来源：夸克 → 115", text
         )
 
     def test_upgrade_line_uses_upgrade_icon(self):
@@ -131,25 +134,26 @@ class TransferDetailLineTest(unittest.TestCase):
             "title": "某剧",
             "season": 1,
             "episodes": [],
-            "notification_kind": "transfer",
+            "notification_kind": "upgrade",
         }])
         text = _sent_text(service)
         self.assertIn("📺 某剧 S01\n类型：剧集", text)
 
     def test_custom_template_keeps_variables(self):
         service = _service({
-            "notify_template_transfer": "自定 {{ count }} 项 {{ total_size }}\n{{ labels[0] }}",
+            "notify_template_upgrade": "自定 {{ count }} 项 {{ total_size }}\n{{ labels[0] }}",
         })
         service._send_transfer_notification_now([{
             "type": "电影",
             "title": "杀手",
             "year": "2020",
+            "notification_kind": "upgrade",
             "size": 1024 ** 3,
             "source": "115网盘",
         }])
         self.assertEqual(
             _sent_text(service),
-            "自定 1 项 1.0 GB\n🎬 杀手 (2020) · 电影 · 1.0 GB · 115网盘",
+            "自定 1 项 1.0 GB\n⬆️ 🎬 杀手 (2020) · 电影 · 1.0 GB · 115网盘",
         )
 
 
@@ -157,12 +161,12 @@ class RuntimeSyncTest(unittest.TestCase):
     """1.7.77：模板升级必须同步进运行期状态，否则本次进程内仍发旧排版。"""
 
     def test_updates_are_written_into_state(self):
-        state = {"notify_template_transfer": "旧模板 {{ count }}"}
+        state = {"notify_template_upgrade": "旧模板 {{ count }}"}
         changed = _tpl.apply_runtime_updates(
-            state, {"notify_template_transfer": "新模板 {{ count }}"}
+            state, {"notify_template_upgrade": "新模板 {{ count }}"}
         )
         self.assertEqual(changed, 1)
-        self.assertEqual(state["notify_template_transfer"], "新模板 {{ count }}")
+        self.assertEqual(state["notify_template_upgrade"], "新模板 {{ count }}")
 
     def test_unchanged_values_are_not_counted(self):
         state = {"notify_template_delete": "同一份"}
@@ -214,28 +218,28 @@ class DefaultTemplateTest(unittest.TestCase):
             self.assertNotEqual(text, "兜底", key)
             self.assertNotIn("{{", text, key)
 
-    def test_transfer_default_has_body_and_time(self):
+    def test_upgrade_default_has_body_and_time(self):
         text = _tpl.render_template(
-            _tpl.DEFAULT_TEMPLATES["notify_template_transfer"],
+            _tpl.DEFAULT_TEMPLATES["notify_template_upgrade"],
             "兜底",
-            action="转存",
+            action="洗版",
             count=1,
             total_size="2.0 GB",
             labels=["🎬 杀手 (2020) · 电影 · 2.0 GB · 115网盘"],
             cards=["🎬 杀手 (2020)\n类型：电影\n大小：2.0 GB\n来源：115网盘"],
         )
-        self.assertTrue(text.startswith("📦 本次转存 1 个文件 · 合计 2.0 GB"))
+        self.assertTrue(text.startswith("⬆️ 本次洗版 1 个文件 · 合计 2.0 GB"))
         self.assertIn("🎬 杀手 (2020)", text)
         self.assertIn("🕐 ", text)
 
 
 class LegacyUpgradeTest(unittest.TestCase):
     def test_legacy_default_is_replaced(self):
-        config = {"notify_template_transfer": _tpl.LEGACY_DEFAULT_TEMPLATES["notify_template_transfer"][0]}
+        config = {"notify_template_upgrade": _tpl.LEGACY_DEFAULT_TEMPLATES["notify_template_upgrade"][0]}
         updated = _tpl.upgrade_legacy_templates(config)
         self.assertEqual(
-            updated["notify_template_transfer"],
-            _tpl.DEFAULT_TEMPLATES["notify_template_transfer"],
+            updated["notify_template_upgrade"],
+            _tpl.DEFAULT_TEMPLATES["notify_template_upgrade"],
         )
 
     def test_every_legacy_generation_is_upgraded(self):
@@ -270,77 +274,6 @@ class LegacyUpgradeTest(unittest.TestCase):
         ) + "\n\n"
         updated = _tpl.upgrade_legacy_templates({"notify_template_checkin": noisy})
         self.assertIn("notify_template_checkin", updated)
-
-
-class EnrichFromHistoryTest(unittest.TestCase):
-    """详情缺 size/source 时按历史记录回查补全（1.7.80）。"""
-
-    def _service_with_history(self, records):
-        service = _service()
-        owner = types.SimpleNamespace(
-            _get_data=lambda key: list(records) if key == "history" else [],
-            _detail_source_text=lambda item: (
-                f"{item.get('source_drive_name')} → {item.get('cloud_drive_name')}"
-                if item.get("source_drive_name")
-                and item.get("source_drive_name") != item.get("cloud_drive_name")
-                else str(item.get("cloud_drive_name") or "")
-            ),
-        )
-        object.__setattr__(service, "_owner", owner)
-        service._post_message = MagicMock()
-        service._notification_type = "Plugin"
-        return service
-
-    def test_missing_fields_are_filled_from_history(self):
-        service = self._service_with_history([{
-            "status": "成功",
-            "file_name": "末世行者 (2026).1080p.mkv",
-            "file_size": 3 * 1024 ** 3,
-            "cloud_drive_name": "115网盘",
-            "source_drive_name": "夸克网盘",
-        }])
-        details = service._enrich_transfer_details([{
-            "type": "电影",
-            "title": "末世行者",
-            "year": "2026",
-            "file_name": "末世行者 (2026).1080p.mkv",
-            "notification_kind": "transfer",
-        }])
-        self.assertEqual(details[0]["size"], 3 * 1024 ** 3)
-        self.assertEqual(details[0]["source"], "夸克网盘 → 115网盘")
-
-    def test_enriched_detail_renders_full_line(self):
-        service = self._service_with_history([{
-            "status": "成功",
-            "file_name": "末世行者 (2026).1080p.mkv",
-            "file_size": 3 * 1024 ** 3,
-            "cloud_drive_name": "115网盘",
-        }])
-        service._send_transfer_notification_now([{
-            "type": "电影",
-            "title": "末世行者",
-            "year": "2026",
-            "file_name": "末世行者 (2026).1080p.mkv",
-            "notification_kind": "transfer",
-        }])
-        text = _sent_text(service)
-        self.assertIn("🎬 末世行者 (2026)\n类型：电影\n大小：3.0 GB\n来源：115网盘", text)
-
-    def test_existing_values_win_and_no_record_is_safe(self):
-        service = self._service_with_history([])
-        details = service._enrich_transfer_details([{
-            "type": "电影",
-            "title": "A",
-            "size": 100,
-            "source": "115网盘",
-            "file_name": "A.mkv",
-        }])
-        self.assertEqual(details[0]["size"], 100)
-        self.assertEqual(details[0]["source"], "115网盘")
-        details = service._enrich_transfer_details([
-            {"type": "电影", "title": "B", "file_name": "B.mkv"},
-        ])
-        self.assertEqual(details[0].get("source", ""), "")
 
 
 if __name__ == "__main__":

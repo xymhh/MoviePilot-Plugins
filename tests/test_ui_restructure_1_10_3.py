@@ -77,6 +77,7 @@ class TestSidebarNavRestructure(unittest.TestCase):
     def test_history_entry_declared_no_organize(self):
         # 1.10.4：网盘整理不新增导航，侧栏只剩渠道管理与转存记录。
         # 1.13.2：频道监控从渠道页独立成导航，侧栏是渠道管理、频道监控、转存记录。
+        # 1.13.3：转存记录页瘦身为失败记录页，导航标题同步改名。
         nav = _registration().get_sidebar_nav()
         by_key = {item["nav_key"]: item for item in nav}
         self.assertEqual(
@@ -91,7 +92,7 @@ class TestSidebarNavRestructure(unittest.TestCase):
         self.assertEqual(monitor["order"], 31)
         self.assertTrue(str(monitor["icon"]).startswith("mdi-"))
         history = by_key["history"]
-        self.assertEqual(history["title"], "转存记录")
+        self.assertEqual(history["title"], "失败记录")
         self.assertEqual(history["section"], "system")
         self.assertEqual(history["permission"], "manage")
         self.assertEqual(history["order"], 32)

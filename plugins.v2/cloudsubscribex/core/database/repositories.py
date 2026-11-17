@@ -4,13 +4,11 @@ import copy
 import hashlib
 import time
 import json
-import os
 import re
 from collections import defaultdict
-from threading import RLock
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import Integer, and_, case, cast, delete, func, or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -20,7 +18,6 @@ from .models import (
     AuthSession,
     CheckinHistoryRecord,
     CheckinScheduleState,
-    HistoryRecord,
     OfflinePendingTask,
     PointBudgetRecord,
     RetryIndex,
@@ -28,34 +25,13 @@ from .models import (
     SourceSha1Cache,
     SourceMissCache,
 )
-from ..failure import (
-    KIND_CHECKSUM_MISS,
-    classify_failure,
-    kind_of_pseudo_status,
-)
-from ..history import history_group_key
 from ...drive.common import positive_int
-from ...search.types import normalize_resource_type, resource_type_from_url
 
-
-#: 历史台账默认保留条数（超过后按记录时间淘汰最旧）。可用环境变量覆盖。
-DEFAULT_HISTORY_RETENTION = 5000
 
 #: 重试索引留存（设计 §2）：失败行 90 天、待修复行 30 天；重试完成的行
-#: 在 history 翻成功时由同步删除，不走过期清理。
+#: 在转存翻成功时由同步删除，不走过期清理。
 RETRY_INDEX_FAILED_RETENTION_SECONDS = 90 * 86400
 RETRY_INDEX_REPAIR_RETENTION_SECONDS = 30 * 86400
-
-
-def history_retention_limit() -> int:
-    """读取历史台账保留上限；0 或负数表示不做上限。"""
-    raw = str(os.environ.get("CLOUDSUBSCRIBE_HISTORY_LIMIT", "") or "").strip()
-    if not raw:
-        return DEFAULT_HISTORY_RETENTION
-    try:
-        return max(0, int(float(raw)))
-    except (TypeError, ValueError):
-        return DEFAULT_HISTORY_RETENTION
 
 
 def _episode_number(record: Dict[str, Any]) -> Optional[int]:
@@ -92,462 +68,6 @@ def _timestamp(value: Any) -> int:
         return max(0, int(float(value or 0)))
     except (TypeError, ValueError):
         return 0
-
-
-class HistoryRepository(DbOper):
-    def __init__(self, manager: CloudSubscribeDatabaseManager, db: Session = None):
-        super().__init__(manager, db)
-        self._filter_options_lock = RLock()
-        self._filter_options: Optional[Dict[str, List[str]]] = None
-
-    def _load_filter_options(self, db: Session) -> Dict[str, List[str]]:
-        with self._filter_options_lock:
-            if self._filter_options is None:
-                rows = db.execute(select(
-                    HistoryRecord.resource_type,
-                    HistoryRecord.source,
-                ).distinct()).all()
-                self._filter_options = {
-                    "resource_types": sorted({
-                        row.resource_type for row in rows if row.resource_type
-                    }),
-                    "sources": sorted({
-                        row.source for row in rows if row.source
-                    }),
-                }
-            return copy.deepcopy(self._filter_options)
-
-    def _invalidate_filter_options(self) -> None:
-        with self._filter_options_lock:
-            self._filter_options = None
-
-    @staticmethod
-    def _record_id(record: Dict[str, Any], index: int) -> str:
-        record_id = str(record.get("record_id") or "").strip()
-        if record_id:
-            return record_id
-        identity = "\0".join(str(record.get(key) or "") for key in (
-            "share_url", "file_name", "tmdb_id", "season", "episode",
-        ))
-        if identity.strip("\0"):
-            return hashlib.sha1(identity.encode("utf-8")).hexdigest()
-        return hashlib.sha1(
-            f"{_canonical_digest(record)}:{index}".encode("utf-8")
-        ).hexdigest()
-
-    @staticmethod
-    def _source(record: Dict[str, Any]) -> str:
-        source = str(record.get("source") or "unknown").strip().lower()
-        if source in {"manual", "手动添加", "手动资源"}:
-            # 频道推送的候选复用手动转存链路，但来源应显示为 TG 频道，
-            # 不能再混进「手动添加」。
-            via = str(record.get("discovered_via") or "").strip().lower()
-            return "tg" if via.startswith("tg:") else "manual"
-        return source
-
-    @staticmethod
-    def _resource_type(record: Dict[str, Any]) -> str:
-        return (
-                normalize_resource_type(
-                    record.get("resource_type") or record.get("pan_type") or ""
-                )
-                or resource_type_from_url(record.get("share_url"))
-                or "unknown"
-        )
-
-    @staticmethod
-    def _task_types(record: Dict[str, Any]) -> List[str]:
-        values = {
-            str(value or "").strip().lower()
-            for value in (record.get("task_types") or [])
-            if str(value or "").strip()
-        }
-        if str(record.get("transfer_mode") or "").strip().lower() == "cross":
-            values.add("cross_transfer")
-        upgrade = record.get("upgrade")
-        if upgrade is True or str(upgrade or "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }:
-            values.add("upgrade")
-        return sorted(values)
-
-    @classmethod
-    def normalize(cls, record: Dict[str, Any], index: int) -> Dict[str, Any]:
-        payload = copy.deepcopy(record)
-        record_id = cls._record_id(payload, index)
-        payload["record_id"] = record_id
-        group_key = history_group_key(payload)
-        task_types = cls._task_types(payload)
-        return {
-            "record_id": record_id,
-            "sort_index": index,
-            "group_key": group_key,
-            "record_time": str(payload.get("time") or ""),
-            "status": str(payload.get("status") or ""),
-            "stage": str(payload.get("stage") or ""),
-            "resource_type": cls._resource_type(payload),
-            "source": cls._source(payload),
-            "task_types": "|" + "|".join(task_types) + "|",
-            "title": str(payload.get("title") or ""),
-            "file_name": str(payload.get("file_name") or ""),
-            "media_type": str(payload.get("type") or ""),
-            "tmdb_id": str(payload.get("tmdb_id") or ""),
-            "season": positive_int(payload.get("season")),
-            "episode": _episode_number(payload),
-            "subscribe_id": positive_int(payload.get("subscribe_id")),
-            "payload": payload,
-        }
-
-    @classmethod
-    def normalize_records(
-            cls, records: Iterable[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        normalized = []
-        used_ids = set()
-        for index, value in enumerate(records or []):
-            if not isinstance(value, dict):
-                continue
-            item = cls.normalize(value, index)
-            if item["record_id"] in used_ids:
-                item["record_id"] = hashlib.sha1(
-                    f"{item['record_id']}:{index}".encode("utf-8")
-                ).hexdigest()
-                item["payload"]["record_id"] = item["record_id"]
-            used_ids.add(item["record_id"])
-            normalized.append(item)
-        return normalized
-
-    @db_update
-    def replace_all(
-            self, records: Iterable[Dict[str, Any]], db: Session = None
-    ) -> int:
-        normalized = self.normalize_records(records)
-        current = {
-            row.record_id: row
-            for row in db.scalars(select(HistoryRecord)).all()
-        }
-        desired_ids = {item["record_id"] for item in normalized}
-        for record_id in current.keys() - desired_ids:
-            db.delete(current[record_id])
-        for item in normalized:
-            row = current.get(item["record_id"])
-            if row is None:
-                HistoryRecord(**item).create(db)
-                continue
-            changes = {
-                key: copy.deepcopy(value)
-                for key, value in item.items()
-                if getattr(row, key) != value
-            }
-            if changes:
-                row.update(db, changes)
-        self._invalidate_filter_options()
-        self.prune(db=db)
-        return len(normalized)
-
-    @db_update
-    def repair_group_keys(self, db: Session = None) -> int:
-        """幂等回填旧记录的媒体分组键。"""
-        repaired = 0
-        for row in db.scalars(select(HistoryRecord)).all():
-            expected = history_group_key(row.payload or {})
-            if row.group_key == expected:
-                continue
-            row.update(db, {"group_key": expected})
-            repaired += 1
-        return repaired
-
-    @db_update
-    def repair_failure_kinds(self, db: Session = None) -> int:
-        """幂等回填失败记录的类型，供历史页按类型单独筛选。"""
-        repaired = 0
-        for row in db.scalars(select(HistoryRecord)).all():
-            payload = copy.deepcopy(row.payload or {})
-            if str(payload.get("status") or "") != "失败":
-                continue
-            if str(payload.get("failure_kind") or "").strip():
-                continue
-            kind = classify_failure(
-                payload.get("failure_reason") or payload.get("error")
-            )
-            payload["failure_kind"] = kind
-            payload.setdefault("failure_retryable", kind not in {
-                "share_invalid", "file_missing"
-            })
-            row.update(db, {"payload": payload})
-            repaired += 1
-        return repaired
-
-    @db_update
-    def repair_tg_sources(self, db: Session = None) -> int:
-        """把频道推送的历史记录来源从 manual 回填为 tg（幂等）。"""
-        repaired = 0
-        for row in db.scalars(
-            select(HistoryRecord).where(HistoryRecord.source == "manual")
-        ).all():
-            payload = row.payload or {}
-            via = str(payload.get("discovered_via") or "").strip().lower()
-            if not via.startswith("tg:"):
-                continue
-            row.update(db, {"source": "tg"})
-            repaired += 1
-        if repaired:
-            self._invalidate_filter_options()
-        return repaired
-
-    @db_query
-    def list_all(self, db: Session = None) -> List[Dict[str, Any]]:
-        rows = db.scalars(
-            select(HistoryRecord).order_by(HistoryRecord.sort_index)
-        ).all()
-        return [copy.deepcopy(row.payload) for row in rows]
-
-    @db_update
-    def prune(self, limit: Optional[int] = None, db: Session = None) -> int:
-        """按记录时间只保留最近 ``limit`` 条，返回删除条数。"""
-        cap = history_retention_limit() if limit is None else int(limit)
-        if cap <= 0:
-            return 0
-        total = db.scalar(select(func.count()).select_from(HistoryRecord)) or 0
-        if total <= cap:
-            return 0
-        keep_ids = db.scalars(
-            select(HistoryRecord.id)
-            .order_by(HistoryRecord.record_time.desc(), HistoryRecord.id.desc())
-            .limit(cap)
-        ).all()
-        if not keep_ids:
-            return 0
-        deleted = db.execute(
-            delete(HistoryRecord).where(HistoryRecord.id.not_in(keep_ids))
-        ).rowcount or 0
-        return int(deleted)
-
-    @staticmethod
-    def _filters(
-            keyword: str = "",
-            resource_types: Iterable[str] = (),
-            sources: Iterable[str] = (),
-            task_types: Iterable[str] = (),
-            statuses: Iterable[str] = (),
-    ) -> list:
-        filters = []
-        normalized_resource_types = {
-            str(value).strip().lower() for value in resource_types if str(value).strip()
-        }
-        normalized_sources = {
-            str(value).strip().lower() for value in sources if str(value).strip()
-        }
-        plain_statuses = set()
-        wanted_kinds = set()
-        for value in statuses or ():
-            text = str(value).strip()
-            if not text:
-                continue
-            kind = kind_of_pseudo_status(text)
-            if kind:
-                wanted_kinds.add(kind)
-            else:
-                plain_statuses.add(text.lower())
-        normalized_task_types = {
-            str(value).strip().lower() for value in task_types if str(value).strip()
-        }
-        if normalized_resource_types:
-            filters.append(HistoryRecord.resource_type.in_(normalized_resource_types))
-        if normalized_sources:
-            filters.append(HistoryRecord.source.in_(normalized_sources))
-        failure_kind_expr = func.json_extract(
-            HistoryRecord.payload, "$.failure_kind"
-        )
-        pseudo_kinds = {KIND_CHECKSUM_MISS}
-        failure_branches = []
-        if "失败" in plain_statuses and pseudo_kinds:
-            # 「失败」不含细分的伪状态（如「秒传失败」），它们各有独立选项。
-            plain_statuses.discard("失败")
-            failure_branches.append(and_(
-                func.lower(HistoryRecord.status) == "失败",
-                or_(
-                    failure_kind_expr.is_(None),
-                    failure_kind_expr.not_in(sorted(pseudo_kinds)),
-                ),
-            ))
-        for kind in sorted(wanted_kinds):
-            failure_branches.append(and_(
-                func.lower(HistoryRecord.status) == "失败",
-                failure_kind_expr == kind,
-            ))
-        if len(failure_branches) > 1:
-            # 1.10.5：同时勾选「失败」与「秒传失败」时按并集查；以前两个
-            # 条件是 AND 拼在一起，结果恒为空，什么都查不到。
-            filters.append(or_(*failure_branches))
-        elif failure_branches:
-            filters.append(failure_branches[0])
-        if plain_statuses:
-            filters.append(
-                func.lower(HistoryRecord.status).in_(plain_statuses)
-            )
-        if normalized_task_types:
-            filters.append(or_(*[
-                HistoryRecord.task_types.like(f"%|{value}|%")
-                for value in normalized_task_types
-            ]))
-        normalized_keyword = str(keyword or "").strip().lower()
-        if normalized_keyword:
-            pattern = f"%{normalized_keyword}%"
-            filters.append(or_(
-                func.lower(HistoryRecord.title).like(pattern),
-                func.lower(HistoryRecord.file_name).like(pattern),
-                func.lower(HistoryRecord.media_type).like(pattern),
-                func.lower(HistoryRecord.tmdb_id).like(pattern),
-                func.lower(HistoryRecord.resource_type).like(pattern),
-                func.lower(HistoryRecord.source).like(pattern),
-            ))
-        return filters
-
-    @db_query
-    def query_group_page(
-            self,
-            *,
-            page: int,
-            page_size: int,
-            keyword: str = "",
-            resource_types: Iterable[str] = (),
-            sources: Iterable[str] = (),
-            task_types: Iterable[str] = (),
-            statuses: Iterable[str] = (),
-            db: Session = None,
-    ) -> Dict[str, Any]:
-        filters = self._filters(
-            keyword, resource_types, sources, task_types, statuses
-        )
-        normalized_page_size = min(50, max(1, int(page_size or 10)))
-        filter_options = self._load_filter_options(db)
-        latest_time = func.max(HistoryRecord.record_time).label("latest_time")
-        success_count = func.sum(case(
-            (HistoryRecord.status == "成功", 1), else_=0
-        )).label("success_count")
-        pending_count = func.sum(case(
-            (HistoryRecord.status.in_(["处理中", "下载中"]), 1), else_=0
-        )).label("pending_count")
-        failed_count = func.sum(case(
-            (HistoryRecord.status == "成功", 0),
-            (HistoryRecord.status.in_(["处理中", "下载中"]), 0),
-            else_=1,
-        )).label("failed_count")
-        total_size = func.coalesce(func.sum(cast(
-            func.json_extract(HistoryRecord.payload, "$.file_size"), Integer
-        )), 0).label("total_size")
-        total_groups = func.count().over().label("total_groups")
-        grouped = select(
-            HistoryRecord.group_key,
-            latest_time,
-            success_count,
-            pending_count,
-            failed_count,
-            total_size,
-            total_groups,
-        ).where(*filters).group_by(HistoryRecord.group_key)
-
-        requested_page = max(1, int(page or 1))
-
-        def load_groups(page_number: int):
-            return db.execute(
-                grouped.order_by(latest_time.desc(), HistoryRecord.group_key)
-                .offset((page_number - 1) * normalized_page_size)
-                .limit(normalized_page_size)
-            ).all()
-
-        group_rows = load_groups(requested_page)
-        if group_rows:
-            total = int(group_rows[0].total_groups or 0)
-        elif requested_page > 1:
-            total = int(db.scalar(
-                select(func.count()).select_from(grouped.subquery())
-            ) or 0)
-        else:
-            total = 0
-        total_pages = max(
-            1, (total + normalized_page_size - 1) // normalized_page_size
-        )
-        normalized_page = min(requested_page, total_pages)
-        if normalized_page != requested_page:
-            group_rows = load_groups(normalized_page)
-        group_keys = [row.group_key for row in group_rows]
-        records_by_group = defaultdict(list)
-        if group_keys:
-            rows = db.scalars(
-                select(HistoryRecord)
-                .where(HistoryRecord.group_key.in_(group_keys), *filters)
-                .order_by(
-                    HistoryRecord.season.desc(),
-                    HistoryRecord.episode.desc(),
-                    HistoryRecord.record_time.desc(),
-                    HistoryRecord.sort_index.desc(),
-                )
-            ).all()
-            for row in rows:
-                payload = copy.deepcopy(row.payload)
-                payload["record_id"] = row.record_id
-                records_by_group[row.group_key].append(payload)
-        groups = [{
-            "group_key": row.group_key,
-            "latest_time": str(row.latest_time or ""),
-            "success_count": int(row.success_count or 0),
-            "pending_count": int(row.pending_count or 0),
-            "failed_count": int(row.failed_count or 0),
-            "total_size": int(row.total_size or 0),
-            "records": records_by_group.get(row.group_key, []),
-        } for row in group_rows]
-        return {
-            "groups": groups,
-            "page": normalized_page,
-            "page_size": normalized_page_size,
-            "total": total,
-            "total_pages": total_pages,
-            "filter_options": {
-                "resource_types": filter_options["resource_types"],
-                "sources": filter_options["sources"],
-            },
-        }
-
-    @staticmethod
-    def _summary(db: Session, today: str) -> Dict[str, int]:
-        stats = db.execute(select(
-            func.count(HistoryRecord.id),
-            func.sum(case(
-                (HistoryRecord.record_time.like(f"{today}%"), 1), else_=0
-            )),
-            func.sum(case((HistoryRecord.status == "成功", 1), else_=0)),
-            func.sum(case((HistoryRecord.status == "失败", 1), else_=0)),
-        )).one()
-        return {
-            "total": int(stats[0] or 0),
-            "today": int(stats[1] or 0),
-            "success": int(stats[2] or 0),
-            "failed": int(stats[3] or 0),
-        }
-
-    @db_query
-    def summary(
-            self, today: str, db: Session = None
-    ) -> Dict[str, int]:
-        return self._summary(db, today)
-
-    @db_query
-    def overview(
-            self, today: str, recent_limit: int = 20,
-            db: Session = None,
-    ) -> Dict[str, Any]:
-        summary = self._summary(db, today)
-        recent = db.scalars(
-            select(HistoryRecord)
-            .order_by(HistoryRecord.record_time.desc(), HistoryRecord.id.desc())
-            .limit(max(0, min(int(recent_limit or 0), 20)))
-        ).all()
-        return {
-            **summary,
-            "recent": [copy.deepcopy(row.payload) for row in recent],
-        }
 
 
 #: 重试索引行字段（与 RetryIndex 模型列一一对应；展示类字段不在此列）。
@@ -593,12 +113,40 @@ class RetryIndexRepository(DbOper):
         return row.to_dict() if row is not None else None
 
     @db_query
+    def get_by_finalize_key(
+            self, finalize_key: str, db: Session = None
+    ) -> Optional[Dict[str, Any]]:
+        """按 finalize_key 查一行（后处理通知详情的索引回查）。"""
+        key = str(finalize_key or "").strip()
+        if not key:
+            return None
+        row = db.scalars(
+            select(RetryIndex).where(RetryIndex.finalize_key == key)
+        ).first()
+        return row.to_dict() if row is not None else None
+
+    @db_query
     def list_retryable(self, db: Session = None) -> List[Dict[str, Any]]:
         """只列失败与待修复行（处理中的重试不列出）。"""
         rows = db.scalars(
             select(RetryIndex)
             .where(or_(RetryIndex.status == "失败", RetryIndex.status == "成功"))
             .order_by(RetryIndex.created_at.asc(), RetryIndex.record_id.asc())
+        ).all()
+        return [row.to_dict() for row in rows]
+
+    @db_query
+    def list_page_rows(self, db: Session = None) -> List[Dict[str, Any]]:
+        """失败记录页列表：失败、待修复与处理中行（索引里只存这三类）。
+
+        处理中行也要列出：前端统计卡片可按“处理中”过滤、总览按它分组，
+        删除与清空入口又都明确排除处理中行——只计数不列行，卡片点进去
+        永远是空的。清空仍走 list_retryable（不删处理中行）。
+        """
+        rows = db.scalars(
+            select(RetryIndex).order_by(
+                RetryIndex.created_at.asc(), RetryIndex.record_id.asc()
+            )
         ).all()
         return [row.to_dict() for row in rows]
 
@@ -1362,7 +910,6 @@ class CloudSubscribeRepositories:
             manager: CloudSubscribeDatabaseManager,
             db: Session = None,
     ):
-        self.history = HistoryRepository(manager, db)
         self.retry_index = RetryIndexRepository(manager, db)
         self.offline = OfflinePendingRepository(manager, db)
         self.checkin = CheckinRepository(manager, db)

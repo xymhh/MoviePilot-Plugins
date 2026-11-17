@@ -632,11 +632,14 @@ class SyncRuntimeService(OwnerDelegator):
     def _run_subscription_group(
             self,
             subscribes: List[Any],
-            history_snapshot: List[dict],
+            history_seed: List[dict],
             exclude_ids: set,
             manual_resources: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        local_history = list(history_snapshot)
+        # v1.13.3：history_seed 恒为空列表（旧的插件 history 快照已删，
+        # 判重基线改走云盘目录与媒体库）；本轮新增记录仍往 local_history
+        # 里追加，返回时只取本轮新增的部分。
+        local_history = list(history_seed)
         initial_history_count = len(local_history)
         transfer_details: List[Dict[str, Any]] = []
         transferred_count = 0

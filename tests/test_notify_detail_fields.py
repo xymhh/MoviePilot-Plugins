@@ -32,11 +32,11 @@ _core.OwnerDelegator = OwnerDelegator
 _core.CloudFile = object
 sys.modules["app.log"].logger = MagicMock()
 
-_history = load_module(
-    "cloudsubscribex.handlers.sync.history",
-    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
+_transfer_details = load_module(
+    "cloudsubscribex.handlers.sync.transfer_details",
+    "plugins.v2/cloudsubscribex/handlers/sync/transfer_details.py",
 )
-HistoryMixin = _history.HistoryService
+HistoryMixin = _transfer_details.TransferDetailsService
 
 
 def _service(drive_name="115网盘"):

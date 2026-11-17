@@ -270,36 +270,6 @@ export function useRuntimeData(api, notify, pluginId = "CloudSubscribeX", {onSet
     }
   }
 
-  async function upgradeHistory(records, scope = "record") {
-    const identities = (records || []).map((record) => ({
-      record_id: record.record_id,
-      time: record.time,
-      share_url: record.share_url,
-      file_name: record.file_name,
-      tmdb_id: record.tmdb_id,
-      season: record.season,
-      episode: record.episode,
-    }))
-    const result = await api.post(`plugin/${pluginId}/history/upgrade`, {
-      source: "history",
-      scope,
-      records: identities,
-    })
-    if (!result?.success) throw new Error(result?.message || "洗版任务提交失败");
-    startRequestedUntil = Date.now() + 10000;
-    runtimeStreamDisabled = false;
-    runtimeStreamFailures = 0;
-    Object.assign(runtime, {
-      status: "starting",
-      task: "正在准备洗版任务",
-      progress: 0,
-      tasks: [],
-    })
-    armStartupGuard();
-    ensureRuntimeUpdates();
-    return result.message || "洗版任务已提交";
-  }
-
   onMounted(() => {
     document.addEventListener("visibilitychange", handleVisibilityChange);
     void loadRuntime().finally(ensureRuntimeUpdates);
@@ -317,6 +287,5 @@ export function useRuntimeData(api, notify, pluginId = "CloudSubscribeX", {onSet
     startSync,
     stopSync,
     stopTask,
-    upgradeHistory,
   }
 }

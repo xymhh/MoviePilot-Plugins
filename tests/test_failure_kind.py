@@ -41,11 +41,10 @@ failure = load_module(
     "plugins.v2/cloudsubscribex/core/failure.py",
 )
 
-_history = load_module(
-    "cloudsubscribex.handlers.sync.history",
-    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
+retry_index = load_module(
+    "cloudsubscribex.core.retry_index",
+    "plugins.v2/cloudsubscribex/core/retry_index.py",
 )
-HistoryService = _history.HistoryService
 
 
 class ClassifyTest(unittest.TestCase):
@@ -156,7 +155,7 @@ class RecordHelperTest(unittest.TestCase):
 
 class RetryStateTest(unittest.TestCase):
     def _state(self, record):
-        return HistoryService._history_retry_state(record)
+        return retry_index.retry_state_of(record)
 
     def test_expired_share_disables_retry(self):
         record = {

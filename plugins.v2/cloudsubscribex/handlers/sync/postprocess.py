@@ -15,6 +15,7 @@ from app.schemas.types import MediaType
 
 from .utils import extract_ed2k_filename, normalize_season
 from ...core import CloudDriveCapability, OwnerDelegator
+from ...core.failure import apply_failure, failure_retryable_of
 from ...search.subs_filter import anime_file_candidates
 from ...utils import MediaFileParser
 
@@ -148,8 +149,6 @@ class PostprocessService(OwnerDelegator):
     )
 
     _FINALIZE_MAX_FAILURES = 5
-    # 历史记录终态重排队的墙钟上限（秒）；到点强制结算，避免 UI 长时间卡住
-    _HISTORY_RESYNC_MAX_AGE_SECONDS = 1800
     _FINALIZE_DEAD_LOG = "文件后处理连续失败 {} 次，已终止重试：{}"
     _FINALIZE_DEAD_REASON = "文件后处理连续失败 {} 次，已停止自动重试"
     _FINALIZE_DEAD_TITLE = "网盘文件后处理失败"
@@ -292,25 +291,6 @@ class PostprocessService(OwnerDelegator):
             short_id = uuid.uuid4().hex[:10]
         return f"{source.stem}-{short_id}{source.suffix}"
 
-    def _history_ready_for_finalize(self, item: Dict[str, Any], now: float) -> bool:
-        """历史记录尚未落盘时先不提交终态，超过宽限期后放行以免任务永久排队。"""
-        if item.get("history_ready") or item.get("skip_history"):
-            return True
-        grace = float(getattr(self, "_HISTORY_READY_GRACE_SECONDS", 600) or 600)
-        if now - float(item.get("created_at") or now) < grace:
-            return False
-        message = (
-            f"历史记录长时间未落盘，放行文件后处理："
-            f"{item.get('file_name') or item.get('pending_key') or ''}"
-        )
-        # 同一 pending 项的宽限放行告警只打一次，避免每轮复查都刷屏。
-        if item.get("history_grace_warned"):
-            logger.debug(message)
-        else:
-            item["history_grace_warned"] = True
-            logger.warning(message)
-        return True
-
     def _due_pending_keys(
             self,
             pending: Dict[str, Dict[str, Any]],
@@ -325,7 +305,6 @@ class PostprocessService(OwnerDelegator):
             if (not selected or key in selected)
                and (bool(selected and key in selected) or now >= float(item.get("_monitor_until") or 0))
                and (force or now >= float(item.get("next_check_at") or 0))
-               and self._history_ready_for_finalize(item, now)
         ]
 
     @staticmethod
@@ -935,110 +914,245 @@ class PostprocessService(OwnerDelegator):
                 return True
         return False
 
-    def _resolve_history_record(
-            self,
-            item: Dict[str, Any],
-            pending_key: str,
-            status: str,
+    def _pending_item_to_terminal_record(
+            self, item: Dict[str, Any], pending_key: str, status: str
+    ) -> Optional[Dict[str, Any]]:
+        """把后处理项拼成 history 形状的记录 dict，供终态写入重试索引。
+
+        字段只取后处理项自身 + 序列化 mediainfo + 分享平台推导的跨盘信息
+        （与 history 建记录时同一口径，history.py:122-141）；share_url 或
+        file_name 缺失时算不出 record_id，返回 None。
+        """
+        share_url = str(item.get("share_url") or "").strip()
+        file_name = str(item.get("file_name") or "").strip()
+        if not share_url or not file_name:
+            return None
+        media = item.get("mediainfo") or {}
+        if not isinstance(media, dict):
+            media = {}
+        media_type = media.get("type")
+        if hasattr(media_type, "value"):
+            media_type = media_type.value
+        created_at = float(item.get("created_at") or 0)
+        record_time = (
+            time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(created_at))
+            if created_at > 0 else ""
+        )
+        record: Dict[str, Any] = {
+            "time": record_time,
+            "share_url": share_url,
+            "file_name": file_name,
+            "source_file_name": str(item.get("staging_name") or file_name),
+            "file_size": int(item.get("file_size") or 0),
+            "source_sha1": str(item.get("source_sha1") or ""),
+            "source_md5": "",
+            "tmdb_id": media.get("tmdb_id"),
+            "title": str(media.get("title") or item.get("title") or file_name),
+            "type": str(media_type or ""),
+            "season": item.get("season"),
+            "episode": item.get("episode"),
+            "year": str(media.get("year") or "") or None,
+            "cloud_dir": str(item.get("cloud_dir") or ""),
+            "finalize_key": pending_key,
+            "status": status,
+            "stage": "",
+            "transfer_mode": "",
+            "source_drive_key": "",
+            "target_drive_key": "",
+        }
+        try:
+            source_provider = self._resource_provider_for_url(share_url)
+            target_drive = getattr(self, "_cloud_drive", None)
+            if (
+                    source_provider is not None
+                    and target_drive is not None
+                    and getattr(source_provider, "key", None)
+                    and getattr(target_drive, "key", None)
+                    and source_provider.key != target_drive.key
+            ):
+                record.update({
+                    "transfer_mode": "cross",
+                    "source_drive_key": str(source_provider.key),
+                    "target_drive_key": str(target_drive.key),
+                })
+        except Exception as error:  # noqa: BLE001 - 跨盘信息拿不到时按同盘处理
+            logger.debug(f"推导跨盘信息失败，按同盘处理：{error}", exc_info=True)
+        return record
+
+    def _write_terminal_state(
+            self, item: Dict[str, Any], pending_key: str, status: str,
             reason: str = "",
     ) -> bool:
-        """写入历史终态；历史记录尚未落盘时保留任务，稍后重写避免状态卡在处理中。"""
-        if self._mark_offline_history_status(pending_key, status, reason):
+        """写后处理终态（§4.4）：成功不再写插件 history——MP 整理历史是
+        唯一载体；失败写进 retry_index（只写可重试的）；跨盘成功但落盘
+        自检未通过写一条修复行。始终返回 True——结算不再因找不到历史
+        记录而重排队，旧 _resolve_history_record 的 10 次重排队与补写
+        逻辑随 history 一起删除。"""
+        if status == "成功":
+            self._delete_terminal_index_row(item, pending_key)
+            self._write_repair_row_if_unlanded(item, pending_key)
             return True
-        if item.get("skip_history"):
-            return True
-        limit = int(getattr(self, "_HISTORY_RESYNC_LIMIT", 10) or 10)
-        retries = int(item.get("history_resync_count") or 0)
-        # 除次数上限外再加墙钟上限：10 次 ×60 秒会让卡片在 UI 上「卡」十几分钟，
-        # 而真正的原因（历史记录文件名与上游资源名不一致）往往不会自愈。
-        max_age = float(
-            getattr(self, "_HISTORY_RESYNC_MAX_AGE_SECONDS", 1800) or 1800
-        )
-        created_at = float(item.get("created_at") or 0)
-        aged_out = bool(created_at) and (time.time() - created_at) >= max_age
-        if retries < limit and not aged_out:
-            retries += 1
-            item["history_resync_count"] = retries
-            item["history_ready"] = False
-            item["next_check_at"] = time.time() + 60
-            self._persist_history_resync_progress(item, pending_key)
-            message = (
-                f"历史记录尚未落盘，保留后处理任务稍后重写终态（{status}）："
+        record = self._pending_item_to_terminal_record(item, pending_key, "失败")
+        if record is None:
+            logger.warning(
+                f"终态失败无法写入重试索引（缺 share_url/file_name）："
                 f"{item.get('file_name') or pending_key}"
             )
-            # 同一 pending 项的「尚未落盘」告警只打一次，后续复查降为 debug。
-            if item.get("history_resync_warned"):
-                logger.debug(message)
-            else:
-                item["history_resync_warned"] = True
-                logger.warning(message)
-            return False
-        # 1.7.102：终态找不到历史记录时不再丢弃——用后处理项自身的落盘事实补写一条。
-        backfilled = 0
-        try:
-            backfill = getattr(self, "_backfill_history_from_pending", None)
-            if callable(backfill):
-                backfilled = int(backfill(item) or 0)
-        except Exception as error:
-            logger.debug(f"补写历史记录失败：{error}", exc_info=True)
-        if backfilled:
-            self._settle_offline_pending_item(pending_key, item)
             return True
-        logger.warning(
-            f"历史记录长时间缺失，放弃写入终态（{status}）："
-            f"{item.get('file_name') or pending_key}"
-        )
-        # 达到上限后强制结算：无论是否命中历史记录都要移除 pending 项，
-        # 禁止无限重排队（命中路径已在本函数开头写入终态）。
-        self._settle_offline_pending_item(pending_key, item)
+        apply_failure(record, reason or "转存失败")
+        if not failure_retryable_of(record):
+            return True
+        try:
+            from ...core.retry_index import record_to_index_row
+        except Exception as error:  # noqa: BLE001 - 索引模块不可用时只记日志
+            logger.debug(f"重试索引模块不可用，失败终态未写入：{error}", exc_info=True)
+            return True
+        row = record_to_index_row(record, "失败")
+        if row is None:
+            return True
+        try:
+            get_store = getattr(self, "_get_data_store", None)
+            if callable(get_store):
+                get_store().repositories.retry_index.upsert_row(row)
+        except Exception as error:  # noqa: BLE001 - 索引写失败不阻塞终态结算
+            logger.debug(f"失败终态写重试索引失败：{error}", exc_info=True)
         return True
 
-    def _persist_history_resync_progress(
+    def _delete_terminal_index_row(
             self, item: Dict[str, Any], pending_key: str
     ) -> None:
-        """把重排队计数写回持久化数据，保证重启后仍能到达上限并终止。"""
-        if not self._get_data or not getattr(self, "_save_data", None):
+        """成功终态：删掉该记录在重试索引里的旧行（失败/处理中行已无
+        重试价值）。删行失败不阻塞结算；跨盘待修复行由
+        _write_repair_row_if_unlanded 随后重新 upsert。"""
+        record = self._pending_item_to_terminal_record(item, pending_key, "成功")
+        if record is None:
             return
         try:
-            with self._offline_pending_lock:
-                current = self._get_data(self._OFFLINE_PENDING_KEY) or {}
-                stored = current.get(pending_key)
-                if not isinstance(stored, dict):
-                    return
-                if stored.get("_monitor_token") and (
-                        stored.get("_monitor_token") != item.get("_monitor_token")
-                ):
-                    return
-                for field in (
-                        "history_resync_count", "history_ready", "next_check_at",
-                        "history_grace_warned", "history_resync_warned",
-                ):
-                    if field in item:
-                        stored[field] = copy.deepcopy(item[field])
-                self._save_offline_pending(current)
-        except Exception as error:
-            logger.debug(f"持久化历史重排队计数失败：{error}", exc_info=True)
+            from ...core.retry_index import retry_record_id
+            record_id = retry_record_id(record)
+            if not record_id:
+                return
+            get_store = getattr(self, "_get_data_store", None)
+            if callable(get_store):
+                get_store().repositories.retry_index.delete_by_record_ids(
+                    [record_id]
+                )
+        except Exception as error:  # noqa: BLE001 - 删行失败不阻塞成功结算
+            logger.debug(f"成功终态删除重试索引旧行失败：{error}", exc_info=True)
 
-    def _settle_offline_pending_item(
-            self, pending_key: str, item: Dict[str, Any]
+    def _write_repair_row_if_unlanded(
+            self, item: Dict[str, Any], pending_key: str
     ) -> None:
-        """达到重排队上限后把 pending 项从持久化数据移除，终止后续复查循环。"""
-        if not self._get_data or not getattr(self, "_save_data", None):
+        """跨盘成功终态：落盘自检未通过时写一条修复行进重试索引
+        （status 成功、landed False，供瘦页重试）。同盘成功不写——
+        MP 整理历史是唯一载体；自检拿不到实测数据（landed None）也不写。"""
+        record = self._pending_item_to_terminal_record(item, pending_key, "成功")
+        if record is None or str(record.get("transfer_mode") or "") != "cross":
+            return
+        verify = getattr(self, "verify_landed_records", None)
+        if not callable(verify):
             return
         try:
-            with self._offline_pending_lock:
-                current = self._get_data(self._OFFLINE_PENDING_KEY) or {}
-                stored = current.get(pending_key)
-                if not isinstance(stored, dict):
-                    return
-                if stored.get("_monitor_token") and (
-                        stored.get("_monitor_token") != item.get("_monitor_token")
-                ):
-                    return
-                current.pop(pending_key, None)
-                self._save_offline_pending(current)
-        except Exception as error:
-            logger.debug(f"结算历史重排队任务失败：{error}", exc_info=True)
+            infos = verify([record]) or {}
+        except Exception as error:  # noqa: BLE001 - 自检失败不阻塞成功结算
+            logger.debug(f"落盘自检失败，跳过修复行写入：{error}", exc_info=True)
+            return
+        info = infos.get(id(record)) or {}
+        if info.get("landed") is not False:
+            return
+        record["landed"] = False
+        try:
+            from ...core.retry_index import record_to_index_row
+        except Exception as error:  # noqa: BLE001 - 索引模块不可用时只记日志
+            logger.debug(f"重试索引模块不可用，修复行未写入：{error}", exc_info=True)
+            return
+        row = record_to_index_row(record, "成功")
+        if row is None:
+            return
+        try:
+            get_store = getattr(self, "_get_data_store", None)
+            if callable(get_store):
+                get_store().repositories.retry_index.upsert_row(row)
+                logger.warning(
+                    f"跨盘转存成功但落盘自检未通过，已记修复行："
+                    f"{record.get('file_name') or pending_key}"
+                )
+        except Exception as error:  # noqa: BLE001 - 索引写失败不阻塞成功结算
+            logger.debug(f"修复行写重试索引失败：{error}", exc_info=True)
+
+    def get_pending_finalize_tasks(self) -> List[Dict[str, Any]]:
+        """返回等待115文件就绪、重命名或生成STRM的持久任务。"""
+        if not self._get_data:
+            return []
+        with self._offline_pending_lock:
+            pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
+            return [copy.deepcopy({**item, "pending_key": key}) for key, item in pending.items()]
+
+    def delete_pending_finalize_tasks(
+            self,
+            pending_keys: Set[str],
+            task_ids: Optional[Set[str]] = None,
+    ) -> int:
+        """删除用户明确取消的待后处理任务，并把失败终态记进重试索引。"""
+        removed_keys, pending_count, removed_items = self._remove_pending_finalize_tasks(
+            pending_keys,
+            task_ids=task_ids,
+        )
+        if not removed_keys:
+            return 0
+        for pending_key, item in removed_items.items():
+            self._write_terminal_state(
+                item, pending_key, "失败", "后处理任务已由用户删除"
+            )
+        self._notify_offline_pending_changed(pending_count)
+        return len(removed_keys)
+
+    def stop_pending_finalize_tasks(self, pending_keys: Set[str]) -> int:
+        """安全停止后移除尚未提交的后处理任务，并把失败终态记进重试索引。"""
+        removed_keys, pending_count, removed_items = self._remove_pending_finalize_tasks(
+            pending_keys
+        )
+        if not removed_keys:
+            return 0
+        for pending_key, item in removed_items.items():
+            self._write_terminal_state(
+                item, pending_key, "失败", "后处理任务已由用户停止"
+            )
+        self._notify_offline_pending_changed(pending_count)
+        return len(removed_keys)
+
+    def _remove_pending_finalize_tasks(
+            self,
+            pending_keys: Set[str],
+            task_ids: Optional[Set[str]] = None,
+    ) -> Tuple[Set[str], int, Dict[str, Dict[str, Any]]]:
+        """仅移除待后处理状态；调用方负责写终态和状态通知。"""
+        keys = {str(value or "").strip() for value in pending_keys if str(value or "").strip()}
+        normalized_task_ids = {
+            str(value or "").strip().upper()
+            for value in (task_ids or set())
+            if str(value or "").strip()
+        }
+        if (not keys and not normalized_task_ids) or not self._get_data:
+            return set(), 0, {}
+        with self._offline_pending_lock:
+            pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
+            removed_keys = {
+                key for key, item in pending.items()
+                if key in keys
+                   or str((item or {}).get("task_id") or "").strip().upper()
+                   in normalized_task_ids
+            }
+            if not removed_keys:
+                return set(), len(pending), {}
+            removed_items = {
+                key: copy.deepcopy(pending[key]) for key in removed_keys
+            }
+            for key in removed_keys:
+                pending.pop(key, None)
+            self._save_offline_pending(pending)
+            return removed_keys, len(pending), removed_items
+
 
     def _commit_single_item(
             self,
@@ -1049,9 +1163,9 @@ class PostprocessService(OwnerDelegator):
             media_data: Dict[str, Any],
             ctx: PostprocessBatchContext,
     ) -> None:
-        """单项后处理完成后立即提交历史终态并将通知入队，避免中途停止丢失已完成项。"""
+        """单项后处理完成后立即结算终态并将通知入队，避免中途停止丢失已完成项。"""
         self._update_postprocess_progress(
-            item, pending_key, "commit", "更新历史和订阅进度"
+            item, pending_key, "commit", "更新终态和订阅进度"
         )
         if item.get("upgrade") and str(
                 item.get("upgrade_mode") or self._upgrade_mode
@@ -1059,8 +1173,7 @@ class PostprocessService(OwnerDelegator):
             self._delete_upgrade_old_strm(
                 item, replacement_path=strm_path
             )
-        if not self._resolve_history_record(item, pending_key, "成功"):
-            return
+        self._write_terminal_state(item, pending_key, "成功")
         # v1.12.6 C：成功终态清除 MP 整理中登记（无身份时是空操作）。
         self._clear_mp_organizing_for_item(item)
         self._queue_subscription_completion(item, media, media_data, ctx)
@@ -1100,14 +1213,14 @@ class PostprocessService(OwnerDelegator):
             ctx: PostprocessBatchContext,
             notify: bool = True,
     ) -> None:
-        """单项后处理定位或执行失败后，彻底结算该项，更新历史并通知前端停止该项。"""
+        """单项后处理定位或执行失败后，彻底结算该项，失败记入重试索引，
+        并通知前端停止该项。"""
         logger.warning(
             f"文件后处理失败并停止：{item.get('file_name') or pending_key}，原因：{reason}"
         )
-        if not self._resolve_history_record(item, pending_key, "失败", reason):
-            return
+        self._write_terminal_state(item, pending_key, "失败", reason)
         # v1.12.6 C：所有 abort 都走这里，终态清除 MP 整理中登记集中做
-        # 一次（无身份时是空操作；历史未落盘提前返回时不清除，任务还在）。
+        # 一次（无身份时是空操作）。
         self._clear_mp_organizing_for_item(item)
         # 终态失败统一走已有的死任务失败通知口径（同一标题/文案、同一 _notify 开关）：
         # 此前只有 finalize_dead 路径会通知，直接 abort（定位失败、离线超时等）
@@ -2246,8 +2359,8 @@ class PostprocessService(OwnerDelegator):
             subscribe.to_dict = lambda: dict(subscribe.__dict__)
         if not subscribe:
             self._cleanup_failed_offline_task(item, "订阅已不存在")
-            self._mark_offline_history_status(
-                pending_key, "失败", "Magnet 下载完成时订阅已不存在"
+            self._write_terminal_state(
+                item, pending_key, "失败", "Magnet 下载完成时订阅已不存在"
             )
             return []
 
@@ -2326,7 +2439,7 @@ class PostprocessService(OwnerDelegator):
             reason = "Magnet 下载完成，但真实文件名未匹配当前订阅"
             logger.debug(f"{reason}：{item.get('file_name')}")
             self._cleanup_failed_offline_task(item, reason)
-            self._mark_offline_history_status(pending_key, "失败", reason)
+            self._write_terminal_state(item, pending_key, "失败", reason)
             return []
 
         history_records = []
@@ -2552,20 +2665,13 @@ class PostprocessService(OwnerDelegator):
             details: List[Dict[str, Any]],
             success_episodes: List[int],
     ) -> Optional[List[Dict[str, Any]]]:
-        """统一持久化 Magnet 匹配或自愈产生的历史记录、订阅状态并返回详情。"""
+        """统一结算 Magnet 匹配或自愈产生的订阅状态并返回详情（v1.13.3：
+        成功不再写插件 history——终态只走 _write_terminal_state，失败才进
+        重试索引；跨盘成功但落盘自检未通过写一条修复行）。"""
         if not history_records:
             return None
-        persisted_records = [
-            record for record in history_records
-            if not record.get("skip_history")
-        ]
-        with self._offline_pending_lock:
-            history = [
-                record for record in (self._get_data("history") or [])
-                if str(record.get("finalize_key") or "") != pending_key
-            ]
-            history.extend(persisted_records)
-            self._save_data("history", history)
+        if any(not record.get("skip_history") for record in history_records):
+            self._write_terminal_state(item, pending_key, "成功")
         item["success_episodes"] = (
             [] if item.get("transient_target") else success_episodes
         )

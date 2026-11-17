@@ -165,9 +165,17 @@ def _scan_save_calls():
 class DataKeyGovernanceTests(unittest.TestCase):
     def test_literal_save_keys_are_declared(self):
         """源码里字面量写键必须全部已声明；新增字面量键先改
-        CloudSubscribeDataStore，否则这里失败。"""
+        CloudSubscribeDataStore，否则这里失败。
+
+        v1.13.3：字面量 save_data 调用已全部随 history 写操作删掉
+        （失败/待修复改走 retry_index 仓储），字面量集合为空是预期
+        状态——本用例改为守“无未声明键”与“无 history 写操作”两条。
+        """
         literals, _dynamics = _scan_save_calls()
-        self.assertTrue(literals, "没扫到任何字面量写键，扫描正则可能失效了")
+        self.assertNotIn(
+            "history", literals,
+            "save_data('history') 必须随 history 表一起删掉，失败/待修复只走重试索引",
+        )
         undeclared = sorted(key for key in literals if not CloudSubscribeDataStore.handles(key))
         self.assertEqual(
             undeclared, [],
@@ -195,8 +203,8 @@ class DataKeyGovernanceTests(unittest.TestCase):
         self.assertIn(BARE_KEY_PATTERN, dynamics, "旧插件逐键迁移的裸 key 模式丢了？")
 
     def test_handles_covers_suffix_patterns(self):
+        # v1.13.3：history 键已删除（转存历史表随之删掉），不得再声明/读写。
         for key in (
-            "history",
             "pending_offline_strm",
             "checkin_schedule_state",
             "legacy_id_migration",
@@ -206,5 +214,5 @@ class DataKeyGovernanceTests(unittest.TestCase):
             "p115_auth_session",
         ):
             self.assertTrue(CloudSubscribeDataStore.handles(key), key)
-        for key in ("checkin", "unknown_key", "", "history_backup"):
+        for key in ("checkin", "unknown_key", "", "history", "history_backup"):
             self.assertFalse(CloudSubscribeDataStore.handles(key), key)

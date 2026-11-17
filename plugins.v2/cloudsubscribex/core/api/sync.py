@@ -182,75 +182,6 @@ class SyncApi(OwnerDelegator):
         return sorted(positive_ints(values or []))
 
     @classmethod
-    def _normalize_history_search_targets(
-            cls, targets: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """将历史媒体组展开为同步链可直接处理的电影或单季电视剧目标。"""
-        media_type_values = {
-            "tv": MediaType.TV.value,
-            "电视剧": MediaType.TV.value,
-            "movie": MediaType.MOVIE.value,
-            "电影": MediaType.MOVIE.value,
-        }
-        normalized: Dict[tuple, Dict[str, Any]] = {}
-        for target in targets:
-            if not isinstance(target, dict):
-                continue
-            try:
-                tmdb_id = int(target.get("tmdb_id") or 0)
-            except (TypeError, ValueError):
-                tmdb_id = 0
-            title = str(target.get("title") or "").strip()
-            media_type = media_type_values.get(
-                str(target.get("media_type") or "").strip().lower(), ""
-            )
-            if tmdb_id <= 0 or not title or not media_type:
-                continue
-
-            base = {
-                "tmdb_id": tmdb_id,
-                "media_type": media_type,
-                "title": title,
-                "year": target.get("year") or "",
-            }
-            if media_type == MediaType.MOVIE.value:
-                normalized.setdefault((media_type, tmdb_id, 0), base)
-                continue
-
-            season_episodes = target.get("season_episodes") or {}
-            if not isinstance(season_episodes, dict):
-                season_episodes = {}
-            seasons = set(cls._positive_ints(target.get("seasons") or []))
-            seasons.update(cls._positive_ints(season_episodes.keys()))
-            try:
-                single_season = int(target.get("season") or 0)
-            except (TypeError, ValueError):
-                single_season = 0
-            if single_season > 0:
-                seasons.add(single_season)
-            fallback_episodes = cls._positive_ints(target.get("episodes") or [])
-            for season in sorted(seasons):
-                episodes = cls._positive_ints(
-                    season_episodes.get(str(season))
-                    or season_episodes.get(season)
-                    or (fallback_episodes if len(seasons) == 1 else [])
-                )
-                if not episodes:
-                    continue
-                key = (media_type, tmdb_id, season)
-                existing = normalized.get(key)
-                if existing:
-                    existing["episodes"] = sorted(
-                        set(existing.get("episodes") or []) | set(episodes)
-                    )
-                    continue
-                normalized[key] = {
-                    **base,
-                    "season": season,
-                    "episodes": episodes,
-                }
-        return list(normalized.values())
-
     def api_vue_start_sync(
             self,
             payload: Optional[Dict[str, Any]] = None,
@@ -258,21 +189,17 @@ class SyncApi(OwnerDelegator):
     ) -> dict:
         payload = payload or {}
         raw_subscribe_ids = payload.get("subscribe_ids") or []
-        raw_targets = payload.get("history_targets") or []
         try:
             selected_count = max(0, int(payload.get("selected_count") or 0))
         except (TypeError, ValueError):
             selected_count = 0
-        selection_requested = bool(
-            selected_count or raw_subscribe_ids or raw_targets
-        )
-        if not isinstance(raw_subscribe_ids, list) or not isinstance(raw_targets, list):
+        selection_requested = bool(selected_count or raw_subscribe_ids)
+        if not isinstance(raw_subscribe_ids, list):
             return {"success": False, "message": "立即搜索范围参数无效"}
-        if len(raw_subscribe_ids) > 200 or len(raw_targets) > 200:
-            return {"success": False, "message": "单次最多选择 200 个历史媒体"}
+        if len(raw_subscribe_ids) > 200:
+            return {"success": False, "message": "单次最多选择 200 个订阅"}
 
         subscribe_ids = set()
-        history_search_targets: List[Dict[str, Any]] = []
         if selection_requested:
             with SessionFactory() as db:
                 subscribes = SubscribeOper(db=db).list() or []
@@ -291,69 +218,17 @@ class SyncApi(OwnerDelegator):
                 if subscribe_id in subscriptions_by_id:
                     subscribe_ids.add(subscribe_id)
 
-            normalized_targets = self._normalize_history_search_targets(raw_targets)
-            if len(normalized_targets) > 500:
-                return {"success": False, "message": "所选历史记录包含的媒体季数过多"}
-            for target in normalized_targets:
-                tmdb_id = int(target["tmdb_id"])
-                media_type = str(target["media_type"])
-                title = " ".join(
-                    str(target.get("title") or "").strip().casefold().split()
-                )
-                year = str(target.get("year") or "").strip()
-                season = int(target.get("season") or 0)
-                matched_ids = set()
-                for subscribe_id, subscribe in subscriptions_by_id.items():
-                    if media_type and getattr(subscribe, "type", None) != media_type:
-                        continue
-                    try:
-                        subscribe_tmdb_id = int(tmdb_id_of(subscribe) or 0)
-                    except (TypeError, ValueError):
-                        subscribe_tmdb_id = 0
-                    if tmdb_id > 0:
-                        if subscribe_tmdb_id != tmdb_id:
-                            continue
-                    else:
-                        subscribe_title = " ".join(
-                            str(getattr(subscribe, "name", "") or "")
-                            .strip().casefold().split()
-                        )
-                        subscribe_year = str(
-                            getattr(subscribe, "year", "") or ""
-                        ).strip()
-                        if not title or subscribe_title != title:
-                            continue
-                        if year and subscribe_year and subscribe_year != year:
-                            continue
-                    if media_type == MediaType.TV.value:
-                        try:
-                            subscribe_season = int(
-                                getattr(subscribe, "season", 1) or 1
-                            )
-                        except (TypeError, ValueError):
-                            subscribe_season = 1
-                        if subscribe_season != season:
-                            continue
-                    matched_ids.add(subscribe_id)
-
-                if matched_ids:
-                    subscribe_ids.update(matched_ids)
-                else:
-                    history_search_targets.append(target)
-
-            if not subscribe_ids and not history_search_targets:
+            if not subscribe_ids:
                 return {
                     "success": False,
-                    "message": "所选历史记录缺少可搜索的媒体或集数信息",
+                    "message": "所选订阅缺少可搜索的媒体信息",
                 }
 
         selected_ids = sorted(subscribe_ids) if selection_requested else None
         sync_kwargs = {
             "subscribe_ids": selected_ids,
-            "history_search_targets": history_search_targets or None,
         }
-        history_target_count = len(history_search_targets)
-        media_count = len(selected_ids or []) + history_target_count
+        media_count = len(selected_ids or [])
         if wait:
             result: Dict[str, Any] = {}
             future = self._submit_sync_operation(
@@ -365,7 +240,6 @@ class SyncApi(OwnerDelegator):
             data.update({
                 "scope": "selected" if selection_requested else "all",
                 "subscribe_count": len(selected_ids or []),
-                "history_target_count": history_target_count,
                 "media_count": media_count,
             })
             result["data"] = data
@@ -375,12 +249,7 @@ class SyncApi(OwnerDelegator):
             "页面订阅搜索",
         )
         if selection_requested:
-            parts = []
-            if selected_ids:
-                parts.append(f"{len(selected_ids)} 个订阅")
-            if history_target_count:
-                parts.append(f"{history_target_count} 个历史媒体目标")
-            message = f"已按所选历史记录提交{'和'.join(parts)}的搜索"
+            message = f"已按所选 {len(selected_ids)} 个订阅提交搜索"
             scope = "selected"
         else:
             message = "全部订阅搜索任务已提交"
@@ -391,7 +260,6 @@ class SyncApi(OwnerDelegator):
             "data": {
                 "scope": scope,
                 "subscribe_count": len(selected_ids or []),
-                "history_target_count": history_target_count,
                 "media_count": media_count,
             },
         }

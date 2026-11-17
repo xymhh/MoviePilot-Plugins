@@ -12,7 +12,11 @@
 1.13.2：1.10.3 的渠道页合并已废止——渠道页只留 ChannelManager，
 频道监控（TgMonitor）独立成主侧栏导航（AppPageTgMonitor），
 签到状态（CheckinDashboard）只留 MP 首页 checkin widget。
-PluginWorkbench 按 mode="overview"|"history" 渲染总览与历史两页；Page 只做转发。
+1.13.3：转存记录页瘦身为失败记录页——HistoryTable 只列重试索引里的
+失败与待修复行（扁平表，不再按媒体分组/展开子记录，不再有洗版/补发
+通知/Emby 播放入口）；总览动态仍用 MediaHub，overviewGroups 由扁平
+失败记录在前端就地分组。PluginWorkbench 按 mode="overview"|"history"
+渲染总览与历史两页；Page 只做转发。
 
 用法：python3 scripts/check_frontend_entry.py [项目根]
 """

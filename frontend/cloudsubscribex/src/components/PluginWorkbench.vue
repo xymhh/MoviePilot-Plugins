@@ -113,15 +113,15 @@
       </div>
     </header>
 
-    <section class="overview-band" aria-label="转存统计">
+    <section class="overview-band" aria-label="失败记录统计">
       <div class="overview-title d-flex align-center ga-2 mb-2">
         <v-icon icon="mdi-chart-box-outline" color="primary" size="small" />
-        <span class="text-subtitle-2 font-weight-bold">转存统计</span>
+        <span class="text-subtitle-2 font-weight-bold">失败记录统计</span>
       </div>
       <StatsGrid :stats="stats" class="overview-stats-grid" @select="handleStatSelect" />
     </section>
 
-    <section v-if="mode === 'overview'" class="overview-list" aria-label="转存动态">
+    <section v-if="mode === 'overview'" class="overview-list" aria-label="失败动态">
       <div class="overview-list-title d-flex align-center ga-2">
         <v-icon icon="mdi-alert-circle-outline" color="error" size="small" />
         <span class="text-subtitle-2 font-weight-bold">{{ overviewListTitle }}</span>
@@ -143,23 +143,18 @@
         @delete="confirmDeleteHistory" />
     </section>
 
-    <section v-else class="history-workspace" aria-label="转存记录">
+    <section v-else class="history-workspace" aria-label="失败记录">
       <HistoryTable
         :api="api"
-        :items="historyGroups"
+        :items="failures"
         :page="historyPage.page"
         :page-size="historyPage.pageSize"
         :total="historyPage.total"
         :total-pages="historyPage.totalPages"
-        :filter-options="historyPage.filterOptions"
-        :emby-play-items="embyPlayItems"
         :loading="loading"
         :retrying-key="retryingHistoryKey"
         :deleting-key="deletingHistoryKey"
-        :notifying-key="notifyingHistoryKey"
-        :upgrading-key="upgradingHistoryKey"
-        :enable-cloud-upgrade="historyPage.enableCloudUpgrade"
-        :initial-statuses="historyStatuses"
+        :status-filter="historyStatus"
         @refresh="loadPage"
         @query-change="updateHistoryQuery"
         @clear="openClearHistory"
@@ -168,11 +163,8 @@
         @retry-selected="confirmRetrySelectedHistory"
         @mark-success="confirmMarkHistorySuccess"
         @delete="confirmDeleteHistory"
-        @delete-groups="confirmDeleteGroups"
+        @delete-records="confirmDeleteRecords"
         @selection-change="updateHistorySelection"
-        @notify="confirmNotifyHistory"
-        @upgrade="handleHistoryUpgrade"
-        @play="playHistory"
         @open-media="openMediaDetail" />
     </section>
 
@@ -193,9 +185,9 @@
       persistent
       @confirm="confirmImmediateSearch">
       <template v-if="selectedHistoryCount">
-        确认立即搜索所选 {{ selectedHistoryCount }} 个历史媒体？
+        确认立即搜索所选 {{ selectedHistoryCount }} 条失败记录的媒体？
         <v-alert type="info" variant="tonal" density="compact" class="mt-3">
-          本次仅搜索所选历史记录，不会搜索其他订阅。
+          本次仅搜索所选失败记录的媒体，不会搜索其他订阅。
         </v-alert>
       </template>
       <template v-else>确认立即搜索全部订阅？</template>
@@ -227,23 +219,11 @@
       title="批量标记为成功"
       icon="mdi-check-decagram-outline"
       icon-color="warning"
-      :body="`将把 ${markSuccessRecords.length} 条「待确认 / 待处理」记录直接标记为成功；之后落盘自检和后处理终态都不会再改写这些记录，是否继续？`"
+      :body="`将把 ${markSuccessRecords.length} 条「待修复 / 待确认」记录直接标记为成功；之后落盘自检和后处理终态都不会再改写这些记录，是否继续？`"
       confirm-text="确认标记"
       confirm-color="warning"
       :loading="markingHistoryKey === 'batch'"
       @confirm="markHistorySuccess" />
-    <ConfirmDialog
-      v-model="upgradeVisible"
-      title="确认历史洗版"
-      alert-text="将继续使用该条历史记录作为现有版本基线，并按当前洗版设置搜索和比较候选资源。"
-      alert-type="warning"
-      confirm-text="确认洗版"
-      confirm-color="warning"
-      :loading="Boolean(upgradingHistoryKey)"
-      persistent
-      @confirm="confirmHistoryUpgrade">
-      确认洗版“{{ historyUpgradeLabel(upgradingPayload) }}”？
-    </ConfirmDialog>
     <ConfirmDialog
       v-if="stopVisible"
       v-model="stopVisible"
@@ -276,12 +256,11 @@
     <ConfirmDialog
       v-if="clearVisible"
       v-model="clearVisible"
-      title="清空历史记录"
+      title="清空失败记录"
       icon="mdi-delete-sweep-outline"
       icon-color="error"
-      body="确认清理本插件的转存历史？此操作不可逆。"
+      body="确认清理失败记录页的全部失败与待修复记录？处理中的记录不会被清理，网盘文件和 STRM 均会保留，此操作不可逆。"
       :options="[
-        { key: 'forceClear', label: '同时终止并清理正在处理的记录', color: 'error' },
         { key: 'clearPoints', label: '同时清空 HDHive/Dian115 已花费积分记录', color: 'warning' },
       ]"
       confirm-text="确认清空"
@@ -306,27 +285,16 @@
     <ConfirmDialog
       v-if="deleteVisible"
       v-model="deleteVisible"
-      title="删除历史记录"
+      title="删除失败记录"
       icon="mdi-delete-outline"
       icon-color="error"
-      :body="deletingGroupCount
-        ? `确认删除所选 ${deletingGroupCount} 个汇总项中的 ${deletingRecords.length} 条转存历史？`
-        : `确认删除“${deletingRecord?.file_name || '此记录'}”的转存历史？`"
-      :options="[{ key: 'deleteLinked', label: '同时删除关联的网盘文件和STRM', color: 'error' }]"
+      :body="deletingRecordCount
+        ? `确认删除所选 ${deletingRecordCount} 条失败记录？网盘文件和 STRM 均会保留。`
+        : `确认删除“${deletingRecord?.file_name || '此记录'}”的失败记录？网盘文件和 STRM 均会保留。`"
       confirm-text="确认删除"
       confirm-color="error"
       :loading="Boolean(deletingHistoryKey)"
       @confirm="deleteHistory" />
-
-    <ConfirmDialog
-      v-model="notifyVisible"
-      title="补发汇总通知"
-      confirm-text="确认发送"
-      :error-text="notifyError"
-      :loading="Boolean(notifyingHistoryKey)"
-      @confirm="notifyHistory">
-      将为“{{ notifyingSummaryTitle || notifyingRecord?.file_name || "此记录" }}”重新发送入库通知和Webhook。
-    </ConfirmDialog>
 
     <v-snackbar v-model="fallbackVisible" :color="fallbackType" :style="snackbarTextStyle" location="top" timeout="3000">
       {{ fallbackMessage }}
@@ -435,7 +403,7 @@ const snackbarTextStyle = computed(() => ({
   color: `rgb(var(--v-theme-on-${fallbackType.value || "success"}))`,
 }))
 const overviewFilter = ref("失败")
-const historyStatuses = ref([])
+const historyStatus = ref("失败")
 const offlineVisible = ref(false)
 const manualVisible = ref(false)
 const manualInitialMode = ref("links")
@@ -462,16 +430,8 @@ const markingHistoryKey = ref("")
 const deleteVisible = ref(false)
 const deletingRecord = ref(null)
 const deletingRecords = ref([])
-const deletingGroupCount = ref(0)
+const deletingRecordCount = ref(0)
 const deletingHistoryKey = ref("")
-const notifyVisible = ref(false)
-const notifyingRecord = ref(null)
-const notifyingSummaryTitle = ref("")
-const notifyingHistoryKey = ref("")
-const upgradingHistoryKey = ref("")
-const upgradeVisible = ref(false)
-const upgradingPayload = ref(null)
-const notifyError = ref("")
 const searchConfirmVisible = ref(false)
 const searchStarting = ref(false)
 const historyDirty = ref(true)
@@ -485,11 +445,9 @@ function notify(text, type = "success") {
 }
 
 const {
-  historyGroups,
-  subscribesProgress,
+  failures,
   historyPage,
   historyStats,
-  embyPlayItems,
   loading,
   stats,
   loadPage,
@@ -498,7 +456,6 @@ const {
   clearHistory: clearHistoryRequest,
   deleteHistory: deleteHistoryRequest,
   deleteHistoryBatch: deleteHistoryBatchRequest,
-  notifyHistory: notifyHistoryRequest,
 } = useHistoryPageData(api, notify, props.pluginId)
 const { clearCache: clearCacheRequest } = useCacheActions(api, props.pluginId)
 let historyRefreshTimer = null
@@ -525,7 +482,6 @@ const {
   startSync,
   stopSync: stopSyncRequest,
   stopTask: stopTaskRequest,
-  upgradeHistory: upgradeHistoryRequest,
 } = useRuntimeData(api, notify, props.pluginId, {
   onSettled: scheduleHistoryRefresh,
   onHistoryChanged: scheduleHistoryRefresh,
@@ -533,12 +489,12 @@ const {
 
 onMounted(() => {
   void loadSummary()
-  // 1.10.5：总览默认看失败记录，首屏就按状态查服务端（含秒传未命中，
-  // 见 overviewStatusesFor）；历史页仍按原来不筛选加载。
+  // v1.13.3：总览默认看失败记录，首屏就按状态查服务端；历史页同样默认
+  // 只看失败（顶部统计卡片可切待修复/处理中/全部）。
   if (props.mode === "overview") {
-    void updateHistoryQuery({statuses: ["失败", "秒传失败"], page: 1})
+    void updateHistoryQuery({status: "失败", page: 1})
   } else {
-    void loadPage(false)
+    void updateHistoryQuery({status: "失败", page: 1})
   }
   void loadTransferPause()
 })
@@ -548,52 +504,73 @@ onUnmounted(() => {
 
 function handleStatSelect(stat) {
   const filter = String(stat?.filter || "").trim()
-  historyStatuses.value = filter ? [filter] : []
-  // 总览页用同一过滤切转存动态；历史页用 historyStatuses 过滤表格。
+  historyStatus.value = filter
+  // 总览页用同一过滤切失败动态；历史页用 historyStatus 过滤表格。
+  // 过滤走服务端状态查询（失败 / 成功=待修复 / 处理中 / "" 全部）。
   overviewFilter.value = filter
-  // 1.10.5：总览默认只拉第 1 页（最新 10 组）再在前端过滤，失败分组不在
-  // 这 10 组里就永远显示不出。过滤改走服务端状态查询。
   void updateHistoryQuery({
-    statuses: filter ? overviewStatusesFor(filter) : [],
+    status: filter,
     page: 1,
   })
-}
-
-// 1.10.5：总览的“失败”要含秒传未命中——它在后端是独立的伪状态
-// “秒传失败”，只查“失败”会漏掉它；统计卡的失败数是两类之和。
-function overviewStatusesFor(filter) {
-  if (filter === "失败") return ["失败", "秒传失败"]
-  return [filter]
 }
 
 const overviewEmptyTitle = computed(() =>
   overviewFilter.value === "失败"
     ? "暂无失败记录"
     : overviewFilter.value === "成功"
-      ? "暂无成功记录"
-      : "暂无转存记录",
+      ? "暂无待修复记录"
+      : overviewFilter.value === "处理中"
+        ? "暂无处理中记录"
+        : "暂无失败记录",
 )
 const overviewEmptyHint = computed(() =>
   overviewFilter.value === "失败"
     ? "失败的转存会出现在这里，可直接重试"
     : overviewFilter.value === "成功"
-      ? "成功的转存会出现在这里"
-      : "转存记录会出现在这里",
+      ? "跨盘成功但落盘自检未通过的记录会出现在这里，可标记成功或重试"
+      : overviewFilter.value === "处理中"
+        ? "正在重试的记录会出现在这里"
+        : "失败与待修复的转存会出现在这里",
 )
 
 const overviewListTitle = computed(() =>
   overviewFilter.value === "失败"
     ? "失败记录（可重试）"
     : overviewFilter.value === "成功"
-      ? "成功记录"
-      : "转存动态",
+      ? "待修复记录"
+      : overviewFilter.value === "处理中"
+        ? "处理中记录"
+        : "失败记录",
 )
+// v1.13.3：总览动态不再用后端分组，失败记录是扁平列表，这里按媒体
+// 就地分组供 MediaHub 展示（每组 records 即该媒体的失败行）。
 const overviewGroups = computed(() => {
-  const filter = overviewFilter.value
-  if (!filter) return historyGroups.value
-  return (historyGroups.value || []).filter((group) =>
-    (group.records || []).some((record) => record?.status === filter),
-  )
+  const byKey = new Map()
+  for (const record of failures.value || []) {
+    const key = `${record.tmdb_id || ""}|${record.title || record.file_name || ""}|${record.type || ""}`
+    let group = byKey.get(key)
+    if (!group) {
+      group = {
+        group_key: key,
+        title: record.title || record.file_name || "未知",
+        year: record.year || "",
+        type: record.type || "",
+        tmdb_id: record.tmdb_id || 0,
+        season: Number(record.season || 0),
+        subscribe_id: record.subscribe_id || null,
+        records: [],
+        failed_count: 0,
+        pending_count: 0,
+        success_count: 0,
+      }
+      byKey.set(key, group)
+    }
+    group.records.push(record)
+    if (record.status === "失败") group.failed_count += 1
+    else if (record.status === "处理中") group.pending_count += 1
+    else group.success_count += 1
+  }
+  return [...byKey.values()]
 })
 
 const stoppableTaskCount = computed(
@@ -604,9 +581,9 @@ const immediateSearchLabel = computed(() =>
   selectedHistoryCount.value ? `搜索所选（${selectedHistoryCount.value}）` : "搜索全部",
 )
 const immediateSearchTitle = computed(() =>
-  selectedHistoryCount.value ? `立即搜索所选 ${selectedHistoryCount.value} 个历史媒体` : "立即搜索全部订阅",
+  selectedHistoryCount.value ? `立即搜索所选 ${selectedHistoryCount.value} 条失败记录的媒体` : "立即搜索全部订阅",
 )
-const immediateSearchDialogTitle = computed(() => (selectedHistoryCount.value ? "搜索所选历史记录" : "搜索全部订阅"))
+const immediateSearchDialogTitle = computed(() => (selectedHistoryCount.value ? "搜索所选失败记录" : "搜索全部订阅"))
 const runtimeSummary = computed(() => {
   if (runtime.status === "starting") return "正在准备订阅任务"
   if (runtime.status === "stopping") return "正在停止当前任务"
@@ -691,28 +668,14 @@ function openMediaDetail(link) {
   window.location.hash = String(link).replace(/^#/, "")
 }
 
-async function playHistory(itemId) {
-  const popup = window.open("", "_blank")
-  try {
-    const result = await api.get(`plugin/${props.pluginId}/history/play/${encodeURIComponent(itemId)}`)
-    const url = result?.data?.url
-    if (!result?.success || !url) throw new Error(result?.message || "未找到播放地址")
-    if (popup) popup.location.href = url
-    else window.open(url, "_blank", "noopener,noreferrer")
-  } catch (error) {
-    if (popup) popup.close()
-    notify(error.message || "打开 Emby 失败", "error")
-  }
-}
-
 function openClearHistory() {
   clearVisible.value = true
 }
 
-async function clearHistory({forceClear, clearPoints}) {
+async function clearHistory({clearPoints}) {
   clearing.value = true
   try {
-    const message = await clearHistoryRequest(forceClear, clearPoints);
+    const message = await clearHistoryRequest(false, clearPoints);
     clearVisible.value = false
     notify(message)
   } catch (e) {
@@ -841,7 +804,7 @@ function markSuccessIdentity(record) {
 function confirmMarkHistorySuccess(payload) {
   const records = (payload?.records || []).map(markSuccessIdentity)
   if (!records.length) {
-    notify("所选记录没有可标记的待确认/待处理项", "warning")
+    notify("所选记录没有可标记的待修复/待确认项", "warning")
     return
   }
   markSuccessRecords.value = records
@@ -874,82 +837,44 @@ async function markHistorySuccess() {
   }
 }
 
-function handleHistoryUpgrade(payload) {
-  if (payload?.scope === "group") {
-    openManualDialog("upgrade", payload.media || null)
-    return
-  }
-  if (!(payload?.records || []).length) return
-  upgradingPayload.value = payload
-  upgradeVisible.value = true
-}
-
-function historyUpgradeLabel(payload) {
-  const record = payload?.records?.[0] || {}
-  const title = String(record.title || record.file_name || "此记录").trim()
-  const season = Number(record.season || 0)
-  const episode = Number(record.episode || 0)
-  if (season > 0 && episode > 0) {
-    return `${title} S${String(season).padStart(2, "0")}E${String(episode).padStart(2, "0")}`
-  }
-  return title
-}
-
-async function confirmHistoryUpgrade() {
-  const payload = upgradingPayload.value
-  const records = payload?.records || []
-  if (!records.length) return
-  upgradingHistoryKey.value = String(payload?.key || "")
-  try {
-    const message = await upgradeHistoryRequest(records, payload?.scope || "record")
-    upgradeVisible.value = false
-    upgradingPayload.value = null
-    notify(message)
-  } catch (e) {
-    notify(e.message || "洗版任务提交失败", "error")
-  } finally {
-    upgradingHistoryKey.value = ""
-  }
-}
-
 function confirmDeleteHistory(record) {
-  if (!["成功", "失败", "跳过"].includes(record?.status) && !record?.finalize_key) {
-    notify("任务仍在处理，完成后才能删除历史记录", "warning")
+  if (record?.status === "处理中") {
+    notify("任务仍在处理，完成后才能删除失败记录", "warning")
     return
   }
   deletingRecord.value = record
   deletingRecords.value = []
-  deletingGroupCount.value = 0
+  deletingRecordCount.value = 0
   deleteVisible.value = true
 }
 
-function confirmDeleteGroups({ records, groupCount }) {
+function confirmDeleteRecords({ records, recordCount }) {
   const deletableRecords = (records || []).filter(
-    (record) => ["成功", "失败", "跳过"].includes(record?.status) || Boolean(record?.finalize_key),
+    (record) => record?.status !== "处理中",
   )
   if (!deletableRecords.length) {
-    notify("所选汇总项没有可删除的历史记录", "warning")
+    notify("所选记录没有可删除的失败记录", "warning")
     return
   }
   deletingRecord.value = null
   deletingRecords.value = deletableRecords
-  deletingGroupCount.value = Number(groupCount || 0)
+  deletingRecordCount.value = Number(recordCount || deletableRecords.length)
   deleteVisible.value = true
 }
 
-async function deleteHistory({deleteLinked}) {
-  const batch = deletingGroupCount.value > 0
+async function deleteHistory() {
+  const batch = deletingRecordCount.value > 0
   const record = deletingRecord.value
   if (!batch && !record) return
   deletingHistoryKey.value = batch ? "batch" : historyKey(record)
   try {
     const message = batch
-      ? await deleteHistoryBatchRequest(deletingRecords.value, deleteLinked)
-      : await deleteHistoryRequest(record, deleteLinked)
+      ? await deleteHistoryBatchRequest(deletingRecords.value)
+      : await deleteHistoryRequest(record)
     deleteVisible.value = false
     deletingRecord.value = null
     deletingRecords.value = []
-    deletingGroupCount.value = 0
+    deletingRecordCount.value = 0
     notify(message)
   } catch (e) {
     notify(e.message || "删除失败", "error")
@@ -958,35 +883,6 @@ async function deleteHistory({deleteLinked}) {
   }
 }
 
-function confirmNotifyHistory(payload) {
-  const record = payload?.record || payload
-  if (record?.status !== "成功" || record?.finalize_key) {
-    notify("文件尚未成功完成，不能发送通知", "warning")
-    return
-  }
-  notifyingRecord.value = record
-  notifyingSummaryTitle.value = String(payload?.summaryTitle || record?.title || record?.file_name || "此记录")
-  notifyError.value = ""
-  notifyVisible.value = true
-}
-
-async function notifyHistory() {
-  const record = notifyingRecord.value
-  if (!record) return
-  notifyingHistoryKey.value = historyKey(record)
-  try {
-    const message = await notifyHistoryRequest(record)
-    notifyVisible.value = false
-    notifyingRecord.value = null
-    notifyingSummaryTitle.value = ""
-    notifyError.value = ""
-    notify(message)
-  } catch (e) {
-    notifyError.value = e.message || "通知失败"
-  } finally {
-    notifyingHistoryKey.value = ""
-  }
-}
 </script>
 
 <style scoped>

@@ -365,7 +365,7 @@ class FinalizeMpWaitTests(unittest.TestCase):
             lambda item, key: (None, {}),
         )
         _stub(
-            self.service, "_resolve_history_record",
+            self.service, "_write_terminal_state",
             lambda item, key, status, reason="": True,
         )
         _stub(
@@ -425,7 +425,7 @@ class FinalizeMpWaitTests(unittest.TestCase):
         """真实 _abort_single_item 终态结算时按源路径清除登记表。"""
         service = DummyMpWaitService()
         _stub(
-            service, "_resolve_history_record",
+            service, "_write_terminal_state",
             lambda item, key, status, reason="": True,
         )
         _stub(service, "_notify_finalize_dead", lambda item, key: None)
@@ -442,7 +442,7 @@ class FinalizeMpWaitTests(unittest.TestCase):
         """真实 _commit_single_item 成功终态时按源路径清除登记表。"""
         service = DummyMpWaitService()
         _stub(
-            service, "_resolve_history_record",
+            service, "_write_terminal_state",
             lambda item, key, status, reason="": True,
         )
         _stub(
@@ -462,7 +462,7 @@ class FinalizeMpWaitTests(unittest.TestCase):
         """无 mp_organize 身份时走老路径：120 秒 / 2 次后 abort。
 
         这里不用 setUp 里的 abort recorder——删掉实例上的桩，恢复真实
-        _abort_single_item（_resolve_history_record 与失败通知仍打桩）。
+        _abort_single_item（_write_terminal_state 与失败通知仍打桩）。
         """
         item = _item(NOW - 300)
         item.pop("mp_organize")
@@ -470,7 +470,7 @@ class FinalizeMpWaitTests(unittest.TestCase):
         self.service._snapshot_map = {}
         self.service.__dict__.pop("_abort_single_item", None)
         _stub(
-            self.service, "_resolve_history_record",
+            self.service, "_write_terminal_state",
             lambda item, key, status, reason="": True,
         )
         _stub(

@@ -167,26 +167,6 @@ class SyncExecutionService(OwnerDelegator):
             for item in resources
         )
 
-    @staticmethod
-    def _history_group_key(
-            media_type: str,
-            title: str,
-            season: Any = None,
-            tmdb_id: Any = None,
-    ) -> Tuple[str, str, int]:
-        normalized_type = "电影" if str(media_type or "") == MediaType.MOVIE.value else "电视剧"
-        media_identity = (
-            f"tmdb:{tmdb_id}"
-            if str(tmdb_id or "").strip()
-            else f"title:{str(title or '').strip()}"
-        )
-        return (
-            normalized_type,
-            media_identity,
-            int(season or 1) if normalized_type == "电视剧" else 0,
-        )
-
-    @staticmethod
     def _media_key_from_subscribe(subscribe_id: int, subscribe: Any) -> tuple:
         if not subscribe:
             return ("ID", int(subscribe_id))
@@ -575,7 +555,6 @@ class SyncExecutionService(OwnerDelegator):
             subscribe_states: Optional[str] = None,
             manual_resources: Optional[List[Dict[str, Any]]] = None,
             manual_target: Optional[Dict[str, Any]] = None,
-            history_search_targets: Optional[List[Dict[str, Any]]] = None,
             upgrade_request: Optional[Dict[str, Any]] = None,
             manual_upgrade: bool = False,
             discovered_via: str = "",
@@ -647,7 +626,9 @@ class SyncExecutionService(OwnerDelegator):
 
         # 获取订阅或构造无需订阅卡片的临时媒体目标。
         if upgrade_request:
-            source = str(upgrade_request.get("source") or "history").strip().lower()
+            # v1.13.3：洗版目标只从媒体服务器内容（media_server）或已解析
+            # 目标（resolved）来；history 来源随转存记录页一起删除。
+            source = str(upgrade_request.get("source") or "media_server").strip().lower()
             if source == "resolved":
                 subscribes = list(upgrade_request.get("targets") or [])
             elif source == "media_server":
@@ -655,9 +636,7 @@ class SyncExecutionService(OwnerDelegator):
                     upgrade_request.get("items") or []
                 )
             else:
-                subscribes = self._sync_handler.resolve_history_upgrade_targets(
-                    upgrade_request.get("records") or []
-                )
+                raise ValueError(f"未知的洗版目标来源：{source}")
         elif manual_target:
             manual_media_type = str(
                 manual_target.get("media_type") or ""
@@ -686,7 +665,7 @@ class SyncExecutionService(OwnerDelegator):
         else:
             with SessionFactory() as db:
                 subscribe_oper = SubscribeOper(db=db)
-                if subscribe_ids is not None or history_search_targets:
+                if subscribe_ids is not None:
                     normalized_ids = []
                     seen_ids = set()
                     for queued_id in subscribe_ids or []:
@@ -734,15 +713,6 @@ class SyncExecutionService(OwnerDelegator):
                     ]
                 else:
                     subscribes = subscribe_oper.list(subscribe_states or "N,R")
-            for index, target in enumerate(history_search_targets or [], start=1):
-                subscribes.append(
-                    self._sync_handler.build_transient_media_target(
-                        target,
-                        target_id=-index,
-                        episodes=set(target.get("episodes") or []),
-                    )
-                )
-
         if not subscribes:
             logger.debug("当前没有可处理的订阅")
             if self._notify:
@@ -792,7 +762,6 @@ class SyncExecutionService(OwnerDelegator):
         unresolved_tmdb_count = 0
         active_subscribes = []
         transient_request = bool(manual_target or upgrade_request)
-        history_target_request = bool(history_search_targets)
         if manual_resources or transient_request:
             active_subscribes, _ = self._deduplicate_subscribes(all_subscribes)
             if transient_request:
@@ -810,11 +779,6 @@ class SyncExecutionService(OwnerDelegator):
             }
             candidates = []
             for subscribe in all_subscribes:
-                if history_target_request and bool(
-                        getattr(subscribe, "_transient_target", False)
-                ):
-                    candidates.append(subscribe)
-                    continue
                 subscribe_id_value = int(getattr(subscribe, "id", 0) or 0)
                 if self._is_subscribe_excluded(subscribe_id_value):
                     excluded_count += 1
@@ -882,25 +846,14 @@ class SyncExecutionService(OwnerDelegator):
                 )
             return False
 
-        history: List[dict] = self.get_data('history') or []
-        history_by_media: Dict[Tuple[str, str, int], List[dict]] = {}
-        for record in history:
-            history_by_media.setdefault(
-                self._history_group_key(
-                    record.get("type"),
-                    record.get("title"),
-                    record.get("season"),
-                    record.get("tmdb_id"),
-                ),
-                [],
-            ).append(record)
+        # v1.13.3：本轮新增记录从空列表开始累积（processors 往里追加）；
+        # 旧的插件 history 快照已删，判重基线改走云盘目录与媒体库。
+        history: List[dict] = []
         transfer_details: List[Dict[str, Any]] = []
         transferred_count = 0
         preparing_phase = (
             "准备处理手动转存"
             if manual_resources
-            else "准备搜索历史媒体"
-            if history_search_targets
             else "准备搜索资源"
         )
         status_text = (
@@ -957,15 +910,7 @@ class SyncExecutionService(OwnerDelegator):
                     executor.submit(
                         self._run_subscription_group,
                         group,
-                        history_by_media.get(
-                            self._history_group_key(
-                                getattr(group[0], "type", ""),
-                                getattr(group[0], "name", ""),
-                                getattr(group[0], "season", None),
-                                tmdb_id_of(group[0]),
-                            ),
-                            [],
-                        ),
+                        [],
                         exclude_ids,
                         manual_resources,
                     ): group
@@ -996,8 +941,8 @@ class SyncExecutionService(OwnerDelegator):
                     history.extend(new_history_records)
                     if new_history_records:
                         self._sync_handler._timed_sync_call(
-                            "history_persist",
-                            self._sync_handler.append_history_records,
+                            "retry_index_persist",
+                            self._sync_handler.persist_sync_results,
                             new_history_records,
                         )
                         pending_finalize_keys = {
@@ -1029,9 +974,16 @@ class SyncExecutionService(OwnerDelegator):
                             for item in completed_details
                         )
                         if self._notify:
-                            self._sync_handler.send_transfer_notification(
-                                completed_details, completed_count
-                            )
+                            # v1.13.3 第 6 步：转存完成通知只留洗版；普通转存
+                            # 不再发完成通知（MP 的入库通知仍在）。
+                            upgrade_details = [
+                                detail for detail in completed_details
+                                if str(detail.get("notification_kind") or "") == "upgrade"
+                            ]
+                            if upgrade_details:
+                                self._sync_handler.send_transfer_notification(
+                                    upgrade_details, completed_count
+                                )
                         if self._webhook_handler:
                             self._webhook_handler.send_transfer_complete(
                                 transfer_details=completed_details,
@@ -1332,7 +1284,6 @@ class SyncExecutionService(OwnerDelegator):
             progress_callback: Optional[Callable[..., None]] = None,
             manual_resources: Optional[List[Dict[str, Any]]] = None,
             manual_target: Optional[Dict[str, Any]] = None,
-            history_search_targets: Optional[List[Dict[str, Any]]] = None,
             upgrade_request: Optional[Dict[str, Any]] = None,
             manual_upgrade: bool = False,
             discovered_via: str = "",
@@ -1348,7 +1299,6 @@ class SyncExecutionService(OwnerDelegator):
                 and subscribe_states is None
                 and not manual_resources
                 and not manual_target
-                and not history_search_targets
                 and not upgrade_request
         )
         if lock_acquired:
@@ -1412,7 +1362,6 @@ class SyncExecutionService(OwnerDelegator):
                     subscribe_states=subscribe_states,
                     manual_resources=manual_resources,
                     manual_target=manual_target,
-                    history_search_targets=history_search_targets,
                     manual_upgrade=manual_upgrade,
                     upgrade_request=upgrade_request,
                     discovered_via=discovered_via,

@@ -55,7 +55,6 @@ from .core.api import (
     DoctorApi,
     MoviePilotRegistration,
     DuplicateApi,
-    HistoryApi,
     MediaLibraryApi,
     PageApi,
     QRCodeService,
@@ -116,7 +115,6 @@ _COMPONENT_TYPES = (
     MediaLibraryApi,
     QRCodeService,
     RedirectApi,
-    HistoryApi,
     DuplicateApi,
     TgMonitorApi,
     MessageRoutingHook,
@@ -197,7 +195,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.13.2"
+    plugin_version = "1.13.3"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -867,12 +865,10 @@ class CloudSubscribeX(_PluginBase):
         self._init_clients()
         self._init_handlers()
         if self._sync_handler:
-            self._sync_handler.restore_history_posters()
             # 1.12.14/1.12.15：清理插件以前写进 MP 整理历史的镜像记录
             # （PanSou → 115网盘CS版、复制等），幂等、每次启动都跑；
             # 之后插件不再写这类记录，MP 的整理历史只剩 MP 自己写的账。
             self._sync_handler.remove_platform_transfer_history_mirror()
-            self._sync_handler.reconcile_orphan_finalize_records()
         self._update_offline_monitor(
             len(self._sync_handler.get_pending_finalize_tasks())
             if self._sync_handler else 0
@@ -918,7 +914,6 @@ class CloudSubscribeX(_PluginBase):
         self._start_strm_full_scan()
         self._start_strm_increment()
         self._start_organize_schedule()
-        self._start_history_state_maintenance()
         self._start_retry_index_maintenance()
         # 配置保存可能改了开关/端口：apply 末尾同步一次代理运行态
         # （stop_service 在重载开头已经停过，这里按新配置重新决定起不起）。
@@ -1205,25 +1200,6 @@ class CloudSubscribeX(_PluginBase):
                 minutes=max(1, int(self._strm_increment_minutes or 10))
             ),
         )
-
-    def _start_history_state_maintenance(self) -> None:
-        """每 5 分钟回收过期租约并清扫超时非终态历史。"""
-        self._scheduler_registry().ensure_job(
-            "cloudsubscribe_history_state_maintenance",
-            func=lambda: self._run_history_state_maintenance(),
-            trigger=IntervalTrigger(minutes=5),
-        )
-
-    def _run_history_state_maintenance(self) -> None:
-        sync_handler = getattr(self, "_sync_handler", None)
-        if sync_handler is None:
-            return
-        try:
-            result = sync_handler.maintain_history_states()
-            if result.get("swept"):
-                logger.info(f"已清扫 {result['swept']} 条超时转存历史")
-        except Exception as error:  # noqa: BLE001
-            logger.warning(f"历史状态周期维护失败：{error}")
 
     def _start_retry_index_maintenance(self) -> None:
         """每天清理一次过期的重试索引行（失败 90 天、待修复 30 天）。"""
@@ -2217,7 +2193,6 @@ class CloudSubscribeX(_PluginBase):
         self._init_subscribe_handler()
         self._search_handler = SearchHandler(plugin=self)
         self._sync_handler = SyncHandler(plugin=self)
-        self._sync_handler.reconcile_orphaned_history()
 
         self._webhook_handler = WebhookHandler(
             enabled=self._webhook_enabled,

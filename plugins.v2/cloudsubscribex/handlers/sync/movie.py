@@ -57,32 +57,11 @@ class MovieSyncProcessor(OwnerDelegator):
             if track_points and self._search_handler:
                 self._search_handler.reset_subscription_budgets(sub_key)
 
-            # 检查历史记录是否已成功转存
+            # v1.13.3：洗版基线不再从插件 history 取（history 表已删）；
+            # 现有版本基线只认媒体服务器文件、手动基线与网盘回退三处，
+            # 下面三处按优先级依次合并进 movie_history_score/size。
             movie_history_score = -1  # -1 表示未转存过
             movie_history_size = 0
-            subscribe_tmdb_id = str(tmdb_id_of(subscribe) or "")
-            subscribe_year = str(getattr(subscribe, "year", None) or "").strip()
-            for h in history:
-                if h.get("type") != "电影" or h.get("status") != "成功":
-                    continue
-                history_tmdb_id = str(h.get("tmdb_id") or "").strip()
-                if subscribe_tmdb_id and history_tmdb_id:
-                    same_movie = subscribe_tmdb_id == history_tmdb_id
-                else:
-                    history_year = str(h.get("year") or "").strip()
-                    same_movie = (
-                            h.get("title") == subscribe.name
-                            and bool(subscribe_year and history_year)
-                            and subscribe_year == history_year
-                    )
-                if not same_movie:
-                    continue
-                score = int(h.get("rule_score") or 0)
-                if score > movie_history_score:
-                    movie_history_score = score
-                    movie_history_size = self._resource_size_bytes(
-                        h.get("file_size") or h.get("size")
-                    )
 
             # 原生 best_version 决定是否为洗版订阅，插件范围进一步限制处理对象。
             is_best_version = manual_upgrade or self._is_cloud_upgrade_subscribe(subscribe)
@@ -756,7 +735,7 @@ class MovieSyncProcessor(OwnerDelegator):
                             )
 
                             # 收集转存详情用于通知：体积直接取转存结果，
-                            # 不再从 history 里补（history 表在 v1.13.2 删除）。
+                            # 不再从 history 里补（history 表在 v1.13.3 删除）。
                             if not pending_key:
                                 movie_size = self._resource_size_bytes(
                                     matched_file.get("size")

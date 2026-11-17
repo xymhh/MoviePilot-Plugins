@@ -303,63 +303,6 @@ class MediaLibraryApi(OwnerDelegator):
             timer.cancel()
 
     @staticmethod
-    def _history_group_key(media_type: str, tmdb_id: Any) -> str:
-        return f"tmdb:{media_type or '未知类型'}:{tmdb_id}"
-
-    def _history_emby_play_items(self, history: list) -> Dict[str, str]:
-        """一次数据库查询返回可在已启用 Emby 中播放的历史汇总项。"""
-        services = MediaServerHelper().get_services(type_filter="emby")
-        active_services = {
-            name: service
-            for name, service in services.items()
-            if not service.instance.is_inactive()
-        }
-        if not active_services:
-            return {}
-        eligible = {
-            (int(item.get("tmdb_id")), str(item.get("type") or ""))
-            for item in history
-            if item.get("tmdb_id")
-               and str(item.get("status") or "") == "成功"
-               and not item.get("finalize_key")
-        }
-        if not eligible:
-            return {}
-        tmdb_ids = {tmdb_id for tmdb_id, _ in eligible}
-        with SessionFactory() as db:
-            rows = db.query(MediaServerItem).filter(
-                MediaServerItem.server == "emby",
-                *media_server_tmdb_filters(MediaServerItem, tmdb_ids),
-            ).all()
-        result = {}
-        for row in filter_media_rows(rows):
-            identity = (tmdb_id_of(row) or 0, str(row.item_type or ""))
-            if identity not in eligible or not row.item_id:
-                continue
-            result[self._history_group_key(identity[1], identity[0])] = str(
-                row.item_id
-            )
-        return result
-
-    def api_vue_emby_play(self, item_id: str) -> dict:
-        """仅从已启用 Emby 实例解析播放链接。"""
-        item_id = str(item_id or "").strip()
-        if not item_id:
-            return {"success": False, "message": "缺少 Emby 媒体条目ID"}
-        services = MediaServerHelper().get_services(type_filter="emby")
-        chain = MediaServerChain()
-        for name, service in services.items():
-            if service.instance.is_inactive():
-                continue
-            item = chain.iteminfo(server=name, item_id=item_id)
-            if not item:
-                continue
-            play_url = chain.get_play_url(server=name, item_id=item_id)
-            if play_url:
-                return {"success": True, "data": {"url": play_url}}
-        return {"success": False, "message": "未在已启用的 Emby 中找到播放地址"}
-
-    @staticmethod
     def _media_type(value: Any) -> str:
         text = str(getattr(value, "value", value) or "").strip().casefold()
         if text in {"movie", "film", "电影"}:

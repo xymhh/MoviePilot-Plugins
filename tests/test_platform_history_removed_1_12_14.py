@@ -322,14 +322,36 @@ class TestPlatformHistoryRemoved(unittest.TestCase):
         self.assertFalse(session2.committed)
 
     def test_sync_does_not_mirror_to_mp_history(self):
-        """启动同步不再往 MP 表里写记录（只恢复海报，不碰数据库写）。"""
-        session = _FakeSession()
+        """v1.13.3：history 表已删，海报恢复（restore_history_posters）
+        连同读 history 的路径一起删除；模块里唯一碰 MP 表的方法只剩
+        一次性清理（删托管行），不再有任何写记录入口。"""
+        self.assertNotIn(
+            "restore_history_posters", PlatformHistoryService.__dict__
+        )
+        self.assertNotIn(
+            "_record_platform_transfer_histories",
+            PlatformHistoryService.__dict__,
+        )
+        methods = {
+            name for name in PlatformHistoryService.__dict__
+            if not name.startswith("__")
+        }
+        self.assertEqual(
+            methods,
+            {"_delete_platform_transfer_histories",
+             "remove_platform_transfer_history_mirror"},
+            "平台历史模块只应剩清理方法，新增写入口须先审",
+        )
+        # 清理本身不新增行：只删、不 add。
+        session = _FakeSession(rows=[
+            _FakeTransferHistory(
+                src="cloudsubscribe://abc", downloader="网盘订阅助手"
+            ),
+        ])
         _install_session(session)
-        service = _Service(session, data={"history": [_record()]})
-        # 海报恢复依赖下载历史桩（无海报可恢复），只断言不写 MP 表。
-        service.restore_history_posters()
+        service = _Service(session)
+        self.assertEqual(service.remove_platform_transfer_history_mirror(), 1)
         self.assertEqual(session.added, [])
-        self.assertFalse(session.committed)
 
 
 if __name__ == "__main__":

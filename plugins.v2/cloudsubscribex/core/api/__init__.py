@@ -5,7 +5,6 @@ from .channels import ChannelsApi
 from .checkin import CheckinApi
 from .config import ConfigApi
 from .doctor import DoctorApi
-from .history import HistoryApi
 from .duplicate import DuplicateApi
 from .media_library import MediaLibraryApi
 from .page import PageApi
@@ -23,7 +22,6 @@ __all__ = [
     "CheckinApi",
     "ConfigApi",
     "DoctorApi",
-    "HistoryApi",
     "DuplicateApi",
     "MediaLibraryApi",
     "MoviePilotRegistration",

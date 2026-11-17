@@ -519,27 +519,34 @@ class EpisodeDedupSkipStatusContractTests(unittest.TestCase):
         self.assertNotIn("跳过", source)
 
     def test_backend_terminal_status_includes_skipped(self):
-        """18. 后端可删除判定与合并终态保护都认「跳过」。"""
-        source = self._read("plugins.v2/cloudsubscribex/handlers/sync/history.py")
-        self.assertIn('"跳过"', source)
-        # _history_record_deletable 与 prepare_history_group 的 failed_count 不得把跳过算成失败
-        self.assertIn('{"成功", "处理中", "下载中", "跳过"}', source)
+        """18. v1.13.3：重试索引里没有「跳过」这种行状态（只有失败 /
+        成功（待修复）/ 处理中），所以不需要、也没有跳过的特殊分支；
+        万一出现未知状态，retry_state_of 兜底为“无需重试”，不把它
+        当失败、也不给重试入口；统计只数三类行。"""
+        retry_index = self._read("plugins.v2/cloudsubscribex/core/retry_index.py")
+        self.assertNotIn('"跳过"', retry_index)
+        self.assertIn('return False, "当前记录无需重试"', retry_index)
+        summary = self._read("plugins.v2/cloudsubscribex/core/api/page.py")
+        self.assertIn('== "失败"', summary)
+        self.assertIn('== "处理中"', summary)
+        self.assertNotIn('"跳过"', summary)
 
     def test_frontend_supports_skipped_status(self):
-        """19. 前端筛选/配色/可删除判定都认「跳过」。
-
-        1.9.0 起状态词收敛到 utils/status.js：筛选选项存统一词「已跳过」，提交时
-        由 STATUS_QUERY 展开成后端的「跳过」；配色也由 statusText 统一映射。
+        """19. v1.13.3：瘦页用单个 status 字符串过滤（失败 / 成功=
+        待修复 / 处理中 / "" 全部），不再有多选；可删除判定只排除
+        处理中行；「跳过」只剩 status.js 里的展示映射（旧记录文案），
+        不再是可筛选的行状态。
         """
         status_js = self._read("frontend/cloudsubscribex/src/utils/status.js")
         self.assertIn("跳过: STATUS.SKIPPED", status_js)
         self.assertIn('[STATUS.SKIPPED]: ["跳过"]', status_js)
         table = self._read("frontend/cloudsubscribex/src/components/dashboard/HistoryTable.vue")
-        self.assertIn("statusQueryValues(selectedStatuses.value)", table)
-        self.assertIn('["成功", "失败", "跳过"]', table)
-        # 1.10.3：可删除判定随 AppPage.vue 搬进 PluginWorkbench.vue。
+        self.assertIn('statusFilter: {type: String, default: ""}', table)
+        self.assertIn("canDeleteRecord", table)
+        self.assertIn('!== "处理中"', table)
         workbench = self._read("frontend/cloudsubscribex/src/components/PluginWorkbench.vue")
-        self.assertIn('["成功", "失败", "跳过"]', workbench)
+        self.assertIn('const historyStatus = ref("失败")', workbench)
+        self.assertIn("group.pending_count", workbench)
 
     def test_frontend_status_map_covers_history_statuses(self):
         """20. 统一状态表必须覆盖后端全部历史状态词，漏一个就会显示成原始值。"""
@@ -916,27 +923,19 @@ class EpisodeDedupHistoryTrustTests(unittest.TestCase):
 
 
 class SkipMergeDoesNotPoisonHistoryTests(unittest.TestCase):
-    """组9（1.6.51）：跳过记录不得污染成功记录的落盘信息，也不得写进 MP 整理历史。"""
+    """组9（1.6.51 → v1.13.3 改写）：跳过合并进 history 记录的逻辑
+    随 history.py 一起删除（索引里没有跳过行、无合并）；只剩第 35 条
+    的待修复链路，搬到了 core/retry_index.py。"""
 
     @staticmethod
     def _read(relative_path):
         with open(os.path.join(project_root, relative_path), encoding="utf-8") as handle:
             return handle.read()
 
-    def test_skip_merge_keeps_landing_fields(self):
-        """34. 跳过合并进成功记录时保留 cloud_dir / 文件名，防止再造幻影版本。"""
-        source = self._read("plugins.v2/cloudsubscribex/handlers/sync/history.py")
-        self.assertIn("skip_onto_success", source)
-        block = source.split("skip_onto_success = (", 1)[1]
-        for key in ("cloud_dir", "cloud_file_id", "file_size", "file_name"):
-            self.assertIn(f'"{key}"', block.split("history[index] = merged", 1)[0])
-        # 假成功不得进入平台整理历史
-        self.assertIn("if not skip_onto_success:", source)
-
     def test_cross_success_repair_path_exists(self):
         """35. 手动保底链路：查无落盘的跨盘成功记录可人工重新转存。"""
-        source = self._read("plugins.v2/cloudsubscribex/handlers/sync/history.py")
-        self.assertIn("_cross_success_needs_repair", source)
+        source = self._read("plugins.v2/cloudsubscribex/core/retry_index.py")
+        self.assertIn("def cross_success_needs_repair", source)
         self.assertIn('return True, "重新转存此记录"', source)
 
 class QualityPreferDecisionTests(unittest.TestCase):

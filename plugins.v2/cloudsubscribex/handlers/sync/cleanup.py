@@ -1,5 +1,5 @@
 """
-历史记录关联物理文件与网盘目录的级联清理服务。
+媒体服务器路径关联物理文件与网盘目录的级联清理服务。
 """
 import re
 import shutil
@@ -16,7 +16,7 @@ from ...core.media import list_subscribes_by_tmdb_id
 
 
 class HistoryCleanupService(OwnerDelegator):
-    """负责删除历史记录时级联清理本地 STRM 文件、元数据文件与网盘文件目录。"""
+    """负责按媒体服务器路径删除时级联清理本地 STRM 文件、元数据文件与网盘文件目录。"""
 
     _METADATA_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
     _SEASON_DIRECTORY_PATTERN = re.compile(r"^season[ ._-]*\d+$", re.IGNORECASE)
@@ -723,7 +723,7 @@ class HistoryCleanupService(OwnerDelegator):
                 logger.warning(f"批量删除关联网盘内容失败：{cloud_dir} - {error}")
 
         logger.info(
-            f"历史联动批量删除完成：历史记录={len(records)} 条，"
+            f"历史联动批量删除完成：删除目标={len(records)} 条，"
             f"网盘文件={cloud_deleted} 个，网盘目录={directories_deleted} 个，"
             f"STRM={strm_deleted} 个，本地目录={local_directories_deleted} 个"
         )

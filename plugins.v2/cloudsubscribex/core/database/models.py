@@ -62,39 +62,6 @@ class CloudSubscribeBase(DeclarativeBase):
         }
 
 
-class HistoryRecord(CloudSubscribeBase):
-    __tablename__ = "history_records"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    record_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    sort_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    group_key: Mapped[str] = mapped_column(String(255), nullable=False)
-    record_time: Mapped[str] = mapped_column(String(40), nullable=False, default="")
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="")
-    stage: Mapped[str] = mapped_column(String(32), nullable=False, default="")
-    resource_type: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
-    source: Mapped[str] = mapped_column(String(64), nullable=False, default="unknown")
-    task_types: Mapped[str] = mapped_column(String(255), nullable=False, default="|")
-    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
-    file_name: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
-    media_type: Mapped[str] = mapped_column(String(32), nullable=False, default="")
-    tmdb_id: Mapped[str] = mapped_column(String(32), nullable=False, default="")
-    season: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    episode: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    subscribe_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    payload: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False)
-
-    __table_args__ = (
-        Index("ix_history_group_time", "group_key", "record_time"),
-        Index(
-            "ix_history_group_filter",
-            "group_key", "status", "resource_type", "source",
-        ),
-        Index("ix_history_filter", "status", "resource_type", "source"),
-        Index("ix_history_sort", "sort_index"),
-    )
-
-
 class OfflinePendingTask(CloudSubscribeBase):
     __tablename__ = "offline_pending_tasks"
 
@@ -204,11 +171,10 @@ class RetryIndex(CloudSubscribeBase):
     """最小重试索引（Phase 2 v1.13.1）：只存重试必需的字段。
 
     展示类字段（海报、评分、来源文本、跳过原因、缓存字段）一律不存。
-    record_time / type 沿用 history 记录的键名（HistoryRecord 用 record_time
+    record_time / type 沿用转存记录的键名（旧 history 表用 record_time
     存 time 值的既有约定）。行只分三种：失败（status=="失败"）、跨盘成功
     待修复（status=="成功" 且 landed 为 False）、处理中（重试进行中）。
-    旧 history 的导入/同步见 core/retry_index.py；history 表本身在
-    v1.13.2 才删，本版两边并行。
+    v1.13.3 起 history 表已删除，本索引是失败与待修复的唯一事实来源。
     """
 
     __tablename__ = "retry_index"

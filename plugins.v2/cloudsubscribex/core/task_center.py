@@ -1,7 +1,7 @@
 """统一任务中心只读聚合。
 
-数据来自 ``history_records``（v1.13.0 起同步作业账本已删除），只做展示层映射：
-六个用户状态保持不变。
+数据来自 ``retry_index``（v1.13.3 起 history 表已删）：只列失败、
+处理中与跨盘成功待修复行，只做展示层映射，六个用户状态保持不变。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any, Dict, List
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .database.models import HistoryRecord
+from .database.models import RetryIndex
 from .failure import failure_kind_of, failure_label, status_label_of
 from .state import (
     STATUS_DOWNLOADING,
@@ -24,7 +24,8 @@ from .state import (
     stage_label,
 )
 MAX_TASKS = 200
-_HISTORY_STATUSES = (STATUS_PROCESSING, STATUS_DOWNLOADING, STATUS_PENDING_CONFIRM)
+_INDEX_STATUSES = ("处理中", "失败")
+# 跨盘成功待修复行（status 成功且 landed False）单独按待确认列出。
 _TYPE_NOISE = {"转存", "整理", "订阅", "未知", "其他", "-", "None"}
 _FILENAME_HINTS = (
     "2160p", "1080p", "720p", "480p", "web-dl", "webdl", "webrip", "bluray",
@@ -79,9 +80,10 @@ def _int(value: Any) -> int:
         return 0
 
 
-def _history_timestamp(record: HistoryRecord) -> int:
-    payload = record.payload if isinstance(record.payload, dict) else {}
-    for value in (payload.get("updated_at"), record.record_time):
+def _index_timestamp(row: RetryIndex) -> int:
+    """索引行的时间戳：优先 created_at/updated_at（epoch 秒），
+    回落 record_time（"%Y-%m-%d %H:%M:%S" 字符串）。"""
+    for value in (getattr(row, "updated_at", None), getattr(row, "created_at", None)):
         if value is None or value == "":
             continue
         if isinstance(value, (int, float)):
@@ -94,6 +96,13 @@ def _history_timestamp(record: HistoryRecord) -> int:
         for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
             try:
                 return int(time.mktime(datetime.strptime(text, fmt).timetuple()))
+            except (TypeError, ValueError, OverflowError):
+                continue
+    record_time = str(getattr(row, "record_time", "") or "").strip()
+    if record_time:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return int(time.mktime(datetime.strptime(record_time, fmt).timetuple()))
             except (TypeError, ValueError, OverflowError):
                 continue
     return 0
@@ -115,35 +124,42 @@ def _progress(payload: Any) -> Dict[str, int]:
     }
 
 
-def _record_fields(record: HistoryRecord) -> Dict[str, Any]:
-    payload = record.payload if isinstance(record.payload, dict) else {}
+def _record_fields(row: RetryIndex) -> Dict[str, Any]:
+    """索引行映射为任务中心字段。状态口径：处理中→处理中，失败→失败，
+    成功且 landed False→待确认（跨盘待修复）。"""
+    status = _text(row.status)
+    if status == "成功" and row.landed is False:
+        display_status = STATUS_PENDING_CONFIRM
+    elif status == "失败":
+        display_status = STATUS_FAILED
+    else:
+        display_status = STATUS_PROCESSING
     return {
         "title": _display_title(
-            record.title or payload.get("title"),
-            record.file_name or payload.get("file_name"),
+            row.title,
+            row.file_name,
         ),
         "media_type": _media_type(
-            record.media_type,
-            payload.get("media_type"),
-            payload.get("tmdb_type"),
-            payload.get("type"),
+            row.type,
+            "电视剧" if row.type == "电视剧" else "电影",
         ),
-        "status": _text(record.status),
-        "stage": _text(record.stage),
-        "target_provider": _text(
-            payload.get("target_drive_key") or payload.get("provider")
+        "status": display_status,
+        "stage": _text(row.stage),
+        "target_provider": _text(row.target_drive_key),
+        "target_path": _text(row.cloud_dir),
+        "target_name": _text(row.file_name),
+        "failure_kind": (
+            failure_kind_of({"failure_kind": row.failure_kind, "failure_reason": row.failure_reason})
+            if display_status == STATUS_FAILED else ""
         ),
-        "target_path": _text(payload.get("cloud_dir")),
-        "target_name": _text(record.file_name or payload.get("file_name")),
-        "failure_kind": failure_kind_of(payload) if record.status == STATUS_FAILED else "",
-        "error": _text(payload.get("failure_reason") or payload.get("error"))[:300],
-        "created_at": _history_timestamp(record),
-        "updated_at": _history_timestamp(record),
-        "progress": _progress(payload),
-        "history_time": _text(record.record_time),
-        "share_url": _text(payload.get("share_url")),
-        "file_name": _text(record.file_name or payload.get("file_name")),
-        "record_id": _text(record.record_id),
+        "error": _text(row.failure_reason)[:300],
+        "created_at": _index_timestamp(row),
+        "updated_at": _index_timestamp(row),
+        "progress": {"transferred": 0, "total": _int(row.file_size)},
+        "history_time": _text(row.record_time),
+        "share_url": _text(row.share_url),
+        "file_name": _text(row.file_name),
+        "record_id": _text(row.record_id),
     }
 
 
@@ -209,11 +225,12 @@ def _finalize(task: Dict[str, Any]) -> Dict[str, Any]:
         or task.get("history_id")
     )
     if status in {STATUS_PENDING_CONFIRM, STATUS_FAILED}:
-        # 有历史记录走历史重试。
+        # 有索引行走索引重试（/history/retry）。
         if has_history:
             actions.append("retry")
     elif status in {STATUS_PROCESSING, STATUS_DOWNLOADING}:
-        actions.append("stop")
+        # 处理中行是后台重试在飞，没有可停的后处理任务，不给 stop。
+        pass
     task["actions"] = actions
     task.pop("_state", None)
     task.pop("_history_fields", None)
@@ -244,19 +261,26 @@ def collect_tasks(
         db: Session,
         state_filter: str = "all",
 ) -> List[Dict[str, Any]]:
-    """聚合非终态历史，返回按 updated_at 倒序的任务列表。"""
+    """聚合重试索引里的非终态行（失败/处理中/待修复），返回按
+    updated_at 倒序的任务列表。"""
     tasks: Dict[str, Dict[str, Any]] = {}
 
-    for record in db.scalars(
-            select(HistoryRecord)
-            .where(HistoryRecord.status.in_(_HISTORY_STATUSES))
+    for row in db.scalars(
+            select(RetryIndex)
+            .where(
+                RetryIndex.status.in_(_INDEX_STATUSES)
+                | (
+                    (RetryIndex.status == "成功")
+                    & (RetryIndex.landed.is_(False))
+                )
+            )
     ).all():
-        task_key = f"history:{_text(record.record_id) or _int(record.id)}"
-        task = tasks.setdefault(task_key, _blank_task(task_key, "history"))
-        record_fields = _record_fields(record)
+        task_key = f"retry_index:{_text(row.record_id)}"
+        task = tasks.setdefault(task_key, _blank_task(task_key, "retry_index"))
+        record_fields = _record_fields(row)
         _merge(task, record_fields, prefer=True)
         task["_history_fields"] = record_fields
-        task["kind"] = "history"
+        task["kind"] = "retry_index"
 
     ordered = sorted(
         tasks.values(),

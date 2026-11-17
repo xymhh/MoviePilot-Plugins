@@ -13,7 +13,6 @@ from app.schemas.types import MediaType
 from ...core import OwnerDelegator
 from ...core.file_hash import FileHashCancelled, file_sha1
 from ...core.media import list_subscribes_by_tmdb_id
-from ...core.state import STATUS_PROCESSING
 from ...utils import MediaFileParser
 
 
@@ -319,24 +318,8 @@ class PtUpgradeService(OwnerDelegator):
                 upload_speed=0,
                 pending_key=pending_key,
             )
-            history_item = self._build_transfer_history_item(
-                mediainfo=mediainfo,
-                subscribe=subscribe,
-                status=STATUS_PROCESSING,
-                share_url=share_url,
-                file_name=target_name,
-                source_file_name=local_path.name,
-                cloud_dir=target_dir,
-                resource={"resource_type": "pt", "source": "moviepilot"},
-                season=season,
-                **({"episode": episode} if episode else {}),
-                file_size=file_size,
-                source_sha1=checksum,
-                rule_score=new_score,
-                upgrade=bool(old_file),
-                finalize_key=pending_key,
-            )
-            self.append_history_records([history_item])
+            # v1.13.3：洗版提交只登记后处理任务，不再写一条处理中历史记录
+            # （history 表已删；终态由 _write_terminal_state 结算，失败才进索引）。
             logger.info(f"PT洗版已提交网盘后处理：{local_path.name}，{reason}")
             return True
         except _PtUploadCancelled:

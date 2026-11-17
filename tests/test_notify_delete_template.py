@@ -60,28 +60,26 @@ class DeleteTemplateTest(unittest.TestCase):
         self.assertEqual(upgraded, {})
 
 
-class TransferTemplateTest(unittest.TestCase):
-    def test_transfer_default_renders_cards_with_labels(self):
+class UpgradeTemplateTest(unittest.TestCase):
+    """v1.13.3：转存/跨盘转存模板已删，只剩洗版模板走同一渲染路径。"""
+
+    def test_upgrade_default_renders_cards_with_labels(self):
         text = _tpl.render_template(
-            _tpl.DEFAULT_TEMPLATES["notify_template_transfer"],
+            _tpl.DEFAULT_TEMPLATES["notify_template_upgrade"],
             "兜底",
-            action="转存",
+            action="洗版",
             count=1,
             total_size="2.0 GB",
             cards=["🎬 杀手 (2020)\n类型：电影\n大小：2.0 GB\n来源：115网盘"],
         )
         self.assertIn("🎬 杀手 (2020)\n类型：电影\n大小：2.0 GB\n来源：115网盘", text)
-        self.assertIn("本次转存 1 个文件 · 合计 2.0 GB", text)
+        self.assertIn("⬆️ 本次洗版 1 个文件 · 合计 2.0 GB", text)
 
     def test_single_line_defaults_are_upgraded(self):
-        for key in (
-            "notify_template_transfer",
-            "notify_template_cross_transfer",
-            "notify_template_upgrade",
-        ):
-            legacy = _tpl.LEGACY_DEFAULT_TEMPLATES[key][0]
-            upgraded = _tpl.upgrade_legacy_templates({key: legacy})
-            self.assertEqual(upgraded.get(key), _tpl.DEFAULT_TEMPLATES[key], key)
+        key = "notify_template_upgrade"
+        legacy = _tpl.LEGACY_DEFAULT_TEMPLATES[key][0]
+        upgraded = _tpl.upgrade_legacy_templates({key: legacy})
+        self.assertEqual(upgraded.get(key), _tpl.DEFAULT_TEMPLATES[key], key)
 
 
 if __name__ == "__main__":

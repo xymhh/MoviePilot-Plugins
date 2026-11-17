@@ -103,7 +103,13 @@ class HistoryRetryRecoveryTest(unittest.TestCase):
     def _retry(self):
         # 上下文还原与分享文件定位属于另外的职责链，这里替换为固定结果，
         # 专注验证「转存成功后」的终态处理
+        # v1.13.3：重试入口只查重试索引，不再扫 _get_data("history")，
+        # 查找入口也一并钉死。
         with patch.object(
+            HistoryRetryService,
+            "_find_history_record",
+            return_value=self.record,
+        ), patch.object(
             HistoryRetryService,
             "_resolve_history_retry_context",
             return_value=self.retry_context,
@@ -126,9 +132,14 @@ class HistoryRetryRecoveryTest(unittest.TestCase):
         self.assertEqual("处理中", self.record["status"])
         self.assertEqual(TARGET_NAME, self.record["file_name"])
         self.assertNotIn("failure_reason", self.record)
-        self.owner.append_history_records.assert_called_once()
-        _, kwargs = self.owner.append_history_records.call_args
-        self.assertTrue(kwargs.get("reopen_terminal"))
+        # v1.13.3：终态不再经 append_history_records 回写 history，
+        # 而是写重试索引——后处理跟进中的行以“处理中”留在索引里。
+        self.owner.append_history_records.assert_not_called()
+        repo = self.owner._get_data_store.return_value.repositories.retry_index
+        repo.upsert_row.assert_called()
+        last_row = repo.upsert_row.call_args.args[0]
+        self.assertEqual(last_row["status"], "处理中")
+        self.assertEqual(last_row["finalize_key"], "pending-key-1")
 
     def test_decorative_metadata_failure_keeps_terminal_link(self):
         """回归：标题/封面等装饰性更新异常不得让整条重试失败。"""
@@ -232,7 +243,13 @@ class HistoryRetryExistingEpisodeTest(unittest.TestCase):
         return self.SimpleNamespace(name=name, size=size, is_directory=False)
 
     def _retry(self):
+        # v1.13.3：重试入口只查重试索引，不再扫 _get_data("history")，
+        # 查找入口直接钉死本条记录。
         with patch.object(
+            HistoryRetryService,
+            "_find_history_record",
+            return_value=self.record,
+        ), patch.object(
             HistoryRetryService,
             "_resolve_history_retry_context",
             return_value=self.retry_context,

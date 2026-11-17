@@ -14,18 +14,17 @@ from __future__ import annotations
 import hashlib
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from .failure import failure_kind_of, failure_retryable_of
 
-#: 索引行状态沿用 history 的中文状态：失败 / 成功（只表示跨盘成功待修复）
-#: / 处理中（重试进行中）。
+#: 索引行状态：失败 / 成功（只表示跨盘成功待修复）/ 处理中（重试进行中）。
 INDEX_STATUS_FAILED = "失败"
 INDEX_STATUS_REPAIR = "成功"
 INDEX_STATUS_PROCESSING = "处理中"
 
-#: record_id 的身份三元组（与 HistoryService._ensure_history_record_id
-#: 同一规则：share_url + file_name 缺一不可，其余三项参与哈希）。
+#: record_id 的身份三元组（share_url + file_name 缺一不可，
+#: 其余三项参与哈希）。
 _IDENTITY_KEYS = ("share_url", "file_name", "tmdb_id", "season", "episode")
 
 
@@ -46,7 +45,7 @@ def _to_int_or_none(value: Any) -> Optional[int]:
 
 
 def _record_time_to_epoch(value: Any, fallback: int) -> int:
-    """history 记录的 time（本地时间字符串）转 epoch，供 created_at 用。"""
+    """转存记录的 time（本地时间字符串）转 epoch，供 created_at 用。"""
     text = str(value or "").strip()
     if text:
         for pattern in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
@@ -58,10 +57,7 @@ def _record_time_to_epoch(value: Any, fallback: int) -> int:
 
 
 def retry_record_id(record: Mapping[str, Any]) -> str:
-    """算一条 history 记录的重试索引主键。
-
-    与 HistoryService._ensure_history_record_id 同一规则，但不改动原记录。
-    """
+    """算一条转存记录的重试索引主键（不改动原记录）。"""
     record_id = str(record.get("record_id") or "").strip()
     if record_id:
         return record_id
@@ -72,9 +68,8 @@ def retry_record_id(record: Mapping[str, Any]) -> str:
 
 
 def cross_success_needs_repair(record: Mapping[str, Any]) -> bool:
-    """跨盘成功行是否待修复（与 HistoryService._cross_success_needs_repair
-    同一规则：landed 明确 False 即待修复；landed 明确 True 即完成；
-    landed 未知时按云盘目录/源文件名启发式判断）。"""
+    """跨盘成功行是否待修复（landed 明确 False 即待修复；landed 明确
+    True 即完成；landed 未知时按云盘目录/源文件名启发式判断）。"""
     landed = record.get("landed")
     if landed is False:
         return True
@@ -152,78 +147,55 @@ def record_to_index_row(
     }
 
 
-def import_retry_index_from_history(
-        repositories: Any,
-        records: List[Dict[str, Any]],
-        now: Optional[int] = None,
-) -> int:
-    """启动时一次性导入：只导失败且可重试的行与跨盘成功待修复的行。
+def retry_state_of(record: Mapping[str, Any]) -> Tuple[bool, str]:
+    """一条索引行是否可重试（v1.13.3：原 handlers/sync/retry.py 的
+    _history_retry_state，移到这里供失败页展示与重试入口共用同一规则）。"""
+    from .failure import (
+        KIND_FILE_MISSING,
+        KIND_SHARE_INVALID,
+        failure_kind_of,
+        failure_label,
+    )
 
-    upsert 保证幂等（跑两次不重复）；其余行直接放弃。
-    """
-    current = int(now or time.time())
-    imported = 0
-    for record in records or []:
-        if not isinstance(record, dict):
-            continue
-        status = retry_index_status(record, include_processing=False)
-        if status is None:
-            continue
-        row = record_to_index_row(record, status, current)
-        if row is None:
-            continue
-        if repositories.retry_index.upsert_row(row):
-            imported += 1
-    return imported
-
-
-def sync_retry_index_from_history(
-        repositories: Any,
-        records: List[Dict[str, Any]],
-        now: Optional[int] = None,
-) -> Dict[str, int]:
-    """history 落库后同步重试索引。
-
-    失败/待修复行 upsert；处理中行只更新已有的索引行（不新建）；
-    仍在 history 里但已不再重试相关的行，删掉它的索引行；
-    history 里已没有的行（被裁剪/归档）不动——裁剪掉的失败行仍可重试。
-    """
-    current = int(now or time.time())
-    counts = {"upserted": 0, "updated": 0, "deleted": 0}
-    existing = {
-        str(row.get("record_id") or "")
-        for row in repositories.retry_index.list_all()
-    }
-    for record in records or []:
-        if not isinstance(record, dict):
-            continue
-        status = retry_index_status(record, include_processing=True)
-        record_id = retry_record_id(record)
-        if status is None:
-            if record_id and record_id in existing:
-                counts["deleted"] += repositories.retry_index.delete_by_record_ids(
-                    [record_id]
-                )
-            continue
-        if status == INDEX_STATUS_PROCESSING and record_id not in existing:
-            continue
-        row = record_to_index_row(record, status, current)
-        if row is None:
-            continue
-        if repositories.retry_index.upsert_row(row):
-            if record_id in existing:
-                counts["updated"] += 1
-            else:
-                counts["upserted"] += 1
-    return counts
+    status = str(record.get("status") or "")
+    is_cross = str(record.get("transfer_mode") or "") == "cross"
+    if status == INDEX_STATUS_REPAIR and is_cross:
+        if cross_success_needs_repair(record):
+            if not str(record.get("share_url") or "").strip():
+                return False, "记录缺少资源链接，无法重试"
+            return True, "重新转存此记录"
+        return False, "跨盘任务已成功完成，无需重试"
+    if not str(record.get("share_url") or "").strip():
+        return False, "记录缺少资源链接，无法重试"
+    if status == INDEX_STATUS_FAILED:
+        if not failure_retryable_of(record):
+            kind = failure_kind_of(record)
+            if kind == KIND_SHARE_INVALID:
+                return False, "原分享已失效，需重新搜源"
+            if kind == KIND_FILE_MISSING:
+                return False, "分享内已找不到该文件，需重新搜源"
+            return False, f"{failure_label(kind)}，重试无法恢复，需重新搜源"
+        if is_cross:
+            return True, "重新执行跨盘转存"
+        return True, "重试此记录"
+    if (
+            status == INDEX_STATUS_REPAIR
+            and str(record.get("source_file_name") or "")
+            == str(record.get("file_name") or "")
+    ):
+        return True, "修复此记录"
+    return False, "当前记录无需重试"
 
 
 def index_row_to_history_dict(row: Mapping[str, Any]) -> Dict[str, Any]:
-    """索引行拼成 history 形状的记录 dict，供重试入口在 history 记录
-    已被裁剪/删除时使用（字段与 history 记录同名，缺失的展示字段留空）。"""
+    """索引行拼成转存记录形状的 dict，供重试入口使用（字段与转存记录
+    同名，缺失的展示字段留空）。"""
     row = dict(row or {})
+    can_retry, retry_title = retry_state_of(row)
     return {
         "record_id": str(row.get("record_id") or ""),
+        "can_retry": can_retry,
+        "retry_title": retry_title,
         "time": str(row.get("record_time") or ""),
         "share_url": str(row.get("share_url") or ""),
         "file_name": str(row.get("file_name") or ""),

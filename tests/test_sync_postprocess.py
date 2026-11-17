@@ -1,11 +1,9 @@
 """后处理任务完整测试套件（覆盖 DirectoryFileIndex、快照同步、文件定位、重命名与移动状态机、重试退避及关闭自动整理契约）。"""
 
 import sys
-import threading
-import time
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from plugin_env import (
     OwnerDelegator,
@@ -50,6 +48,12 @@ register_package("cloudsubscribex.handlers.sync")
 load_module(
     "cloudsubscribex.handlers.sync.utils",
     "plugins.v2/cloudsubscribex/handlers/sync/utils.py",
+)
+
+# 终态写重试索引用真实 core.retry_index（行构造逻辑本身就是被测对象）。
+load_module(
+    "cloudsubscribex.core.retry_index",
+    "plugins.v2/cloudsubscribex/core/retry_index.py",
 )
 
 _postprocess = load_module(
@@ -251,8 +255,7 @@ class TestPostprocessServiceHelpers(unittest.TestCase):
 
     def test_due_pending_keys(self):
         now = 1000.0
-        # skip_history：跳过「等待历史落盘」判断（该判断由 _history_ready_for_finalize 负责，
-        # 这里只验证到期逻辑，否则缺省 created_at 会落入宽限期而全部不算到期）。
+        # v1.13.3：_history_ready_for_finalize 门已删除，这里只验证到期逻辑。
         pending = {
             "due_item": {"next_check_at": 900.0, "_monitor_until": 950.0, "skip_history": True},
             "future_item": {"next_check_at": 1100.0, "_monitor_until": 950.0, "skip_history": True},
@@ -491,211 +494,157 @@ ensure_package("cloudsubscribex.search.types")
 set_media_type(movie="电影", tv="电视剧")
 sys.modules["cloudsubscribex.core"].CloudFile = MagicMock()
 
-_history = load_module(
-    "cloudsubscribex.handlers.sync.history",
-    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
-)
-HistoryService = _history.HistoryService
-
 _OFFLINE_KEY = "pending_offline_strm"
 
 
-class DummyHistoryService(HistoryService):
-    """内存存储版 HistoryService，用于批量匹配与持久化行为测试。"""
+class _FakeRetryIndex:
+    """只记 upsert 的重试索引桩。"""
 
-    def __init__(self, store):
-        super().__init__(None)
-        object.__setattr__(self, "_store", store)
-        object.__setattr__(self, "_history_changed", None)
-        object.__setattr__(self, "_offline_pending_lock", threading.RLock())
-        object.__setattr__(self, "_OFFLINE_PENDING_KEY", _OFFLINE_KEY)
+    def __init__(self):
+        self.rows = []
 
-    def _get_data(self, key):
-        return self._store.get(key)
+    def upsert_row(self, row):
+        self.rows.append(dict(row))
+        return True
 
-    def _save_data(self, key, value):
-        import copy as _copy
-        self._store[key] = _copy.deepcopy(value)
+    def get_by_identity(self, record_time, share_url, file_name):
+        for row in self.rows:
+            if (
+                    str(row.get("record_time") or "") == str(record_time or "")
+                    and str(row.get("share_url") or "") == str(share_url or "")
+                    and str(row.get("file_name") or "") == str(file_name or "")
+            ):
+                return dict(row)
+        return None
 
-    def _record_platform_transfer_histories(self, records):
-        pass
 
+class _FakeDataStore(dict):
+    """既是 _get_data 的字典，又是 _get_data_store() 的可调用仓库。"""
 
-class TestOfflineHistoryFallbackMatching(unittest.TestCase):
-    """文件级 (file_name, cloud_dir) 精确兜底匹配（禁止模糊/包含）。"""
-
-    def _service(self, history, pending):
-        store = {"history": history, _OFFLINE_KEY: pending}
-        return DummyHistoryService(store), store
-
-    def test_no_finalize_key_matches_by_file_name_and_cloud_dir(self):
-        """历史记录缺 finalize_key 但 (file_name, cloud_dir) 相同 → 能写终态。"""
-        service, store = self._service(
-            history=[{
-                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
-                "status": "处理中", "share_url": "https://pan.example.com/s/AAA",
-            }],
-            pending={"pansou:ABCDEF:123": {
-                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
-            }},
+    def __init__(self):
+        super().__init__()
+        self.retry_index = _FakeRetryIndex()
+        self.repositories = types.SimpleNamespace(
+            retry_index=self.retry_index,
         )
-        matched = service._mark_offline_history_status_batch(
-            {"pansou:ABCDEF:123"}, "成功"
-        )
-        self.assertEqual(matched, 1)
-        self.assertEqual(store["history"][0]["status"], "成功")
-        self.assertNotIn("finalize_key", store["history"][0])
 
-    def test_same_file_name_different_cloud_dir_not_matched(self):
-        """cloud_dir 不同（仅文件名相同）→ 禁止模糊匹配，不写终态。"""
-        service, store = self._service(
-            history=[{
-                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/other",
-                "status": "处理中", "share_url": "https://pan.example.com/s/BBB",
-            }],
-            pending={"pansou:ABCDEF:123": {
-                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
-            }},
-        )
-        matched = service._mark_offline_history_status_batch(
-            {"pansou:ABCDEF:123"}, "成功"
-        )
-        self.assertEqual(matched, 0)
-        self.assertEqual(store["history"][0]["status"], "处理中")
-
-    def test_finalize_key_match_path_unchanged(self):
-        """正常路径（key 能匹配）行为不变。"""
-        service, store = self._service(
-            history=[{
-                "finalize_key": "pansou:ABCDEF:123",
-                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
-                "status": "处理中", "share_url": "https://pan.example.com/s/CCC",
-            }],
-            pending={"pansou:ABCDEF:123": {
-                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
-            }},
-        )
-        matched = service._mark_offline_history_status_batch(
-            {"pansou:ABCDEF:123"}, "失败", reason="离线失败"
-        )
-        self.assertEqual(matched, 1)
-        self.assertEqual(store["history"][0]["status"], "失败")
-        self.assertEqual(store["history"][0]["failure_reason"], "离线失败")
-
-    def test_success_overwrite_failure_protection_unchanged(self):
-        """成功记录不被失败覆盖的保护语义不变（兜底命中也走该保护）。"""
-        service, store = self._service(
-            history=[{
-                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
-                "status": "成功", "share_url": "https://pan.example.com/s/DDD",
-            }],
-            pending={"pansou:ABCDEF:123": {
-                "file_name": "Show.S01E01.mkv", "cloud_dir": "/media/tv",
-            }},
-        )
-        matched = service._mark_offline_history_status_batch(
-            {"pansou:ABCDEF:123"}, "失败", reason="后处理失败"
-        )
-        self.assertEqual(matched, 1)
-        self.assertEqual(store["history"][0]["status"], "成功")
-        self.assertNotIn("failure_reason", store["history"][0])
+    def __call__(self):
+        return self
 
 
-class TestHistoryResyncTermination(unittest.TestCase):
-    """history_resync_count 持久化、达上限结算移除 pending、日志降噪。"""
+class TestTerminalStateWritesRetryIndex(unittest.TestCase):
+    """v1.13.3 §4.4：终态结算不再写 history、不再重排队。
+
+    成功不写任何地方（MP 整理历史是唯一载体）；可重试的失败写进
+    retry_index；永久失败不写；跨盘成功但落盘自检未通过写修复行。
+    结算始终返回 True。
+    """
 
     def _service(self):
         service = DummyPostprocessService()
         service._OFFLINE_PENDING_KEY = _OFFLINE_KEY
-        service._HISTORY_RESYNC_LIMIT = 10
+        store = _FakeDataStore()
+        service._get_data_store = store
         service._save_data = lambda key, value: None
-        service._mark_offline_history_status = lambda *args, **kwargs: False
-        return service
+        return service, store
 
     @staticmethod
-    def _seed_pending(service, pending_key="pansou:ABCDEF:123"):
-        service._get_data_store[_OFFLINE_KEY] = {
-            pending_key: {
-                "file_name": "Show.S01E01.mkv",
-                "cloud_dir": "/media/tv",
-                "_monitor_token": "tok",
-            }
-        }
-
-    def test_resync_count_persists_between_calls(self):
-        """计数必须写回 _OFFLINE_PENDING_KEY 数据，重启后仍能到达上限。"""
-        service = self._service()
-        self._seed_pending(service)
-        pending_key = "pansou:ABCDEF:123"
-        item = {"file_name": "Show.S01E01.mkv", "_monitor_token": "tok"}
-        result = service._resolve_history_record(item, pending_key, "成功")
-        self.assertFalse(result)
-        stored = service._get_data_store[_OFFLINE_KEY][pending_key]
-        self.assertEqual(stored["history_resync_count"], 1)
-        self.assertEqual(item["history_resync_count"], 1)
-
-    def test_resync_at_limit_settles_and_removes_pending(self):
-        """达到上限后 pending 项被移除、返回放行，不再重复处理。"""
-        service = self._service()
-        self._seed_pending(service)
-        pending_key = "pansou:ABCDEF:123"
-        item = {
-            "file_name": "Show.S01E01.mkv", "_monitor_token": "tok",
-            "history_resync_count": service._HISTORY_RESYNC_LIMIT,
-        }
-        with patch.object(_postprocess, "logger") as mock_logger:
-            result = service._resolve_history_record(item, pending_key, "成功")
-        self.assertTrue(result)
-        self.assertNotIn(pending_key, service._get_data_store[_OFFLINE_KEY])
-        self.assertEqual(item["history_resync_count"], service._HISTORY_RESYNC_LIMIT)
-        # 达到上限那次保留一条 WARNING，且不再用 ERROR 刷屏
-        self.assertTrue(mock_logger.warning.called)
-        self.assertFalse(mock_logger.error.called)
-
-    def test_grace_and_resync_warnings_fire_once(self):
-        """宽限放行与尚未落盘两条 WARNING 各只打一次，之后降为 debug。"""
-        service = self._service()
-        self._seed_pending(service)
-        pending_key = "pansou:ABCDEF:123"
+    def _item(**overrides):
         item = {
             "file_name": "Show.S01E01.mkv",
-            "created_at": 1.0,
-            "_monitor_token": "tok",
+            "staging_name": "Show.S01E01.mkv",
+            "share_url": "https://pan.example.com/s/ABC",
+            "cloud_dir": "/media/tv",
+            "file_size": 123456,
+            "source_sha1": "A1B2C3D4",
+            "season": 1,
+            "episode": 1,
+            "created_at": 1_700_000_000.0,
+            "mediainfo": {
+                "tmdb_id": 123,
+                "title": "测试剧",
+                "type": "电视剧",
+                "year": "2026",
+            },
         }
-        now = 10_000.0  # 超过 600s 宽限期
-        with patch.object(_postprocess, "logger") as mock_logger:
-            for _ in range(3):
-                self.assertTrue(service._history_ready_for_finalize(item, now))
-            self.assertEqual(mock_logger.warning.call_count, 1)
-            self.assertEqual(mock_logger.debug.call_count, 2)
-            mock_logger.reset_mock()
-            # 历史终态重排队现在还有墙钟上限：用「刚刚创建」的 item 验证 10 次
-            # 计数以内会重排队，而不是被墙钟上限直接结算。
-            resync_item = {
-                "file_name": "Show.S01E01.mkv",
-                "created_at": time.time(),
-                "_monitor_token": "tok",
-            }
-            for _ in range(3):
-                self.assertFalse(
-                    service._resolve_history_record(resync_item, pending_key, "成功")
-                )
-            self.assertEqual(mock_logger.warning.call_count, 1)
-            self.assertEqual(mock_logger.debug.call_count, 2)
+        item.update(overrides)
+        return item
 
-    def test_resync_gives_up_after_wall_clock_limit(self):
-        """历史一直没落盘时，超过墙钟上限必须直接结算，不能让卡片卡十几分钟。"""
-        service = self._service()
-        self._seed_pending(service)
-        pending_key = "pansou:ABCDEF:123"
-        item = {
-            "file_name": "Show.S01E01.mkv",
-            "created_at": time.time() - service._HISTORY_RESYNC_MAX_AGE_SECONDS - 1,
-            "_monitor_token": "tok",
+    def test_failure_writes_retryable_row(self):
+        service, store = self._service()
+        item = self._item()
+        self.assertTrue(
+            service._write_terminal_state(item, "key1", "失败", "网络超时")
+        )
+        self.assertEqual(len(store.retry_index.rows), 1)
+        row = store.retry_index.rows[0]
+        self.assertEqual(row["status"], "失败")
+        self.assertEqual(row["failure_reason"], "网络超时")
+        self.assertEqual(row["failure_kind"], "network")
+        self.assertTrue(row["failure_retryable"])
+        self.assertEqual(row["share_url"], "https://pan.example.com/s/ABC")
+        self.assertEqual(row["file_name"], "Show.S01E01.mkv")
+        self.assertEqual(row["source_file_name"], "Show.S01E01.mkv")
+        self.assertEqual(row["tmdb_id"], 123)
+        self.assertEqual(row["title"], "测试剧")
+        self.assertEqual(row["season"], 1)
+        self.assertEqual(row["episode"], 1)
+        self.assertTrue(str(row["record_id"] or ""))
+
+    def test_permanent_failure_writes_nothing(self):
+        service, store = self._service()
+        item = self._item()
+        self.assertTrue(
+            service._write_terminal_state(item, "key1", "失败", "分享链接已失效")
+        )
+        self.assertEqual(store.retry_index.rows, [])
+
+    def test_success_writes_nothing(self):
+        service, store = self._service()
+        item = self._item()
+        self.assertTrue(service._write_terminal_state(item, "key1", "成功"))
+        self.assertEqual(store.retry_index.rows, [])
+
+    def test_cross_success_unlanded_writes_repair_row(self):
+        service, store = self._service()
+        # 跨盘：源盘 key 与目标盘不同。
+        service._resource_provider_for_url = lambda url: types.SimpleNamespace(
+            key="quark", name="夸克网盘",
+        )
+        service._cloud_drive = types.SimpleNamespace(key="u115cs")
+        service.verify_landed_records = lambda records: {
+            id(records[0]): {"landed": False, "reason": "missing_in_dir"},
         }
-        self.assertTrue(service._resolve_history_record(item, pending_key, "成功"))
-        self.assertNotIn(pending_key, service._get_data_store[_OFFLINE_KEY])
+        item = self._item()
+        self.assertTrue(service._write_terminal_state(item, "key1", "成功"))
+        self.assertEqual(len(store.retry_index.rows), 1)
+        row = store.retry_index.rows[0]
+        self.assertEqual(row["status"], "成功")
+        self.assertEqual(row["transfer_mode"], "cross")
+        self.assertEqual(row["source_drive_key"], "quark")
+        self.assertEqual(row["target_drive_key"], "u115cs")
+        self.assertIs(row["landed"], False)
 
+    def test_cross_success_landed_writes_nothing(self):
+        service, store = self._service()
+        service._resource_provider_for_url = lambda url: types.SimpleNamespace(
+            key="quark", name="夸克网盘",
+        )
+        service._cloud_drive = types.SimpleNamespace(key="u115cs")
+        service.verify_landed_records = lambda records: {
+            id(records[0]): {"landed": True},
+        }
+        item = self._item()
+        self.assertTrue(service._write_terminal_state(item, "key1", "成功"))
+        self.assertEqual(store.retry_index.rows, [])
+
+    def test_missing_identity_returns_true_without_write(self):
+        service, store = self._service()
+        item = self._item(share_url="")
+        self.assertTrue(
+            service._write_terminal_state(item, "key1", "失败", "网络超时")
+        )
+        self.assertEqual(store.retry_index.rows, [])
 
 if __name__ == "__main__":
     unittest.main()

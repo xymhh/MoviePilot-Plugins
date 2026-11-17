@@ -49,13 +49,8 @@ class RenderTemplateTest(unittest.TestCase):
 
 
 class DefaultTemplateTest(unittest.TestCase):
+    # v1.13.3：转存/跨盘转存模板已删（通知只剩洗版），CONTEXT 只留现存模板。
     CONTEXT = {
-        "notify_template_transfer": dict(
-            action="转存", count=2, labels=["尚公主 S01 E01"], items=[{"title": "尚公主"}]
-        ),
-        "notify_template_cross_transfer": dict(
-            action="跨盘转存", count=1, labels=["某电影 (2024)"], items=[]
-        ),
         "notify_template_upgrade": dict(
             action="洗版", count=1, labels=["某剧 S01 E03"], items=[]
         ),
@@ -118,17 +113,17 @@ class ResolveTemplateTest(unittest.TestCase):
         )
 
     def test_defaults_when_blank_or_missing(self):
-        default = notify_template.DEFAULT_TEMPLATES["notify_template_transfer"]
+        default = notify_template.DEFAULT_TEMPLATES["notify_template_upgrade"]
         self.assertEqual(
-            notify_template.resolve_template({}, "notify_template_transfer"), default
+            notify_template.resolve_template({}, "notify_template_upgrade"), default
         )
         self.assertEqual(
             notify_template.resolve_template(
-                {"notify_template_transfer": "   "}, "notify_template_transfer"
+                {"notify_template_upgrade": "   "}, "notify_template_upgrade"
             ),
             default,
         )
-        self.assertEqual(notify_template.resolve_template(None, "notify_template_transfer"), default)
+        self.assertEqual(notify_template.resolve_template(None, "notify_template_upgrade"), default)
 
 
 if __name__ == "__main__":

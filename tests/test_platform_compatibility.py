@@ -2,7 +2,7 @@ import sys
 import unittest
 from unittest.mock import MagicMock
 
-from plugin_env import OwnerDelegator, load_module, register_mock
+from plugin_env import OwnerDelegator, load_module, register_mock, register_module
 
 # 构造 mock 的 app 基础依赖
 mock_subscribe_chain = MagicMock()
@@ -37,6 +37,12 @@ class TestPlatformCompatibility(unittest.TestCase):
     """
 
     def setUp(self):
+        # 本文件不模拟点选链：显式注册空的 app.chain.interaction，
+        # 否则 AutoMockModule 的自动属性会把一个 MagicMock 当成
+        # MediaInteractionChain 返回，_install_interaction_media_hook
+        # 读 target.__name__ 时抛 AttributeError（1.13.3 瘦页后暴露，
+        # 与其它文件的注册顺序有关）。
+        register_module("app.chain.interaction")
         self.owner = MagicMock()
         self.owner._subscribe_search_originals = {}
         self.hook = SubscriptionSearchHook(self.owner)
@@ -250,8 +256,9 @@ class TestPlatformCompatibility(unittest.TestCase):
         import re
         from pathlib import Path
 
-        history_file = Path("plugins.v2/cloudsubscribex/handlers/sync/history.py")
-        text = history_file.read_text(encoding="utf-8")
+        # _transient_target_defaults 随 history.py 拆分已迁到 media_targets.py
+        targets_file = Path("plugins.v2/cloudsubscribex/handlers/sync/media_targets.py")
+        text = targets_file.read_text(encoding="utf-8")
         match = re.search(r"def _transient_target_defaults\(\)[^:]*:\s*return\s*\{([^}]+)\}", text)
         self.assertIsNotNone(match)
         # 验证必需包含 quality, resolution, effect, include, exclude 等 v3 契约属性

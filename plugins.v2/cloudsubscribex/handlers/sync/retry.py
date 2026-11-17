@@ -6,7 +6,7 @@ import time
 from copy import deepcopy
 from threading import Lock, Thread
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.metainfo import MetaInfo
 from app.db.subscribe_oper import SubscribeOper
@@ -52,27 +52,15 @@ class HistoryRetryService(OwnerDelegator):
     def _find_history_record(
             self, record_time: str, share_url: str, file_name: str
     ) -> Optional[Dict[str, Any]]:
-        indexed = self._find_retry_index_record(record_time, share_url, file_name)
-        if indexed is not None:
-            return indexed
-        history = (self._get_data("history") or []) if self._get_data else []
-        return next(
-            (
-                item for item in history
-                if str(item.get("time") or "") == str(record_time or "")
-                   and str(item.get("share_url") or "") == str(share_url or "")
-                   and str(item.get("file_name") or "") == str(file_name or "")
-            ),
-            None,
-        )
+        """重试入口只查重试索引（v1.13.3：history 表已删，无回落）。"""
+        return self._find_retry_index_record(record_time, share_url, file_name)
 
     def _find_retry_index_record(
             self, record_time: str, share_url: str, file_name: str
     ) -> Optional[Dict[str, Any]]:
-        """先查重试索引：有索引行时优先用它定位 history 记录；history
-        记录已被裁剪/删除时，用索引行拼一条可重试的记录 dict。
+        """查重试索引：有行时用它拼一条可重试的记录 dict。
 
-        索引不可用（测试桩/异常）时返回 None，调用方回落 history 扫描。
+        索引不可用（测试桩/异常）时返回 None。
         """
         try:
             get_store = getattr(self, "_get_data_store", None)
@@ -81,28 +69,16 @@ class HistoryRetryService(OwnerDelegator):
             row = get_store().repositories.retry_index.get_by_identity(
                 record_time, share_url, file_name
             )
-        except Exception as error:  # noqa: BLE001 - 索引不可用时回落
-            logger.debug(f"重试索引查询失败，回落历史扫描：{error}", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - 索引不可用时返回 None
+            logger.debug(f"重试索引查询失败：{error}", exc_info=True)
             return None
         if not row:
             return None
         try:
             from ...core.retry_index import index_row_to_history_dict
-        except Exception as error:  # noqa: BLE001 - 索引模块不可用时回落
-            logger.debug(f"重试索引转换失败，回落历史扫描：{error}", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - 索引模块不可用时返回 None
+            logger.debug(f"重试索引转换失败：{error}", exc_info=True)
             return None
-        history = (self._get_data("history") or []) if self._get_data else []
-        record_id = str(row.get("record_id") or "").strip()
-        if record_id:
-            found = next(
-                (
-                    item for item in history
-                    if str(item.get("record_id") or "").strip() == record_id
-                ),
-                None,
-            )
-            if found is not None:
-                return found
         return index_row_to_history_dict(row)
 
     @staticmethod
@@ -175,7 +151,7 @@ class HistoryRetryService(OwnerDelegator):
                 task_id=processing.get("record_id") or "",
             )
             clear_failure(processing)
-            self.append_history_records([processing], reopen_terminal=True)
+            self._upsert_retry_index_row(processing, "处理中")
             if self._history_changed:
                 self._history_changed()
         except Exception:
@@ -298,23 +274,47 @@ class HistoryRetryService(OwnerDelegator):
             self, record_time: str, share_url: str, file_name: str, reason: str
     ) -> None:
         """后台重试异常时把记录落回失败态，避免界面一直停在「处理中」。"""
-        history = (self._get_data("history") or []) if self._get_data else []
-        record = next(
-            (
-                item for item in history
-                if str(item.get("time") or "") == str(record_time or "")
-                   and str(item.get("share_url") or "") == str(share_url or "")
-                   and str(item.get("file_name") or "") == str(file_name or "")
-            ),
-            None,
-        )
+        record = self._find_history_record(record_time, share_url, file_name)
         if not record or str(record.get("status") or "") == "成功":
             return
         apply_failure(record, reason)
         record.pop("retrying", None)
         record.pop("finalize_key", None)
-        if self._save_data:
-            self._save_data("history", history)
+        self._upsert_retry_index_row(record, "失败")
+
+    def _upsert_retry_index_row(self, record: Dict[str, Any], status: str) -> bool:
+        """把一条 history 形状记录写进重试索引（失败/处理中/待修复成功行）。"""
+        try:
+            get_store = getattr(self, "_get_data_store", None)
+            if not callable(get_store):
+                return False
+            from ...core.retry_index import record_to_index_row
+            row = record_to_index_row(record, status)
+            return bool(get_store().repositories.retry_index.upsert_row(row))
+        except Exception as error:  # noqa: BLE001 - 索引写入失败不中断重试主流程
+            logger.warning(f"重试索引写入失败：{error}")
+            return False
+
+    def _delete_retry_index_row(self, record: Dict[str, Any]) -> None:
+        """重试终态成功时删掉索引行（无事可重试、无待修复项）。"""
+        try:
+            get_store = getattr(self, "_get_data_store", None)
+            if not callable(get_store):
+                return
+            from ...core.retry_index import retry_record_id
+            record_id = retry_record_id(record)
+            if record_id:
+                get_store().repositories.retry_index.delete_by_record_ids([record_id])
+        except Exception as error:  # noqa: BLE001 - 索引删除失败不中断重试主流程
+            logger.warning(f"重试索引删除失败：{error}")
+
+    @staticmethod
+    def _history_retry_state(record: Dict[str, Any]) -> Tuple[bool, str]:
+        """一条索引行是否可重试（v1.13.3：规则已移到 core.retry_index
+        的 retry_state_of，这里只做转发，失败页展示与重试入口共用）。"""
+        from ...core.retry_index import retry_state_of
+
+        return retry_state_of(record)
 
     @staticmethod
     def _retry_episode_number(file_name: str, season: int) -> Optional[int]:
@@ -438,16 +438,7 @@ class HistoryRetryService(OwnerDelegator):
         force=True 供后台线程调用：提交阶段已校验过可重试性，此时记录已被
         置为「处理中」，需要跳过状态校验继续执行。
         """
-        history = (self._get_data("history") or []) if self._get_data else []
-        record = next(
-            (
-                item for item in history
-                if str(item.get("time") or "") == str(record_time or "")
-                   and str(item.get("share_url") or "") == str(share_url or "")
-                   and str(item.get("file_name") or "") == str(file_name or "")
-            ),
-            None,
-        )
+        record = self._find_history_record(record_time, share_url, file_name)
         if not record:
             raise ValueError("未找到对应的转存历史记录")
         if not force:
@@ -547,8 +538,11 @@ class HistoryRetryService(OwnerDelegator):
                 target_name=target_name,
             ) if self._cross_transfer_manager else {}
             record.update(cache_info)
-            if self._save_data:
-                self._save_data("history", history)
+            # 跨盘重试刷新了源文件缓存信息（id/sha1/md5），同步回索引行，
+            # 状态保持原样（失败仍失败、待修复成功仍成功）。
+            self._upsert_retry_index_row(
+                record, str(record.get("status") or "失败")
+            )
             # 1.10.0 起任务结束即删临时文件，不再保留缓存供恢复；
             # 重试一律完整重跑（下面直接走分享重新取源文件）。
             if not success:
@@ -571,8 +565,7 @@ class HistoryRetryService(OwnerDelegator):
                     provider_name = cross_source.name if cross_source else "网盘"
                     reason = f"{provider_name}分享链接无效：{status.status_text}"
                     apply_failure(record, reason, KIND_SHARE_INVALID)
-                    if self._save_data:
-                        self._save_data("history", history)
+                    self._upsert_retry_index_row(record, "失败")
                     raise ValueError(reason)
                 share_files = share_transfer.list_share_files(canonical_url)
                 source_file = self._find_share_file_for_history(
@@ -660,7 +653,7 @@ class HistoryRetryService(OwnerDelegator):
                 or "重试转存失败"
             )
             apply_failure(record, reason)
-            self._save_data("history", history)
+            self._upsert_retry_index_row(record, "失败")
             raise RuntimeError(reason)
 
         strm_path, pending_key = self._generate_or_queue_strm(
@@ -687,7 +680,7 @@ class HistoryRetryService(OwnerDelegator):
         )
         if not strm_path and not pending_key:
             apply_failure(record, "文件已转存但后处理任务登记失败")
-            self._save_data("history", history)
+            self._upsert_retry_index_row(record, "失败")
             raise RuntimeError("文件已转存，但无法登记后处理任务")
         record["file_name"] = target_name
         record["cloud_dir"] = cloud_dir
@@ -764,9 +757,12 @@ class HistoryRetryService(OwnerDelegator):
                     success_episodes=success_episodes,
                 )
         if pending_key:
-            self.append_history_records([record], reopen_terminal=True)
+            # 重试已交后处理跟进：索引行 stays 处理中，finalize 终态由
+            # _write_terminal_state 结算（成功删行、失败写失败行）。
+            self._upsert_retry_index_row(record, "处理中")
         else:
-            self._save_data("history", history)
+            # 重试已在线完成且成功：索引行不再有重试/修复价值，直接删行。
+            self._delete_retry_index_row(record)
         logger.info(
             f"历史记录后处理完成：{cloud_dir.rstrip('/')}/{target_name}，"
             f"状态：{record['status']}"

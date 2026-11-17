@@ -38,10 +38,10 @@ except Exception:
 from .baseline import UpgradeBaselineService
 from .cleanup import HistoryCleanupService
 from .episode_dedup import EpisodeDedupService
-from .history import HistoryService
 from .landed import LandedVerifyService
 from .matching import FileMatchingService
 from .media_refresh import MediaRefreshMixin
+from .media_targets import MediaTargetsService
 from .mp_organize import MpOrganizeMixin
 from .strm_ops import StrmOpsMixin
 from .transfer_ops import TransferOpsMixin
@@ -68,6 +68,7 @@ from .retry import HistoryRetryService
 from .rule_scoring import UpgradeRuleScoringService
 from .subtitles import SubtitleService
 from .television import TelevisionSyncProcessor
+from .transfer_details import TransferDetailsService
 from .upgrade import UpgradeService
 from .utils import extract_ed2k_filename, format_episode_ranges
 from ...search.magnet import extract_magnet_hash
@@ -95,9 +96,10 @@ from ...utils.cache import create_platform_ttl_cache
 _COMPONENT_TYPES = (
     MovieSyncProcessor,
     TelevisionSyncProcessor,
-    HistoryService,
     HistoryCleanupService,
     HistoryRetryService,
+    TransferDetailsService,
+    MediaTargetsService,
     FileMatchingService,
     PostprocessService,
     UpgradeBaselineService,
@@ -126,10 +128,6 @@ class SyncHandler:
     _OFFLINE_CHECK_DELAYS = (10, 20, 40, 60, 120, 300)
     _OFFLINE_TIMEOUT = 30 * 60
     _FILE_FINALIZE_TIMEOUT = 30 * 60
-    # 历史记录落盘前不提交后处理终态，超过该宽限期后允许放行，避免任务永久排队
-    _HISTORY_READY_GRACE_SECONDS = 10 * 60
-    # 提交时历史记录尚未落盘的最大保留重试次数
-    _HISTORY_RESYNC_LIMIT = 10
     _OFFLINE_MONITOR_LEASE_SECONDS = 15 * 60
     _MEDIA_RECOGNITION_CACHE_LIMIT = 256
     _PLATFORM_ROOT_CACHE_LIMIT = 256
@@ -553,15 +551,50 @@ class SyncHandler:
             ttl=self._RUNTIME_CACHE_TTL,
         )
 
-    def append_history_records(
+    def persist_sync_results(
             self,
             records: List[Dict[str, Any]],
-            reopen_terminal: bool = False,
     ) -> int:
-        """写入历史后通知运行态订阅者，避免前端等待整批任务结束。"""
-        count = self._get_component(HistoryService).append_history_records(
-            records, reopen_terminal=reopen_terminal
-        )
+        """本轮同步结果落盘（v1.13.3 §1.4）：只把失败（可重试）与跨盘成功
+        待修复行写进重试索引；同盘成功行不写（MP 整理历史是唯一载体）。
+        返回写入行数，写入后通知前端刷新。"""
+        count = 0
+        get_store = getattr(self, "_get_data_store", None)
+        if not callable(get_store):
+            return 0
+        try:
+            store = get_store()
+        except Exception as error:  # noqa: BLE001 - 存储不可用时跳过落盘
+            logger.debug(f"重试索引存储不可用，同步结果未落盘：{error}", exc_info=True)
+            return 0
+        try:
+            from ...core.retry_index import (
+                record_to_index_row,
+                retry_index_status,
+            )
+        except Exception as error:  # noqa: BLE001 - 索引模块不可用时跳过落盘
+            logger.debug(f"重试索引模块不可用，同步结果未落盘：{error}", exc_info=True)
+            return 0
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            try:
+                status = retry_index_status(record)
+            except Exception:
+                continue
+            if status is None:
+                continue
+            try:
+                row = record_to_index_row(record, status)
+            except Exception:
+                continue
+            if row is None:
+                continue
+            try:
+                if store.repositories.retry_index.upsert_row(row):
+                    count += 1
+            except Exception as error:  # noqa: BLE001 - 单行写失败不阻塞整批
+                logger.debug(f"同步结果写重试索引失败：{error}", exc_info=True)
         if count and self._history_changed:
             self._history_changed()
         return count
@@ -1612,7 +1645,9 @@ class SyncHandler:
             "check_index": 0,
             "fail_count": 0,
             "finalize_dead": False,
-            "history_ready": bool(skip_history or current.get("skip_history")),
+            # v1.13.3 §4.4：后处理登记时就绪标志默认就是 True（终态不再
+            # 等历史记录落盘才置位）；宽限期只为照顾更新前已登记的旧项。
+            "history_ready": True,
             "skip_history": bool(skip_history or current.get("skip_history")),
             "mediainfo": (
                 media_data

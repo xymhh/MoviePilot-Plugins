@@ -3,7 +3,8 @@
 import asyncio
 import json
 import time
-from typing import Any, Dict, Optional
+from threading import Thread
+from typing import Any, Dict, List, Optional
 
 from app.core.config import global_vars, settings
 from app.log import logger
@@ -14,6 +15,7 @@ from .page import clear_ui_options_cache
 from ..cloud import CloudDriveCapability
 from ..delegation import OwnerDelegator
 from ..sync_pause import set_paused, snapshot
+from ..services.runtime import sync_lock
 from ..task_center import collect_tasks
 from ...utils import clear_magnet_metadata_cache
 
@@ -169,29 +171,140 @@ class RuntimeApi(OwnerDelegator):
             task_ids,
         )
 
+    def _retry_index_record_ids(
+            self, identities: List[Dict[str, Any]]
+    ) -> List[str]:
+        """把失败页传来的记录身份（time/share_url/file_name/tmdb/season/
+        episode）换算成重试索引的 record_id；算不出的直接跳过。"""
+        from ...core.retry_index import retry_record_id
+        record_ids = []
+        for item in identities or []:
+            if not isinstance(item, dict):
+                continue
+            record_id = retry_record_id(item)
+            if record_id:
+                record_ids.append(record_id)
+        return record_ids
+
     def api_vue_clear_history(self, payload: Optional[Dict[str, Any]] = None) -> dict:
-        return self.api_clear_history(
-            settings.API_TOKEN,
-            force=(payload or {}).get("force") is True,
-            clear_points_history=(payload or {}).get("clear_points_history") is True,
-        )
+        """清空失败记录页：删掉重试索引里全部失败与待修复行（处理中行
+        正在重试，不删）；可选同时清空积分消费记录。"""
+        data = payload or {}
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            rows = store.repositories.retry_index.list_retryable() or []
+            record_ids = [
+                str(row.get("record_id") or "")
+                for row in rows if str(row.get("record_id") or "")
+            ]
+            deleted = 0
+            if record_ids:
+                deleted = int(
+                    store.repositories.retry_index.delete_by_record_ids(record_ids)
+                    or 0
+                )
+        except Exception as error:
+            logger.error(f"清空失败记录异常：{error}")
+            return {"success": False, "message": str(error)}
+        message = f"已清理 {deleted} 条失败记录"
+        points = {}
+        if data.get("clear_points_history") is True and self._search_handler:
+            try:
+                points = self._search_handler.clear_point_history() or {}
+            except Exception as error:
+                logger.warning(f"清空积分消费记录失败：{error}")
+            if points:
+                message += (
+                    f"；已清理积分消费记录 HDHive={int(points.get('hdhive') or 0)}、"
+                    f"Dian115={int(points.get('dian115') or 0)}"
+                )
+        if self._history_changed:
+            self._history_changed()
+        return {"success": True, "message": message, "data": {"deleted": deleted, "points_history": points}}
 
     def api_vue_delete_history(self, payload: Dict[str, Any]) -> dict:
-        return self.api_delete_history(settings.API_TOKEN, payload or {})
+        """删除单条失败记录（只删索引行，不删网盘文件与 STRM）。"""
+        data = payload or {}
+        record_ids = self._retry_index_record_ids([data])
+        if not record_ids:
+            return {"success": False, "message": "未找到对应的失败记录"}
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            deleted = int(
+                store.repositories.retry_index.delete_by_record_ids(record_ids)
+                or 0
+            )
+        except Exception as error:
+            logger.warning(f"删除失败记录失败：{error}")
+            return {"success": False, "message": str(error)}
+        if self._history_changed:
+            self._history_changed()
+        return {
+            "success": True,
+            "message": "失败记录已删除，网盘文件和 STRM 均已保留",
+            "data": {"deleted": deleted},
+        }
 
     def api_vue_delete_history_batch(self, payload: Dict[str, Any]) -> dict:
+        """批量删除失败记录（只删索引行，不删网盘文件与 STRM）。"""
         data = payload or {}
-        return self.api_delete_history_batch(
-            settings.API_TOKEN,
-            identities=data.get("records") or [],
-            delete_linked_files=data.get("delete_linked_files") is True,
-        )
+        records = [item for item in (data.get("records") or []) if isinstance(item, dict)]
+        if not records:
+            return {"success": False, "message": "未选择可删除的失败记录"}
+        if len(records) > 2000:
+            return {"success": False, "message": "单次最多删除 2000 条失败记录"}
+        record_ids = self._retry_index_record_ids(records)
+        if not record_ids:
+            return {"success": False, "message": "未找到对应的失败记录"}
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            deleted = int(
+                store.repositories.retry_index.delete_by_record_ids(record_ids)
+                or 0
+            )
+        except Exception as error:
+            logger.warning(f"批量删除失败记录失败：{error}")
+            return {"success": False, "message": str(error)}
+        if self._history_changed:
+            self._history_changed()
+        return {
+            "success": True,
+            "message": f"已删除 {deleted} 条失败记录，网盘文件和 STRM 均已保留",
+            "data": {"deleted": deleted},
+        }
 
     def api_vue_upgrade_history(self, payload: Dict[str, Any]) -> dict:
-        return self.api_upgrade_history(settings.API_TOKEN, payload or {})
-
-    def api_vue_notify_history(self, payload: Dict[str, Any]) -> dict:
-        return self.api_notify_history(settings.API_TOKEN, payload or {})
+        """从媒体服务器内容发起洗版（v1.13.3：history 来源随转存记录页
+        一起删除，只剩 media_server 入口）。"""
+        data = payload or {}
+        if not bool(getattr(self, "_enable_cloud_upgrade", False)):
+            return {"success": False, "message": "请先在洗版设置中启用网盘洗版"}
+        if getattr(self, "_sync_running", False) or sync_lock.locked():
+            return {"success": False, "message": "已有订阅或洗版任务正在运行"}
+        items = [
+            value for value in ((data or {}).get("items") or [])
+            if isinstance(value, dict)
+        ]
+        if not items:
+            return {"success": False, "message": "请选择至少一个媒体库内容"}
+        if len(items) > 200:
+            return {"success": False, "message": "单次最多选择 200 个媒体内容"}
+        try:
+            targets = self._sync_handler.resolve_media_server_upgrade_targets(items)
+        except Exception as error:
+            logger.warning(f"媒体库洗版目标校验失败：{error}")
+            return {"success": False, "message": str(error)}
+        upgrade_request = {"source": "resolved", "targets": targets}
+        Thread(
+            target=self.sync_subscribes,
+            kwargs={"upgrade_request": upgrade_request},
+            daemon=True,
+            name="cloudsubscribe-history-upgrade",
+        ).start()
+        return {"success": True, "message": f"已提交 {len(items)} 个媒体库内容的洗版任务"}
 
     def api_vue_retry_history(self, payload: Dict[str, Any]) -> dict:
         if not self._sync_handler:
@@ -231,16 +344,46 @@ class RuntimeApi(OwnerDelegator):
             return {"success": False, "message": str(error)}
 
     def api_vue_mark_history_success(self, payload: Dict[str, Any]) -> dict:
-        return self.api_mark_history_success(
-            settings.API_TOKEN,
-            identities=(payload or {}).get("records") or [],
-        )
-
-    def api_vue_backfill_history(self, payload: Dict[str, Any]) -> dict:
-        return self.api_backfill_history(
-            settings.API_TOKEN,
-            keyword=str((payload or {}).get("keyword") or ""),
-        )
+        """把选中的待修复行标记为已解决（删掉索引行，文件本身不动）；
+        处理中行正在重试，跳过不标记。"""
+        records = [item for item in ((payload or {}).get("records") or []) if isinstance(item, dict)]
+        if not records:
+            return {"success": False, "message": "未选择可标记的失败记录"}
+        if len(records) > 2000:
+            return {"success": False, "message": "单次最多标记 2000 条失败记录"}
+        record_ids = self._retry_index_record_ids(records)
+        if not record_ids:
+            return {"success": False, "message": "未找到对应的失败记录"}
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            rows = store.repositories.retry_index.list_all() or []
+            processing_ids = {
+                str(row.get("record_id") or "")
+                for row in rows
+                if str(row.get("status") or "") == "处理中"
+            }
+            deletable = [rid for rid in record_ids if rid not in processing_ids]
+            deleted = 0
+            if deletable:
+                deleted = int(
+                    store.repositories.retry_index.delete_by_record_ids(deletable)
+                    or 0
+                )
+        except Exception as error:
+            logger.warning(f"标记失败记录为成功失败：{error}")
+            return {"success": False, "message": str(error)}
+        skipped = len(record_ids) - deleted
+        message = f"已把 {deleted} 条记录标记为成功"
+        if skipped:
+            message += f"，跳过 {skipped} 条（处理中或已变化）"
+        if self._history_changed:
+            self._history_changed()
+        return {
+            "success": True,
+            "message": message,
+            "data": {"updated": deleted, "skipped": skipped},
+        }
 
     _CACHE_CATEGORIES = frozenset({
         "search", "cloud", "sync", "interface", "platform",

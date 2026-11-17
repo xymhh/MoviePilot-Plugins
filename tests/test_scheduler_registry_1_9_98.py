@@ -598,7 +598,8 @@ class PluginWiringTests(unittest.TestCase):
     def _start_all(self, plugin):
         plugin._start_strm_full_scan()
         plugin._start_strm_increment()
-        plugin._start_history_state_maintenance()
+        # v1.13.3：第 5 步删清扫器，历史状态维护任务由重试索引留存清理接替。
+        plugin._start_retry_index_maintenance()
         plugin._start_organize_schedule()
         plugin._start_residue_cleanup()
 
@@ -613,7 +614,7 @@ class PluginWiringTests(unittest.TestCase):
             {
                 "cloudsubscribe_strm_full_scan",
                 "cloudsubscribe_strm_increment",
-                "cloudsubscribe_history_state_maintenance",
+                "cloudsubscribe_retry_index_maintenance",
                 "cloudsubscribe_organize",
                 "cloudsubscribe_residue_cleanup_startup",
             },
@@ -623,10 +624,10 @@ class PluginWiringTests(unittest.TestCase):
         plugin = self._enabled_plugin()
         self._start_all(plugin)
         registry = plugin._scheduler_registry()
-        # 1.9.98 之前历史状态维护与 115 整理两个调度器不在 stop_service 里，
+        # 1.9.98 之前重试索引维护与 115 整理两个调度器不在 stop_service 里，
         # 停用/卸载后继续跑；现在它们与其它任务共用一个注册表。
         self.assertIn(
-            "cloudsubscribe_history_state_maintenance", registry.job_ids()
+            "cloudsubscribe_retry_index_maintenance", registry.job_ids()
         )
         self.assertIn("cloudsubscribe_organize", registry.job_ids())
         plugin.stop_service()

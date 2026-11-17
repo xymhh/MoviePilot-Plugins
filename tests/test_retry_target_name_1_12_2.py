@@ -103,7 +103,13 @@ class HistoryRetryTargetNameTest(unittest.TestCase):
         self.service = HistoryRetryService(self.owner)
 
     def _retry(self):
+        # v1.13.3：重试入口只查重试索引，不再扫 _get_data("history")；
+        # 这里直接把记录钉在查找入口上，专注验证目标名传递。
         with patch.object(
+            HistoryRetryService,
+            "_find_history_record",
+            return_value=self.record,
+        ), patch.object(
             HistoryRetryService,
             "_resolve_history_retry_context",
             return_value=self.retry_context,

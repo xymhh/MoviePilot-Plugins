@@ -169,11 +169,10 @@ naming_module = load_module(
 )
 SyncNamingService = naming_module.SyncNamingService
 
-history_module = load_module(
-    "cloudsubscribex.handlers.sync.history",
-    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
+retry_index_module = load_module(
+    "cloudsubscribex.core.retry_index",
+    "plugins.v2/cloudsubscribex/core/retry_index.py",
 )
-HistoryService = history_module.HistoryService
 
 # 冻结副本引用的基线模块全局量（本文件内绑定，不动共享模块）
 normalize_platform_cache_key = baseline_module.normalize_platform_cache_key
@@ -488,7 +487,7 @@ def _make_parity_handler(*, old, scan_files, mp_candidates, plugin_history,
             frozenset({"MoviePilot整理记录", "插件转存记录"}),
         )
         handler._plugin_history_episode_files = _frozen_plugin_history_episode_files.__get__(handler, EpisodeDedupService)
-        handler._cross_success_needs_repair = HistoryService._cross_success_needs_repair
+        handler._cross_success_needs_repair = retry_index_module.cross_success_needs_repair
         handler._build_episode_baseline = _old_build_episode_baseline.__get__(handler, EpisodeDedupService)
     else:
         handler._build_episode_baseline = UpgradeBaselineService._build_episode_baseline.__get__(handler, EpisodeDedupService)

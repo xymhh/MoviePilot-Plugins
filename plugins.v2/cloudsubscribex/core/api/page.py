@@ -5,11 +5,8 @@ from __future__ import annotations
 import copy
 import datetime
 import os
-import re
-import time
 from typing import Any, Dict
 from urllib.parse import quote, urlencode
-import pytz
 from app.core.config import settings
 from app.log import logger
 from app.schemas.types import NotificationType
@@ -17,7 +14,6 @@ from app.schemas.types import NotificationType
 from ..cloud import CloudDriveCapability
 from ..delegation import OwnerDelegator
 from ..config import UIConfig
-from ..episode_parse import parse_episodes_from_names as _parse_episodes_from_names
 from ...drive.scanner import DriverRegistry
 from ...search.scanner import SearchSourceRegistry
 from ...search.types import (
@@ -44,37 +40,8 @@ _AIRED_INFO_CACHE = create_platform_ttl_cache(
     "ui:aired:v2", maxsize=512, ttl=6 * 60 * 60
 )
 
-# 本地媒体库（STRM 落盘目录）索引：追更进度里的「已入库」必须反映磁盘上真实存在的集，
-# 只看订阅 note 会漏掉「订阅开始前就已入库」的集（例如订阅 start_episode=3 时 E1/E2 永远补不上）。
 # 追更日历：只展示未来 N 天内的待更新集（TMDB 只有日期，没有钟点）
 _CALENDAR_HORIZON_DAYS = 30
-_LOCAL_LIBRARY_TTL = 60.0
-_LOCAL_LIBRARY_STATE: dict[str, Any] = {"at": 0.0, "root": "", "index": {}}
-_SEASON_DIR_PATTERN = re.compile(r"^(?:season[\s._-]*|s)(\d{1,2})$|^第\s*(\d{1,2})\s*季$", re.IGNORECASE)
-_TMDB_TAG_PATTERN = re.compile(r"\{tmdb[-_]?(\d+)\}", re.IGNORECASE)
-_YEAR_TAG_PATTERN = re.compile(r"[（(](\d{4})[)）]")
-
-
-def _match_season_dir(dir_name: str) -> int | None:
-    """识别 `Season 1` / `S01` / `第1季` 形式的季目录。"""
-    match = _SEASON_DIR_PATTERN.match((dir_name or "").strip())
-    if not match:
-        return None
-    number = match.group(1) or match.group(2)
-    try:
-        season = int(number)
-    except (TypeError, ValueError):
-        return None
-    return season if 0 < season < 100 else None
-
-
-def _normalize_media_name(value: str) -> str:
-    """媒体目录名归一化：去掉 tmdb 标签、年份与标点，便于按片名兜底匹配。"""
-    text = _TMDB_TAG_PATTERN.sub(" ", str(value or ""))
-    text = _YEAR_TAG_PATTERN.sub(" ", text)
-    text = re.sub(r"[\[\]【】{}()（）._·:：!！?？,，、\-—~]+", " ", text)
-    text = re.sub(r"\s+", "", text)
-    return text.strip().lower()
 
 
 def _aired_episode_info(tmdb_id: int, season: int) -> dict | None:
@@ -172,83 +139,75 @@ def _resolve_subscribe_tmdb_id(subscribe: object):
 
 class PageApi(OwnerDelegator):
     @staticmethod
-    def _history_filter_values(value: str) -> set[str]:
-        return {
-            item.strip().lower()
-            for item in str(value or "").split(",")
-            if item.strip()
-        }
-
     def api_vue_page_data(
             self,
             page: int = 1,
             page_size: int = 10,
             keyword: str = "",
-            resource_types: str = "",
-            sources: str = "",
-            task_types: str = "",
-            statuses: str = "",
+            status: str = "",
     ) -> dict:
-        page_result = self._get_data_store().query_history_page(
-            page=page,
-            page_size=page_size,
-            keyword=keyword,
-            resource_types=self._history_filter_values(resource_types),
-            sources=self._history_filter_values(sources),
-            task_types=self._history_filter_values(task_types),
-            statuses=self._history_filter_values(statuses),
-        )
-        page_groups = page_result.pop("groups", [])
-        page_history = [
-            record for group in page_groups
-            for record in group.get("records", [])
-        ]
-        if self._sync_handler:
-            page_history = self._sync_handler.prepare_history_records(
-                page_history
-            )
-            prepared_by_id = {
-                str(record.get("record_id") or ""): record
-                for record in page_history
-            }
-            history_groups = []
-            for group in page_groups:
-                group["records"] = [
-                    prepared_by_id.get(
-                        str(record.get("record_id") or ""), record
-                    )
-                    for record in group.get("records", [])
-                ]
-                prepared_group = self._sync_handler.prepare_history_group(group)
-                poster = (
-                    prepared_group.get("poster")
-                    or prepared_group.get("image")
-                    or prepared_group.get("poster_path")
-                    or prepared_group.get("poster_url")
-                )
-                if poster:
-                    prepared_group["poster_url"] = _platform_image_url(poster, "w500")
-                history_groups.append(prepared_group)
-        else:
-            page_history = [copy.deepcopy(item) for item in page_history]
-            history_groups = [copy.deepcopy(group) for group in page_groups]
+        """失败记录页数据（v1.13.3 瘦页）：只列重试索引里的失败、跨盘成功
+        待修复与处理中行，不再分页展示全量转存历史；status 可按行状态过滤
+        （失败 / 成功（待修复）/ 处理中）。处理中行要列出：前端统计卡片
+        可按它过滤，删除与清空入口又明确排除它——只计数不列行会让卡片
+        点进去永远是空的。"""
+        try:
+            page_no = max(1, int(page or 1))
+        except (TypeError, ValueError):
+            page_no = 1
+        try:
+            size = max(1, min(100, int(page_size or 10)))
+        except (TypeError, ValueError):
+            size = 10
+        needle = str(keyword or "").strip().casefold()
+        status_filter = str(status or "").strip()
+        try:
+            store = self._get_data_store()
+            store.initialize()
+            rows = store.repositories.retry_index.list_page_rows() or []
+        except Exception as err:
+            logger.warning(f"读取重试索引失败：{err}")
+            rows = []
+        try:
+            from ...core.retry_index import index_row_to_history_dict
+            failures = [index_row_to_history_dict(row) for row in rows]
+        except Exception as err:
+            logger.warning(f"重试索引转换失败：{err}")
+            failures = []
+        if status_filter:
+            failures = [
+                record for record in failures
+                if str(record.get("status") or "") == status_filter
+            ]
+        if needle:
+            failures = [
+                record for record in failures
+                if needle in str(record.get("title") or "").casefold()
+                or needle in str(record.get("file_name") or "").casefold()
+                or needle in str(record.get("share_url") or "").casefold()
+            ]
+        total = len(failures)
+        total_pages = max(1, (total + size - 1) // size)
+        page_no = min(page_no, total_pages)
+        page_records = failures[(page_no - 1) * size:page_no * size]
         return {
             "success": True,
             "data": {
                 **_display_catalog(),
-                "history_groups": history_groups,
+                "failures": page_records,
                 "history_page": {
-                    "page": page_result["page"],
-                    "page_size": page_result["page_size"],
-                    "total": page_result["total"],
-                    "total_pages": page_result["total_pages"],
-                    "filter_options": page_result["filter_options"],
+                    "page": page_no,
+                    "page_size": size,
+                    "total": total,
+                    "total_pages": total_pages,
+                    "filter_options": {
+                        "resource_types": [],
+                        "sources": [],
+                    },
                     "enable_cloud_upgrade": bool(
                         getattr(self, "_enable_cloud_upgrade", False)
                     ),
                 },
-                "emby_play_items": self._history_emby_play_items(page_history),
-                "subscribes_progress": self._build_subscribes_progress(page_history),
             },
         }
 
@@ -325,347 +284,30 @@ class PageApi(OwnerDelegator):
 
         return {"success": True, "data": {"counts": counts, "latest": latest, "upcoming": upcoming}}
 
-    def _local_library_index(self) -> dict[tuple, set[int]]:
-        """扫描本地媒体库根目录，建立「tmdb/片名 + 季 → 磁盘上真实存在的集号」索引。"""
-        root = str(getattr(self._owner, "_local_resource_path", "") or "").strip()
-        if not root or not os.path.isdir(root):
-            return {}
-        now = time.monotonic()
-        state = _LOCAL_LIBRARY_STATE
-        if state.get("root") == root and state.get("index") and now - float(state.get("at") or 0) < _LOCAL_LIBRARY_TTL:
-            return state["index"]
-
-        index: dict[tuple, set[int]] = {}
-        try:
-            for dir_path, dir_names, file_names in os.walk(root):
-                relative = dir_path[len(root):].strip(os.sep)
-                # 媒体库结构最多到 类型/分类/媒体目录/季目录 这一层，再深不再遍历
-                if relative and relative.count(os.sep) > 4:
-                    dir_names[:] = []
-                    continue
-                season = _match_season_dir(os.path.basename(dir_path))
-                if season is None:
-                    continue
-                dir_names[:] = []
-                episodes = _parse_episodes_from_names(file_names, season)
-                if not episodes:
-                    continue
-                media_dir = os.path.basename(os.path.dirname(dir_path))
-                tmdb_match = _TMDB_TAG_PATTERN.search(media_dir)
-                if tmdb_match:
-                    index.setdefault(("tmdb", tmdb_match.group(1), season), set()).update(episodes)
-                media_name = _normalize_media_name(media_dir)
-                if media_name:
-                    year_match = _YEAR_TAG_PATTERN.search(media_dir)
-                    year = int(year_match.group(1)) if year_match else 0
-                    index.setdefault(("title", media_name, year, season), set()).update(episodes)
-        except OSError as error:
-            logger.debug(f"本地媒体库索引构建失败：{error}")
-            return {}
-
-        _LOCAL_LIBRARY_STATE.update({"at": now, "root": root, "index": index})
-        if index:
-            logger.debug(f"本地媒体库索引已刷新：{len(index)} 条季记录，根目录 {root}")
-        return index
-
-    def _local_library_episodes(
-            self,
-            tmdb_id: Any,
-            title: Any,
-            year: Any,
-            season: Any,
-    ) -> set[int]:
-        """取本地媒体库中该季真实存在的集号；无索引或未命中返回空集。"""
-        index = self._local_library_index()
-        if not index:
-            return set()
-        try:
-            season_no = int(season or 1)
-        except (TypeError, ValueError):
-            season_no = 1
-        if tmdb_id:
-            hit = index.get(("tmdb", str(tmdb_id), season_no))
-            if hit:
-                return set(hit)
-        media_name = _normalize_media_name(title)
-        if not media_name:
-            return set()
-        try:
-            year_no = int(year or 0)
-        except (TypeError, ValueError):
-            year_no = 0
-        hit = index.get(("title", media_name, year_no, season_no))
-        if hit:
-            return set(hit)
-        # 年份标签缺失或写法不同（如目录只写片名）时，按片名兜底合并
-        merged: set[int] = set()
-        for key, episodes in index.items():
-            if key[0] == "title" and key[1] == media_name and key[3] == season_no:
-                merged.update(episodes)
-        return merged
-
-    def _build_subscribes_progress(self, page_history: list[dict[str, Any]] = None) -> list[dict[str, Any]]:
-        """构建以 MoviePilot 订阅为核心的追更进度大屏数据。"""
-        subscribes = []
-        history_success_map: dict[str, set[int]] = {}
-        # 电影没有集号，episode 为空时进不了 history_success_map，
-        # 单独留一份「成功落地的 tmdb id」用于判定电影是否已入库
-        history_success_tmdb: set[str] = set()
-        try:
-            from app.db import SessionFactory
-            from app.db.models.subscribe import Subscribe
-            with SessionFactory() as db:
-                subscribes = list(db.query(Subscribe).all())
-        except Exception as err:
-            logger.warning(f"通过 SessionFactory 读取订阅失败: {err}")
-            try:
-                from app.db.subscribe_oper import SubscribeOper
-                subscribes = SubscribeOper().list() or []
-            except Exception as err2:
-                logger.warning(f"回退读取订阅列表仍失败: {err2}")
-                return []
-
-        # 转存历史存在插件自己的 SQLite（history_records 表），
-        # 用 MoviePilot 的 SessionFactory 去查只会静默返回空 —— 必须走插件数据仓库。
+    def api_vue_history_summary(self) -> dict:
+        """失败记录页统计（v1.13.3）：重试索引里的失败/待修复/处理中行数。"""
         try:
             store = self._get_data_store()
             store.initialize()
-            history_rows = store.repositories.history.list_all() or []
+            rows = store.repositories.retry_index.list_all() or []
         except Exception as err:
-            logger.warning(f"读取插件转存历史失败，已入库将只统计订阅 note: {err}")
-            history_rows = []
-        if not history_rows:
-            # 空历史会让「已入库」永远等于订阅 note，属于必须能被发现的口径故障
-            logger.warning("插件转存历史为空，已入库将只统计订阅 note")
-
-        for rec in history_rows:
-            if not isinstance(rec, dict):
-                continue
-            if str(rec.get("status") or "") not in ("成功", "完成"):
-                continue
-            hr_tmdb = str(rec.get("tmdb_id") or "").strip()
-            if hr_tmdb:
-                history_success_tmdb.add(hr_tmdb)
-            ep = rec.get("episode")
-            try:
-                int_ep = int(ep)
-            except (TypeError, ValueError):
-                continue
-            if int_ep <= 0:
-                continue
-            hr_season = rec.get("season") or 1
-            hr_sub = rec.get("subscribe_id")
-            hr_title = str(rec.get("title") or "").strip()
-            if hr_sub:
-                history_success_map.setdefault(f"sub:{hr_sub}", set()).add(int_ep)
-            if hr_tmdb:
-                history_success_map.setdefault(f"tmdb:{hr_tmdb}:{hr_season}", set()).add(int_ep)
-            if hr_title:
-                history_success_map.setdefault(f"title:{hr_title}:{hr_season}", set()).add(int_ep)
-
-        active_tasks = []
-        owner = getattr(self, "_owner", None)
-        if owner and hasattr(owner, "_runtime_service"):
-            try:
-                active_tasks = owner._runtime_service.get_tasks() or []
-            except Exception as error:  # noqa: BLE001 - 任务看板不可用不该拖垮进度表
-                logger.debug(f"读取运行任务失败：{error}", exc_info=True)
-
-        history_items = page_history or []
-        progress_list = []
-        build_errors = 0
-        for sub in subscribes:
-            try:
-                sub_id = int(getattr(sub, "id", 0) or 0)
-                name = str(getattr(sub, "name", "") or "未知剧集")
-                year = str(getattr(sub, "year", "") or "")
-                season = getattr(sub, "season", None)
-                if season is not None:
-                    try:
-                        season = int(season)
-                    except (ValueError, TypeError):
-                        season = None
-
-                total_episodes = int(getattr(sub, "total_episode", 0) or 0)
-                lack_episode = int(getattr(sub, "lack_episode", 0) or 0)
-                raw_note = getattr(sub, "note", []) or []
-                if isinstance(raw_note, str):
-                    try:
-                        raw_note = [int(x.strip()) for x in raw_note.split(",") if x.strip().isdigit()]
-                    except Exception:
-                        raw_note = []
-                library_episodes = {int(x) for x in raw_note if str(x).isdigit() and int(x) > 0}
-
-                # 必须先解析 tmdb_id，下面合并转存历史时要用它做键
-                tmdb_id = _resolve_subscribe_tmdb_id(sub)
-                state = str(getattr(sub, "state", "R") or "R")
-                # 电影/剧集判定：优先用订阅自身的 type，缺省时按有无季号推断
-                sub_type = str(getattr(sub, "type", "") or "").strip()
-                is_movie = sub_type == "电影" or (not sub_type and season is None)
-
-                # 合并转存历史中已成功的集数，确保转存后列表即时更新
-                eff_season = season or 1
-                history_eps = set(history_success_map.get(f"sub:{sub_id}", set()))
-                if tmdb_id:
-                    history_eps |= history_success_map.get(
-                        f"tmdb:{tmdb_id}:{eff_season}", set()
-                    )
-                if name:
-                    history_eps |= history_success_map.get(
-                        f"title:{name}:{eff_season}", set()
-                    )
-                library_episodes = sorted(library_episodes | history_eps)
-
-                # 媒体库实测优先：磁盘上真实存在的集一定算已入库。
-                # 订阅 note 只记录 MoviePilot 下载过的集，订阅从第 N 集开始时早期集永远补不上。
-                if not is_movie:
-                    local_episodes = self._local_library_episodes(tmdb_id, name, year, eff_season)
-                    if local_episodes:
-                        library_episodes = sorted(set(library_episodes) | local_episodes)
-
-                # 海报多级回查与增强
-                poster = str(getattr(sub, "poster", "") or getattr(sub, "backdrop", "") or "")
-                if not poster and history_items:
-                    for rec in history_items:
-                        rec_tmdb = str(rec.get("tmdb_id") or "")
-                        rec_title = str(rec.get("title") or "")
-                        if (tmdb_id and rec_tmdb == str(tmdb_id)) or rec_title == name:
-                            cand = rec.get("image") or rec.get("poster") or rec.get("poster_path")
-                            if cand:
-                                poster = str(cand)
-                                break
-                poster_url = _platform_image_url(poster, "w500") if poster else ""
-
-                transferring = []
-                for t in active_tasks:
-                    if int(t.get("subscribe_id") or 0) == sub_id:
-                        ep = t.get("episode")
-                        if ep and int(ep) > 0:
-                            transferring.append(int(ep))
-                transferring_episodes = sorted(set(transferring))
-
-                # 挂载该订阅对应的真实转存记录（电影判定也要用，故提前计算）
-                matched_records = [
-                    rec for rec in history_items
-                    if int(rec.get("subscribe_id") or 0) == sub_id
-                    or (tmdb_id and str(rec.get("tmdb_id") or "") == str(tmdb_id))
-                    or str(rec.get("title") or "") == name
-                ]
-
-                if total_episodes > 0:
-                    missing_episodes = [
-                        i for i in range(1, total_episodes + 1)
-                        if i not in library_episodes and i not in transferring_episodes
-                    ]
-                    missing_count = len(missing_episodes)
-                elif is_movie:
-                    # 电影没有集数概念：已入库 = 有集数记录 ∪ 有成功转存流水。
-                    # MoviePilot 的 lack_episode 在电影订阅上常为 None，直接沿用会让
-                    # 「一次都没转存成功」的电影被算成「已全部入库」。
-                    landed = (
-                        bool(library_episodes)
-                        or (bool(tmdb_id) and str(tmdb_id) in history_success_tmdb)
-                        or any(
-                            str(rec.get("status") or "") in ("成功", "完成")
-                            for rec in matched_records
-                        )
-                    )
-                    if landed:
-                        library_episodes = [1]
-                        transferring_episodes = []
-                        missing_episodes = []
-                        missing_count = 0
-                    else:
-                        library_episodes = []
-                        missing_episodes = [1]
-                        missing_count = 1
-                else:
-                    missing_episodes = []
-                    missing_count = lack_episode
-
-                # 挂载该订阅对应的真实转存记录
-                matched_records = [
-                    rec for rec in history_items
-                    if int(rec.get("subscribe_id") or 0) == sub_id
-                    or (tmdb_id and str(rec.get("tmdb_id") or "") == str(tmdb_id))
-                    or str(rec.get("title") or "") == name
-                ]
-
-                progress_list.append({
-                    "subscribe_id": sub_id,
-                    "name": name,
-                    "title": name,
-                    "year": year,
-                    "season": season,
-                    "type": "电影" if is_movie else "电视剧",
-                    "media_type": "movie" if is_movie else "tv",
-                    "total_episodes": total_episodes,
-                    "library_episodes": library_episodes,
-                    "library_count": len(library_episodes),
-                    "transferring_episodes": transferring_episodes,
-                    "missing_episodes": missing_episodes,
-                    "missing_count": missing_count,
-                    "tmdb_id": tmdb_id,
-                    "state": state,
-                    "poster": poster,
-                    "poster_url": poster_url,
-                    "records": matched_records,
-                })
-            except Exception as err:
-                # 单条订阅失败不能静默：整表归零会让前端退化回历史卡片视图
-                build_errors += 1
-                if build_errors <= 3:
-                    logger.warning(f"处理订阅条目追更进度失败(累计 {build_errors}): {err}")
-                continue
-
-        if build_errors:
-            logger.warning(
-                f"追更进度构建部分失败：{build_errors} 条订阅被跳过，"
-                f"成功 {len(progress_list)} 条"
-            )
-
-        # 按同剧同季自动合并重复订阅，避免数据库中历史重复卡片导致大屏泛滥
-        dedup_map = {}
-        for item in progress_list:
-            dedup_key = (
-                str(item["tmdb_id"]) if item.get("tmdb_id") else item["name"].strip().lower(),
-                item.get("season"),
-            )
-            if dedup_key not in dedup_map:
-                dedup_map[dedup_key] = item
-            else:
-                existing = dedup_map[dedup_key]
-                merged_lib = sorted(set(existing["library_episodes"]) | set(item["library_episodes"]))
-                existing["library_episodes"] = merged_lib
-                existing["library_count"] = len(merged_lib)
-                if existing["total_episodes"] > 0:
-                    existing["missing_episodes"] = [
-                        i for i in range(1, existing["total_episodes"] + 1)
-                        if i not in merged_lib and i not in existing["transferring_episodes"]
-                    ]
-                    existing["missing_count"] = len(existing["missing_episodes"])
-                dup_ids = existing.setdefault("duplicate_subscribe_ids", [existing["subscribe_id"]])
-                if item["subscribe_id"] not in dup_ids:
-                    dup_ids.append(item["subscribe_id"])
-                existing["records"].extend(item.get("records") or [])
-                if not existing.get("poster_url") and item.get("poster_url"):
-                    existing["poster_url"] = item["poster_url"]
-                    existing["poster"] = item.get("poster") or ""
-
-        final_list = list(dedup_map.values())
-        final_list.sort(key=lambda x: (
-            0 if (x["missing_count"] > 0 and x["state"] != "S") else 1,
-            -x["subscribe_id"],
-        ))
-        return final_list
-
-    def api_vue_history_summary(self) -> dict:
-        today = datetime.datetime.now(
-            tz=pytz.timezone(settings.TZ)
-        ).strftime("%Y-%m-%d")
+            logger.warning(f"读取重试索引失败：{err}")
+            rows = []
+        failed = sum(1 for row in rows if str(row.get("status") or "") == "失败")
+        repair = sum(
+            1 for row in rows
+            if str(row.get("status") or "") == "成功"
+            and row.get("landed") is False
+        )
+        processing = sum(1 for row in rows if str(row.get("status") or "") == "处理中")
         return {
             "success": True,
-            "data": self._get_data_store().history_summary(today),
+            "data": {
+                "failed": failed,
+                "repair": repair,
+                "processing": processing,
+                "total": len(rows),
+            },
         }
 
     def _get_plugin_config(self) -> Dict[str, Any]:
@@ -995,7 +637,6 @@ class PageApi(OwnerDelegator):
 
     def api_vue_local_directories(self, path: str = "/") -> dict:
         """列出本地（宿主机/容器）指定目录下的子目录，供配置页选择本地路径。"""
-        import os
         from pathlib import Path
 
         normalized_path = str(path or "/").strip()

@@ -84,10 +84,10 @@ _ensure("cloudsubscribex.search.types").normalize_resource_type = lambda v: str(
 _ensure("cloudsubscribex.search.types").resource_type_from_url = lambda url: "cloud"
 
 history_module = load_module(
-    "cloudsubscribex.handlers.sync.history",
-    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
+    "cloudsubscribex.handlers.sync.media_targets",
+    "plugins.v2/cloudsubscribex/handlers/sync/media_targets.py",
 )
-HistoryService = history_module.HistoryService
+HistoryService = history_module.MediaTargetsService
 
 
 class _FakeQuery:

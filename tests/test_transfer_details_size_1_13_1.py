@@ -119,11 +119,11 @@ def _format_size(value):
 
 _ensure("cloudsubscribex.drive.common").format_size = _format_size
 
-history_module = load_module(
-    "cloudsubscribex.handlers.sync.history",
-    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
+transfer_details_module = load_module(
+    "cloudsubscribex.handlers.sync.transfer_details",
+    "plugins.v2/cloudsubscribex/handlers/sync/transfer_details.py",
 )
-HistoryService = history_module.HistoryService
+HistoryService = transfer_details_module.TransferDetailsService
 
 _notify = load_module(
     "cloudsubscribex.handlers.sync.notify",
@@ -282,7 +282,10 @@ def _notify_service():
 
 
 class TransferNotificationCardTests(unittest.TestCase):
-    """卡片：体积未知时不显示大小数字，注明“部分集数体积未知”。"""
+    """卡片：体积未知时不显示大小数字，注明“部分集数体积未知”。
+
+    v1.13.3：通知只剩洗版一种，卡片用 upgrade 详情走同一渲染路径。
+    """
 
     def test_card_hides_size_and_notes_unknown(self):
         service = _notify_service()
@@ -290,7 +293,8 @@ class TransferNotificationCardTests(unittest.TestCase):
             _tv_detail([14, 18, 19], 3000,
                         ["玉簟秋 - S01E14.mkv", "玉簟秋 - S01E18.mkv",
                         "玉簟秋 - S01E19.mkv"],
-                        {14: 1000, 18: 2000, 19: 0}, size_unknown=True),
+                        {14: 1000, 18: 2000, 19: 0}, size_unknown=True,
+                        kind="upgrade"),
         ])
         text = service._post_message.call_args.kwargs["text"]
         self.assertNotIn("大小：", text)
@@ -301,7 +305,8 @@ class TransferNotificationCardTests(unittest.TestCase):
     def test_card_shows_size_when_known(self):
         service = _notify_service()
         service._send_transfer_notification_now([
-            _tv_detail([14], 3000, ["玉簟秋 - S01E14.mkv"], {14: 3000}),
+            _tv_detail([14], 3000, ["玉簟秋 - S01E14.mkv"], {14: 3000},
+                        kind="upgrade"),
         ])
         text = service._post_message.call_args.kwargs["text"]
         self.assertIn("大小：2.9 KB", text)

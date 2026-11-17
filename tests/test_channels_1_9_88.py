@@ -636,6 +636,10 @@ class ChannelsApiTest(unittest.TestCase):
         self.assertIn("@yunpanx", result["message"])
 
     def test_test_search_channel_uses_isolated_handler(self):
+        # _test_search_channel 内做 from app.schemas import MediaInfo；
+        # 全量收集时 test_yun139_caiyun_share.py 会把 app.schemas 整个换成
+        # 空模块（无 MediaInfo），这里在调用前补上，避免顺序依赖。
+        ensure_package("app.schemas").MediaInfo = SimpleNamespace
         calls = {}
 
         class _FakeSearchApi:

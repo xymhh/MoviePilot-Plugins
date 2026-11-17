@@ -9,12 +9,16 @@
 原因是 115 秒传命中时文件立即可用、任务条目状态却可能长期不翻转，而插件的完成判定
 只看网盘暂存目录（``handlers/sync/postprocess.py::_poll_offline_ready``），不依赖该状态。
 
-本测试锁定展示层新判定 ``HistoryService.is_offline_task_finalized`` 的匹配规则：
-同一 info_hash 且历史状态为「成功」才算已入库；失败、缺失、大小写、空值都要正确处理。
+v1.13.3：本判定不再查插件 history（表已删除），改查 MP 自己的
+DownloadHistory（download_hash 对磁力任务就是 magnet 链接，含 info_hash）。
+本测试锁定新判定：同一 info_hash 在 MP 下载历史里出现才算已入库；
+大小写、空值、查询异常都要正确处理。
 """
 
 import sys
+import types
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from plugin_env import (
@@ -42,10 +46,103 @@ set_media_type(movie="电影", tv="电视剧")
 sys.modules["cloudsubscribex.core"].OwnerDelegator = OwnerDelegator
 sys.modules["cloudsubscribex.core"].CloudFile = MagicMock()
 
-HistoryService = load_module(
-    "cloudsubscribex.handlers.sync.history",
-    "plugins.v2/cloudsubscribex/handlers/sync/history.py",
-).HistoryService
+
+class _FakeColumn:
+    """模拟 DownloadHistory.download_hash 列：like() 只记录 pattern。"""
+
+    def __init__(self, store):
+        self._store = store
+
+    def like(self, pattern):
+        self._store["pattern"] = pattern
+        return ("like", pattern)
+
+
+class _FakeQuery:
+    def __init__(self, hashes, store):
+        self._hashes = list(hashes)
+        self._store = store
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def first(self):
+        pattern = str(self._store.get("pattern") or "")
+        needle = pattern.strip("%").upper()
+        if not needle:
+            return None
+        for value in self._hashes:
+            if needle in str(value or "").upper():
+                return SimpleNamespace(download_hash=value)
+        return None
+
+
+class _FakeSession:
+    def __init__(self, hashes, store):
+        self._hashes = hashes
+        self._store = store
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def query(self, *args, **kwargs):
+        return _FakeQuery(self._hashes, self._store)
+
+
+# transfer_details.py 在 import 时就绑定 SessionFactory / DownloadHistory，
+# 所以假实现必须在 load 之前装好，并用可变状态让各用例换数据。
+_FAKE_HASHES = []
+_FAKE_STORE = {}
+_FAKE_RAISE = {"enabled": False}
+
+
+def _fake_session_factory():
+    if _FAKE_RAISE["enabled"]:
+        raise RuntimeError("db down")
+    return _FakeSession(_FAKE_HASHES, _FAKE_STORE)
+
+
+sys.modules["app.db"].SessionFactory = _fake_session_factory
+sys.modules["app.db.models.downloadhistory"].DownloadHistory = type(
+    "DownloadHistory", (), {"download_hash": _FakeColumn(_FAKE_STORE)}
+)
+
+_transfer_details = load_module(
+    "cloudsubscribex.handlers.sync.transfer_details",
+    "plugins.v2/cloudsubscribex/handlers/sync/transfer_details.py",
+)
+TransferDetailsService = _transfer_details.TransferDetailsService
+
+
+def _install_fake_download_history():
+    """在 sys.modules 里装上内存假实现。
+
+    is_offline_task_finalized 在方法内才 import SessionFactory /
+    DownloadHistory，所以必须在每个用例跑之前（setUp）重装一次：
+    全量套件里后收集的文件会在收集期重注册 app.db 占位模块，
+    只在 import 时装一次会被覆盖（全量曾因此让否定用例全挂）。
+    """
+    sys.modules["app.db"].SessionFactory = _fake_session_factory
+    sys.modules["app.db.models.downloadhistory"].DownloadHistory = type(
+        "DownloadHistory", (), {"download_hash": _FakeColumn(_FAKE_STORE)}
+    )
+
+
+class _BaseTest(unittest.TestCase):
+    def setUp(self):
+        _install_fake_download_history()
+        self.service = object.__new__(TransferDetailsService)
+        object.__setattr__(self.service, "_owner", types.SimpleNamespace())
+        _FAKE_HASHES.clear()
+        _FAKE_STORE.clear()
+        _FAKE_RAISE["enabled"] = False
+
+    def _with_download_hashes(self, hashes):
+        _FAKE_HASHES[:] = list(hashes)
+
 
 INFO_HASH = "3F1A4C2B5D6E7F80912A3B4C5D6E7F8091A2B3C4"
 MAGNET_URL = (
@@ -54,62 +151,34 @@ MAGNET_URL = (
 )
 
 
-class OfflineFinalizedFlagTest(unittest.TestCase):
-    """历史匹配必须区分成功/失败，且对异常输入保持沉默。"""
+class OfflineFinalizedFlagTest(_BaseTest):
+    """MP 下载历史里有该 hash 的磁力记录才算已入库。"""
 
-    def setUp(self):
-        self.owner = MagicMock()
-        self.service = HistoryService(self.owner)
-
-    def _with_history(self, records):
-        self.owner._get_data.return_value = records
-
-    def test_successful_record_marks_finalized(self):
-        self._with_history([
-            {"share_url": MAGNET_URL, "status": "成功"},
-        ])
+    def test_matching_download_history_marks_finalized(self):
+        self._with_download_hashes([MAGNET_URL])
         self.assertTrue(self.service.is_offline_task_finalized(INFO_HASH))
 
-    def test_failed_record_is_not_finalized(self):
-        self._with_history([
-            {"share_url": MAGNET_URL, "status": "失败"},
-            {"share_url": MAGNET_URL, "status": "处理中"},
-        ])
-        self.assertFalse(self.service.is_offline_task_finalized(INFO_HASH))
-
-    def test_unrelated_record_is_not_finalized(self):
-        self._with_history([
-            {"share_url": "https://pan.quark.cn/s/4df950a3b4b6", "status": "成功"},
-        ])
+    def test_unrelated_hash_is_not_finalized(self):
+        self._with_download_hashes(
+            ["https://pan.quark.cn/s/4df950a3b4b6"]
+        )
         self.assertFalse(self.service.is_offline_task_finalized(INFO_HASH))
 
     def test_lowercase_hash_matches_uppercase_record(self):
-        self._with_history([
-            {"share_url": MAGNET_URL.upper(), "status": "成功"},
-        ])
+        self._with_download_hashes([MAGNET_URL.upper()])
         self.assertTrue(self.service.is_offline_task_finalized(INFO_HASH.lower()))
 
     def test_empty_hash_is_not_finalized(self):
-        self._with_history([
-            {"share_url": MAGNET_URL, "status": "成功"},
-        ])
+        self._with_download_hashes([MAGNET_URL])
         self.assertFalse(self.service.is_offline_task_finalized(""))
         self.assertFalse(self.service.is_offline_task_finalized(None))
 
-    def test_missing_history_source_is_not_finalized(self):
-        self.service = HistoryService(None)
+    def test_empty_download_history_is_not_finalized(self):
+        self._with_download_hashes([])
         self.assertFalse(self.service.is_offline_task_finalized(INFO_HASH))
 
-    def test_malformed_records_are_ignored(self):
-        self._with_history([
-            None,
-            "not-a-dict",
-            {"share_url": MAGNET_URL, "status": "成功"},
-        ])
-        self.assertTrue(self.service.is_offline_task_finalized(INFO_HASH))
-
-    def test_blank_records_are_not_finalized(self):
-        self._with_history([])
+    def test_query_failure_is_not_finalized(self):
+        _FAKE_RAISE["enabled"] = True
         self.assertFalse(self.service.is_offline_task_finalized(INFO_HASH))
 
 

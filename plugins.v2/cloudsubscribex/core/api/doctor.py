@@ -6,7 +6,7 @@
 
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.log import logger
@@ -99,7 +99,6 @@ class DoctorApi(OwnerDelegator):
     def _checks(self) -> List[Tuple[str, str, Callable[[Dict[str, Any]], CheckResult]]]:
         return [
             ("plugin_db", "插件私有库", self._check_plugin_db),
-            ("history", "转存历史", self._check_history),
             ("subscribe", "订阅缺口", self._check_subscribe),
             ("search", "搜索渠道", self._check_search),
             ("drive", "当前网盘", self._check_drive),
@@ -131,70 +130,34 @@ class DoctorApi(OwnerDelegator):
             return STATUS_ERROR, detail, hint, None
         return STATUS_WARN, detail, hint, None
 
-    def _history_rows(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """转存历史只在插件私有 SQLite，且一次体检只读一遍。"""
-        if "history" not in context:
+    def _index_rows(self, context: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """重试索引只在插件私有 SQLite，且一次体检只读一遍。"""
+        if "retry_index" not in context:
             store = self._get_data_store()
             store.initialize()
-            context["history"] = store.repositories.history.list_all() or []
+            context["retry_index"] = store.repositories.retry_index.list_all() or []
             context["db_path"] = str(getattr(store.manager, "db_path", "") or "")
-        return context["history"]
+        return context["retry_index"]
 
     def _check_plugin_db(self, context: Dict[str, Any]) -> CheckResult:
-        rows = self._history_rows(context)
+        rows = self._index_rows(context)
         db_path = context.get("db_path") or ""
         size_mb = 0.0
         if db_path and os.path.exists(db_path):
             size_mb = round(os.path.getsize(db_path) / 1024 / 1024, 1)
-        detail = f"转存流水 {len(rows)} 条，库文件 {size_mb} MB"
+        failed = sum(1 for row in rows if str(row.get("status") or "") == "失败")
+        repair = sum(
+            1 for row in rows
+            if str(row.get("status") or "") == "成功"
+            and row.get("landed") is False
+        )
+        detail = f"重试索引 {len(rows)} 行（失败 {failed}，待修复 {repair}），库文件 {size_mb} MB"
         if not db_path:
             return STATUS_WARN, detail + "（未取到库路径）", "检查插件数据目录挂载", None
         if not os.path.exists(db_path):
-            return STATUS_ERROR, f"库文件不存在：{db_path}", "插件数据目录未持久化，重启会丢历史", None
-        if not rows:
-            return STATUS_WARN, detail, "私有库为空，已入库只能靠订阅 note 推算", None
-        return STATUS_OK, detail, None, None
-
-    def _check_history(self, context: Dict[str, Any]) -> CheckResult:
-        rows = self._history_rows(context)
-        latest = None
-        success_count = 0
-        failed_recent = 0
-        cutoff = datetime.now() - timedelta(days=7)
-        for record in rows:
-            if not isinstance(record, dict):
-                continue
-            status = str(record.get("status") or "")
-            if status not in ("成功", "完成"):
-                if status == "失败":
-                    happened = _parse_time(record.get("time"))
-                    if happened and happened >= cutoff:
-                        failed_recent += 1
-                continue
-            success_count += 1
-            happened = _parse_time(record.get("time"))
-            if happened and (latest is None or happened > latest):
-                latest = happened
-        if latest is None:
-            return (
-                STATUS_WARN,
-                "还没有任何成功转存记录",
-                "先跑一次立即搜索，确认主干道能通",
-                "search",
-            )
-        hours = int((datetime.now() - latest).total_seconds() // 3600)
-        detail = f"最近成功转存 {hours} 小时前，累计成功 {success_count} 条"
-        if failed_recent:
-            detail += f"，近 7 天失败 {failed_recent} 条"
-        if hours >= HISTORY_STALE_HOURS:
-            return (
-                STATUS_WARN,
-                detail,
-                f"{HISTORY_STALE_HOURS} 小时内没有新成功记录，检查订阅是否还有缺集、网盘是否掉线",
-                "search",
-            )
-        if failed_recent >= 20:
-            return STATUS_WARN, detail, "近期失败偏多，去历史记录筛「失败」看具体原因", "history"
+            return STATUS_ERROR, f"库文件不存在：{db_path}", "插件数据目录未持久化，重启会丢索引", None
+        if failed >= 20:
+            return STATUS_WARN, detail, "近期失败偏多，去失败记录页看具体原因", None
         return STATUS_OK, detail, None, None
 
     def _check_subscribe(self, context: Dict[str, Any]) -> CheckResult:

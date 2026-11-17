@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import copy
 import datetime
 import json
 from threading import RLock
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from app.log import logger
 
@@ -50,7 +49,6 @@ class CloudSubscribeDataStore:
     ==============================  ==========  ============================
     键                              归属        读写方
     ==============================  ==========  ============================
-    ``history``                     持久        history 仓储
     ``pending_offline_strm``        持久        offline 仓储
     ``checkin_schedule_state``      持久        schedule 仓储
     ``*_checkin_history``           持久        checkin 仓储（按渠道）
@@ -62,7 +60,6 @@ class CloudSubscribeDataStore:
     ==============================  ==========  ============================
     """
 
-    HISTORY_KEY = "history"
     OFFLINE_PENDING_KEY = "pending_offline_strm"
     SCHEDULE_KEY = "checkin_schedule_state"
     LEGACY_MIGRATION_KEY = "legacy_id_migration"
@@ -73,8 +70,6 @@ class CloudSubscribeDataStore:
     def __init__(self, owner):
         self._lock = RLock()
         self._initialized = False
-        # 历史台账快照缓存：一次同步会反复取 history，避免每次都全表反序列化。
-        self._history_cache: Optional[List[Dict[str, Any]]] = None
         self.manager = CloudSubscribeDatabaseManager(
             owner.get_data_path() / "cloudsubscribe.db"
         )
@@ -97,7 +92,6 @@ class CloudSubscribeDataStore:
         normalized = str(key or "")
         return bool(
             normalized in {
-                cls.HISTORY_KEY,
                 cls.OFFLINE_PENDING_KEY,
                 cls.SCHEDULE_KEY,
                 cls.LEGACY_MIGRATION_KEY,
@@ -124,62 +118,9 @@ class CloudSubscribeDataStore:
             self.manager.open()
             self.manager.init_db()
             self.manager.update_db()
-            repaired = self.repositories.history.repair_group_keys()
-            repaired_kinds = self.repositories.history.repair_failure_kinds()
-            repaired_sources = self.repositories.history.repair_tg_sources()
             self._migrate_legacy_sha1_cache()
             self._migrate_legacy_json_state()
-            if repaired:
-                logger.info(f"CloudSubscribe 历史媒体分组已修复：{repaired} 条")
-            if repaired_kinds:
-                logger.info(
-                    f"CloudSubscribe 历史失败类型已回填：{repaired_kinds} 条"
-                )
-            if repaired_sources:
-                logger.info(
-                    f"CloudSubscribe 频道来源已回填：{repaired_sources} 条"
-                )
-            imported = self._import_retry_index()
-            if imported:
-                logger.info(f"重试索引已从转存历史导入：{imported} 条")
             self._initialized = True
-
-    def _import_retry_index(self) -> int:
-        """启动时一次性从旧 history 导入失败/待修复行进重试索引（幂等）。
-
-        只导两类行（失败且可重试、跨盘成功但 landed=False），其余放弃；
-        失败只记日志，不阻塞启动。
-        """
-        try:
-            from .retry_index import import_retry_index_from_history
-        except Exception as error:  # noqa: BLE001 - 索引模块不可用时跳过导入
-            logger.debug(f"重试索引模块加载失败，跳过导入：{error}", exc_info=True)
-            return 0
-        try:
-            history = self.repositories.history.list_all()
-        except Exception as error:  # noqa: BLE001 - 历史读取失败时跳过导入
-            logger.debug(f"重试索引导入读取历史失败：{error}", exc_info=True)
-            return 0
-        try:
-            return import_retry_index_from_history(self.repositories, history)
-        except Exception as error:  # noqa: BLE001 - 导入失败不阻塞启动
-            logger.warning(f"重试索引导入失败：{error}", exc_info=True)
-            return 0
-
-    def _sync_retry_index(self, history: List[Dict[str, Any]]) -> None:
-        """history 落库后同步重试索引（只加/改/删重试相关的行）。
-
-        失败不阻塞 history 保存。
-        """
-        try:
-            from .retry_index import sync_retry_index_from_history
-        except Exception as error:  # noqa: BLE001 - 索引模块不可用时跳过同步
-            logger.debug(f"重试索引模块加载失败，跳过同步：{error}", exc_info=True)
-            return
-        try:
-            sync_retry_index_from_history(self.repositories, history)
-        except Exception as error:  # noqa: BLE001 - 同步失败不阻塞保存
-            logger.warning(f"重试索引同步失败：{error}", exc_info=True)
 
     def _migrate_legacy_sha1_cache(self) -> None:
         """把 1.7.97 的 source_sha1_cache.json 一次性并入数据库表。"""
@@ -232,10 +173,6 @@ class CloudSubscribeDataStore:
             return int(saved.timestamp())
 
     def _load_database(self, key: str) -> Any:
-        if key == self.HISTORY_KEY:
-            if self._history_cache is None:
-                self._history_cache = self.repositories.history.list_all()
-            return copy.deepcopy(self._history_cache)
         if key == self.OFFLINE_PENDING_KEY:
             return self.repositories.offline.load_all()
         if key == self.SCHEDULE_KEY:
@@ -259,11 +196,7 @@ class CloudSubscribeDataStore:
         return None
 
     def _save_database(self, key: str, value: Any) -> None:
-        if key == self.HISTORY_KEY:
-            self.repositories.history.replace_all(value or [])
-            self._sync_retry_index(value or [])
-            self._history_cache = None
-        elif key == self.OFFLINE_PENDING_KEY:
+        if key == self.OFFLINE_PENDING_KEY:
             self.repositories.offline.replace_all(value or {})
         elif key == self.SCHEDULE_KEY:
             self.repositories.schedule.save(value or {})
@@ -299,20 +232,6 @@ class CloudSubscribeDataStore:
                 raise ValueError(f"未声明的数据键不能持久化：{normalized}")
             self.initialize()
             self._save_database(normalized, value)
-
-    def query_history_page(self, **kwargs) -> Dict[str, Any]:
-        self.initialize()
-        return self.repositories.history.query_group_page(**kwargs)
-
-    def history_overview(
-            self, today: str, recent_limit: int = 20
-    ) -> Dict[str, Any]:
-        self.initialize()
-        return self.repositories.history.overview(today, recent_limit)
-
-    def history_summary(self, today: str) -> Dict[str, int]:
-        self.initialize()
-        return self.repositories.history.summary(today)
 
     def load_checkin_snapshot(self) -> Dict[str, Any]:
         """在同一只读会话中加载全部签到历史和调度状态。"""
@@ -433,6 +352,4 @@ class CloudSubscribeDataStore:
         self._rename_legacy(legacy)
 
     def close(self) -> None:
-        with self._lock:
-            self._history_cache = None
         self.manager.close()

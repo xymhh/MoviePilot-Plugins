@@ -1,10 +1,11 @@
 import {computed, reactive, ref} from "vue";
 import {applyDisplayCatalog} from "./resourceUtils";
 
+// v1.13.3：转存记录页瘦身为失败记录页——后端只返回重试索引里的失败与
+// 跨盘成功待修复行（failures 扁平列表），不再有按媒体分组的 history_groups、
+// 订阅进度 subscribes_progress 与 Emby 播放项 emby_play_items。
 export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
-  const historyGroups = ref([]);
-  const subscribesProgress = ref([]);
-  const embyPlayItems = ref({});
+  const failures = ref([]);
   const loading = ref(false);
   const historyPage = reactive({
     page: 1,
@@ -18,42 +19,19 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     enableCloudUpgrade: false,
   })
   const historyStats = reactive({
-    total: 0,
-    today: 0,
-    success: 0,
     failed: 0,
+    repair: 0,
+    processing: 0,
+    total: 0,
   })
   const historyQuery = reactive({
     page: 1,
     pageSize: 10,
     keyword: "",
-    resourceTypes: [],
-    sources: [],
-    taskTypes: [],
-    statuses: [],
+    // 行状态过滤："" 全部 / "失败" / "成功"（待修复）/ "处理中"
+    status: "",
   })
   const stats = computed(() => [
-    {
-      title: "总转存",
-      value: historyStats.total,
-      color: "primary",
-      icon: "mdi-cloud-upload-outline",
-      filter: "",
-    },
-    {
-      title: "今日转存",
-      value: historyStats.today,
-      color: "info",
-      icon: "mdi-calendar-today",
-      filter: "",
-    },
-    {
-      title: "成功",
-      value: historyStats.success,
-      color: "success",
-      icon: "mdi-check-circle-outline",
-      filter: "成功",
-    },
     {
       title: "失败",
       value: historyStats.failed,
@@ -61,15 +39,31 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       icon: "mdi-alert-circle-outline",
       filter: "失败",
     },
+    {
+      title: "待修复",
+      value: historyStats.repair,
+      color: "warning",
+      icon: "mdi-wrench-outline",
+      filter: "成功",
+    },
+    {
+      title: "处理中",
+      value: historyStats.processing,
+      color: "info",
+      icon: "mdi-progress-clock",
+      filter: "处理中",
+    },
+    {
+      title: "全部记录",
+      value: historyStats.total,
+      color: "primary",
+      icon: "mdi-clipboard-text-clock-outline",
+      filter: "",
+    },
   ])
 
   let pageRequestSequence = 0;
   let summaryRequestSequence = 0;
-  let airedRequestSequence = 0;
-
-  function normalizeQueryList(value) {
-    return [...new Set((Array.isArray(value) ? value : []).map((item) => String(item || "").trim()).filter(Boolean))];
-  }
 
   function pageQueryString() {
     const query = new URLSearchParams({
@@ -77,64 +71,8 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       page_size: String(historyQuery.pageSize),
     })
     if (historyQuery.keyword) query.set("keyword", historyQuery.keyword);
-    for (const [key, values] of [
-      ["resource_types", historyQuery.resourceTypes],
-      ["sources", historyQuery.sources],
-      ["task_types", historyQuery.taskTypes],
-      ["statuses", historyQuery.statuses],
-    ]) {
-      if (values.length) query.set(key, values.join(","));
-    }
+    if (historyQuery.status) query.set("status", historyQuery.status);
     return query.toString();
-  }
-
-  async function loadAiredCounts() {
-    const snapshot = subscribesProgress.value;
-    const items = [];
-    const seen = new Set();
-    for (const group of snapshot) {
-      if (group.media_type === "movie") continue;
-      const tmdbId = Number(group.tmdb_id || 0);
-      if (!tmdbId) continue;
-      const season = group.season === null || group.season === undefined ? 1 : Number(group.season);
-      const totalEpisodes = Number(group.total_episodes || 0);
-      if (!Number.isFinite(season) || season < 0) continue;
-      const key = `${tmdbId}:${season}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      items.push({ tmdb_id: tmdbId, season, total_episodes: totalEpisodes });
-    }
-    if (!items.length) return;
-
-    const requestId = ++airedRequestSequence;
-    try {
-      const result = await api.post(`plugin/${pluginId}/aired_counts`, { items });
-      if (requestId !== airedRequestSequence || subscribesProgress.value !== snapshot) return;
-      const counts = result?.data?.counts || {};
-      const latest = result?.data?.latest || {};
-      const upcoming = result?.data?.upcoming || {};
-      if (!Object.keys(counts).length && !Object.keys(upcoming).length) return;
-      subscribesProgress.value = snapshot.map((group) => {
-        if (group.media_type === "movie" || !group.tmdb_id) return group;
-        const season = group.season === null || group.season === undefined ? 1 : Number(group.season);
-        const key = `${Number(group.tmdb_id)}:${season}`;
-        const value = counts[key];
-        const nextEps = upcoming[key] || [];
-        if (value === undefined && !nextEps.length) return group;
-        const air = latest[key] || {};
-        return {
-          ...group,
-          aired_episodes: Math.max(0, Number(value ?? group.aired_episodes ?? 0) || 0),
-          latest_air_date: air.air_date || group.latest_air_date || "",
-          latest_air_episode: Number(air.episode || group.latest_air_episode || 0),
-          // 追更日历数据：未来 30 天内待更新的集（TMDB 只有日期，没有钟点）
-          upcoming_episodes: nextEps,
-        };
-      });
-    } catch (error) {
-      // 已播集数只是补充信息，TMDB 不可用时保留“—”即可，不打断主列表。
-      console.debug("加载已播集数失败", error);
-    }
   }
 
   async function loadPage(showLoading = true) {
@@ -147,10 +85,7 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       const data = result.data || {};
       applyDisplayCatalog(data);
       const pageData = data.history_page || {};
-      historyGroups.value = Array.isArray(data.history_groups) ? data.history_groups : [];
-      subscribesProgress.value = Array.isArray(data.subscribes_progress) ? data.subscribes_progress : [];
-      void loadAiredCounts();
-      embyPlayItems.value = data.emby_play_items || {};
+      failures.value = Array.isArray(data.failures) ? data.failures : [];
       Object.assign(historyPage, {
         page: Math.max(1, Number(pageData.page || 1)),
         pageSize: Math.max(1, Number(pageData.page_size || 10)),
@@ -182,20 +117,20 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     try {
       const result = await api.get(`plugin/${pluginId}/history/summary`);
       if (!result?.success) {
-        throw new Error(result?.message || "加载历史摘要失败");
+        throw new Error(result?.message || "加载失败记录摘要失败");
       }
       if (requestId !== summaryRequestSequence) return false;
       const data = result.data || {};
       Object.assign(historyStats, {
-        total: Math.max(0, Number(data.total || 0)),
-        today: Math.max(0, Number(data.today || 0)),
-        success: Math.max(0, Number(data.success || 0)),
         failed: Math.max(0, Number(data.failed || 0)),
+        repair: Math.max(0, Number(data.repair || 0)),
+        processing: Math.max(0, Number(data.processing || 0)),
+        total: Math.max(0, Number(data.total || 0)),
       })
       return true;
     } catch (error) {
       if (requestId === summaryRequestSequence && showError) {
-        notify(error.message || "加载历史摘要失败", "error");
+        notify(error.message || "加载失败记录摘要失败", "error");
       }
       return false;
     }
@@ -206,14 +141,9 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       page: Math.max(1, Number(nextQuery.page ?? historyQuery.page) || 1),
       pageSize: Math.min(50, Math.max(1, Number(nextQuery.pageSize ?? historyQuery.pageSize) || 10)),
       keyword: String(nextQuery.keyword ?? historyQuery.keyword).trim(),
-      resourceTypes: normalizeQueryList(nextQuery.resourceTypes ?? historyQuery.resourceTypes),
-      sources: normalizeQueryList(nextQuery.sources ?? historyQuery.sources),
-      taskTypes: normalizeQueryList(nextQuery.taskTypes ?? historyQuery.taskTypes),
-      statuses: normalizeQueryList(nextQuery.statuses ?? historyQuery.statuses),
+      status: String(nextQuery.status ?? historyQuery.status).trim(),
     }
-    const unchanged = Object.entries(normalized).every(([key, value]) =>
-      Array.isArray(value) ? JSON.stringify(value) === JSON.stringify(historyQuery[key]) : value === historyQuery[key],
-    )
+    const unchanged = Object.entries(normalized).every(([key, value]) => value === historyQuery[key])
     if (unchanged) return false;
     Object.assign(historyQuery, normalized);
     return loadPage();
@@ -226,10 +156,12 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     })
     if (!result?.success) throw new Error(result?.message || "清空失败");
     await Promise.all([loadPage(false), loadSummary(false)]);
-    return result.message || "历史已清空";
+    return result.message || "失败记录已清空";
   }
 
-  async function deleteHistory(record, deleteLinkedFiles = false) {
+  // v1.13.3：删除只删重试索引行，不删网盘文件与 STRM；delete_linked_files
+  // 参数已废弃，后端不再接受，前端不再发送。
+  async function deleteHistory(record) {
     const result = await api.post(`plugin/${pluginId}/history/delete`, {
       time: record.time,
       share_url: record.share_url,
@@ -237,14 +169,13 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       tmdb_id: record.tmdb_id,
       season: record.season,
       episode: record.episode,
-      delete_linked_files: Boolean(deleteLinkedFiles),
     })
     if (!result?.success) throw new Error(result?.message || "删除失败");
     await Promise.all([loadPage(false), loadSummary(false)]);
-    return result.message || "历史记录已删除";
+    return result.message || "失败记录已删除";
   }
 
-  async function deleteHistoryBatch(records, deleteLinkedFiles = false) {
+  async function deleteHistoryBatch(records) {
     const identities = records.map((record) => ({
       record_id: record.record_id,
       time: record.time,
@@ -256,32 +187,16 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     }))
     const result = await api.post(`plugin/${pluginId}/history/delete_batch`, {
       records: identities,
-      delete_linked_files: Boolean(deleteLinkedFiles),
     })
     if (!result?.success) throw new Error(result?.message || "批量删除失败");
     await Promise.all([loadPage(false), loadSummary(false)]);
-    return result.message || "所选历史记录已删除";
-  }
-
-  async function notifyHistory(record) {
-    const result = await api.post(`plugin/${pluginId}/history/notify`, {
-      time: record.time,
-      share_url: record.share_url,
-      file_name: record.file_name,
-      tmdb_id: record.tmdb_id,
-      season: record.season,
-      episode: record.episode,
-    })
-    if (!result?.success) throw new Error(result?.message || "通知失败");
-    return result.message || "通知已补发";
+    return result.message || "所选失败记录已删除";
   }
 
   return {
-    historyGroups,
-    subscribesProgress,
+    failures,
     historyPage,
     historyStats,
-    embyPlayItems,
     loading,
     stats,
     loadPage,
@@ -290,6 +205,5 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     clearHistory,
     deleteHistory,
     deleteHistoryBatch,
-    notifyHistory,
   }
 }

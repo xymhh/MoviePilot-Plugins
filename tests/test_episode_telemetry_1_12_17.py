@@ -2,12 +2,11 @@
 
 覆盖：
 - 提交成功终态记一行：结果=成功，总/下载/整理等待三段 + 累计快照；
-- abort 终态记一行失败；重复 abort（历史已结算）不重复记；
+- abort 终态记一行失败（重复 abort 不再由终态写入返回值守门）；
 - 辅助函数容忍缺失时间戳，不抛错。
 """
 import sys
 import unittest
-from unittest.mock import MagicMock
 
 from plugin_env import load_module
 
@@ -48,7 +47,7 @@ class EpisodeTelemetryTests(unittest.TestCase):
 
     def _stub_commit_path(self, resolve_result=True):
         _stub(self.service, "_update_postprocess_progress", lambda *a, **k: None)
-        _stub(self.service, "_resolve_history_record", lambda *a, **k: resolve_result)
+        _stub(self.service, "_write_terminal_state", lambda *a, **k: resolve_result)
         _stub(self.service, "_clear_mp_organizing_for_item", lambda *a, **k: None)
         _stub(self.service, "_queue_subscription_completion", lambda *a, **k: None)
         _stub(self.service, "_notify_pending_file_finalized", lambda *a, **k: None)
@@ -74,17 +73,22 @@ class EpisodeTelemetryTests(unittest.TestCase):
         self.assertIn("整理等待=300.0s", line)
         self.assertIn("oss2:part=1次/10.0MB", line)
 
-    def test_abort_logs_failure_once_and_repeat_is_silent(self):
+    def test_abort_logs_failure_once(self):
+        """abort 终态记一行失败。
+
+        v1.13.3 §4.4：结算不再因历史记录缺失而提前返回，重复 abort 的
+        结构保证是 pending 项只处理一次——处理完即从 ctx.pending 弹出，
+        不再由终态写入的返回值守门；旧的「第二次 abort 静默」用例随
+        _resolve_history_record 一起删除。
+        """
         _stub(self.service, "_update_postprocess_progress", lambda *a, **k: None)
-        resolve = MagicMock(side_effect=[True, False])
-        _stub(self.service, "_resolve_history_record", resolve)
+        _stub(self.service, "_write_terminal_state", lambda *a, **k: True)
         _stub(self.service, "_clear_mp_organizing_for_item", lambda *a, **k: None)
         _stub(self.service, "_notify_finalize_dead", lambda *a, **k: None)
         _stub(self.service, "_postprocess_task_id", lambda item: None)
         item = _item(NOW - 300)
         ctx = _ctx({"key1": item})
         before = len(self.logger.info.call_args_list)
-        self.service._abort_single_item(item, "key1", "MP 整理未受理", ctx)
         self.service._abort_single_item(item, "key1", "MP 整理未受理", ctx)
         lines = _telemetry_lines(before)
         self.assertEqual(len(lines), 1)
