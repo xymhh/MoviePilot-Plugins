@@ -610,7 +610,14 @@ class TransferOpsMixin(OwnerDelegator):
                     # Phase 4 第 6 项：同盘批量触发的 MP 整理身份随项进
                     # pending 记录（_build_pending_record 原样收下），
                     # finalize 改走 MP 轮询、不再 2 次定位失败就判死。
-                    "mp_organize": item.get("mp_organize"),
+                    # v1.18.1：跨盘尾巴与同盘单文件尾巴把身份写在内层
+                    # file_item 上（外层没有），这里读不到外层就读内层；
+                    # 否则跨盘项进 pending 时丢身份，finalize 仍按老规则
+                    # 2 次定位失败就 abort（天才谋杀法 2026 实测）。
+                    "mp_organize": (
+                        item.get("mp_organize")
+                        or (item.get("file") or {}).get("mp_organize")
+                    ),
                     "skip_history": bool(
                         (item.get("resource") or {}).get("skip_history")
                         or str(item["file"]["id"]) in mp_organized_ids
