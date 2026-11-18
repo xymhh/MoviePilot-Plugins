@@ -65,6 +65,35 @@ class NetflixSubscribeProvider(SubscribeProvider):
                     if item.unique_seed not in seen:
                         seen.add(item.unique_seed)
                         yield item
+        # 非富模式此前只走全球榜，country_selections 被静默丢掉（富模式
+        # 尾部有同样的国家 TSV 处理）。这里按富模式尾部逐字补上：国家
+        # 周榜 TSV 只拉一次，按 country_iso2 分国家出候选。
+        selections = options.get("country_selections") or {}
+        if isinstance(selections, str):
+            try:
+                selections = json.loads(selections or "{}")
+            except (TypeError, ValueError):
+                selections = {}
+        if selections and not context.stopped():
+            rows = self.service.latest_week(
+                self._load(
+                    options,
+                    context,
+                    f"tsv:{client.countries_weekly_url}",
+                    lambda: client.load_tsv(client.countries_weekly_url, proxy),
+                )
+            )
+            for country, categories in selections.items():
+                if isinstance(categories, dict):
+                    categories = categories.get("cats", []) if categories.get("on", True) else []
+                country_rows = [row for row in rows if row.get("country_iso2") == country]
+                for category in categories or []:
+                    if category not in COUNTRY_CATEGORIES:
+                        continue
+                    for item in self.service.candidates(country_rows, category, country, scan_limit):
+                        if item.unique_seed not in seen:
+                            seen.add(item.unique_seed)
+                            yield item
 
     def _fetch_rich(
             self, options: dict, context: SubscribeContext, limit: int, proxy: bool,

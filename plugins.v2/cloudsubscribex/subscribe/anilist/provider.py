@@ -6,8 +6,8 @@ from typing import Iterator, Optional
 from app.chain.anilist import AniListChain
 from app.log import logger
 
-from ...core.subscribe import MediaCandidate, SubscribeContext, SubscribeProvider
-from ...core.subscribe.provider import ranking_scan_limit
+from ...core.subscribe import MediaCandidate, SubscribeContext
+from ...core.subscribe.provider import RankingProvider, ranking_scan_limit
 from ...core.subscribe.registry import register
 
 ANILIST_METHODS: dict[str, tuple[str, str]] = {
@@ -18,7 +18,7 @@ ANILIST_METHODS: dict[str, tuple[str, str]] = {
 
 
 @register
-class AnilistSubscribeProvider(SubscribeProvider):
+class AnilistSubscribeProvider(RankingProvider):
     provider_id = "anilist"
     provider_name = "AniList榜单"
 
@@ -57,92 +57,39 @@ class AnilistSubscribeProvider(SubscribeProvider):
                 logger.warning(f"MoviePilot平台链中不存在方法：AniListChain.{method_name}")
                 continue
 
+            rank_label = f"AniList榜单[{rank_name}]"
             try:
-                items = []
-                page = 1
-                seen_pages = set()
-                while len(items) < scan_limit:
-                    if context.stopped():
-                        return
-                    try:
-                        page_items = method(page=page, count=limit) or []
-                    except Exception as error:
-                        if not items:
-                            raise
-                        logger.warning(f"AniList榜单[{rank_name}]第 {page} 页抓取失败，保留已抓取内容：{error}")
-                        break
-                    if not page_items:
-                        break
-                    page_keys = tuple(
-                        str(getattr(item, "anilist_id", None) or getattr(item, "title", None) or item)
-                        for item in page_items
-                    )
-                    if page_keys in seen_pages:
-                        break
-                    seen_pages.add(page_keys)
-                    items.extend(page_items)
-                    page += 1
-                items = items[:scan_limit]
+                items = self._paginate(
+                    lambda page: method(page=page, count=limit),
+                    scan_limit,
+                    context,
+                    rank_label,
+                    "anilist_id",
+                )
+                if items is None:
+                    return
             except Exception as error:
-                logger.error(f"抓取AniList榜单[{rank_name}]失败：{error}")
+                logger.error(f"抓取{rank_label}失败：{error}")
                 continue
 
-            logger.info(f"AniList榜单[{rank_name}]抓取成功：返回 {len(items)} 条数据")
+            logger.info(f"{rank_label}抓取成功：返回 {len(items)} 条数据")
 
             for item in items:
                 if context.stopped():
                     return
                 data = item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
-                title = str(data.get("title") or data.get("name") or "").strip()
-                if not title:
-                    continue
-
-                year = str(data.get("year") or "").strip()
-                if min_year and year:
-                    try:
-                        if int(year) < min_year:
-                            continue
-                    except ValueError:
-                        logger.debug("fetch 分支忽略异常", exc_info=True)
-
-                vote = data.get("vote_average") or data.get("vote") or 0.0
-                try:
-                    vote_float = float(vote)
-                    if min_vote and vote_float < min_vote:
-                        continue
-                except (TypeError, ValueError):
-                    vote_float = 0.0
-
-                anilist_id = data.get("anilist_id")
-                try:
-                    anilist_id = int(anilist_id) if anilist_id else None
-                except (TypeError, ValueError):
-                    anilist_id = None
-
-                tmdb_id = data.get("tmdb_id")
-                try:
-                    tmdb_id = int(tmdb_id) if tmdb_id else None
-                except (TypeError, ValueError):
-                    tmdb_id = None
-
-                unique_key = f"{anilist_id or tmdb_id or title}:{year}"
-                if unique_key in seen_keys:
-                    continue
-                seen_keys.add(unique_key)
-
-                yield MediaCandidate(
-                    title=title,
-                    year=year or None,
+                candidate = self._candidate_from_dict(
+                    data,
+                    min_year=min_year,
+                    min_vote=min_vote,
+                    seen_keys=seen_keys,
                     media_type="tv",
-                    tmdb_id=tmdb_id,
                     source=self.provider_id,
-                    source_meta={
-                        "rank": rank_name,
-                        "rank_key": rank_key,
-                        "anilist_id": anilist_id,
-                        "release_date": data.get("release_date"),
-                        "first_air_date": data.get("first_air_date"),
-                    },
-                    vote_average=vote_float,
-                    unique_seed=unique_key,
+                    rank=rank_name,
+                    rank_key=rank_key,
+                    id_fields=(("anilist_id", "int"), ("tmdb_id", "int")),
+                    unique_key_fields=("anilist_id", "tmdb_id"),
                 )
+                if candidate is None:
+                    continue
+                yield candidate

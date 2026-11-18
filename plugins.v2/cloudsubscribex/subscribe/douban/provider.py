@@ -5,10 +5,9 @@ from typing import Iterator, Optional
 
 from app.chain.recommend import RecommendChain
 from app.log import logger
-from app.schemas.types import MediaType
 
-from ...core.subscribe import MediaCandidate, SubscribeContext, SubscribeProvider
-from ...core.subscribe.provider import ranking_scan_limit
+from ...core.subscribe import MediaCandidate, SubscribeContext
+from ...core.subscribe.provider import RankingProvider, ranking_scan_limit
 from ...core.subscribe.registry import register
 
 DOUBAN_METHODS: dict[str, tuple[str, str, str]] = {
@@ -24,7 +23,7 @@ DOUBAN_METHODS: dict[str, tuple[str, str, str]] = {
 
 
 @register
-class DoubanSubscribeProvider(SubscribeProvider):
+class DoubanSubscribeProvider(RankingProvider):
     provider_id = "douban"
     provider_name = "豆瓣榜单"
 
@@ -76,104 +75,42 @@ class DoubanSubscribeProvider(SubscribeProvider):
                 logger.warning(f"MoviePilot平台推荐链中不存在方法：RecommendChain.{method_name}")
                 continue
 
+            rank_label = f"豆瓣榜单[{rank_name}]"
             try:
-                items = []
-                page = 1
-                seen_pages = set()
-                while len(items) < scan_limit:
-                    if context.stopped():
-                        return
-                    try:
-                        page_items = method(page=page, count=limit) or []
-                    except Exception as error:
-                        if not items:
-                            raise
-                        logger.warning(f"豆瓣榜单[{rank_name}]第 {page} 页抓取失败，保留已抓取内容：{error}")
-                        break
-                    if not page_items:
-                        break
-                    page_keys = tuple(
-                        str(getattr(item, "douban_id", None) or getattr(item, "title", None) or item)
-                        for item in page_items
-                    )
-                    if page_keys in seen_pages:
-                        break
-                    seen_pages.add(page_keys)
-                    items.extend(page_items)
-                    page += 1
-                items = items[:scan_limit]
+                items = self._paginate(
+                    lambda page: method(page=page, count=limit),
+                    scan_limit,
+                    context,
+                    rank_label,
+                    "douban_id",
+                )
+                if items is None:
+                    return
             except Exception as error:
-                logger.error(f"抓取豆瓣榜单[{rank_name}]失败：{error}")
+                logger.error(f"抓取{rank_label}失败：{error}")
                 continue
 
-            logger.info(f"豆瓣榜单[{rank_name}]抓取成功：返回 {len(items)} 条数据")
+            logger.info(f"{rank_label}抓取成功：返回 {len(items)} 条数据")
 
             for item in items:
                 if context.stopped():
                     return
                 data = item.to_dict() if hasattr(item, "to_dict") else dict(item or {})
-                title = str(data.get("title") or data.get("name") or "").strip()
-                if not title:
+                mtype = self._resolve_media_type(data, default_type, selected_types, limit_type)
+                if mtype is None:
                     continue
-
-                raw_type = str(data.get("type") or default_type or "").strip().lower()
-                movie_types = {"movie", "电影", "film"}
-                tv_types = {"tv", "电视剧", "剧集", "teleplay", "series"}
-                if hasattr(MediaType, "MOVIE"):
-                    movie_types.add(str(getattr(MediaType.MOVIE, "value", "")).lower())
-                if hasattr(MediaType, "TV"):
-                    tv_types.add(str(getattr(MediaType.TV, "value", "")).lower())
-
-                mtype = "movie" if raw_type in movie_types else "tv" if raw_type in tv_types else default_type
-                if selected_types and "all" not in selected_types:
-                    if mtype == "movie" and not ({"movie", "anime_movie"} & selected_types):
-                        continue
-                    if mtype == "tv" and not ({"tv", "anime_tv"} & selected_types):
-                        continue
-                elif limit_type and limit_type not in ("all", "全部", "any") and limit_type != mtype:
-                    continue
-
-                year = str(data.get("year") or "").strip()
-                if min_year and year:
-                    try:
-                        if int(year) < min_year:
-                            continue
-                    except ValueError:
-                        logger.debug("fetch 分支忽略异常", exc_info=True)
-
-                vote = data.get("vote_average") or data.get("vote") or 0.0
-                try:
-                    vote_float = float(vote)
-                    if min_vote and vote_float < min_vote:
-                        continue
-                except (TypeError, ValueError):
-                    vote_float = 0.0
-
-                douban_id = str(data.get("douban_id") or "").strip() or None
-                tmdb_id = data.get("tmdb_id")
-                try:
-                    tmdb_id = int(tmdb_id) if tmdb_id else None
-                except (TypeError, ValueError):
-                    tmdb_id = None
-
-                unique_key = f"{douban_id or tmdb_id or title}:{year}"
-                if unique_key in seen_keys:
-                    continue
-                seen_keys.add(unique_key)
-
-                yield MediaCandidate(
-                    title=title,
-                    year=year or None,
+                candidate = self._candidate_from_dict(
+                    data,
+                    min_year=min_year,
+                    min_vote=min_vote,
+                    seen_keys=seen_keys,
                     media_type=mtype,
-                    tmdb_id=tmdb_id,
-                    douban_id=douban_id,
                     source=self.provider_id,
-                    source_meta={
-                        "rank": rank_name,
-                        "rank_key": rank_key,
-                        "release_date": data.get("release_date"),
-                        "first_air_date": data.get("first_air_date"),
-                    },
-                    vote_average=vote_float,
-                    unique_seed=unique_key,
+                    rank=rank_name,
+                    rank_key=rank_key,
+                    id_fields=(("douban_id", "str"), ("tmdb_id", "int")),
+                    unique_key_fields=("douban_id", "tmdb_id"),
                 )
+                if candidate is None:
+                    continue
+                yield candidate
