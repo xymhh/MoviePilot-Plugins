@@ -210,53 +210,71 @@ class SyncHandler:
                         return val
             return default
 
+        self._init_host_handles(cloud_drive, search_handler, subscribe_handler, chain)
+        self._init_organize_flags(_get_val)
+        self._init_cloud_services()
+        self._init_batch_limits(_get_val)
+        self._init_plugin_callbacks(_get_val)
+        self._init_upgrade_rules(_get_val)
+        self._init_cloud_paths(cloud_transfer_path, cloud_media_root, cloud_transfer_paths, cloud_media_paths)
+        self._init_strm_media_server(_get_val)
+        self._init_locks_caches()
+
+    def _init_host_handles(self, cloud_drive, search_handler, subscribe_handler, chain):
+        """Phase 5 第 3 项（v1.20.0）：宿主句柄：网盘/搜索/订阅处理器与 MediaChain，缺省时从插件上取。原 __init__ 第 213-233 行原样搬移，行为不变。"""
         self._cloud_drive = (
             cloud_drive
             if cloud_drive is not None
-            else getattr(plugin, "_cloud_drive", None) if plugin else None
+            else getattr(self._plugin, "_cloud_drive", None) if self._plugin else None
         )
         self._search_handler = (
             search_handler
             if search_handler is not None
-            else getattr(plugin, "_search_handler", None) if plugin else None
+            else getattr(self._plugin, "_search_handler", None) if self._plugin else None
         )
         self._subscribe_handler = (
             subscribe_handler
             if subscribe_handler is not None
-            else getattr(plugin, "_subscribe_handler", None) if plugin else None
+            else getattr(self._plugin, "_subscribe_handler", None) if self._plugin else None
         )
         self._chain = (
             chain
             if chain is not None
-            else getattr(plugin, "chain", None) if plugin else None
+            else getattr(self._plugin, "chain", None) if self._plugin else None
         )
 
-        self._organize_after_transfer = bool(_get_val("organize_after_transfer", True))
+
+    def _init_organize_flags(self, get_val):
+        """Phase 5 第 3 项（v1.20.0）：整理与转存开关：整理后整理、离线超时、跨盘开关与媒体类型、网盘注册表。原 __init__ 第 234-259 行原样搬移，行为不变。"""
+        self._organize_after_transfer = bool(get_val("organize_after_transfer", True))
         self._mp_organize_after_share_save = bool(
-            _get_val("mp_organize_after_share_save", True)
+            get_val("mp_organize_after_share_save", True)
         )
-        self._organize_subtitles = bool(_get_val("organize_subtitles", True))
+        self._organize_subtitles = bool(get_val("organize_subtitles", True))
         self._subtitle_traditional_to_simplified = bool(
-            _get_val("subtitle_traditional_to_simplified", False)
+            get_val("subtitle_traditional_to_simplified", False)
         )
-        offline_timeout = _get_val("offline_timeout", 30)
+        offline_timeout = get_val("offline_timeout", 30)
         self._offline_timeout = max(10, min(int(offline_timeout or 30), 1440)) * 60
         self._OFFLINE_TIMEOUT = self._offline_timeout
-        self._cross_transfer_enabled = bool(_get_val("cross_transfer_enabled", False))
-        cross_media_types = _get_val("cross_transfer_media_types", ("movie", "tv"))
+        self._cross_transfer_enabled = bool(get_val("cross_transfer_enabled", False))
+        cross_media_types = get_val("cross_transfer_media_types", ("movie", "tv"))
         self._cross_transfer_media_types = {
             self.resource_transfer._normalize_cross_transfer_media_type(value)
             for value in (cross_media_types or ("movie", "tv"))
         }
-        self._cloud_drive_registry = _get_val(
+        self._cloud_drive_registry = get_val(
             "cloud_drive_registry",
-            getattr(plugin, "_cloud_drive_registry", None) if plugin else None
+            getattr(self._plugin, "_cloud_drive_registry", None) if self._plugin else None
         )
-        self._cross_transfer_manager = _get_val(
+        self._cross_transfer_manager = get_val(
             "cross_transfer_manager",
-            getattr(plugin, "_cross_transfer_manager", None) if plugin else None
+            getattr(self._plugin, "_cross_transfer_manager", None) if self._plugin else None
         )
 
+
+    def _init_cloud_services(self):
+        """Phase 5 第 3 项（v1.20.0）：网盘能力服务：按 CloudDriveCapability 向当前网盘取 12 个可选服务。原 __init__ 第 260-296 行原样搬移，行为不变。"""
         self._cloud_auth = self._optional_cloud_service(
             CloudDriveCapability.AUTHENTICATION
         )
@@ -294,18 +312,21 @@ class SyncHandler:
             CloudDriveCapability.LOCAL_UPLOAD
         )
 
-        transfer_task_batch_size = _get_val("transfer_task_batch_size", 50)
+
+    def _init_batch_limits(self, get_val):
+        """Phase 5 第 3 项（v1.20.0）：批量与风控：每批数量/间隔、风控冷却、离线黑名单。原 __init__ 第 297-319 行原样搬移，行为不变。"""
+        transfer_task_batch_size = get_val("transfer_task_batch_size", 50)
         self._transfer_task_batch_size = max(
             1, min(int(transfer_task_batch_size or 50), 1000)
         )
         policy = self._cloud_drive.policy if self._cloud_drive else None
-        configured_batch_size = max(1, int(_get_val("batch_size", 20) or 1))
+        configured_batch_size = max(1, int(get_val("batch_size", 20) or 1))
         self._batch_size = min(
             configured_batch_size,
             policy.max_batch_size if policy and policy.supports_batch else configured_batch_size,
         )
-        self._batch_interval = max(0.0, min(float(_get_val("batch_interval", 3) or 0), 60.0))
-        transfer_risk_cooldown = _get_val("transfer_risk_cooldown", 1800)
+        self._batch_interval = max(0.0, min(float(get_val("batch_interval", 3) or 0), 60.0))
+        transfer_risk_cooldown = get_val("transfer_risk_cooldown", 1800)
         self._transfer_risk_cooldown = max(
             60, min(int(transfer_risk_cooldown or 1800), 86400)
         )
@@ -316,91 +337,101 @@ class SyncHandler:
             ttl=86400,
             maxsize=10000,
         )
-        self._skip_other_season_dirs = bool(_get_val("skip_other_season_dirs", True))
-        self._notify = bool(_get_val("notify", False))
-        self._notification_type = _get_val("notification_type", NotificationType.Plugin)
+        self._skip_other_season_dirs = bool(get_val("skip_other_season_dirs", True))
 
-        self._post_message = _get_val(
+
+    def _init_plugin_callbacks(self, get_val):
+        """Phase 5 第 3 项（v1.20.0）：插件回调：通知、取数/存数、停止信号、任务更新等宿主回调。原 __init__ 第 320-363 行原样搬移，行为不变。"""
+        self._notify = bool(get_val("notify", False))
+        self._notification_type = get_val("notification_type", NotificationType.Plugin)
+
+        self._post_message = get_val(
             "post_message_func",
-            getattr(plugin, "post_message", None) if plugin else None
+            getattr(self._plugin, "post_message", None) if self._plugin else None
         )
-        self._get_data = _get_val(
+        self._get_data = get_val(
             "get_data_func",
-            getattr(plugin, "get_data", None) if plugin else None
+            getattr(self._plugin, "get_data", None) if self._plugin else None
         )
-        self._save_data = _get_val(
+        self._save_data = get_val(
             "save_data_func",
-            getattr(plugin, "save_data", None) if plugin else None
+            getattr(self._plugin, "save_data", None) if self._plugin else None
         )
-        self._should_stop = _get_val(
+        self._should_stop = get_val(
             "should_stop",
-            getattr(plugin, "_stop_requested", None) if plugin else None
+            getattr(self._plugin, "_stop_requested", None) if self._plugin else None
         )
-        self._offline_pending_changed = _get_val(
+        self._offline_pending_changed = get_val(
             "offline_pending_changed",
-            getattr(plugin, "_update_offline_monitor", None) if plugin else None
+            getattr(self._plugin, "_update_offline_monitor", None) if self._plugin else None
         )
-        self._history_changed = _get_val(
+        self._history_changed = get_val(
             "history_changed",
-            getattr(plugin, "_mark_history_changed", None) if plugin else None
+            getattr(self._plugin, "_mark_history_changed", None) if self._plugin else None
         )
-        self._file_finalized = _get_val(
+        self._file_finalized = get_val(
             "file_finalized",
-            getattr(plugin, "_on_file_finalized", None) if plugin else None
+            getattr(self._plugin, "_on_file_finalized", None) if self._plugin else None
         )
-        self._task_update = _get_val(
+        self._task_update = get_val(
             "task_update",
-            getattr(plugin, "_update_sync_task", None) if plugin else None
+            getattr(self._plugin, "_update_sync_task", None) if self._plugin else None
         )
-        self._postprocess_task_update = _get_val(
+        self._postprocess_task_update = get_val(
             "postprocess_task_update",
-            getattr(plugin, "_update_postprocess_task", None) if plugin else None
+            getattr(self._plugin, "_update_postprocess_task", None) if self._plugin else None
         )
-        self._task_context = _get_val(
+        self._task_context = get_val(
             "task_context",
-            getattr(plugin, "_current_task_context", None) if plugin else None
+            getattr(self._plugin, "_current_task_context", None) if self._plugin else None
         )
 
-        self._self_heal_interval = _get_val("self_heal_interval", 10)
-        self._enable_cloud_upgrade = bool(_get_val("enable_cloud_upgrade", False))
-        self._enable_pt_upgrade = bool(_get_val("enable_pt_upgrade", False))
+
+    def _init_upgrade_rules(self, get_val):
+        """Phase 5 第 3 项（v1.20.0）：洗版与判重规则：自愈间隔、洗版开关/订阅/模式、集数判重、画质偏好、本地路径与分类目录。原 __init__ 第 364-395 行原样搬移，行为不变。"""
+        self._self_heal_interval = get_val("self_heal_interval", 10)
+        self._enable_cloud_upgrade = bool(get_val("enable_cloud_upgrade", False))
+        self._enable_pt_upgrade = bool(get_val("enable_pt_upgrade", False))
         if self._enable_pt_upgrade and not self._cloud_upload:
             logger.warning("PT洗版已启用，但当前网盘不支持本地文件上传")
-        upgrade_sub_ids = _get_val("upgrade_subscribe_ids", None)
+        upgrade_sub_ids = get_val("upgrade_subscribe_ids", None)
         self._upgrade_subscribe_ids = list(upgrade_sub_ids or [])
         self._upgrade_subscribe_id_set = {
             str(value) for value in self._upgrade_subscribe_ids
         }
-        raw_mode = str(_get_val("upgrade_mode", "largest") or "largest").strip().lower()
+        raw_mode = str(get_val("upgrade_mode", "largest") or "largest").strip().lower()
         self._upgrade_mode = (
             raw_mode if raw_mode in {"coexist", "replace", "largest", "smallest"} else "largest"
         )
-        self._episode_dedup_enabled = bool(_get_val("episode_dedup_enabled", True))
-        self._verify_landed_enabled = bool(_get_val("verify_landed_enabled", True))
+        self._episode_dedup_enabled = bool(get_val("episode_dedup_enabled", True))
+        self._verify_landed_enabled = bool(get_val("verify_landed_enabled", True))
         self._prefer_template_named_version = bool(
-            _get_val("prefer_template_named_version", True)
+            get_val("prefer_template_named_version", True)
         )
-        self._quality_prefer_enabled = bool(_get_val("quality_prefer_enabled", False))
-        self._quality_min_gain_percent = int(_get_val("quality_min_gain_percent", 10) or 0)
-        self._quality_min_gain_mb = int(_get_val("quality_min_gain_mb", 200) or 0)
-        self._local_resource_path = str(_get_val("local_resource_path", "") or "").strip()
+        self._quality_prefer_enabled = bool(get_val("quality_prefer_enabled", False))
+        self._quality_min_gain_percent = int(get_val("quality_min_gain_percent", 10) or 0)
+        self._quality_min_gain_mb = int(get_val("quality_min_gain_mb", 200) or 0)
+        self._local_resource_path = str(get_val("local_resource_path", "") or "").strip()
         # 媒体库一级目录：在网盘媒体库目录/本地媒体根路径下先建 电影/剧集 目录，再放二级分类
-        self._type_folder_enabled = bool(_get_val("type_folder_enabled", False))
+        self._type_folder_enabled = bool(get_val("type_folder_enabled", False))
         self._type_folder_movie = (
-                str(_get_val("type_folder_movie", "电影") or "").strip().strip("/") or "电影"
+                str(get_val("type_folder_movie", "电影") or "").strip().strip("/") or "电影"
         )
         self._type_folder_tv = (
-                str(_get_val("type_folder_tv", "剧集") or "").strip().strip("/") or "剧集"
+                str(get_val("type_folder_tv", "剧集") or "").strip().strip("/") or "剧集"
         )
 
-        paths = cloud_transfer_paths if cloud_transfer_paths is not None else self.transfer_ops._configured_transfer_paths(plugin)
+
+    def _init_cloud_paths(self, cloud_transfer_path, cloud_media_root, cloud_transfer_paths, cloud_media_paths):
+        """Phase 5 第 3 项（v1.20.0）：网盘路径：各盘转存/媒体库路径映射、当前盘路径与默认值回填。原 __init__ 第 396-434 行原样搬移，行为不变。"""
+        paths = cloud_transfer_paths if cloud_transfer_paths is not None else self.transfer_ops._configured_transfer_paths(self._plugin)
         self._cloud_transfer_paths = {
             str(key).strip().lower(): self._normalize_cloud_path(value)
             for key, value in dict(paths or {}).items()
             if str(key).strip()
         }
 
-        media_paths = cloud_media_paths if cloud_media_paths is not None else self.transfer_ops._configured_media_paths(plugin)
+        media_paths = cloud_media_paths if cloud_media_paths is not None else self.transfer_ops._configured_media_paths(self._plugin)
         self._cloud_media_paths = {
             str(key).strip().lower(): self._normalize_cloud_path(value)
             for key, value in dict(media_paths or {}).items()
@@ -432,10 +463,13 @@ class SyncHandler:
                 self._cloud_drive.key, self._CLOUD_MEDIA_ROOT
             )
 
-        self._strm_generate_enabled = bool(_get_val("strm_generate_enabled", True))
-        self._video_extensions = list(_get_val("video_extensions", [".mkv", ".mp4", ".avi", ".iso"]))
-        self._nfo_scrape_enabled = bool(_get_val("nfo_scrape_enabled", False))
-        self._image_scrape_enabled = bool(_get_val("image_scrape_enabled", False))
+
+    def _init_strm_media_server(self, get_val):
+        """Phase 5 第 3 项（v1.20.0）：STRM 与媒体服务器：STRM 生成器、媒体服务器通知器与解析器。原 __init__ 第 435-518 行原样搬移，行为不变。"""
+        self._strm_generate_enabled = bool(get_val("strm_generate_enabled", True))
+        self._video_extensions = list(get_val("video_extensions", [".mkv", ".mp4", ".avi", ".iso"]))
+        self._nfo_scrape_enabled = bool(get_val("nfo_scrape_enabled", False))
+        self._image_scrape_enabled = bool(get_val("image_scrape_enabled", False))
         self._metadata_scraper = (
             MediaScraper(
                 nfo_enabled=self._nfo_scrape_enabled,
@@ -473,10 +507,10 @@ class SyncHandler:
                 self._strm_generate_enabled = False
             else:
                 s_base_url = str(
-                    _get_val("strm_base_url", StrmGenerator.DEFAULT_BASE_URL) or ""
+                    get_val("strm_base_url", StrmGenerator.DEFAULT_BASE_URL) or ""
                 ).strip()
                 s_template = str(
-                    _get_val("strm_url_template", StrmGenerator.DEFAULT_TEMPLATE) or ""
+                    get_val("strm_url_template", StrmGenerator.DEFAULT_TEMPLATE) or ""
                 ).strip()
                 if not s_base_url:
                     logger.warning(
@@ -494,11 +528,11 @@ class SyncHandler:
                     except StrmTemplateError as error:
                         logger.error(f"STRM 生成配置无效，已停止直接生成：{error}")
 
-        media_server_refresh_enabled = bool(_get_val("media_server_refresh_enabled", False))
-        media_servers = _get_val("media_servers", None)
-        media_server_path_mappings = _get_val("media_server_path_mappings", "")
-        media_server_refresh_delay = _get_val("media_server_refresh_delay", 0)
-        emby_mediainfo_enabled = bool(_get_val("emby_mediainfo_enabled", False))
+        media_server_refresh_enabled = bool(get_val("media_server_refresh_enabled", False))
+        media_servers = get_val("media_servers", None)
+        media_server_path_mappings = get_val("media_server_path_mappings", "")
+        media_server_refresh_delay = get_val("media_server_refresh_delay", 0)
+        emby_mediainfo_enabled = bool(get_val("emby_mediainfo_enabled", False))
 
         self._media_server_path_mappings = str(media_server_path_mappings or "")
         self._media_server_notifier = MediaServerNotifier(
@@ -516,6 +550,10 @@ class SyncHandler:
         self._notification_batch_timer: Optional[threading.Timer] = None
         self._media_server_resolver = MediaServerResolver()
         MediaServerResolver.configure(media_servers)
+
+
+    def _init_locks_caches(self):
+        """Phase 5 第 3 项（v1.20.0）：锁与缓存：各并发锁与平台 TTL 缓存（识别/季目录/根目录/延期/基线等）。原 __init__ 第 519-570 行原样搬移，行为不变。"""
         self._offline_pending_lock = threading.RLock()
         self._pt_upgrade_lock = threading.RLock()
         self._pt_upgrade_active = set()
@@ -567,6 +605,7 @@ class SyncHandler:
             "sync:season_listing", self, maxsize=256,
             ttl=self._RUNTIME_CACHE_TTL,
         )
+
 
     # -- 对外 API：显式转发（Phase 5，v1.19.0）--
     # 插件宿主（__init__.py）与 core/api、core/hook 经 self._sync_handler
