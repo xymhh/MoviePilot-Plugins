@@ -3,7 +3,7 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.21.0",
+    "version": "1.22.0",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -383,7 +383,8 @@
       "v1.18.4": "渠道管理修复（v1.18.4）：PanSou 的限定频道/限定插件在渠道管理编辑弹窗里一直显示“没有可选项”——弹窗复用了配置页的表单结构，但没接动态选项加载链路，field.items 永远是空（标题“已选择 126 / 0 项”，卡片上的 126/27 只是已保存的选中值）；补上与配置页同款的链路：导出 fields/search/index.js 的 resolveDynamicField 供 ChannelManager 复用，formSection 对字段做动态解析，ConfigSection 绑 load-options/refresh-options（调 ui_options?scope=pansou 写进 channelOptions.pansou），打开编辑弹窗时预拉一次。新增 7 条回归单测。",
       "v1.19.0": "Phase 5 显式组合（v1.19.0）：SyncHandler 改显式组合——25 个具名服务字段替代 __getattr__/resolve_component 隐式委托，对外 38 个方法改显式转发；组件间调用全部显式化（self._xxx → self.<具名服务>.<方法>，_effective_mediainfo 逐点确认，命名服务版为准）；测试桩随之迁移到字段实例上，全量 pytest 2130 / unittest 2018 通过。",
       "v1.20.0": "Phase 5 第 3 项（v1.20.0）：SyncHandler.__init__（约 410 行）按配置分组拆成 9 个 _init_* 方法（宿主句柄/整理开关/网盘能力服务/批量与风控/插件回调/洗版规则/网盘路径/STRM 与媒体服务器/锁与缓存），__init__ 只剩头部 + _get_val 闭包 + 9 个调用；_get_val 作参数传，plugin 引用改走 self._plugin；搬移前后 345 行逐行 0 差异，全量 pytest 2136 / unittest 2024 通过。",
-      "v1.21.0": "Phase 5 第 4 项（v1.21.0）：搜索源瘦身——BaseMagnetSearchService（海盗湾/UIndex）、DelegatingSearchService（聚影/蜗牛）、14 个 provider 工厂合成数据驱动的 build_search_provider、create_service() 转正、BaseSearchClient（海盗湾/UIndex）、_UnlockLimiter 合一、Turnstile 只抽模型加载、registry 跳过源记 info 日志并带原因、get_source_catalog 标注未启用原因；片库不等价未并入，PinglianQuotaBudget 是站点实时配额适配器、不换 PointBudgetLedger。全量 pytest 2202 / unittest 2090 通过。"
+      "v1.21.0": "Phase 5 第 4 项（v1.21.0）：搜索源瘦身——BaseMagnetSearchService（海盗湾/UIndex）、DelegatingSearchService（聚影/蜗牛）、14 个 provider 工厂合成数据驱动的 build_search_provider、create_service() 转正、BaseSearchClient（海盗湾/UIndex）、_UnlockLimiter 合一、Turnstile 只抽模型加载、registry 跳过源记 info 日志并带原因、get_source_catalog 标注未启用原因；片库不等价未并入，PinglianQuotaBudget 是站点实时配额适配器、不换 PointBudgetLedger。全量 pytest 2202 / unittest 2090 通过。",
+      "v1.22.0": "Phase 5 第 4 项（v1.22.0）：订阅源瘦身——RankingProvider 模板基类（_paginate + _candidate_from_dict + _resolve_media_type），AniList/Bangumi/豆瓣/TMDB 各瘦 45–63 行；修 Netflix 国家榜静默丢失（非富 TSV 路径补上 country_selections 处理）；补 provider 级单测 28 个。新旧版 8 个场景输出 0 差异，全量 pytest 2230 / unittest 2118 通过。"
     }
   },
   "version": "1.9.85",
