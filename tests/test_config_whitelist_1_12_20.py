@@ -5,7 +5,7 @@
 core/config.py 的 get_default_config() 顶层键 + utils/notify_template.py
 的 DEFAULT_TEMPLATES 键）+ 非默认键（config.get 字面量里不在默认键中的 +
 签到契约 credential_keys 等动态键）+ 签到动态键后缀规则。
-参数表：CONCURRENCY_AND_COOLDOWN_PARAMS 是七个值的唯一事实来源；
+参数表：CONCURRENCY_AND_COOLDOWN_PARAMS 是九个值的唯一事实来源；
 get_default_config() 与 _apply_*_config 的兜底默认值都从表里取，数值不变。
 
 测试用真实 _apply_plugin_config 在裸实例上跑一份完整配置断言落位；
@@ -62,6 +62,8 @@ NORMALIZE_DROPPED_KEYS = {
 
 PARAM_KEYS = (
     "cross_transfer_upload_concurrency",
+    "cross_transfer_upload_breaker_threshold",
+    "cross_transfer_upload_breaker_cooldown_seconds",
     "cross_transfer_max_concurrent",
     "subscription_concurrency",
     "batch_interval",
@@ -71,7 +73,9 @@ PARAM_KEYS = (
 )
 
 EXPECTED_PARAM_TABLE = {
-    "cross_transfer_upload_concurrency": {"default": 4, "kind": "speed"},
+    "cross_transfer_upload_concurrency": {"default": 2, "kind": "speed"},
+    "cross_transfer_upload_breaker_threshold": {"default": 5, "kind": "risk"},
+    "cross_transfer_upload_breaker_cooldown_seconds": {"default": 300, "kind": "risk"},
     "cross_transfer_max_concurrent": {"default": 2, "kind": "speed"},
     "subscription_concurrency": {"default": 2, "kind": "speed"},
     "batch_interval": {"default": 3, "kind": "risk"},
@@ -191,7 +195,7 @@ class TestConfigWhitelist(unittest.TestCase):
         config = {key: f"__test__{key}" for key in defaults | extras}
         for key in CHECKIN_SUFFIX_KEYS:
             config[key] = True
-        # 避免走一次性订阅调度分支；参数表七键用表值，避免哨兵串改行为。
+        # 避免走一次性订阅调度分支；参数表九键用表值，避免哨兵串改行为。
         config["auto_subscribe_onlyonce"] = False
         for key in PARAM_KEYS:
             config[key] = table[key]["default"]
@@ -221,12 +225,12 @@ class TestConfigWhitelist(unittest.TestCase):
         for key in NORMALIZE_DROPPED_KEYS:
             self.assertTrue(module.is_plugin_config_key(key))
             self.assertNotIn(f"_{key}", plugin.__dict__)
-        # 参数表七键落位且值就是表值。
+        # 参数表九键落位且值就是表值。
         for key in PARAM_KEYS:
             self.assertEqual(plugin.__dict__[f"_{key}"], table[key]["default"])
 
     def test_param_table_values_unchanged(self):
-        """参数表七个值与 kind 一个都不许变（只收拢定义位置）。"""
+        """参数表九个值与 kind 一个都不许变（只收拢定义位置）。"""
         _, module = _plugin()
         table = module.CONCURRENCY_AND_COOLDOWN_PARAMS
         self.assertEqual(set(table), set(EXPECTED_PARAM_TABLE))

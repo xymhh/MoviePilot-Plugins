@@ -25,9 +25,23 @@ DEFAULT_AUTO_SUBSCRIBE_USERNAME = "网盘订阅助手"
 #: kind: "risk" = 风控约束（防网盘封控/限流）, "speed" = 速度目标（提速）。
 CONCURRENCY_AND_COOLDOWN_PARAMS: Dict[str, Dict[str, Any]] = {
     "cross_transfer_upload_concurrency": {
-        "default": 4,
+        "default": 2,
         "kind": "speed",
-        "note": "115 上传分片并发度；0=单流顺序（最稳），>0 并发分片",
+        "note": (
+            "115 上传分片并发度（直传与本地上传共用）；"
+            "0=单流顺序（最稳），>0 并发分片，上限 16；"
+            "计划 §14：先从 2 起步实测，不要直接拉满"
+        ),
+    },
+    "cross_transfer_upload_breaker_threshold": {
+        "default": 5,
+        "kind": "risk",
+        "note": "115 上传熔断阈值：连续失败几次后打开熔断器",
+    },
+    "cross_transfer_upload_breaker_cooldown_seconds": {
+        "default": 300,
+        "kind": "risk",
+        "note": "115 上传熔断冷却秒数：打开后多久内新上传直接跳过",
     },
     "cross_transfer_max_concurrent": {
         "default": 2,
@@ -352,6 +366,8 @@ class UIConfig:
             "cross_transfer_aria2_disk_cache": "32M",
             "cross_transfer_direct_stream": True,
             "cross_transfer_upload_concurrency": CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_concurrency"]["default"],
+            "cross_transfer_upload_breaker_threshold": CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_threshold"]["default"],
+            "cross_transfer_upload_breaker_cooldown_seconds": CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_cooldown_seconds"]["default"],
             "cross_transfer_rapid_miss_action": "abort",
             # 真实上传 115 的代理（空=直连，只作用于 115 上传/API）
             "cross_transfer_upload_proxy": "",

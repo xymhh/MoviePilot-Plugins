@@ -195,7 +195,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.17.0"
+    plugin_version = "1.18.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -285,7 +285,10 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_aria2_min_split_size: str = "1M"
     _cross_transfer_aria2_disk_cache: str = "32M"
     _cross_transfer_direct_stream: bool = True
-    _cross_transfer_upload_concurrency: int = 4
+    _cross_transfer_upload_concurrency: int = 2
+    # 115 上传熔断器配置（Phase 3b-10）：连续失败几次后打开、冷却多久。
+    _cross_transfer_upload_breaker_threshold: int = 5
+    _cross_transfer_upload_breaker_cooldown_seconds: float = 300.0
     _cross_transfer_rapid_miss_action: str = "abort"
     # 国内中继上传（实验）：默认关闭，未配置地址时强制视为关闭。
     # TG 频道监控（用户自己的 TG API 会话）：默认关闭，未配置凭据时强制视为关闭。
@@ -1965,14 +1968,36 @@ class CloudSubscribeX(_PluginBase):
             upload_concurrency = int(
                 config.get(
                     "cross_transfer_upload_concurrency",
-                    self._cross_transfer_upload_concurrency,
+                    CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_concurrency"]["default"],
                 )
             )
         except (TypeError, ValueError):
-            upload_concurrency = 4
+            upload_concurrency = CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_concurrency"]["default"]
         # 0 表示关闭 115 分片并发上传（回退顺序上传），上限 16。
         self._cross_transfer_upload_concurrency = max(0, min(upload_concurrency, 16))
         self._sync_cross_transfer_upload_concurrency()
+        # 115 上传熔断器配置（Phase 3b-10）：阈值/冷却，非法值回落表默认值。
+        try:
+            breaker_threshold = int(
+                config.get(
+                    "cross_transfer_upload_breaker_threshold",
+                    CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_threshold"]["default"],
+                )
+            )
+        except (TypeError, ValueError):
+            breaker_threshold = CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_threshold"]["default"]
+        self._cross_transfer_upload_breaker_threshold = max(1, min(breaker_threshold, 100))
+        try:
+            breaker_cooldown = float(
+                config.get(
+                    "cross_transfer_upload_breaker_cooldown_seconds",
+                    CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_cooldown_seconds"]["default"],
+                )
+            )
+        except (TypeError, ValueError):
+            breaker_cooldown = CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_cooldown_seconds"]["default"]
+        self._cross_transfer_upload_breaker_cooldown_seconds = max(5.0, min(breaker_cooldown, 3600.0))
+        self._sync_upload_breaker_config()
         self._register_u115cs_storage()
 
         rapid_miss_action = str(
@@ -2145,13 +2170,14 @@ class CloudSubscribeX(_PluginBase):
         self._cloud_drive = self._drive_manager.active_drive
         self._cross_transfer_manager = self._drive_manager.cross_transfer_manager
         self._sync_cross_transfer_upload_concurrency()
+        self._sync_upload_breaker_config()
         self._register_u115cs_storage()
 
     def _sync_cross_transfer_upload_concurrency(self) -> None:
         """把 115 分片并发度注入 115 客户端管理器。
 
         上传组件挂在客户端管理器下、靠属性委托读宿主值，构造期拿不到插件配置，
-        所以插件在初始化与每次保存配置后显式注入；注入失败时组件用默认值（4）。
+        所以插件在初始化与每次保存配置后显式注入；注入失败时组件用默认值（2）。
         """
         manager = getattr(self, "_drive_manager", None)
         client = manager.get_client("115") if manager else None
@@ -2161,6 +2187,22 @@ class CloudSubscribeX(_PluginBase):
             client._cross_transfer_upload_concurrency = self._cross_transfer_upload_concurrency
         except Exception as error:  # noqa: BLE001 - 注入失败不影响主流程
             logger.debug(f"注入 115 上传并发度失败：{error}", exc_info=True)
+
+    def _sync_upload_breaker_config(self) -> None:
+        """把 115 上传熔断器阈值/冷却注入 115 客户端管理器。
+
+        与并发度注入同一路子：上传组件每次用熔断器时从 manager 属性现读，
+        改配置即生效；注入失败时组件用默认值（阈值 5、冷却 300 秒）。
+        """
+        manager = getattr(self, "_drive_manager", None)
+        client = manager.get_client("115") if manager else None
+        if not client:
+            return
+        try:
+            client._upload_breaker_threshold = self._cross_transfer_upload_breaker_threshold
+            client._upload_breaker_cooldown_seconds = self._cross_transfer_upload_breaker_cooldown_seconds
+        except Exception as error:  # noqa: BLE001 - 注入失败不影响主流程
+            logger.debug(f"注入 115 上传熔断配置失败：{error}", exc_info=True)
 
     def _register_u115cs_storage(self) -> None:
         """绑定 115 提供方并把“115网盘CS版”注册进 MP 存储。

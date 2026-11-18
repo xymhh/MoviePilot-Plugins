@@ -13,6 +13,8 @@
 - ``rapid:hit`` / ``rapid:miss``：秒传探测命中 / 未命中（正式上传前
   的 try_rapid_upload 探针与上传内 init 的 reuse 都记在这里）。
 - ``upload:success`` / ``upload:failure``：upload_file 终态，附字节数。
+- ``upload:429``：上传路径上任何一处探测到 429/限流（init / 分片 /
+  整文件 / Range 直传），只记次数——A/B 实测时与上传阶段耗时一起看。
 
 注意：MP 整理触发的上传发生在 MP 链里、插件 finalize 窗口之外，
 这里记的是插件进程内的累计值；按集归因靠第 10 项的阶段耗时日志里

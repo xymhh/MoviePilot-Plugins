@@ -8,7 +8,7 @@
 2. 3 次都失败 → 返回 False，客户端调 3 次，last_error 是拆包后的原错；
 3. 第 1 次成功 → 客户端只调 1 次，不睡觉；
 4. 客户端未初始化 → 返回 False，不调客户端、不睡觉；
-5. 退避按 2 秒、4 秒递增。
+5. 退避按 2 秒、4 秒指数递增（±20% 抖动，见统一重试策略表）。
 """
 
 import os
@@ -156,7 +156,9 @@ class P115UploadRetryTests(unittest.TestCase):
             source.write_bytes(b"0123456789")
             with patch.object(upload_module.time, "sleep") as mock_sleep:
                 self.assertTrue(service.upload_file(str(source), "/"))
-            mock_sleep.assert_called_once_with(2)
+            # 整文件第 1 次失败后退避 2 秒 ±20% 抖动。
+            mock_sleep.assert_called_once()
+            self.assertAlmostEqual(mock_sleep.call_args[0][0], 2.0, delta=0.45)
         self.assertEqual(self._client.upload_file.call_count, 2)
         self.assertEqual(sha1_spy.call_count, 1)
         self.assertEqual(service.last_error, "")
@@ -169,9 +171,11 @@ class P115UploadRetryTests(unittest.TestCase):
             source.write_bytes(b"0123456789")
             with patch.object(upload_module.time, "sleep") as mock_sleep:
                 self.assertFalse(service.upload_file(str(source), "/"))
-            self.assertEqual(
-                [call.args[0] for call in mock_sleep.call_args_list], [2, 4]
-            )
+            # 整文件退避 2 秒、4 秒指数递增，各 ±20% 抖动。
+            delays = [call.args[0] for call in mock_sleep.call_args_list]
+            self.assertEqual(len(delays), 2)
+            self.assertAlmostEqual(delays[0], 2.0, delta=0.45)
+            self.assertAlmostEqual(delays[1], 4.0, delta=0.85)
         self.assertEqual(self._client.upload_file.call_count, 3)
         self.assertIn("the server side failed", service.last_error)
         self.assertNotIn(FAKE_USER_KEY, service.last_error)

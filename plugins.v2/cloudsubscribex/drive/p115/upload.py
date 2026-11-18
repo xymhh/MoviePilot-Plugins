@@ -16,9 +16,18 @@ from app.log import logger
 from requests.adapters import HTTPAdapter
 
 from .files import P115DirectoryReader, P115FileService
+from .upload_policy import (
+    UPLOAD_BREAKER_DEFAULT_COOLDOWN_SECONDS,
+    UPLOAD_BREAKER_DEFAULT_THRESHOLD,
+    UPLOAD_DATA_PUT_MIN_INTERVAL,
+    UPLOAD_RETRY_POLICY,
+    UploadCircuitBreaker,
+    retry_delay,
+)
 from .upload_proxy import oss_request_kwargs
 from ...core import OwnerDelegator
 from ...core.error_text import describe_upload_error
+from ...core.failure import is_rate_limit_error
 from ...core.file_hash import file_sha1
 from ...core.telemetry import api_meter, format_snapshot
 
@@ -80,11 +89,12 @@ except ImportError:  # pragma: no cover - 依赖缺失时的降级分支
 OSS2_UPLOAD_PART_SIZE = 10 * 1024 * 1024
 # OSS STS token 提前刷新阈值（分钟）：分片前若 token 在该时间内过期，先刷新。
 OSS2_TOKEN_REFRESH_THRESHOLD_MINUTES = 5
-# 单片失败重试次数（p115disk 同款口径：最多传 2 次）。
-OSS2_PART_MAX_RETRIES = 2
-# upload_file_init 重试次数与初始退避秒数（p115disk 同款口径 3 次、2 秒起翻倍）。
-OSS2_INIT_MAX_RETRIES = 3
-OSS2_INIT_RETRY_DELAY_SECONDS = 2
+# 单片失败重试次数、init 重试次数与初始退避秒数：统一重试策略表
+# （upload_policy.UPLOAD_RETRY_POLICY）是唯一事实来源，下面只是旧名
+# 别名（p115disk 同款口径：单片最多传 2 次、init 3 次 2 秒起翻倍）。
+OSS2_PART_MAX_RETRIES = int(UPLOAD_RETRY_POLICY["part"]["attempts"])
+OSS2_INIT_MAX_RETRIES = int(UPLOAD_RETRY_POLICY["init"]["attempts"])
+OSS2_INIT_RETRY_DELAY_SECONDS = float(UPLOAD_RETRY_POLICY["init"]["base_delay"])
 # 115 OSS 上传域名（p115disk 同款）。
 OSS2_ENDPOINT = "http://oss-cn-shenzhen.aliyuncs.com"
 # token 过期类错误码（oss2 ServerError.code）。
@@ -103,14 +113,54 @@ OSS2_IOS_USER_AGENT = (
 P115_UPLOAD_PART_SIZE = 16 * 1024 * 1024
 # OSS 单次分块上传最多 10000 片，留出余量后按 9000 片控制分片数。
 P115_MAX_UPLOAD_PARTS = 9000
-# 分片并发上传的默认并发度（可在插件配置里用 cross_transfer_upload_concurrency 覆盖）。
-P115_DEFAULT_UPLOAD_CONCURRENCY = 4
+# 分片并发上传的默认并发度（可在插件配置里用 cross_transfer_upload_concurrency
+# 覆盖；计划 §14：先从 2 起步实测，不要直接拉满）。
+P115_DEFAULT_UPLOAD_CONCURRENCY = 2
 P115_MAX_UPLOAD_CONCURRENCY = 16
 
-#: 驱动层整份重传次数（与 MP 自带 u115 存储的 3 次重试同一口径）。
-_UPLOAD_MAX_ATTEMPTS = 3
-#: 第 1、2 次失败后的退避秒数（第 3 次失败直接返回，不再等）。
-_UPLOAD_RETRY_DELAY_SECONDS = (2, 4)
+#: 驱动层整份重传次数（与 MP 自带 u115 存储的 3 次重试同一口径），
+#: 退避语义见统一重试策略表 UPLOAD_RETRY_POLICY["file"]。
+_UPLOAD_MAX_ATTEMPTS = int(UPLOAD_RETRY_POLICY["file"]["attempts"])
+
+#: manager 未提供数据面限流器时的兜底实例（测试桩 owner 等），
+#: 首次使用时懒创建（见 _fallback_data_limiter）。
+_DATA_PUT_LIMITER: Any = None
+
+
+class _NullRateLimiter:
+    """数据面 pacing 空操作兜底：owner 没给限流器且真类取不到时用。
+
+    只影响测试桩 owner；线上 owner 永远是带 data_rate_limiter 的 manager。
+    """
+
+    def acquire(self) -> None:
+        return None
+
+
+def _fallback_data_limiter() -> Any:
+    """manager 未提供数据面限流器时的兜底（测试桩 owner 等）。
+
+    这里不用模块级 ``from ..common import DriveRateLimiter``：全量测试里
+    别的测试文件会把 sys.modules 里的 drive.common 换成桩
+    （DriveRateLimiter 被置成 object），模块级绑定会在 import 时就炸掉；
+    函数内现取现用，取不到真类时退回空操作限流。
+    """
+    global _DATA_PUT_LIMITER
+    if _DATA_PUT_LIMITER is not None:
+        return _DATA_PUT_LIMITER
+    try:
+        from ..common import DriveRateLimiter
+
+        candidate = DriveRateLimiter(
+            min_interval=UPLOAD_DATA_PUT_MIN_INTERVAL, jitter_ratio=0.2
+        )
+        # 真类才有 acquire；被桩成 object 的 DriveRateLimiter 没有。
+        if not callable(getattr(candidate, "acquire", None)):
+            raise TypeError("DriveRateLimiter 被桩替换")
+    except Exception:
+        candidate = _NullRateLimiter()
+    _DATA_PUT_LIMITER = candidate
+    return candidate
 
 
 def upload_part_size(file_size: int) -> int:
@@ -218,7 +268,8 @@ def read_source_range(
             last_error = error
             if attempt >= int(attempts) - 1:
                 raise
-            time.sleep(0.5 * (attempt + 1))
+            # 源盘侧重试也走统一策略表（0.5 秒起步，指数 + 抖动）。
+            time.sleep(retry_delay("range", attempt + 1))
     raise last_error or IOError("源盘 Range 读取失败")
 
 
@@ -265,7 +316,7 @@ class P115UploadService(OwnerDelegator):
         return str(getattr(self, "_last_upload_error", "") or "")
 
     def _upload_stat(self) -> Dict[str, Any]:
-        """本次尝试的计量小字典（backend/rapid/parts）。
+        """本次尝试的计量小字典（backend/rapid/parts/rate_limited）。
 
         upload_file 每轮尝试开始时重置；内层方法（_upload_via_oss2 /
         _upload_via_p115oss）边跑边填。直接调内层方法时也可能没有
@@ -273,9 +324,139 @@ class P115UploadService(OwnerDelegator):
         """
         stats = getattr(self, "_upload_stats", None)
         if not isinstance(stats, dict):
-            stats = {"backend": "", "rapid": False, "parts": 0}
+            stats = {"backend": "", "rapid": False, "parts": 0, "rate_limited": 0}
             self._upload_stats = stats
         return stats
+
+    def _data_rate_limiter(self) -> Any:
+        """数据面 PUT 起步 pacing 门控：优先用 manager 上的共享实例。
+
+        manager 未提供时（测试桩 owner 等）用模块级兜底实例。只平滑
+        PUT 起步突发，不节流吞吐；控制面 1.5 秒不在此列。
+        判据用鸭子类型（有可调用的 acquire 即可）：全量测试里
+        drive.common 可能被桩替换，isinstance 会误判。
+        """
+        limiter = getattr(self._owner, "data_rate_limiter", None)
+        if limiter is not None and callable(getattr(limiter, "acquire", None)):
+            return limiter
+        return _fallback_data_limiter()
+
+    def _note_rate_limited(self, error: BaseException) -> bool:
+        """429/限流：记一次计量（upload:429 + 本次统计）并返回 True；
+        非限流返回 False。调用方据此选 429 退避还是普通退避。"""
+        if not is_rate_limit_error(error):
+            return False
+        api_meter.record("upload:429")
+        stats = self._upload_stat()
+        stats["rate_limited"] = int(stats.get("rate_limited") or 0) + 1
+        return True
+
+    def _breaker_threshold(self) -> int:
+        """熔断阈值（连续失败几次后打开）：每次从配置现读，改配置即生效。"""
+        try:
+            value = int(
+                getattr(
+                    self._owner, "_upload_breaker_threshold",
+                    UPLOAD_BREAKER_DEFAULT_THRESHOLD,
+                )
+            )
+        except (TypeError, ValueError):
+            value = UPLOAD_BREAKER_DEFAULT_THRESHOLD
+        return max(1, min(value, 100))
+
+    def _breaker_cooldown_seconds(self) -> float:
+        """熔断冷却秒数：每次从配置现读，改配置即生效。"""
+        try:
+            value = float(
+                getattr(
+                    self._owner, "_upload_breaker_cooldown_seconds",
+                    UPLOAD_BREAKER_DEFAULT_COOLDOWN_SECONDS,
+                )
+            )
+        except (TypeError, ValueError):
+            value = UPLOAD_BREAKER_DEFAULT_COOLDOWN_SECONDS
+        return max(5.0, min(value, 3600.0))
+
+    def _upload_breaker(self) -> UploadCircuitBreaker:
+        """上传熔断器：懒创建，落在 owner（manager）上，等价于每账号一个。
+
+        配置每次使用时重读，改配置不用重启。秒传探针
+        （try_rapid_upload / try_rapid_upload_by_hash）不走这里，
+        熔断打开时仍可放行。
+        """
+        breaker = getattr(self, "_upload_circuit_breaker", None)
+        if not isinstance(breaker, UploadCircuitBreaker):
+            breaker = UploadCircuitBreaker()
+            self._upload_circuit_breaker = breaker
+        breaker.configure(self._breaker_threshold(), self._breaker_cooldown_seconds())
+        return breaker
+
+    def _put_part_with_retry(
+            self,
+            put: Callable[[], Any],
+            *,
+            stop_requested: Optional[Callable[[], bool]] = None,
+            on_retry: Optional[Callable[[BaseException, int], bool]] = None,
+    ) -> Any:
+        """单片 PUT 带统一重试：oss2 顺序/并发、远程并发共用。
+
+        ``put``：无参可调用，执行一次 PUT 并返回结果；失败抛异常。
+        ``on_retry``：可选回调 ``on_retry(error, attempt)``，每次重试前
+        调用，返回 False 立即放弃；可用于 token 刷新等补救。
+        429 用 5 秒起步的限流退避，其余按策略表；重试耗尽抛最后一次异常。
+        """
+        attempts = int(UPLOAD_RETRY_POLICY["part"]["attempts"])
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, attempts + 1):
+            if stop_requested is not None and stop_requested():
+                raise InterruptedError
+            try:
+                self._data_rate_limiter().acquire()
+                return put()
+            except InterruptedError:
+                raise
+            except Exception as error:
+                last_error = error
+                if attempt >= attempts:
+                    break
+                rate_limited = self._note_rate_limited(error)
+                if on_retry is not None and not on_retry(error, attempt):
+                    break
+                time.sleep(retry_delay("part", attempt, rate_limited=rate_limited))
+        raise last_error or IOError("115 分片上传失败")
+
+    def _run_parts_concurrently(
+            self,
+            jobs: Any,
+            worker_fn: Callable[[Any], Any],
+            *,
+            workers: int,
+    ) -> list:
+        """并发分片执行器：本地 oss2 并发、远程 Range 直传共用。
+
+        ThreadPoolExecutor + 首错取消剩余任务。``jobs`` 是任务标识
+        （分片号），``worker_fn(job)`` 执行一片并返回结果；返回按
+        完成顺序排列的结果列表（调用方按分片号自行排序）。
+        任一任务失败即取消其余任务并抛出首个异常。
+        """
+        job_list = list(jobs)
+        pool_size = max(
+            1,
+            min(int(workers or 1), P115_MAX_UPLOAD_CONCURRENCY, len(job_list) or 1),
+        )
+        results = []
+        with ThreadPoolExecutor(
+                max_workers=pool_size, thread_name_prefix="p115-upload-part"
+        ) as executor:
+            futures = [executor.submit(worker_fn, job) for job in job_list]
+            try:
+                for future in as_completed(futures):
+                    results.append(future.result())
+            except Exception:
+                for future in futures:
+                    future.cancel()
+                raise
+        return results
 
     def _oss_proxy_kwargs(self) -> Dict[str, Any]:
         """OSS 数据面（分片 PUT / 元数据）的代理参数；未配置时为空字典。
@@ -487,6 +668,119 @@ class P115UploadService(OwnerDelegator):
             expiration,
         )
 
+    def _oss2_bucket(
+            self,
+            key_id: str,
+            key_secret: str,
+            token: str,
+            bucket_name: str,
+            proxies: Optional[Dict[str, str]] = None,
+    ):
+        """按 STS 凭证建一个 oss2 Bucket（服务端点固定为 OSS2_ENDPOINT）。"""
+        auth = Oss2StsAuth(key_id, key_secret, token)
+        return Oss2Bucket(
+            auth, OSS2_ENDPOINT, bucket_name,
+            proxies=proxies if proxies is not None else self._oss2_proxy_dict(),
+        )
+
+    def _upload_oss2_parts_concurrently(
+            self,
+            source: Path,
+            bucket_holder: Dict[str, Any],
+            bucket_name: str,
+            object_name: str,
+            upload_id: str,
+            part_size: int,
+            file_size: int,
+            expiration: Any,
+            progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> list:
+        """oss2 本地文件并发分片：每 worker 独立文件句柄读一片、PUT 一片。
+
+        与远程并发引擎共用 ``_run_parts_concurrently``；单片 PUT 走
+        ``_put_part_with_retry``（策略表重试 + 429 退避 + 起步 pacing）。
+        token 过期时单 worker 加锁刷新并重建 bucket（写进 bucket_holder，
+        调用方的 abort/complete 用的就是最新 bucket）后重传该片。
+        成功返回按分片号排序的 parts（OssPartInfo 列表）；失败抛异常，
+        由调用方 abort 掉该上传任务。
+        """
+        parts_total = -(-int(file_size) // int(part_size))
+        workers = max(
+            1,
+            min(
+                self._upload_concurrency(), P115_MAX_UPLOAD_CONCURRENCY,
+                parts_total,
+            ),
+        )
+        token_state = {"expiration": expiration}
+        refresh_lock = Lock()
+        progress_lock = Lock()
+        uploaded = {"bytes": 0}
+
+        def _rebuild_bucket() -> None:
+            _, key_id, key_secret, token, new_expiration = self._oss2_get_token()
+            token_state["expiration"] = new_expiration
+            bucket_holder["bucket"] = self._oss2_bucket(
+                key_id, key_secret, token, bucket_name
+            )
+
+        # 起步时 token 已快过期：先刷新一次再开工，避免每个 worker 各刷一次。
+        if self._oss2_token_expiring(token_state["expiration"]):
+            logger.info("115 OSS Token 即将过期，正在刷新...")
+            _rebuild_bucket()
+            logger.info("115 OSS Token 刷新成功")
+
+        def put_part(part_number: int):
+            start = (part_number - 1) * part_size
+            length = min(part_size, file_size - start)
+            attempt_bucket: Dict[str, Any] = {"bucket": None}
+
+            def _put_once():
+                # 本次尝试用的 bucket 只读一次：刷新与否按“是不是同一个
+                # bucket 对象”判断，不依赖 expiration 时间戳（token 报错
+                # 时时间戳未必已过期，仍需刷新）。
+                bucket = bucket_holder["bucket"]
+                attempt_bucket["bucket"] = bucket
+                with source.open("rb") as handle:
+                    handle.seek(start)
+                    data = handle.read(length)
+                if len(data) != length:
+                    raise IOError(
+                        f"115 本地文件第 {part_number} 分片读取不完整："
+                        f"{len(data)}/{length}"
+                    )
+                return bucket.upload_part(
+                    object_name, upload_id, part_number,
+                    data=OssSizedFileAdapter(io.BytesIO(data), length),
+                )
+
+            def _on_retry(error: BaseException, _attempt: int) -> bool:
+                if self._is_oss2_token_error(error):
+                    with refresh_lock:
+                        # 别的 worker 可能刚刷新过：holder 已换新 bucket
+                        # 就不再重复刷。
+                        if bucket_holder["bucket"] is attempt_bucket["bucket"]:
+                            logger.warning(
+                                "115 上传分片遇到 Token 过期，刷新后重传该片"
+                            )
+                            _rebuild_bucket()
+                return True
+
+            result = self._put_part_with_retry(_put_once, on_retry=_on_retry)
+            api_meter.record("oss2:part", bytes_=length)
+            with progress_lock:
+                uploaded["bytes"] += length
+                done = uploaded["bytes"]
+            if progress_callback:
+                progress_callback(min(done, file_size), file_size)
+            return OssPartInfo(part_number, result.etag)
+
+        parts = self._run_parts_concurrently(
+            range(1, parts_total + 1), put_part, workers=workers
+        )
+        parts.sort(key=lambda part: part.part_number)
+        return parts
+
     def _upload_via_oss2(
             self,
             source: Path,
@@ -515,7 +809,6 @@ class P115UploadService(OwnerDelegator):
             return digest.hexdigest().upper()
 
         init_resp = None
-        init_retry_delay = OSS2_INIT_RETRY_DELAY_SECONDS
         sig_invalid_handled = False
         for init_attempt in range(OSS2_INIT_MAX_RETRIES):
             init_resp = None
@@ -548,12 +841,16 @@ class P115UploadService(OwnerDelegator):
                     sig_invalid_handled = True
                     continue
                 if init_attempt < OSS2_INIT_MAX_RETRIES - 1:
+                    # 429 用 5 秒起步的限流退避，其余按策略表指数退避 + 抖动。
+                    rate_limited = self._note_rate_limited(error)
+                    delay = retry_delay(
+                        "init", init_attempt + 1, rate_limited=rate_limited
+                    )
                     logger.warning(
                         f"115 上传初始化失败，第 {init_attempt + 1}/"
                         f"{OSS2_INIT_MAX_RETRIES} 次重试：{error}"
                     )
-                    time.sleep(init_retry_delay)
-                    init_retry_delay *= 2
+                    time.sleep(delay)
                 else:
                     logger.error(f"115 上传初始化重试用尽：{error}")
                     raise
@@ -580,14 +877,10 @@ class P115UploadService(OwnerDelegator):
             raise RuntimeError(f"115 上传信息不完整：{init_resp}")
 
         # -- Step 2: OSS token --
-        endpoint, key_id, key_secret, token, expiration = self._oss2_get_token()
-        proxies = self._oss2_proxy_dict()
-
-        def _make_bucket():
-            auth = Oss2StsAuth(key_id, key_secret, token)
-            return Oss2Bucket(auth, endpoint, bucket_name, proxies=proxies)
-
-        bucket = _make_bucket()
+        _endpoint, key_id, key_secret, token, expiration = self._oss2_get_token()
+        bucket_holder = {
+            "bucket": self._oss2_bucket(key_id, key_secret, token, bucket_name)
+        }
         part_size = oss2_determine_part_size(
             file_size, preferred_size=OSS2_UPLOAD_PART_SIZE
         )
@@ -595,66 +888,98 @@ class P115UploadService(OwnerDelegator):
             f"115 开始分片上传（oss2）：{source.name} -> {upload_name}，"
             f"分片 {part_size // 1024 // 1024}MB"
         )
-        upload_id = bucket.init_multipart_upload(
+        upload_id = bucket_holder["bucket"].init_multipart_upload(
             object_name, params={"encoding-type": "url", "sequential": ""}
         ).upload_id
+        parts_total = -(-int(file_size) // int(part_size))
+        # 并发度 > 1 且多于一片时走并发分片（与远程直传共用执行器）；
+        # 否则走原来的顺序循环（单片文件、并发度 0/1 时的行为不变）。
+        concurrency = self._upload_concurrency()
         parts = []
         try:
-            with source.open("rb") as fileobj:
-                part_number = 1
-                offset = 0
-                while offset < file_size:
-                    # token 快过期就先刷新，再传这一片。
-                    if self._oss2_token_expiring(expiration):
-                        logger.info("115 OSS Token 即将过期，正在刷新...")
-                        endpoint, key_id, key_secret, token, expiration = (
-                            self._oss2_get_token()
-                        )
-                        bucket = _make_bucket()
-                        logger.info("115 OSS Token 刷新成功")
-                    num_to_upload = min(part_size, file_size - offset)
-                    # 单片失败只重传该片；token 过期类错误先刷新 token。
-                    last_part_error: Optional[Exception] = None
-                    for part_attempt in range(OSS2_PART_MAX_RETRIES):
-                        try:
-                            result = bucket.upload_part(
-                                object_name,
-                                upload_id,
-                                part_number,
-                                data=OssSizedFileAdapter(fileobj, num_to_upload),
+            if concurrency > 1 and parts_total > 1:
+                logger.info(
+                    f"115 oss2 分片并发上传：{concurrency} 路，"
+                    f"共 {parts_total} 片"
+                )
+                parts = self._upload_oss2_parts_concurrently(
+                    source, bucket_holder, bucket_name, object_name, upload_id,
+                    part_size, file_size, expiration,
+                    progress_callback=progress_callback,
+                )
+                if progress_callback:
+                    progress_callback(file_size, file_size)
+            else:
+                with source.open("rb") as fileobj:
+                    part_number = 1
+                    offset = 0
+                    while offset < file_size:
+                        # token 快过期就先刷新，再传这一片。
+                        if self._oss2_token_expiring(expiration):
+                            logger.info("115 OSS Token 即将过期，正在刷新...")
+                            _endpoint, key_id, key_secret, token, expiration = (
+                                self._oss2_get_token()
                             )
-                            parts.append(OssPartInfo(part_number, result.etag))
-                            api_meter.record("oss2:part", bytes_=num_to_upload)
-                            last_part_error = None
-                            break
-                        except Exception as error:
-                            last_part_error = error
-                            if part_attempt >= OSS2_PART_MAX_RETRIES - 1:
+                            bucket_holder["bucket"] = self._oss2_bucket(
+                                key_id, key_secret, token, bucket_name
+                            )
+                            logger.info("115 OSS Token 刷新成功")
+                        num_to_upload = min(part_size, file_size - offset)
+                        # 单片失败只重传该片；token 过期类错误先刷新 token。
+                        last_part_error: Optional[Exception] = None
+                        for part_attempt in range(OSS2_PART_MAX_RETRIES):
+                            try:
+                                self._data_rate_limiter().acquire()
+                                result = bucket_holder["bucket"].upload_part(
+                                    object_name,
+                                    upload_id,
+                                    part_number,
+                                    data=OssSizedFileAdapter(fileobj, num_to_upload),
+                                )
+                                parts.append(OssPartInfo(part_number, result.etag))
+                                api_meter.record("oss2:part", bytes_=num_to_upload)
+                                last_part_error = None
                                 break
-                            if self._is_oss2_token_error(error):
-                                logger.warning(
-                                    "115 上传分片遇到 Token 过期，刷新后重传该片"
+                            except Exception as error:
+                                last_part_error = error
+                                if part_attempt >= OSS2_PART_MAX_RETRIES - 1:
+                                    break
+                                rate_limited = self._note_rate_limited(error)
+                                if self._is_oss2_token_error(error):
+                                    logger.warning(
+                                        "115 上传分片遇到 Token 过期，刷新后重传该片"
+                                    )
+                                    _endpoint, key_id, key_secret, token, expiration = (
+                                        self._oss2_get_token()
+                                    )
+                                    bucket_holder["bucket"] = self._oss2_bucket(
+                                        key_id, key_secret, token, bucket_name
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"115 上传分片失败，重传该片 "
+                                        f"({part_attempt + 1}/{OSS2_PART_MAX_RETRIES})："
+                                        f"{error}"
+                                    )
+                                # 429 用 5 秒起步的限流退避，其余按策略表
+                                # （旧行为是不睡觉直接重传，v1.18.0 起统一
+                                # 为 1 秒起步的指数退避 + 抖动）。
+                                time.sleep(
+                                    retry_delay(
+                                        "part", part_attempt + 1,
+                                        rate_limited=rate_limited,
+                                    )
                                 )
-                                endpoint, key_id, key_secret, token, expiration = (
-                                    self._oss2_get_token()
-                                )
-                                bucket = _make_bucket()
-                            else:
-                                logger.warning(
-                                    f"115 上传分片失败，重传该片 "
-                                    f"({part_attempt + 1}/{OSS2_PART_MAX_RETRIES})："
-                                    f"{error}"
-                                )
-                            fileobj.seek(offset)
-                    if last_part_error is not None:
-                        raise last_part_error
-                    offset += num_to_upload
-                    part_number += 1
-                    if progress_callback:
-                        progress_callback(offset, file_size)
+                                fileobj.seek(offset)
+                        if last_part_error is not None:
+                            raise last_part_error
+                        offset += num_to_upload
+                        part_number += 1
+                        if progress_callback:
+                            progress_callback(offset, file_size)
         except Exception:
             with contextlib.suppress(Exception):
-                bucket.abort_multipart_upload(object_name, upload_id)
+                bucket_holder["bucket"].abort_multipart_upload(object_name, upload_id)
             raise
 
         self._upload_stat()["parts"] = len(parts)
@@ -668,7 +993,7 @@ class P115UploadService(OwnerDelegator):
             ),
             "x-oss-forbid-overwrite": "false",
         }
-        result = bucket.complete_multipart_upload(
+        result = bucket_holder["bucket"].complete_multipart_upload(
             object_name, upload_id, parts, headers=headers
         )
         if result.status != 200:
@@ -753,18 +1078,33 @@ class P115UploadService(OwnerDelegator):
         # （服务端收到的分块 md5 与客户端算出的不一致，属传输抖动），一次
         # 失败就杀死整个任务。1.12.9 起本地文件改走 oss2 自管分片（p115disk
         # 同款）：单片失败只重传该片、token 快过期先刷新；整文件重传
-        # （最多 3 次、退避 2/4 秒，与 MP 自带 u115 存储同一口径）只作
-        # 外层兜底。SHA1 只算一次，不随重试重复读整份文件。
+        # （最多 3 次、按统一重试策略表指数退避 2 秒起 + 抖动，429 时
+        # 5 秒起，与 MP 自带 u115 存储同一口径）只作外层兜底。SHA1 只算一次，不随重试重复读整份文件。
         # 1.12.13：oss2 路子在线上全量失败（原因未明，代理已排除——
         # cd2 走同一代理正常），先回落旧路子（p115oss）保证上传能走通，
         # 同时把 oss2 的原错记下来以便定位。
+        # 上传熔断器（Phase 3b-10）：连续失败达到阈值后打开，冷却期内
+        # 新上传直接跳过（只放行秒传探针）；秒传探针不走 upload_file，
+        # 不受熔断影响。预检失败（客户端/文件/目录）不计入熔断。
+        breaker = self._upload_breaker()
+        if not breaker.can_upload():
+            remaining = breaker.cooldown_remaining()
+            self._last_upload_error = (
+                "115 上传熔断器开启"
+                f"（连续失败 {self._breaker_threshold()} 次后冷却中，"
+                f"剩余约 {remaining:.0f} 秒），本次上传已跳过，只放行秒传探针"
+            )
+            logger.warning(f"115 本地上传已跳过：{self._last_upload_error}")
+            return False
         last_error: Optional[Exception] = None
         started_at = time.monotonic()
         file_size = 0
         for attempt in range(1, _UPLOAD_MAX_ATTEMPTS + 1):
-            # 本次尝试的后端/秒传/分片数：内层方法边跑边填，终态日志只读
+            # 本次尝试的后端/秒传/分片数/429 数：内层方法边跑边填，终态日志只读
             # 最后一次尝试的结果（重试会覆盖）。
-            self._upload_stats = {"backend": "", "rapid": False, "parts": 0}
+            self._upload_stats = {
+                "backend": "", "rapid": False, "parts": 0, "rate_limited": 0,
+            }
             try:
                 file_size = source.stat().st_size
                 if OSS2_AVAILABLE:
@@ -814,6 +1154,7 @@ class P115UploadService(OwnerDelegator):
                 logger.info(f"115 本地文件上传完成：{source.name} -> {save_path}/{upload_name}")
                 self._last_upload_error = ""
                 api_meter.record("upload:success", bytes_=file_size)
+                breaker.record_success()
                 self._log_upload_telemetry(
                     source.name, file_size, time.monotonic() - started_at, ok=True
                 )
@@ -822,12 +1163,15 @@ class P115UploadService(OwnerDelegator):
                 last_error = error
                 if attempt >= _UPLOAD_MAX_ATTEMPTS:
                     break
+                # 429 用 5 秒起步的限流退避，其余按策略表指数退避 + 抖动。
+                rate_limited = self._note_rate_limited(error)
+                delay = retry_delay("file", attempt, rate_limited=rate_limited)
                 logger.warning(
                     f"115 本地文件上传第 {attempt} 次失败，"
-                    f"{_UPLOAD_RETRY_DELAY_SECONDS[attempt - 1]} 秒后重传："
+                    f"{delay:.1f} 秒后重传："
                     f"{source.name}，{describe_upload_error(error)}"
                 )
-                time.sleep(_UPLOAD_RETRY_DELAY_SECONDS[attempt - 1])
+                time.sleep(delay)
         # p115oss 会把上传失败包成 MultipartUploadAbort（消息是上传
         # 参数字典，含 user_key），真报错在 __cause__ 里；这里拆包
         # 取原错并脱敏，日志行与 last_error 用同一句，下次失败时
@@ -839,6 +1183,8 @@ class P115UploadService(OwnerDelegator):
             f"115 本地文件上传失败：{source.name}，{detail}"
         )
         api_meter.record("upload:failure", bytes_=file_size)
+        # 终态失败记一次熔断：连续失败达到阈值后打开，冷却期内新上传跳过。
+        breaker.record_failure()
         self._log_upload_telemetry(
             source.name, file_size, time.monotonic() - started_at, ok=False
         )
@@ -848,17 +1194,19 @@ class P115UploadService(OwnerDelegator):
     def _log_upload_telemetry(
             self, name: str, file_size: int, seconds: float, *, ok: bool
     ) -> None:
-        """终态计量行：一次上传花了多久、走哪个后端、秒传与否、几片，
-        以及进程累计快照（风控面验收用，见 core/telemetry.py）。"""
+        """终态计量行：一次上传花了多久、走哪个后端、秒传与否、几片、
+        429 出现几次，以及进程累计快照（风控面验收用，见 core/telemetry.py）。"""
         stats = getattr(self, "_upload_stats", None) or {}
         backend = stats.get("backend") or "未知"
         rapid = "是" if stats.get("rapid") else "否"
         parts = stats.get("parts")
         parts_text = f"{parts}片" if isinstance(parts, int) and parts >= 0 else "未知"
+        rate_limited = int(stats.get("rate_limited") or 0)
+        rate_text = f" 429={rate_limited}次" if rate_limited else ""
         logger.info(
             f"115 上传计量：{name} {file_size / 1048576:.2f}MB "
             f"{seconds:.1f}s {'成功' if ok else '失败'} 后端={backend} "
-            f"秒传={rapid} 分片={parts_text} "
+            f"秒传={rapid} 分片={parts_text}{rate_text} "
             f"累计={format_snapshot(api_meter.snapshot())}"
         )
 
@@ -922,8 +1270,21 @@ class P115UploadService(OwnerDelegator):
                     f"115 SHA1 秒传完成：{target_name} -> "
                     f"{save_path}/{target_name}"
                 )
+                # 秒传探针是熔断的放行项：115 正常应答本身就是一次健康信号。
+                self._upload_breaker().record_success()
                 return "rapid"
             api_meter.record("rapid:miss")
+            # 熔断器（Phase 3b-10）：秒传探针已放行，从这里起是真实上传，
+            # 熔断打开时直接返回 False（调用方回退本地缓存下载 + upload_file，
+            # 那边同样被熔断拦住，不会再起新上传）。
+            breaker = self._upload_breaker()
+            if not breaker.can_upload():
+                logger.warning(
+                    "115 Range 直传已跳过：上传熔断器开启"
+                    f"（冷却剩余约 {breaker.cooldown_remaining():.0f} 秒），"
+                    "只放行秒传探针"
+                )
+                return False
 
             part_size = upload_part_size(file_size)
             concurrency = self._upload_concurrency()
@@ -950,6 +1311,7 @@ class P115UploadService(OwnerDelegator):
                         f"115 Range 直传完成（{concurrency} 路分片并发）："
                         f"{target_name} -> {save_path}/{target_name}"
                     )
+                    breaker.record_success()
                     return "remote"
                 except InterruptedError:
                     raise
@@ -976,10 +1338,16 @@ class P115UploadService(OwnerDelegator):
             logger.info(
                 f"115 Range 直传完成：{target_name} -> {save_path}/{target_name}"
             )
+            breaker.record_success()
             return "remote"
         except InterruptedError:
             raise
         except Exception as error:
+            # 源盘侧失败（读源盘/链失效）不是 115 的错，不计熔断；
+            # 只有 429/限流才记一次。
+            if is_rate_limit_error(error):
+                self._note_rate_limited(error)
+                self._upload_breaker().record_failure()
             logger.warning(f"115 Range 直传失败，将回退本地缓存：{error}")
             return False
         finally:
@@ -987,7 +1355,12 @@ class P115UploadService(OwnerDelegator):
 
 
     def _upload_concurrency(self) -> int:
-        """115 分片并发上传的并发度；``0`` 表示关闭（回退顺序上传）。"""
+        """115 分片并发上传的并发度；``0`` 表示关闭（回退顺序上传）。
+
+        直传与本地上传共用：远程 Range 直传（_upload_parts_concurrently）
+        与 oss2 本地分片（_upload_oss2_parts_concurrently）都按它取
+        worker 数。默认 2（计划 §14：先从 2 起步实测，不要直接拉满）。
+        """
         value = getattr(
             getattr(self, "_owner", None),
             "_cross_transfer_upload_concurrency",
@@ -1061,56 +1434,34 @@ class P115UploadService(OwnerDelegator):
             try:
                 start = (part_number - 1) * size
                 length = min(size, total - start)
-                last_error: Optional[Exception] = None
-                for attempt in range(2):
-                    if stop_requested and stop_requested():
-                        raise InterruptedError
-                    try:
-                        data = reader.read_range(start, length)
-                        if len(data) != length:
-                            raise IOError(
-                                f"源盘第 {part_number} 分片读取不完整："
-                                f"{len(data)}/{length}"
-                            )
-                        result = oss_multipart_upload_part(
-                            target, upload_id, data, part_number=part_number,
-                            reporthook=lambda count, number=part_number: report(
-                                number, count
-                            ),
-                            **proxy_kwargs,
+
+                def _put_once() -> dict:
+                    data = reader.read_range(start, length)
+                    if len(data) != length:
+                        raise IOError(
+                            f"源盘第 {part_number} 分片读取不完整："
+                            f"{len(data)}/{length}"
                         )
-                        api_meter.record("p115oss:part", bytes_=length)
-                        return result
-                    except InterruptedError:
-                        raise
-                    except Exception as error:  # noqa: BLE001 - 单片失败重试一次
-                        last_error = error
-                        if attempt:
-                            raise
-                        logger.warning(
-                            f"115 第 {part_number} 分片上传失败，重试一次：{error}"
-                        )
-                        time.sleep(1)
-                raise last_error or IOError(f"115 第 {part_number} 分片上传失败")
+                    return oss_multipart_upload_part(
+                        target, upload_id, data, part_number=part_number,
+                        reporthook=lambda count, number=part_number: report(
+                            number, count
+                        ),
+                        **proxy_kwargs,
+                    )
+
+                result = self._put_part_with_retry(
+                    _put_once, stop_requested=stop_requested
+                )
+                api_meter.record("p115oss:part", bytes_=length)
+                return result
             finally:
                 pool.put(reader)
 
         try:
-            parts: list = []
-            with ThreadPoolExecutor(
-                    max_workers=workers, thread_name_prefix="p115-upload-part",
-            ) as executor:
-                futures = [
-                    executor.submit(put_part, number)
-                    for number in range(1, parts_total + 1)
-                ]
-                try:
-                    for future in as_completed(futures):
-                        parts.append(future.result())
-                except Exception:
-                    for future in futures:
-                        future.cancel()
-                    raise
+            parts: list = self._run_parts_concurrently(
+                range(1, parts_total + 1), put_part, workers=workers
+            )
             if len(parts) != parts_total:
                 raise IOError(
                     f"115 分块上传分片数不符：{len(parts)}/{parts_total}"
@@ -1257,7 +1608,8 @@ class _HttpRangeReader(io.RawIOBase):
                 last_error = error
                 if attempt >= 2:
                     raise
-                time.sleep(0.5 * (attempt + 1))
+                # 源盘侧重试也走统一策略表（0.5 秒起步，指数 + 抖动）。
+                time.sleep(retry_delay("range", attempt + 1))
                 continue
             self._position += len(data)
             return data

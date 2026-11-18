@@ -17,6 +17,7 @@ from .files import P115FileService
 from .offline import OfflineDownloadService
 from .share import ShareService
 from .upload import P115UploadService
+from .upload_policy import UPLOAD_DATA_PUT_MIN_INTERVAL
 from ..common import DriveRateLimiter, create_directory_path_cache
 from ...core import get_component, resolve_component
 from ...utils.cache import create_platform_ttl_cache
@@ -306,6 +307,12 @@ class P115ClientManager:
         _min_interval = min_interval if min_interval is not None else self.DEFAULT_MIN_INTERVAL
         self.rate_limiter = DriveRateLimiter.shared(
             "p115", cookies, min_interval=_min_interval
+        )
+        # 数据面 PUT 起步 pacing（与控制面 1.5 秒是两个独立实例）：
+        # 分片 PUT 只平滑突发（0.1 秒），不节流吞吐；真正的刹车是
+        # 分片并发度上限 + 上传熔断器。见 upload_policy。
+        self.data_rate_limiter = DriveRateLimiter.shared(
+            "p115", cookies, min_interval=UPLOAD_DATA_PUT_MIN_INTERVAL
         )
 
         # 路径缓存（带 TTL）

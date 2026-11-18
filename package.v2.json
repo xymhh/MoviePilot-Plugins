@@ -3,7 +3,7 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.17.0",
+    "version": "1.18.0",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -375,7 +375,8 @@
       "v1.15.0": "Phase 3a（v1.15.0）：入库管线合一 + 判重/解析/基线收敛——TV 与电影走同一条入库管线（_run_ingest_pipeline：入口判重门 → 转存 → MP 整理+字幕 → STRM 登记，TV 批后落盘自检结果挂在每条结果的 landed 上）；入口预检（_filter_entry_dedup_items，跳过项 success+skip_history、不下载不转存）+ 整理入口改调 MP 原生 get_no_exists_info 查库（_library_episode_exists 单层列目录的盲点修掉，整季缺失 episodes=[] 判缺、无法识别时 fail-open）；季集解析合一（core/episode_parse.parse_season_episode）；_effective_mediainfo 合一（handlers/sync/utils.resolve_effective_mediainfo）；文件在哪唯一入口（_locate_cloud_file：dest 精确 + 单目录四策略 + 递归复用同一匹配）；洗版基线三合一（_gather_episode_version_candidates + 共享季目录缓存/评分缓存）；MP 改名后文件名以 MP 历史 dest 为准反向同步（只同步 file_name，不动 cloud_dir）；TV/电影入口编排合一（SubscribeFlowService：开场 + 资源搜索，exclude_ids 死线程删除，resource_urls 单元素循环删除）；P0：_transient_target_defaults 补 @staticmethod（无订阅手动提交 TypeError 修掉）；配置热更新三个出口重登下载器条目。",
       "v1.17.0": "Phase 4（v1.17.0）：状态机收敛——finalize 等 MP 终态再判失败（同盘批量触发 MP 整理时把返回的整理身份写进 pending 项，与跨盘路一致；无身份的项才走插件自己的定位逻辑，2 次/120 秒只约束插件自己的定位/移动）；fail_count 两路合一（内联自增改调 _finalize_failure，阈值与超时只在一处定义）；_FINALIZE_MAX_FAILURES 等常量只在 service.py 定义；_MP_ORGANIZING 内存登记去掉，下载页改从持久化 pending 记录推导“整理中”态；manual_review 归属写清（MP 侧所有，插件只按失败处理、不自动重试）；finalize 终态回写频道监控（按分享链接定位条目，订阅阶段失败与后处理失败分阶段展示）；磁力路径 STRM 缺 pickcode 时按最终文件名重查一次取真实 pickcode。",
       "v1.12.12": "oss2 分片上传改走直连，不再把上传代理传给 oss2 Bucket：插件配了上传代理（mihomo:7890）后，分片 PUT 全走代理失败，但秒传只调 p115 API（代理对其无效、实际直连）能成功，cd2 直连也成功；p115disk 原版建 Bucket 时根本不传代理。oss2 数据面现在直连，上传代理配置仍保留给 p115 客户端 API 侧。",
-      "v1.12.11": "手动添加的平台整理历史改记「本地 → 115网盘CS版」：插件写 MP 整理历史时，来源把手动添加的跨盘转存标成「手动添加」、目标存网盘驱动名「115网盘」，而 MP 自己写的同一集记录是「本地 → 115网盘CS版」（移动），两边看着不一致，且「115网盘」与 MP 原生 115 存储同名、会误导；现在手动来源记「本地」（文件进 115 前在本地 /downloads 中转），目标改记 MP 存储名「115网盘CS版」。老记录靠插件启动时的对账自动替换（旧「手动添加 · …」不在新期望集合里会被删掉，新「本地 · …」会被加上；已交 MP 整理的仍跳过）。"
+      "v1.12.11": "手动添加的平台整理历史改记「本地 → 115网盘CS版」：插件写 MP 整理历史时，来源把手动添加的跨盘转存标成「手动添加」、目标存网盘驱动名「115网盘」，而 MP 自己写的同一集记录是「本地 → 115网盘CS版」（移动），两边看着不一致，且「115网盘」与 MP 原生 115 存储同名、会误导；现在手动来源记「本地」（文件进 115 前在本地 /downloads 中转），目标改记 MP 存储名「115网盘CS版」。老记录靠插件启动时的对账自动替换（旧「手动添加 · …」不在新期望集合里会被删掉，新「本地 · …」会被加上；已交 MP 整理的仍跳过）。",
+      "v1.18.0": "Phase 3b（v1.18.0）：上传扁平化——三套分片实现收成一个分片引擎 + oss2/p115oss 两个后端：oss2 本地分片与远程 Range 直传共用并发执行器，本地上传默认 2 路并发（配置项 cross_transfer_upload_concurrency，0 关闭，上限 16）；init/每片/整文件/源盘 Range 四处重试统一进一张策略表（指数退避 + ±20% 抖动），429 用 5 秒起步的限流退避并记 upload:429 计量；数据面 PUT 纳入独立 pacing 门控（0.1 秒起步平滑，不套控制面 1.5 秒）；上传加熔断器（默认连续失败 5 次后打开、冷却 300 秒，冷却期内新上传直接跳过，只放行秒传探针，阈值/冷却可配）；上传终态计量行带 429 次数。"
     }
   },
   "version": "1.9.85",

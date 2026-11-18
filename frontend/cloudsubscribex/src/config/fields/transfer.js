@@ -235,7 +235,7 @@ export function createTransferSection(options) {
             type: "number",
             min: 0,
             max: 16,
-            hint: "跨盘直传时并发上传的 115 分片数，0 表示关闭（回退单流顺序上传）",
+            hint: "直传与本地上传共用的 115 分片并发数，0 表示关闭（回退单流顺序上传）；默认 2，先小步实测再往上调",
             cols: 4,
             show: enabled("cross_transfer_enabled"),
           },

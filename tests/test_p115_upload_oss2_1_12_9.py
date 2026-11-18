@@ -200,6 +200,9 @@ class P115UploadOss2Tests(unittest.TestCase):
         self._client = client
         owner = OwnerDelegator(SimpleNamespace(
             client=client,
+            # 本文件钉顺序引擎：并发度 0，不走并发分片分支；
+            # 并发分片另有 test_upload_concurrency_1_18_0.py 专测。
+            _cross_transfer_upload_concurrency=0,
             _target_file_cache=MagicMock(),
             _get_component=lambda _component: MagicMock(),
             _rate_limited_call=lambda func, *args, **kwargs: func(*args, **kwargs),
@@ -265,8 +268,15 @@ class P115UploadOss2Tests(unittest.TestCase):
             source = self._write_source(tempdir)
             with patch.object(upload_module.time, "sleep") as mock_sleep:
                 self.assertTrue(service.upload_file(str(source), "/"))
-            # 单片重试不走整文件重传，不睡觉。
-            mock_sleep.assert_not_called()
+            # 单片重试走统一策略表：1 秒起步 ±20% 抖动（旧行为是不睡觉，
+            # v1.18.0 起 init/每片/整文件三处重试语义统一）；仍不走整文件重传。
+            # 数据面 pacing 的起步等待（≤0.12 秒）不在断言里。
+            delays = [
+                call.args[0] for call in mock_sleep.call_args_list
+                if call.args[0] >= 0.5
+            ]
+            self.assertEqual(len(delays), 1)
+            self.assertAlmostEqual(delays[0], 1.0, delta=0.25)
         self.assertEqual(
             [number for number, _ in self._bucket.uploaded_parts], [1, 2, 3]
         )
@@ -324,9 +334,15 @@ class P115UploadOss2Tests(unittest.TestCase):
             source = self._write_source(tempdir)
             with patch.object(upload_module.time, "sleep") as mock_sleep:
                 self.assertTrue(service.upload_file(str(source), "/"))
-            self.assertEqual(
-                [call.args[0] for call in mock_sleep.call_args_list], [2, 4]
-            )
+            # init 退避 2 秒、4 秒指数递增，各 ±20% 抖动；数据面 pacing
+            # 的起步等待（≤0.12 秒）不在断言里。
+            delays = [
+                call.args[0] for call in mock_sleep.call_args_list
+                if call.args[0] >= 0.5
+            ]
+            self.assertEqual(len(delays), 2)
+            self.assertAlmostEqual(delays[0], 2.0, delta=0.45)
+            self.assertAlmostEqual(delays[1], 4.0, delta=0.85)
         self.assertEqual(self._client.upload_file_init.call_count, 3)
         self.assertEqual(
             [number for number, _ in self._bucket.uploaded_parts], [1, 2, 3]

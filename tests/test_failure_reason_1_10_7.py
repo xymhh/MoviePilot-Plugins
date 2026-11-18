@@ -28,7 +28,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
@@ -409,7 +409,9 @@ class P115UploadLastErrorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             source = Path(tempdir) / "f.mkv"
             source.write_bytes(PAYLOAD)
-            result = service.upload_file(str(source), "/movies", "f.mkv")
+            # 429 整文件退避是 5/10 秒真等，测试只断言 last_error，不等它。
+            with patch.object(upload_module.time, "sleep"):
+                result = service.upload_file(str(source), "/movies", "f.mkv")
         self.assertIs(result, False)
         self.assertIn("429", service.last_error)
         self.assertIn("f.mkv", service.last_error)
@@ -421,9 +423,10 @@ class P115UploadLastErrorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tempdir:
             source = Path(tempdir) / "f.mkv"
             source.write_bytes(PAYLOAD)
-            self.assertIs(
-                service.upload_file(str(source), "/movies", "f.mkv"), False,
-            )
+            with patch.object(upload_module.time, "sleep"):
+                self.assertIs(
+                    service.upload_file(str(source), "/movies", "f.mkv"), False,
+                )
             self.assertIn("429", service.last_error)
             service.client.upload_file.side_effect = None
             service.client.upload_file.return_value = {}

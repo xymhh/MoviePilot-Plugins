@@ -192,6 +192,9 @@ class Oss2FallbackTests(unittest.TestCase):
         upload_module.Oss2Bucket = MagicMock(return_value=self._bucket)
         owner = OwnerDelegator(SimpleNamespace(
             client=client,
+            # 本文件钉顺序引擎：并发度 0，不走并发分片分支；
+            # 并发分片另有 test_upload_concurrency_1_18_0.py 专测。
+            _cross_transfer_upload_concurrency=0,
             _target_file_cache=MagicMock(),
             _get_component=lambda _component: MagicMock(),
             _rate_limited_call=lambda func, *args, **kwargs: func(*args, **kwargs),

@@ -110,6 +110,14 @@ class DriveRateLimiter:
                 time.sleep(delay)
                 delay = min(delay * factor, 60.0)
 
+    def acquire(self) -> None:
+        """只做起步 pacing（不执行、不重试），供数据面 PUT 在每次上传前调用。
+
+        控制面用 ``call()``（执行 + 瞬态重试）；数据面分片 PUT 自带
+        重试循环，这里只需要在每次 PUT 前等够最小间隔、平滑突发。
+        """
+        self._before_request()
+
 
 def safe_int(value: Any) -> int:
     """将外部接口值转换为整数，空值和非法值按 0 处理。"""

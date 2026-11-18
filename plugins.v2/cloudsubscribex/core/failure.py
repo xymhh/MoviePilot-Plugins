@@ -12,6 +12,8 @@
 
 from typing import Any, Dict, Iterable, Mapping, Tuple
 
+from .error_text import describe_upload_error
+
 #: 分享链接失效 / 已取消 / 已删除 / 提取码错误。
 KIND_SHARE_INVALID = "share_invalid"
 #: 分享有效，但里面找不到历史记录对应的源文件。
@@ -112,6 +114,54 @@ def classify_failure(reason: Any) -> str:
 def is_permanent(kind: Any) -> bool:
     """该类型失败是否永久性（重试不可能成功）。"""
     return str(kind or "").strip() in PERMANENT_KINDS
+
+
+#: 数字码 429 可能出现的属性名 / 字典键名（oss2/p115/httpx 各家不同）。
+_RATE_LIMIT_CODE_ATTRS = (
+    "status", "code", "errno", "errcode", "errNo", "status_code",
+)
+
+
+def is_rate_limit_error(error: Any) -> bool:
+    """异常是否由 429/限流引起（上传 429 退避与熔断的统一判据）。
+
+    两路判据，数字码优先：
+    1. 沿异常链（__cause__/__context__、args 里的 dict）找 429 数字码；
+    2. 找不到数字码时，把 ``describe_upload_error`` 拆包后的根因文本
+       按 ``classify_failure`` 归类，命中 ``KIND_RISK_CONTROL`` 即算。
+    第 2 路故意覆盖整个风控家族（风控/限流/频繁/账号异常）：退避方向
+    上宁可多等，不可把一次限流当成普通抖动原地硬顶。
+    """
+    if error is None:
+        return False
+    seen = set()
+    current: Any = error
+    depth = 0
+    while current is not None and depth < 8:
+        depth += 1
+        if id(current) in seen:
+            break
+        seen.add(id(current))
+        for attr in _RATE_LIMIT_CODE_ATTRS:
+            try:
+                value = getattr(current, attr, None)
+            except Exception:
+                value = None
+            if value is not None and str(value).strip() == "429":
+                return True
+        args = getattr(current, "args", None) or ()
+        for arg in args:
+            if isinstance(arg, Mapping):
+                for key in _RATE_LIMIT_CODE_ATTRS:
+                    if key in arg and str(arg[key]).strip() == "429":
+                        return True
+        current = getattr(current, "__cause__", None) or getattr(
+            current, "__context__", None
+        )
+    try:
+        return classify_failure(describe_upload_error(error)) == KIND_RISK_CONTROL
+    except Exception:
+        return False
 
 
 #: 需要单独显示的状态名：失败再细分，避免和通用「失败」混在一起。
