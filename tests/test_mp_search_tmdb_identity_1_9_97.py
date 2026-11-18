@@ -24,7 +24,11 @@ from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
 
-from test_title_leading_emoji_1_9_96 import mp_search, platform_module  # noqa: E402
+from test_title_leading_emoji_1_9_96 import (  # noqa: E402
+    agent_module,
+    mp_search,
+    platform_module,
+)
 
 MediaType = platform_module.MediaType
 
@@ -206,8 +210,8 @@ class _RecordingMetaInfo:
 
 class CandidateForTmdbIdTest(unittest.TestCase):
     def setUp(self):
-        self._original_recognize = platform_module.recognize_media
-        self._original_metainfo = platform_module.MetaInfo
+        self._original_recognize = agent_module.recognize_media
+        self._original_metainfo = agent_module.MetaInfo
         self.calls = []
 
         def fake_recognize(chain, meta=None, mtype=None, tmdb_id=None,
@@ -218,16 +222,16 @@ class CandidateForTmdbIdTest(unittest.TestCase):
             )
             return self._next_mediainfo
 
-        platform_module.recognize_media = fake_recognize
-        platform_module.MetaInfo = _RecordingMetaInfo
+        agent_module.recognize_media = fake_recognize
+        agent_module.MetaInfo = _RecordingMetaInfo
         _RecordingMetaInfo.instances.clear()
         self._next_mediainfo = FakeMediaInfo(326140, MediaType.TV)
         owner = SimpleNamespace(chain=SimpleNamespace(name="fake-chain"))
         self.service = platform_module.PlatformIntegrationService(owner)
 
     def tearDown(self):
-        platform_module.recognize_media = self._original_recognize
-        platform_module.MetaInfo = self._original_metainfo
+        agent_module.recognize_media = self._original_recognize
+        agent_module.MetaInfo = self._original_metainfo
 
     def test_returns_canonical_candidate(self):
         candidate = self.service._candidate_for_tmdb_id(
@@ -268,7 +272,7 @@ class CandidateForTmdbIdTest(unittest.TestCase):
         def raising_recognize(*args, **kwargs):
             raise RuntimeError("chain down")
 
-        platform_module.recognize_media = raising_recognize
+        agent_module.recognize_media = raising_recognize
         self.assertIsNone(
             self.service._candidate_for_tmdb_id(326140, "tv", "虚无的十字架")
         )

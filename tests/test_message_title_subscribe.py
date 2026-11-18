@@ -24,10 +24,11 @@ pending_module = load_module(
     "cloudsubscribex.core.pending_titles",
     "plugins.v2/cloudsubscribex/core/pending_titles.py",
 )
-MessageRoutingHook = load_module(
+message_module = load_module(
     "cloudsubscribex.core.hook.message",
     "plugins.v2/cloudsubscribex/core/hook/message.py",
-).MessageRoutingHook
+)
+MessageRoutingHook = message_module.MessageRoutingHook
 
 
 class FakeMediaInfo:
@@ -65,8 +66,14 @@ class TestTitleSubscribeHook(unittest.TestCase):
             lambda subscribe_id, state: self.searches.append((subscribe_id, state)),
         )
         self._stub("handle_telegram_links", lambda payload: self.links.append(payload))
-        # 身份补齐只验证链路，不依赖真实媒体兼容层
-        self._stub("_tmdb_id_of", lambda media: 223911 if media is not None else None)
+        # 身份补齐只验证链路，不依赖真实媒体兼容层（v1.24.0：_tmdb_id_of
+        # 静态方法已删，调用点直接用 core.media.tmdb_id_of，这里改桩模块属性）
+        patcher = patch.object(
+            message_module, "tmdb_id_of",
+            lambda media: 223911 if media is not None else None,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _stub(self, name, value):
         """替换方法为桩函数：类上有定义就改类，否则改宿主（属性读写会委托过去）。"""

@@ -203,9 +203,11 @@ def _load_runtime_api_module():
                 sys.modules[_name] = _saved
 
 
-def _load_sync_runtime_module():
-    module = sys.modules.get("cloudsubscribex.core.services.runtime")
-    if module is not None and hasattr(module, "SyncRuntimeService"):
+def _load_offline_module():
+    # v1.24.0：_update_offline_monitor 从 SyncRuntimeService 搬到了
+    # OfflineTaskService（core/services/offline.py），本用例跟过去。
+    module = sys.modules.get("cloudsubscribex.core.services.offline")
+    if module is not None and hasattr(module, "OfflineTaskService"):
         # 已加载的模块绑定的是加载时的 settings 桩（可能来自其它用例文件，
         # TZ 是 Mock）；直接改它绑定的对象，否则 _update_offline_monitor
         # 里 pytz.timezone(settings.TZ) 会拿到 Mock。
@@ -223,7 +225,7 @@ def _load_sync_runtime_module():
             getattr(pytz_mod, "timezone", None)
         ) and isinstance(trigger, type):
             return module
-        del sys.modules["cloudsubscribex.core.services.runtime"]
+        del sys.modules["cloudsubscribex.core.services.offline"]
     install_app_mocks(
         "app.core", "app.core.config",
         "cloudsubscribex", "cloudsubscribex.core", "cloudsubscribex.utils",
@@ -239,8 +241,8 @@ def _load_sync_runtime_module():
 
     core.CloudDriveCapability = _Capability
     return load_module(
-        "cloudsubscribex.core.services.runtime",
-        "plugins.v2/cloudsubscribex/core/services/runtime.py",
+        "cloudsubscribex.core.services.offline",
+        "plugins.v2/cloudsubscribex/core/services/offline.py",
     )
 
 
@@ -654,7 +656,7 @@ class OfflineMonitorWiringTests(unittest.TestCase):
     """离线监控改走统一注册表：有待处理文件时挂任务，清空时摘掉。"""
 
     def test_update_offline_monitor_registers_and_removes_job(self):
-        module = _load_sync_runtime_module()
+        module = _load_offline_module()
         registry_module = _load_scheduler_module()
         registry = registry_module.SchedulerRegistry(timezone="Asia/Shanghai")
         self.addCleanup(registry.shutdown)
@@ -663,7 +665,7 @@ class OfflineMonitorWiringTests(unittest.TestCase):
             _offline_scheduler_lock=threading.Lock(),
             _sync_handler=None,
         )
-        service = module.SyncRuntimeService(owner)
+        service = module.OfflineTaskService(owner)
         object.__setattr__(
             service, "_refresh_postprocessing_sync_tasks", lambda: None
         )

@@ -3,7 +3,7 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.23.0",
+    "version": "1.24.0",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -385,7 +385,8 @@
       "v1.20.0": "Phase 5 第 3 项（v1.20.0）：SyncHandler.__init__（约 410 行）按配置分组拆成 9 个 _init_* 方法（宿主句柄/整理开关/网盘能力服务/批量与风控/插件回调/洗版规则/网盘路径/STRM 与媒体服务器/锁与缓存），__init__ 只剩头部 + _get_val 闭包 + 9 个调用；_get_val 作参数传，plugin 引用改走 self._plugin；搬移前后 345 行逐行 0 差异，全量 pytest 2136 / unittest 2024 通过。",
       "v1.21.0": "Phase 5 第 4 项（v1.21.0）：搜索源瘦身——BaseMagnetSearchService（海盗湾/UIndex）、DelegatingSearchService（聚影/蜗牛）、14 个 provider 工厂合成数据驱动的 build_search_provider、create_service() 转正、BaseSearchClient（海盗湾/UIndex）、_UnlockLimiter 合一、Turnstile 只抽模型加载、registry 跳过源记 info 日志并带原因、get_source_catalog 标注未启用原因；片库不等价未并入，PinglianQuotaBudget 是站点实时配额适配器、不换 PointBudgetLedger。全量 pytest 2202 / unittest 2090 通过。",
       "v1.22.0": "Phase 5 第 4 项（v1.22.0）：订阅源瘦身——RankingProvider 模板基类（_paginate + _candidate_from_dict + _resolve_media_type），AniList/Bangumi/豆瓣/TMDB 各瘦 45–63 行；修 Netflix 国家榜静默丢失（非富 TSV 路径补上 country_selections 处理）；补 provider 级单测 28 个。新旧版 8 个场景输出 0 差异，全量 pytest 2230 / unittest 2118 通过。",
-      "v1.23.0": "Phase 5 第 4 项（v1.23.0）：前端收敛——删总览页 overview 模式；砍 MediaDrawer 资源搜索与 ManualResourceDialog 选片；删 MediaHub 订阅模式死分支与 aired_counts 后端；历史双层合并（服务层去 apikey 手动比对）；废弃 GET /qrcode/check；硬编码插件名改走 pluginId prop；补 get_api() 回归测试。孤儿文件 MediaHub/MediaDrawer/StatsGrid 一并删除。全量 pytest 2235 / unittest 2123 通过。"
+      "v1.23.0": "Phase 5 第 4 项（v1.23.0）：前端收敛——删总览页 overview 模式；砍 MediaDrawer 资源搜索与 ManualResourceDialog 选片；删 MediaHub 订阅模式死分支与 aired_counts 后端；历史双层合并（服务层去 apikey 手动比对）；废弃 GET /qrcode/check；硬编码插件名改走 pluginId prop；补 get_api() 回归测试。孤儿文件 MediaHub/MediaDrawer/StatsGrid 一并删除。全量 pytest 2235 / unittest 2123 通过。",
+      "v1.24.0": "Phase 5 第 4 项（v1.24.0，最后一版）：服务层拆分——runtime.py 离线部分拆 offline.py；platform.py 拆三 mixin + 媒体识别收敛 media_resolve.py；三份 _is_cloud_upgrade_subscribe 合一（respect_manual_upgrade 显式参数）；归一化收敛；services/__init__ 补导出；钩子安装启动记汇总日志。Config.vue 3427→1911 行、ChannelManager.vue 1056→864 行。全量 pytest 2267 / unittest 2155 通过。"
     }
   },
   "version": "1.9.85",

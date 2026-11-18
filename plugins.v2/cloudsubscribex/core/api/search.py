@@ -196,6 +196,19 @@ class SearchApi(OwnerDelegator):
             "can_enter": bool(is_dir and file_id),
         }
 
+    @staticmethod
+    def _is_pending_hdhaven(source: str, resource_ref: str, url: str) -> bool:
+        """HDHaven 待预览态：给了 resource_ref 但还没拿到真实链接。
+
+        HDHaven 的候选只有 resource_ref（slug），预览时要拿它再调一次
+        测试搜索取详情；和“链接无效”是两回事，不能直接按无效拒绝。
+        """
+        return (
+            source == "hdhaven"
+            and bool(resource_ref)
+            and not url
+        )
+
     def api_vue_preview_search_resource(self, payload: Dict[str, Any]) -> dict:
         """只读获取测试资源的文件列表。"""
         payload = dict(payload or {})
@@ -231,11 +244,7 @@ class SearchApi(OwnerDelegator):
                 and bool(resource_ref)
                 and (not url or (is_unlocked and not valid_hdhive_url))
         )
-        pending_hdhaven = (
-                source == "hdhaven"
-                and bool(resource_ref)
-                and not url
-        )
+        pending_hdhaven = self._is_pending_hdhaven(source, resource_ref, url)
         if (
                 not url and not pending_resolve and not pending_hdhive
                 and not pending_hdhaven

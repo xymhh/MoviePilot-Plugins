@@ -10,6 +10,7 @@ from app.chain.message import MessageChain
 from app.log import logger
 
 from ..delegation import OwnerDelegator
+from ..media import tmdb_id_of
 from ..pending_titles import PendingTitleStore, get_pending_title_store, media_type_value
 from ...search.types import resource_type_from_url
 
@@ -163,6 +164,7 @@ class MessageRoutingHook(OwnerDelegator):
 
             MessageChain._handle_message_core = wrapped
             cls._wrapped = wrapped
+            logger.info("消息路由接管器已安装：MessageChain._handle_message_core")
 
     def close(self) -> None:
         """卸载当前实例，并在没有接管方时恢复平台原方法。"""
@@ -314,17 +316,10 @@ class MessageRoutingHook(OwnerDelegator):
         except Exception as error:
             logger.debug(f"片名候选识别线程启动失败：{text}，{error}", exc_info=True)
 
-    @staticmethod
-    def _tmdb_id_of(media: Any) -> Optional[int]:
-        """读取媒体对象的 TMDB ID（惰性导入，避免加载期依赖 app 运行时）。"""
-        if media is None:
-            return None
-        from ..media import tmdb_id_of
-
-        try:
-            return tmdb_id_of(media)
-        except Exception:
-            return None
+    # TMDB ID 读取已收敛到 core/media.py 的 tmdb_id_of（本文件原
+    # _tmdb_id_of 静态方法只是它的 None 守卫 + 吞异常包装；核实过
+    # tmdb_id_of 对 None/异常输入本身就返回 None，包装是冗余的，
+    # 故删掉、调用点直接用 tmdb_id_of）。
 
     def _enrich_title_candidate(self, record_id: Optional[str], text: str) -> None:
         """后台识别片名并补齐登记记录的身份，识别不出就保持只按片名比对。"""
@@ -345,7 +340,7 @@ class MessageRoutingHook(OwnerDelegator):
                 year=str(getattr(mediainfo, "year", "") or ""),
                 mtype=media_type_value(media_type),
                 season=season,
-                tmdbid=self._tmdb_id_of(mediainfo),
+                tmdbid=tmdb_id_of(mediainfo),
             )
         except Exception as error:
             logger.debug(f"片名候选身份补齐失败：{text}，{error}", exc_info=True)

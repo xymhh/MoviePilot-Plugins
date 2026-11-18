@@ -185,10 +185,12 @@ class OfflineFinalizedFlagTest(_BaseTest):
 class OfflineFinalizedApiContractTest(unittest.TestCase):
     """列表接口必须只加展示字段，不得污染完成判定字段。"""
 
-    RUNTIME_FILE = "plugins.v2/cloudsubscribex/core/services/runtime.py"
+    # v1.24.0：_merge_pending_finalize_tasks（含 finalized 标注）从
+    # runtime.py 搬到了 core/services/offline.py，契约跟过去。
+    OFFLINE_FILE = "plugins.v2/cloudsubscribex/core/services/offline.py"
 
     def setUp(self):
-        with open(self.RUNTIME_FILE, encoding="utf-8") as handle:
+        with open(self.OFFLINE_FILE, encoding="utf-8") as handle:
             self.source = handle.read()
 
     def test_finalized_fields_are_set(self):

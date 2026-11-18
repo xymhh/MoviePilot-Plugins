@@ -8,6 +8,11 @@
 显示的 126/27 只是已保存的选中值。
 
 本文件只做静态断言（前端 wiring 的回归守卫；import 路径错误由 vite 构建兜底）。
+
+v1.24.0 拆分：编辑弹窗（含 <ConfigSection>）抽成
+dashboard/channel/ChannelEditDialog.vue，动态选项的两条绑定随弹窗模板
+一起搬过去；加载器函数本身仍在 ChannelManager.vue，父组件以函数 prop
+传给弹窗。
 """
 
 from __future__ import annotations
@@ -24,6 +29,16 @@ CHANNEL_MANAGER = os.path.join(
     "components",
     "dashboard",
     "ChannelManager.vue",
+)
+CHANNEL_EDIT_DIALOG = os.path.join(
+    REPO_ROOT,
+    "frontend",
+    "cloudsubscribex",
+    "src",
+    "components",
+    "dashboard",
+    "channel",
+    "ChannelEditDialog.vue",
 )
 SEARCH_FIELDS = os.path.join(
     REPO_ROOT,
@@ -66,9 +81,20 @@ class ChannelDynamicOptionsTest(unittest.TestCase):
         self.assertIn("resolveDynamicField(field, channelOptions)", source)
 
     def test_config_section_binds_dynamic_option_events(self):
-        source = _read(CHANNEL_MANAGER)
+        # v1.24.0：编辑弹窗抽成 ChannelEditDialog.vue，绑定随弹窗模板搬过去；
+        # 加载器函数仍在 ChannelManager.vue，以函数 prop 传给弹窗。
+        source = _read(CHANNEL_EDIT_DIALOG)
         self.assertIn('@load-options="loadChannelDynamicOptions"', source)
         self.assertIn('@refresh-options="refreshChannelDynamicOptions"', source)
+        parent = _read(CHANNEL_MANAGER)
+        self.assertIn(
+            ':load-channel-dynamic-options="loadChannelDynamicOptions"',
+            parent,
+        )
+        self.assertIn(
+            ':refresh-channel-dynamic-options="refreshChannelDynamicOptions"',
+            parent,
+        )
 
     def test_loader_fetches_ui_options_by_scope(self):
         source = _read(CHANNEL_MANAGER)

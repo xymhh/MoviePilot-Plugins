@@ -63,90 +63,24 @@
 
     <v-row v-if="filtered.length" dense>
       <v-col v-for="item in filtered" :key="item.id" cols="12" sm="6" md="4" lg="3">
-        <v-card variant="outlined" class="channel-card">
-          <v-card-item class="pb-1">
-            <template #prepend>
-              <v-checkbox-btn
-                :model-value="selected.has(item.id)"
-                density="compact"
-                hide-details
-                @update:model-value="toggleSelect(item.id, $event)"
-              />
-            </template>
-            <v-card-title class="channel-title" :title="item.name" @click="openDetail(item)">
-              {{ item.name }}
-            </v-card-title>
-            <template #append>
-              <v-chip size="x-small" :color="typeColor(item.type)" variant="flat">
-                {{ typeLabel(item.type) }}
-              </v-chip>
-            </template>
-          </v-card-item>
-          <v-card-text class="py-1 channel-body" @click="openDetail(item)">
-            <div class="text-caption text-truncate">{{ channelLine(item) }}</div>
-            <div class="text-caption text-medium-emphasis">优先级 {{ item.priority }}</div>
-          </v-card-text>
-          <v-card-text class="py-1">
-            <div class="d-flex flex-wrap ga-1">
-              <v-chip size="x-small" :color="item.enabled ? 'success' : 'default'" variant="tonal">
-                {{ item.enabled ? "已启用" : "已停用" }}
-              </v-chip>
-              <v-chip size="x-small" variant="tonal" prepend-icon="mdi-clock-outline">
-                {{ relativeTime(item.stats?.last_scan) }}
-              </v-chip>
-              <v-chip size="x-small" variant="tonal">命中 {{ item.stats?.hits || 0 }}</v-chip>
-              <v-chip
-                v-if="item.stats?.last_error"
-                size="x-small"
-                color="error"
-                variant="tonal"
-                :title="item.stats.last_error"
-              >
-                异常
-              </v-chip>
-            </div>
-          </v-card-text>
-          <v-card-actions class="pt-0">
-            <v-switch
-              :model-value="item.enabled"
-              density="compact"
-              hide-details
-              color="success"
-              class="channel-switch"
-              @update:model-value="setEnabled(item, $event)"
-            />
-            <v-spacer />
-            <v-btn
-              icon="mdi-access-point"
-              size="small"
-              variant="text"
-              title="测试"
-              :loading="testingId === item.id"
-              @click="testChannel(item)"
-            />
-            <v-btn
-              icon="mdi-radar"
-              size="small"
-              variant="text"
-              title="立即扫描"
-              :disabled="item.type !== 'tg_channel'"
-              :loading="scanningId === item.id"
-              @click="scanChannel(item)"
-            />
-            <v-btn icon="mdi-pencil" size="small" variant="text" title="编辑" @click="openEdit(item)" />
-            <v-btn
-              icon="mdi-delete"
-              size="small"
-              variant="text"
-              color="error"
-              title="删除"
-              @click="askDelete(item)"
-            />
-          </v-card-actions>
-        </v-card>
+        <ChannelCard
+          :item="item"
+          :selected="selected.has(item.id)"
+          :testing="testingId === item.id"
+          :scanning="scanningId === item.id"
+          :type-label="typeLabel"
+          :type-color="typeColor"
+          :channel-line="channelLine"
+          :relative-time="relativeTime"
+          @toggle-select="toggleSelect"
+          @set-enabled="setEnabled"
+          @test="testChannel"
+          @scan="scanChannel"
+          @edit="openEdit"
+          @delete="askDelete"
+          @open-detail="openDetail" />
       </v-col>
     </v-row>
-
     <v-card v-else variant="tonal" class="pa-6 text-center">
       <v-icon icon="mdi-rss" size="40" class="mb-2" />
       <div class="text-body-2 mb-3">
@@ -155,145 +89,36 @@
       <v-btn color="primary" size="small" prepend-icon="mdi-plus" @click="openCreate">新增渠道</v-btn>
     </v-card>
 
-    <v-navigation-drawer
+    <ChannelDetailDrawer
       v-if="detail"
-      :model-value="detailOpen"
-      temporary
-      location="right"
-      :width="isMobile ? undefined : 380"
-      @update:model-value="detailOpen = $event"
-    >
-      <div class="d-flex align-center pa-3">
-        <div class="text-subtitle-1">渠道详情</div>
-        <v-spacer />
-        <v-btn icon="mdi-close" size="small" variant="text" @click="detailOpen = false" />
-      </div>
-      <v-divider />
-      <v-list density="compact">
-        <v-list-item title="名称" :subtitle="detail.name" />
-        <v-list-item title="类型" :subtitle="typeLabel(detail.type)" />
-        <v-list-item title="状态" :subtitle="detail.enabled ? '已启用' : '已停用'" />
-        <v-list-item title="优先级" :subtitle="String(detail.priority)" />
-        <v-list-item
-          v-for="line in detailLines"
-          :key="line.title"
-          :title="line.title"
-          :subtitle="line.value"
-        />
-        <v-list-item title="命中" :subtitle="String(detail.stats?.hits || 0)" />
-        <v-list-item title="最近扫描" :subtitle="relativeTime(detail.stats?.last_scan)" />
-        <v-list-item v-if="detail.stats?.last_error" title="最近错误" :subtitle="detail.stats.last_error" />
-      </v-list>
-      <div class="pa-3 d-flex ga-2">
-        <v-btn variant="text" @click="detailOpen = false">关闭</v-btn>
-        <v-spacer />
-        <v-btn color="primary" @click="editFromDetail">编辑</v-btn>
-      </div>
-    </v-navigation-drawer>
+      v-model:open="detailOpen"
+      :detail="detail"
+      :detail-lines="detailLines"
+      :type-label="typeLabel"
+      :is-mobile="isMobile"
+      @edit="editFromDetail" />
 
-    <v-dialog v-model="dialogVisible" :fullscreen="isMobile" max-width="720" scrollable>
-      <v-card>
-        <v-card-title>{{ editing ? "编辑渠道" : "新增渠道" }}</v-card-title>
-        <v-card-subtitle>渠道保存后立即生效，参与搜索与监控</v-card-subtitle>
-        <v-card-text>
-          <v-row dense>
-            <v-col cols="12" sm="6">
-              <v-text-field v-model="form.name" label="名称" density="compact" variant="outlined" />
-            </v-col>
-            <v-col cols="12" sm="6">
-              <v-select
-                v-model="form.type"
-                :items="typeOptions"
-                item-title="label"
-                item-value="value"
-                label="类型"
-                density="compact"
-                variant="outlined"
-                :disabled="!!editing"
-                @update:model-value="onTypeChange"
-              />
-            </v-col>
-            <v-col cols="12" sm="6">
-              <v-text-field
-                v-model.number="form.priority"
-                label="优先级（越大越优先）"
-                type="number"
-                density="compact"
-                variant="outlined"
-              />
-            </v-col>
-            <v-col cols="12" sm="6" class="d-flex align-center">
-              <v-switch v-model="form.enabled" label="启用" color="success" hide-details />
-            </v-col>
-          </v-row>
-
-          <template v-if="form.type === 'tg_channel'">
-            <v-row dense>
-              <v-col cols="12">
-                <v-text-field
-                  v-model="form.tg.channel"
-                  label="频道标识"
-                  placeholder="@channel 或 https://t.me/xxx"
-                  density="compact"
-                  variant="outlined"
-                />
-              </v-col>
-              <v-col cols="12" sm="6">
-                <v-text-field
-                  v-model.number="form.tg.scan_limit"
-                  label="回溯条数"
-                  type="number"
-                  min="1"
-                  max="200"
-                  density="compact"
-                  variant="outlined"
-                />
-              </v-col>
-              <v-col cols="12">
-                <v-text-field
-                  v-model="form.tg.keywords"
-                  label="包含关键词（逗号分隔，留空不过滤）"
-                  density="compact"
-                  variant="outlined"
-                />
-              </v-col>
-              <v-col cols="12">
-                <v-text-field
-                  v-model="form.tg.exclude_keywords"
-                  label="排除关键词（逗号分隔）"
-                  density="compact"
-                  variant="outlined"
-                />
-              </v-col>
-            </v-row>
-          </template>
-          <ConfigSection
-            v-else-if="formSection.groups.length"
-            :section="formSection"
-            :config="form.config"
-            :options="channelOptions"
-            :api="api"
-            :refreshing-accounts="refreshingAccounts"
-            :hdhive-oauth-action="hdhiveOauthAction"
-            @notify="notify"
-            @test-source="handleFormTestSource"
-            @refresh-account="refreshAccount"
-            @load-options="loadChannelDynamicOptions"
-            @refresh-options="refreshChannelDynamicOptions"
-            @hdhive-oauth-start="startHdhiveOAuth"
-            @hdhive-oauth-exchange="exchangeHdhiveOAuth"
-          />
-          <v-alert v-else type="info" variant="tonal" density="compact" class="mt-2">
-            该搜索渠道没有可配置项，保存后即可参与搜索。
-          </v-alert>
-        </v-card-text>
-        <v-card-actions>
-          <v-btn variant="text" @click="dialogVisible = false">取消</v-btn>
-          <v-spacer />
-          <v-btn color="primary" :loading="saving" @click="submit">保存</v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
+    <ChannelEditDialog
+      v-model="dialogVisible"
+      :editing="editing"
+      :form="form"
+      :form-section="formSection"
+      :channel-options="channelOptions"
+      :api="api"
+      :refreshing-accounts="refreshingAccounts"
+      :hdhive-oauth-action="hdhiveOauthAction"
+      :type-options="typeOptions"
+      :saving="saving"
+      :is-mobile="isMobile"
+      :load-channel-dynamic-options="loadChannelDynamicOptions"
+      :refresh-channel-dynamic-options="refreshChannelDynamicOptions"
+      @submit="submit"
+      @type-change="onTypeChange"
+      @test-source="handleFormTestSource"
+      @refresh-account="refreshAccount"
+      @hdhive-oauth-start="startHdhiveOAuth"
+      @hdhive-oauth-exchange="exchangeHdhiveOAuth"
+      @notify="notify" />
 
     <v-dialog v-model="deleteVisible" max-width="420">
       <v-card>
@@ -317,7 +142,9 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue"
 import { useDisplay } from "vuetify"
 
-import ConfigSection from "../config/ConfigSection.vue"
+import ChannelCard from "./channel/ChannelCard.vue"
+import ChannelDetailDrawer from "./channel/ChannelDetailDrawer.vue"
+import ChannelEditDialog from "./channel/ChannelEditDialog.vue"
 import { resolveDynamicField } from "../../config/fields/search/index.js"
 
 const props = defineProps({
@@ -1034,23 +861,4 @@ onUnmounted(() => {
   }
 }
 
-.channel-card {
-  min-height: 150px;
-}
-
-.channel-title {
-  font-size: 14px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-}
-
-.channel-body {
-  cursor: pointer;
-}
-
-.channel-switch {
-  flex: 0 0 auto;
-}
 </style>

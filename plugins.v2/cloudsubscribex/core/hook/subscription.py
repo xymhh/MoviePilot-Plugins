@@ -13,6 +13,7 @@ from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 
 from .. import OwnerDelegator
+from ..media import tmdb_id_of
 from ..pending_titles import get_pending_title_store, media_type_value
 
 _season_expansion_suppressed = contextvars.ContextVar(
@@ -100,6 +101,72 @@ class SubscriptionSearchHook(OwnerDelegator):
         "media_source",
     )
 
+    def _summarize_hook_installs(self) -> Tuple[List[str], List[str]]:
+        """汇总钩子安装状态：已安装 / 缺失的包装方法名。
+
+        按 ``__cloudsubscribe_owner__`` 标记逐项核对（MP 改名/删方法时，
+        各安装器只记 warning 就跳过；这里汇总成一条 INFO，便于从启动日志
+        一眼看出哪些接管没装上）。调度器未就绪时各 job 也算缺失。
+        """
+        installed: List[str] = []
+        missing: List[str] = []
+        try:
+            from app.chain.search import SearchChain
+
+            search_chain = SearchChain
+        except Exception:
+            search_chain = None
+        for method_name in self._PLATFORM_SEARCH_METHODS:
+            current = getattr(search_chain, method_name, None) if search_chain else None
+            label = f"SearchChain.{method_name}"
+            if callable(current) and getattr(current, "__cloudsubscribe_owner__", None) is self:
+                installed.append(label)
+            else:
+                missing.append(label)
+        target, _reason = resolve_interaction_chain_class()
+        if target is not None:
+            current = getattr(target, _INTERACTION_METHOD, None)
+            label = f"{target.__name__}.{_INTERACTION_METHOD}"
+            if callable(current) and getattr(current, "__cloudsubscribe_owner__", None) is self:
+                installed.append(label)
+            else:
+                missing.append(label)
+        else:
+            missing.append(f"?.{_INTERACTION_METHOD}")
+        try:
+            from app.chain.subscribe import SubscribeChain
+
+            subscribe_chain = SubscribeChain
+        except Exception:
+            subscribe_chain = None
+        for method_name in ("_process_search_subscription", "add", "async_add"):
+            current = getattr(subscribe_chain, method_name, None) if subscribe_chain else None
+            label = f"SubscribeChain.{method_name}"
+            if callable(current) and getattr(current, "__cloudsubscribe_owner__", None) is self:
+                installed.append(label)
+            else:
+                missing.append(label)
+        try:
+            from app.scheduler import Scheduler
+
+            scheduler = (
+                Scheduler.get_existing_instance()
+                if hasattr(Scheduler, "get_existing_instance")
+                else Scheduler()
+            )
+        except Exception:
+            scheduler = None
+        jobs = getattr(scheduler, "_jobs", None) or {} if scheduler is not None else {}
+        for job_id in self._JOB_IDS:
+            job = jobs.get(job_id)
+            current = job.get("func") if job else None
+            label = f"Scheduler.{job_id}"
+            if getattr(current, "__self__", None) is self:
+                installed.append(label)
+            else:
+                missing.append(label)
+        return installed, missing
+
     def _install_subscribe_search_takeover(self) -> None:
         if not self._enabled:
             return
@@ -117,29 +184,39 @@ class SubscriptionSearchHook(OwnerDelegator):
             )
             if scheduler is None:
                 logger.debug("调度器尚未就绪，等待平台注册后安装订阅接管")
-                return
-            jobs = getattr(scheduler, "_jobs", None) or {}
-            newly_installed = []
-            for job_id in self._JOB_IDS:
-                job = jobs.get(job_id)
-                if not job:
-                    continue
-                current = job.get("func")
-                if getattr(current, "__self__", None) is self:
-                    continue
-                self._subscribe_search_originals.setdefault(job_id, current)
-                job["func"] = (
-                    self._dispatch_subscribe_refresh
-                    if job_id == "subscribe_refresh"
-                    else self._dispatch_subscribe_search
-                )
-                newly_installed.append(job_id)
-            if newly_installed:
-                logger.info(f"订阅搜索路由已接管：{', '.join(newly_installed)}")
             else:
-                logger.debug("订阅搜索路由已保持接管")
+                jobs = getattr(scheduler, "_jobs", None) or {}
+                newly_installed = []
+                for job_id in self._JOB_IDS:
+                    job = jobs.get(job_id)
+                    if not job:
+                        continue
+                    current = job.get("func")
+                    if getattr(current, "__self__", None) is self:
+                        continue
+                    self._subscribe_search_originals.setdefault(job_id, current)
+                    job["func"] = (
+                        self._dispatch_subscribe_refresh
+                        if job_id == "subscribe_refresh"
+                        else self._dispatch_subscribe_search
+                    )
+                    newly_installed.append(job_id)
+                if newly_installed:
+                    logger.info(f"订阅搜索路由已接管：{', '.join(newly_installed)}")
+                else:
+                    logger.debug("订阅搜索路由已保持接管")
         except Exception as error:
             logger.warning(f"安装订阅搜索路由失败：{error}")
+        installed, missing = self._summarize_hook_installs()
+        logger.info(
+            "钩子安装汇总：已安装 %d 个（%s）；缺失 %d 个（%s）"
+            % (
+                len(installed),
+                "、".join(installed) or "无",
+                len(missing),
+                "、".join(missing) or "无",
+            )
+        )
 
     def _restore_subscribe_search_takeover(self) -> None:
         self._restore_platform_search_block()
@@ -428,7 +505,7 @@ class SubscriptionSearchHook(OwnerDelegator):
             )
         media_id = getattr(mediainfo, "media_id", None)
         media_source = getattr(mediainfo, "media_source", None)
-        tmdbid = self._tmdb_id_of(mediainfo)
+        tmdbid = tmdb_id_of(mediainfo)
         if not tmdbid and media_id and self._is_tmdb_source(media_source):
             tmdbid = media_id
         return {
@@ -487,17 +564,10 @@ class SubscriptionSearchHook(OwnerDelegator):
         return True
 
     # -------------------------------------------------- 片名候选命中（1.6.27）
-    @staticmethod
-    def _tmdb_id_of(media: Any) -> Optional[int]:
-        """读取媒体对象的 TMDB ID（惰性导入，避免加载期依赖 app 运行时）。"""
-        if media is None:
-            return None
-        from ..media import tmdb_id_of
-
-        try:
-            return tmdb_id_of(media)
-        except Exception:
-            return None
+    # TMDB ID 读取已收敛到 core/media.py 的 tmdb_id_of（本文件原
+    # _tmdb_id_of 静态方法只是它的 None 守卫 + 吞异常包装；核实过
+    # tmdb_id_of 对 None/异常输入本身就返回 None，包装是冗余的，
+    # 故删掉、调用点直接用 tmdb_id_of）。
 
     @staticmethod
     def _is_tmdb_source(media_source: Any) -> bool:
@@ -550,7 +620,7 @@ class SubscriptionSearchHook(OwnerDelegator):
                 or getattr(candidate, "begin_season", None)
                 or getattr(candidate, "season", None)
             )
-        tmdbid = self._tmdb_id_of(mediainfo)
+        tmdbid = tmdb_id_of(mediainfo)
         if not tmdbid and self._is_tmdb_source(media_source):
             tmdbid = media_id
         titles = [str(title).strip() for title in titles if title]
@@ -674,7 +744,7 @@ class SubscriptionSearchHook(OwnerDelegator):
         enriched = dict(identity)
         enriched["mediainfo"] = mediainfo
         enriched["title"] = getattr(mediainfo, "title", None) or identity.get("title")
-        enriched["tmdbid"] = self._tmdb_id_of(mediainfo) or identity.get("tmdbid")
+        enriched["tmdbid"] = tmdb_id_of(mediainfo) or identity.get("tmdbid")
         enriched["mtype"] = (
             media_type_value(getattr(mediainfo, "type", None)) or identity.get("mtype")
         )

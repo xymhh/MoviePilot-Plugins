@@ -147,13 +147,23 @@ EXPECTED_REGISTERED_PAIRS = 79
 
 # 第 5 项：7 个服务层方法的新签名（去掉 apikey 后的剩余参数名）。
 SERVICE_METHOD_PARAMS = {
-    "api_runtime_status": (),
-    "api_stop_sync": (),
-    "api_stop_sync_task": ("task_id",),
-    "api_offline_tasks": ("refresh",),
-    "api_retry_offline_tasks": ("pending_keys", "task_ids"),
-    "api_delete_offline_task": ("task_id", "pending_key", "delete_source_file"),
-    "api_delete_offline_tasks": ("task_ids", "pending_keys", "delete_source_file"),
+    # (参数, 宿主服务类)：v1.24.0 起 4 个离线方法搬到 OfflineTaskService，
+    # 其余 3 个仍在 SyncRuntimeService。
+    "api_runtime_status": ((), "SyncRuntimeService"),
+    "api_stop_sync": ((), "SyncRuntimeService"),
+    "api_stop_sync_task": (("task_id",), "SyncRuntimeService"),
+    "api_offline_tasks": (("refresh",), "OfflineTaskService"),
+    "api_retry_offline_tasks": (
+        ("pending_keys", "task_ids"), "OfflineTaskService",
+    ),
+    "api_delete_offline_task": (
+        ("task_id", "pending_key", "delete_source_file"),
+        "OfflineTaskService",
+    ),
+    "api_delete_offline_tasks": (
+        ("task_ids", "pending_keys", "delete_source_file"),
+        "OfflineTaskService",
+    ),
 }
 
 # --- 真实加载的模块（按依赖顺序）与打桩的包 ---------------------------
@@ -162,6 +172,7 @@ _REAL_MODULES = (
     ("cloudsubscribex.core.sync_pause", "plugins.v2/cloudsubscribex/core/sync_pause.py"),
     ("cloudsubscribex.core.task_center", "plugins.v2/cloudsubscribex/core/task_center.py"),
     ("cloudsubscribex.core.services.runtime", "plugins.v2/cloudsubscribex/core/services/runtime.py"),
+    ("cloudsubscribex.core.services.offline", "plugins.v2/cloudsubscribex/core/services/offline.py"),
     ("cloudsubscribex.core.services.platform", "plugins.v2/cloudsubscribex/core/services/platform.py"),
     ("cloudsubscribex.core.subscribe.service", "plugins.v2/cloudsubscribex/core/subscribe/service.py"),
     ("cloudsubscribex.core.api.source_filter", "plugins.v2/cloudsubscribex/core/api/source_filter.py"),
@@ -203,6 +214,7 @@ _COMPONENT_MODULE_CLASSES = (
     ("cloudsubscribex.core.api.duplicate", "DuplicateApi"),
     ("cloudsubscribex.core.api.tg", "TgMonitorApi"),
     ("cloudsubscribex.core.services.runtime", "SyncRuntimeService"),
+    ("cloudsubscribex.core.services.offline", "OfflineTaskService"),
     ("cloudsubscribex.core.services.platform", "PlatformIntegrationService"),
     ("cloudsubscribex.core.subscribe.service", "AutoSubscribeService"),
 )
@@ -618,11 +630,11 @@ class GetApiTests(unittest.TestCase):
 
     def test_runtime_service_methods_take_no_apikey(self):
         """第 5 项：7 个服务层方法不再收 apikey 参数（走 bear 鉴权）。"""
-        for name, params in SERVICE_METHOD_PARAMS.items():
+        for name, (params, owner_cls) in SERVICE_METHOD_PARAMS.items():
             bound = getattr(self.owner, name)
             self.assertTrue(inspect.ismethod(bound), name)
             self.assertEqual(
-                type(bound.__self__).__name__, "SyncRuntimeService", name
+                type(bound.__self__).__name__, owner_cls, name
             )
             signature = inspect.signature(bound)
             self.assertNotIn("apikey", signature.parameters, name)

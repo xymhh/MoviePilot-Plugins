@@ -73,6 +73,7 @@ from .core.media_scope import configure_media_path_ignores
 from .core.services import (
     SubscriptionControlService,
     CheckinService,
+    OfflineTaskService,
     OrganizeService,
     PlatformIntegrationService,
     ResidueService,
@@ -121,6 +122,7 @@ _COMPONENT_TYPES = (
     PluginEventHandler,
     MoviePilotRegistration,
     SyncRuntimeService,
+    OfflineTaskService,
     SyncExecutionService,
     SubscriptionScoringService,
     SubscriptionControlService,
@@ -195,7 +197,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.23.0"
+    plugin_version = "1.24.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页

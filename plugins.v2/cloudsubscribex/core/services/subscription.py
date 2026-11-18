@@ -1,11 +1,46 @@
 """订阅搜索接管时段与洗版开关管理。"""
 
 import datetime
+from typing import Any
 
 import pytz
 from app.core.config import settings
 
 from ...core import OwnerDelegator
+
+
+def is_cloud_upgrade_subscribe(
+        enable_cloud_upgrade: bool,
+        upgrade_subscribe_ids: Any,
+        subscribe: Any,
+        respect_manual_upgrade: bool = True,
+) -> bool:
+    """判断订阅是否属于插件网盘洗版范围（服务层唯一实现）。
+
+    三处旧定义已收敛到这里（handlers/search/service.py、
+    handlers/sync/service.py、SubscriptionControlService 各自只留一行委托）：
+    搜索/同步处理器认手动洗版快捷方式（subscribe._manual_upgrade 为真时
+    直接返回 True）；订阅控制服务不认——其调用方 core/api/sync.py 的
+    _manual_upgrade_for_subscribe 明确要求 best_version，调用时传
+    respect_manual_upgrade=False 保留该语义。逐一核对过全部调用方：
+    api/sync.py:44 的订阅现取自数据库、从不带 _manual_upgrade，
+    services/runtime.py:685 的调用方自己先 or 了 manual_upgrade，
+    其余调用方本来就走带快捷方式的处理器版本，所以两种语义都与合一前一致。
+    """
+    if (
+            enable_cloud_upgrade
+            and respect_manual_upgrade
+            and bool(getattr(subscribe, "_manual_upgrade", False))
+    ):
+        return True
+    if (
+            not enable_cloud_upgrade
+            or not subscribe
+            or not bool(getattr(subscribe, "best_version", False))
+    ):
+        return False
+    selected_ids = {str(value) for value in (upgrade_subscribe_ids or [])}
+    return not selected_ids or str(getattr(subscribe, "id", "")) in selected_ids
 
 
 class SubscriptionControlService(OwnerDelegator):
@@ -53,12 +88,15 @@ class SubscriptionControlService(OwnerDelegator):
         return self._is_time_in_block()
 
     def _is_cloud_upgrade_subscribe(self, subscribe) -> bool:
-        """判断订阅是否属于插件网盘洗版范围。best_version 是必要条件。"""
-        if (
-                not self._enable_cloud_upgrade
-                or not subscribe
-                or not bool(getattr(subscribe, "best_version", False))
-        ):
-            return False
-        selected_ids = {str(value) for value in (self._upgrade_subscribe_ids or [])}
-        return not selected_ids or str(getattr(subscribe, "id", "")) in selected_ids
+        """判断订阅是否属于插件网盘洗版范围（委托服务层唯一实现）。
+
+        本服务不认手动洗版快捷方式：调用方 _manual_upgrade_for_subscribe
+        （core/api/sync.py）要求订阅启用 best_version，见
+        is_cloud_upgrade_subscribe 的 respect_manual_upgrade 参数。
+        """
+        return is_cloud_upgrade_subscribe(
+            self._enable_cloud_upgrade,
+            self._upgrade_subscribe_ids,
+            subscribe,
+            respect_manual_upgrade=False,
+        )

@@ -750,19 +750,17 @@ class SyncHandler:
         return count
 
     def _is_cloud_upgrade_subscribe(self, subscribe: Any) -> bool:
-        """判断订阅是否属于插件网盘洗版范围。"""
-        if self._enable_cloud_upgrade and bool(
-                getattr(subscribe, "_manual_upgrade", False)
-        ):
-            return True
-        if (
-                not self._enable_cloud_upgrade
-                or not subscribe
-                or not bool(getattr(subscribe, "best_version", False))
-        ):
-            return False
-        selected_ids = self._upgrade_subscribe_id_set
-        return not selected_ids or str(getattr(subscribe, "id", "")) in selected_ids
+        """判断订阅是否属于插件网盘洗版范围（委托服务层唯一实现）。"""
+        # 懒加载：顶层 import 会把 core.services 包的 __init__ 拉进来，
+        # 单测里 core.services 常是只有部分属性的桩，import 即炸；
+        # 方法调用时 sys.modules 里已有真实模块。
+        from ...core.services.subscription import is_cloud_upgrade_subscribe
+
+        return is_cloud_upgrade_subscribe(
+            self._enable_cloud_upgrade,
+            self._upgrade_subscribe_id_set,
+            subscribe,
+        )
 
     @staticmethod
     def subscription_budget_key(

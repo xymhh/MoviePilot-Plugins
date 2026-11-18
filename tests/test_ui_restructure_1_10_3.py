@@ -221,7 +221,12 @@ class TestConfigAdvancedFolding(unittest.TestCase):
         self.assertIn("allSections", source)
         self.assertIn("showAdvanced", source)
         self.assertIn("csx-config-show-advanced", source)
-        self.assertIn("显示高级设置", source)
+        # v1.24.0：高级开关的 v-switch 随侧栏搬到 ConfigSidebar.vue，
+        # 开关状态仍由 Config.vue 的 showAdvanced 持有（v-model:show-advanced）。
+        sidebar = _read(
+            "frontend/cloudsubscribex/src/components/config/ConfigSidebar.vue"
+        )
+        self.assertIn("显示高级设置", sidebar)
         # 向导按 key 取字段必须读全量，否则落地位置那步取不到 organize 字段。
         pick = re.search(
             r"function pickFields\(keys\) \{.*?for \(const section of (\w+)\.value",

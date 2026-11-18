@@ -57,6 +57,10 @@ platform_module = load_module(
     "plugins.v2/cloudsubscribex/core/services/platform.py",
 )
 PlatformIntegrationService = platform_module.PlatformIntegrationService
+# v1.24.0：_candidate_for_tmdb_id 搬到了 platform_agent mixin，
+# recognize_media / MetaInfo 是它那个模块的全局量，桩必须打在那儿
+#（打在壳上够不到方法解析的名字）。
+agent_module = sys.modules["cloudsubscribex.core.services.platform_agent"]
 
 mp_search = _load_mp_search()
 

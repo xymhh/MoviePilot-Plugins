@@ -19,6 +19,11 @@ v1.23.0（§11 前端收敛第 1 项）：总览模式已删——插件主页�
 直接进失败记录页（默认只看失败），mode prop 已删，只剩 history
 一种模式；总览统计卡片（StatsGrid）与转存动态（MediaHub）不再挂载，
 MP 首页 Dashboard widget 是唯一总览；Page 只做转发。
+v1.24.0：Config.vue（3427 行）与 ChannelManager.vue（1056 行）拆分子组件——
+配置页挂载 ConfigSidebar / ConfigWizard / 四个测试·预览·解锁弹窗，
+渠道管理挂载 ChannelCard / ChannelDetailDrawer / ChannelEditDialog；
+PanSou 动态选项绑定随编辑弹窗搬到 ChannelEditDialog.vue，加载器仍在
+ChannelManager.vue（见 tests/test_channel_dynamic_options_1_18_4.py）。
 
 用法：python3 scripts/check_frontend_entry.py [项目根]
 """
@@ -94,6 +99,47 @@ def main(root: Path) -> int:
             errors.append(f"AppPageTgMonitor 不应挂载 {component}")
     if re.search(r"<v-tab\b", tg_monitor_text):
         errors.append("AppPageTgMonitor 不应有页签")
+
+    # v1.24.0：Config.vue 与 ChannelManager.vue 拆分子组件后的页面组成。
+    config_path = components / "Config.vue"
+    channel_manager_path = components / "dashboard" / "ChannelManager.vue"
+    channel_edit_dialog_path = (
+        components / "dashboard" / "channel" / "ChannelEditDialog.vue"
+    )
+    for path in (config_path, channel_manager_path, channel_edit_dialog_path):
+        if not path.exists():
+            errors.append(f"缺少文件：{path}")
+    if config_path.exists():
+        config_text = config_path.read_text(encoding="utf-8")
+        for component in (
+            "ConfigSidebar",
+            "ConfigWizard",
+            "ConfigSourceTestDialog",
+            "ConfigAutoSubscribeTestDialog",
+            "ConfigResourcePreviewDialog",
+            "ConfigUnlockDialog",
+        ):
+            if component not in config_text:
+                errors.append(f"Config.vue 未挂载 {component}（v1.24.0 拆分）")
+    if channel_manager_path.exists():
+        channel_manager_text = channel_manager_path.read_text(encoding="utf-8")
+        for component in (
+            "ChannelCard",
+            "ChannelDetailDrawer",
+            "ChannelEditDialog",
+        ):
+            if component not in channel_manager_text:
+                errors.append(f"ChannelManager.vue 未挂载 {component}（v1.24.0 拆分）")
+    if channel_edit_dialog_path.exists():
+        edit_dialog_text = channel_edit_dialog_path.read_text(encoding="utf-8")
+        for binding in (
+            '@load-options="loadChannelDynamicOptions"',
+            '@refresh-options="refreshChannelDynamicOptions"',
+        ):
+            if binding not in edit_dialog_text:
+                errors.append(
+                    f"ChannelEditDialog.vue 缺少动态选项绑定 {binding}（v1.18.4 链路）"
+                )
 
     # 唯一实现：失败记录整表在 PluginWorkbench，不再有页签；v1.23.0 起
     # 总览已删，不再挂载统计卡片与转存动态，不再有 mode/overview 代码。

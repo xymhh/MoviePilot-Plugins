@@ -13,6 +13,7 @@ except ImportError:
 from app.log import logger
 from app.schemas.types import MediaType
 
+from .config_normalize import clamp_auto_subscribe_dates
 from .media import tmdb_id_of
 from ..utils.notify_template import DEFAULT_TEMPLATES
 
@@ -508,32 +509,10 @@ class UIConfig:
             defaults[key] = ""
     @staticmethod
     def normalize_auto_subscribe_dates(config: Dict[str, Any]) -> None:
-        current_year = datetime.datetime.now().year
-        current_month = datetime.datetime.now().month
-        for key in (
-                "auto_subscribe_douban_min_year",
-                "auto_subscribe_tmdb_min_year",
-                "auto_subscribe_bangumi_min_year",
-                "auto_subscribe_anilist_min_year",
-                "auto_subscribe_maoyan_min_year",
-                "auto_subscribe_netflix_min_year",
-                "auto_subscribe_mikan_year",
-                "auto_subscribe_mikan_min_year",
-        ):
-            try:
-                if int(config.get(key) or 0) == 0:
-                    config[key] = current_year
-            except (TypeError, ValueError):
-                config[key] = current_year
-        for provider_id in (
-                "douban", "tmdb", "bangumi", "anilist", "maoyan", "netflix", "mikan"
-        ):
-            key = f"auto_subscribe_{provider_id}_min_month"
-            try:
-                month = int(config.get(key) or current_month)
-            except (TypeError, ValueError):
-                month = current_month
-            config[key] = month if 1 <= month <= 12 else current_month
+        # 唯一实现在 core/config_normalize.py：clamp_auto_subscribe_dates
+        #（年份 <= 0、月份不在 1–12 时钳制到当前年月；这里只保留入口名，
+        # 供 core/api/config.py 的校验端点调用）。
+        clamp_auto_subscribe_dates(config)
 
     @staticmethod
     def _subscribes() -> list:
@@ -584,46 +563,13 @@ class UIConfig:
         if not isinstance(target, dict):
             return {}
         import re
-        current_year = datetime.datetime.now().year
-        current_month = datetime.datetime.now().month
 
         if not str(target.get("auto_subscribe_username") or "").strip():
             target["auto_subscribe_username"] = DEFAULT_AUTO_SUBSCRIBE_USERNAME
 
-        year_keys = [
-            "auto_subscribe_douban_min_year",
-            "auto_subscribe_maoyan_min_year",
-            "auto_subscribe_netflix_min_year",
-            "auto_subscribe_mikan_year",
-            "auto_subscribe_mikan_min_year",
-            "auto_subscribe_tmdb_min_year",
-            "auto_subscribe_bangumi_min_year",
-            "auto_subscribe_anilist_min_year",
-        ]
-        for key in year_keys:
-            try:
-                val = int(target.get(key) or 0)
-            except (TypeError, ValueError):
-                val = 0
-            if val <= 0:
-                target[key] = current_year
-
-        month_keys = [
-            "auto_subscribe_douban_min_month",
-            "auto_subscribe_maoyan_min_month",
-            "auto_subscribe_netflix_min_month",
-            "auto_subscribe_mikan_min_month",
-            "auto_subscribe_tmdb_min_month",
-            "auto_subscribe_bangumi_min_month",
-            "auto_subscribe_anilist_min_month",
-        ]
-        for key in month_keys:
-            try:
-                val = int(target.get(key) or 0)
-            except (TypeError, ValueError):
-                val = 0
-            if not 1 <= val <= 12:
-                target[key] = current_month
+        # 自动追更起算年月钳制：唯一实现在 core/config_normalize.py
+        #（clamp_auto_subscribe_dates），这里只调它。
+        clamp_auto_subscribe_dates(target)
 
         mikan_urls = target.get("auto_subscribe_mikan_base_urls")
         if isinstance(mikan_urls, str):

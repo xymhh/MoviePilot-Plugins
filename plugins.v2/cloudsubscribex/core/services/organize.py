@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from app.core.metainfo import MetaInfo
 from app.log import logger
 from app.schemas.types import MediaType
 
@@ -411,13 +410,20 @@ class OrganizeService(OwnerDelegator):
         )
 
     def _recognize_package(self, package: PackagePlan):
+        # 懒加载（与 v1.23.0 的 from ...core.media import recognize_media
+        # 同款做法）：顶层 import 在假包名单测环境下走不通——父包是
+        # MagicMock，没有 __spec__，子模块加载即炸。
+        from .media_resolve import build_recognition_meta, recognize_once
+
         media_type = MediaType.TV if package.is_tv else MediaType.MOVIE
-        meta = MetaInfo(package.pack_name)
-        meta.type = media_type
         if package.is_tv:
             season = max(1, int(package.videos[0].season or 1))
-            meta.begin_season = season
-            meta.begin_episode = max(1, int(package.videos[0].episode or 1))
+            episode = max(1, int(package.videos[0].episode or 1))
+            meta = build_recognition_meta(
+                package.pack_name, media_type, season=season, episode=episode
+            )
+        else:
+            meta = build_recognition_meta(package.pack_name, media_type)
         kwargs = {"meta": meta, "mtype": media_type, "cache": True}
         recognizer = getattr(self, "_recognize_media_once", None)
         if recognizer:
@@ -426,9 +432,10 @@ class OrganizeService(OwnerDelegator):
                 package.pack_name, getattr(meta, "year", None),
                 package.videos[0].season if package.is_tv else None,
             )
-            return recognizer(key, **kwargs)
-        from ...core.media import recognize_media
-        return recognize_media(getattr(self, "chain", None), **kwargs)
+            return recognize_once(
+                recognizer, getattr(self, "chain", None), key, **kwargs
+            )
+        return recognize_once(None, getattr(self, "chain", None), None, **kwargs)
 
     # ------------------------------------------------------------------
     # 执行

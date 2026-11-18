@@ -283,9 +283,15 @@ class TestPendingTitleSearchHook(unittest.TestCase):
         self.owner._handle_selected_title = (
             lambda record, identity: self.selected.append((record, identity))
         )
-        # 媒体身份工具打桩，避免依赖真实 v2/v3 兼容层
+        # 媒体身份工具打桩，避免依赖真实 v2/v3 兼容层（v1.24.0：_tmdb_id_of
+        # 静态方法已删，调用点直接用 core.media.tmdb_id_of，这里改桩模块属性）
+        patcher = patch.object(
+            subscription_module, "tmdb_id_of",
+            lambda media: getattr(media, "tmdbid", None),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
         for name, value in (
-            ("_tmdb_id_of", lambda media: getattr(media, "tmdbid", None)),
             ("_is_tmdb_source", lambda source: str(source or "").lower() in {"themoviedb", "tmdb"}),
         ):
             patcher = patch.object(SubscriptionSearchHook, name, staticmethod(value))
