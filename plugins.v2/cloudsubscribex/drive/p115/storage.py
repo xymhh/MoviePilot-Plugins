@@ -113,6 +113,30 @@ def _remove_upload_registry(key: str) -> None:
         )
 
 
+def _start_upload_heartbeat(key: str) -> Any:
+    """启动上传心跳（见 core.upload_progress.start_upload_heartbeat）。
+
+    惰性导入：与 _report_upload_registry 同款写法。返回 stop()，
+    上传结束（成功或失败）调用方必须在 finally 里调它；导入失败时
+    返回空操作，上传本身不受影响。
+    """
+    try:
+        from ...core.upload_progress import start_upload_heartbeat
+    except Exception:
+        return lambda: None
+    try:
+        stop = start_upload_heartbeat(key)
+    except Exception as error:
+        logger.debug(
+            f"{_LOG_PREFIX}上传心跳启动失败：{key}，{error}",
+            exc_info=True,
+        )
+        return lambda: None
+    if not callable(stop):
+        return lambda: None
+    return stop
+
+
 def _make_upload_progress_callback(file_name: str, total_size: int, key: str = None):
     """造一个上传进度回调：把字节进度写进 MP 的整理进度。
 
@@ -546,12 +570,21 @@ class U115CSStorage(StorageBase):
             if upload is None:
                 return None
             total_size = int(local_path.stat().st_size)
-            if not upload.upload_file(
+            progress = _make_upload_progress_callback(
+                final_name, total_size, key=local_path.name
+            )
+            # 心跳覆盖整个 upload_file（含整文件重传）：分片 PUT 卡住
+            # 时登记表条目不过期，上传卡不闪；finally 里停掉，失败后
+            # 条目 30 秒过期、卡正常消失，不会复活死任务。1.18.3。
+            stop_heartbeat = _start_upload_heartbeat(local_path.name)
+            try:
+                uploaded_ok = upload.upload_file(
                     str(local_path), dir_path, final_name,
-                    progress_callback=_make_upload_progress_callback(
-                        final_name, total_size, key=local_path.name
-                    ),
-            ):
+                    progress_callback=progress,
+                )
+            finally:
+                stop_heartbeat()
+            if not uploaded_ok:
                 logger.warning(
                     f"{_LOG_PREFIX}上传失败："
                     f"{local_path.name} -> {dir_path}/{final_name}，"

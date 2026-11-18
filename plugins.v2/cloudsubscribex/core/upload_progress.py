@@ -122,3 +122,94 @@ def clear_upload_progress() -> None:
             _BASELINES.clear()
     except Exception:
         return
+
+
+def _refresh_upload_entry(name: str) -> bool:
+    """只刷新已存在条目的 updated_at（绝不创建条目）。
+
+    速度按 report_upload_progress 的口径重算：uploaded 不变、
+    elapsed 增长，上传停滞时速度自然衰减到 0。返回是否刷新过。
+    """
+    try:
+        now = time.monotonic()
+        with _LOCK:
+            entry = _ENTRIES.get(name)
+            if entry is None:
+                return False
+            entry["updated_at"] = now
+            baseline = _BASELINES.get(name)
+            if baseline is not None:
+                elapsed = now - baseline["first_at"]
+                if elapsed > 0:
+                    uploaded_now = float(entry.get("uploaded") or 0)
+                    entry["speed"] = max(
+                        0.0,
+                        (uploaded_now - baseline["first_uploaded"]) / elapsed,
+                    )
+                else:
+                    entry["speed"] = 0.0
+            return True
+    except Exception:
+        return False
+
+
+def start_upload_heartbeat(
+    key: Any,
+    *,
+    interval_seconds: float = 10.0,
+    max_missing_seconds: float = 120.0,
+) -> Any:
+    """启动上传心跳：每 interval 秒刷新一次登记表条目，返回 stop()。
+
+    oss2 分片只在每片传完才报一次进度，分片 PUT 卡住（读超时 60 秒
+    + 重试）时超过 30 秒没上报，snapshot 就把条目清掉、下载页的上传
+    卡闪没了。心跳只刷新已存在的条目（上传还没开始上报时什么都不做），
+    卡住期间卡不掉、速度 honest 地衰减到 0。
+
+    上传结束（完成或失败）调用方必须调 stop()；条目连续缺失超
+    max_missing_seconds 时线程自停（防泄漏）。线程是 daemon，
+    stop() 最多等一个心跳间隔，绝不阻塞上传返回。
+    """
+    try:
+        name = str(key or "").strip()
+        interval = float(interval_seconds or 0)
+    except (TypeError, ValueError):
+        return lambda: None
+    if not name or interval <= 0:
+        return lambda: None
+    try:
+        max_missing = float(max_missing_seconds or 0)
+    except (TypeError, ValueError):
+        max_missing = 120.0
+    stop_event = threading.Event()
+
+    def _run() -> None:
+        missing_since: Any = None
+        while not stop_event.is_set():
+            if stop_event.wait(timeout=interval):
+                return
+            if _refresh_upload_entry(name):
+                missing_since = None
+            else:
+                now = time.monotonic()
+                if missing_since is None:
+                    missing_since = now
+                elif max_missing > 0 and now - missing_since > max_missing:
+                    return
+
+    try:
+        thread = threading.Thread(
+            target=_run, name=f"upload-heartbeat-{name}", daemon=True
+        )
+        thread.start()
+    except Exception:
+        return lambda: None
+
+    def _stop() -> None:
+        try:
+            stop_event.set()
+            thread.join(timeout=min(max(interval, 0.1), 2.0))
+        except Exception:
+            return
+
+    return _stop

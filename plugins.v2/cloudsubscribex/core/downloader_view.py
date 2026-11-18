@@ -538,6 +538,9 @@ def _default_torrent_cls() -> Any:
 
 
 _TMDB_TAG_PATTERN = re.compile(r"\{tmdb[=\-](\d+)\}")
+# 电影年份标记，如“(2026)”：不带季集标记、带年份或 tmdb id 的上传
+# 文件按电影进 media 投影（海报）。1.18.3。
+_MOVIE_YEAR_PATTERN = re.compile(r"\((?:19|20)\d{2}\)")
 _HASH_SUFFIX_PATTERN = re.compile(r"\s*\([0-9a-fA-F]{6,}\)\s*$")
 
 
@@ -618,6 +621,17 @@ def synthetic_upload_tasks() -> List[Dict[str, Any]]:
             continue
         media_title = _parse_upload_media_title(file_name)
         episode_match = EPISODE_TAG_PATTERN.search(file_name)
+        tmdb_id = _parse_upload_tmdb_id(file_name)
+        # media 投影（海报+季集）只认“电视剧/电影”：带季集标记的是剧；
+        # 不带季集、但有 tmdb id 或年份的是电影（如“天才谋杀法 (2026)
+        # {tmdb-1084409}…”）；未知只显示名字。1.18.3 之前电影的
+        # media_type 是空串，海报直接跳过。
+        if episode_match:
+            media_type = "电视剧"
+        elif tmdb_id or _MOVIE_YEAR_PATTERN.search(file_name):
+            media_type = "电影"
+        else:
+            media_type = ""
         task: Dict[str, Any] = {
             "id": (
                 "upload:"
@@ -627,9 +641,14 @@ def synthetic_upload_tasks() -> List[Dict[str, Any]]:
                 f"{file_name} · {uploaded / 1048576:.0f}/{total / 1048576:.0f}MB"
             ),
             "media_title": media_title,
-            # 电视剧才进 media 投影（海报+季集）；电影/未知只显示名字，
-            # media_type 非“电视剧/电影”时 _task_media 返回 None。
-            "media_type": "电视剧" if episode_match else "",
+            "media_type": media_type,
+            # MP 下载页的状态文案只有两种（见 MoviePilot-Frontend
+            # DownloadingCard.vue 的 stateText：state == downloading
+            # 显示“下载中”，其余一律“已暂停”），没有“上传中”这个
+            # 状态。transferring 经 map_task_state 映成 downloading，
+            # 卡片显示下载中；改成别的值只会变“已暂停”（还会丢剩余
+            # 时间、暂停按钮变“继续”）。上传的区分靠 ↑ 速度位与
+            # 标题里的已传/总量。1.18.3 核对结论，勿改。
             "status": "transferring",
             "transfer_phase": "uploading",
             "total": total,
@@ -641,7 +660,6 @@ def synthetic_upload_tasks() -> List[Dict[str, Any]]:
         if episode_match:
             # EPISODE_TAG_PATTERN 的季号组恒为数字，int 不会失败。
             task["season"] = int(episode_match.group(1))
-        tmdb_id = _parse_upload_tmdb_id(file_name)
         if tmdb_id:
             task["tmdb_id"] = tmdb_id
         left_time = _format_left_time(total, uploaded, speed)

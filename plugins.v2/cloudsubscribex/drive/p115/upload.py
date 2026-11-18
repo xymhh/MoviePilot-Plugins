@@ -95,8 +95,13 @@ OSS2_TOKEN_REFRESH_THRESHOLD_MINUTES = 5
 OSS2_PART_MAX_RETRIES = int(UPLOAD_RETRY_POLICY["part"]["attempts"])
 OSS2_INIT_MAX_RETRIES = int(UPLOAD_RETRY_POLICY["init"]["attempts"])
 OSS2_INIT_RETRY_DELAY_SECONDS = float(UPLOAD_RETRY_POLICY["init"]["base_delay"])
-# 115 OSS 上传域名（p115disk 同款）。
-OSS2_ENDPOINT = "http://oss-cn-shenzhen.aliyuncs.com"
+# 115 OSS 上传域名（p115disk 同款）。1.18.3：由 http 改 https——
+# 2026-11-18 线上实测：oss2 走 http 时每片 10MB 传完等响应都会
+# 60 秒读超时、连接丢掉、下一片重开连接，有效速度被拖垮；而
+# p115client 默认 https 的 upload_file 走 CONNECT 隧道一条连接
+# 流到底（2.2GB、4MB/s）。两条路打的是同一主机
+# fhnfile.oss-cn-shenzhen.aliyuncs.com，差别就是 scheme。
+OSS2_ENDPOINT = "https://oss-cn-shenzhen.aliyuncs.com"
 # token 过期类错误码（oss2 ServerError.code）。
 OSS2_TOKEN_EXPIRED_CODES = ("InvalidAccessKeyId", "SecurityTokenExpired")
 # iOS UA（与 drive/p115/client.py 的 IOS_USER_AGENT 同值；upload.py 不能
@@ -125,6 +130,70 @@ _UPLOAD_MAX_ATTEMPTS = int(UPLOAD_RETRY_POLICY["file"]["attempts"])
 #: manager 未提供数据面限流器时的兜底实例（测试桩 owner 等），
 #: 首次使用时懒创建（见 _fallback_data_limiter）。
 _DATA_PUT_LIMITER: Any = None
+
+
+def _monotonic_progress_callback(
+    progress_callback: Optional[Callable[[int, int], None]],
+) -> Optional[Callable[[int, int], None]]:
+    """把上传进度回调包一层单调递增保护（并发分片与重传用）。
+
+    并发分片里各 worker 的分片内进度会交错上报、重传时分片内
+    consumed 从 0 重来，直接报给登记表会让卡片百分比来回跳。
+    只放行严格递增的值；传完（uploaded >= total）永远放行，
+    登记表的完成清理不能被拦住。回调在锁内执行，保证多 worker
+    上报顺序与单调值一致。1.18.3。
+    """
+    if progress_callback is None:
+        return None
+    state: Dict[str, Any] = {"max": 0, "lock": Lock()}
+
+    def _report(uploaded: int, total: int) -> None:
+        try:
+            value = int(uploaded or 0)
+            total_value = int(total or 0)
+        except (TypeError, ValueError):
+            return
+        with state["lock"]:
+            if value <= state["max"] and value < total_value:
+                return
+            if value > state["max"]:
+                state["max"] = value
+            progress_callback(value, total_value)
+
+    return _report
+
+
+def _oss2_part_progress_callback(
+    progress_callback: Optional[Callable[[int, int], None]],
+    part_offset: int,
+    file_size: int,
+) -> Optional[Callable[[int, int], None]]:
+    """把 oss2 分片内进度回调 (consumed, total) 映射成全局已传字节。
+
+    oss2 的 progress_callback 是按本片流算的（consumed/total 都是
+    本片口径）；全局已传 = 分片起始偏移 + 本片已传，file_size 封顶。
+    progress_callback 为空时返回 None。1.18.3。
+    """
+    if progress_callback is None:
+        return None
+    try:
+        offset = int(part_offset or 0)
+        size = int(file_size or 0)
+    except (TypeError, ValueError):
+        return None
+    if size <= 0:
+        return None
+
+    def _on_part_progress(consumed: int, _total: int) -> None:
+        try:
+            value = min(offset + int(consumed or 0), size)
+        except (TypeError, ValueError):
+            return
+        if value <= 0:
+            return
+        progress_callback(value, size)
+
+    return _on_part_progress
 
 
 class _NullRateLimiter:
@@ -752,6 +821,11 @@ class P115UploadService(OwnerDelegator):
                 return bucket.upload_part(
                     object_name, upload_id, part_number,
                     data=OssSizedFileAdapter(io.BytesIO(data), length),
+                    # 流式进度：分片传的时候边传边报，百分比连续走，
+                    # 不再等整片传完才跳 10MB。单调保护在外层回调上。
+                    progress_callback=_oss2_part_progress_callback(
+                        progress_callback, start, file_size
+                    ),
                 )
 
             def _on_retry(error: BaseException, _attempt: int) -> bool:
@@ -892,6 +966,10 @@ class P115UploadService(OwnerDelegator):
             object_name, params={"encoding-type": "url", "sequential": ""}
         ).upload_id
         parts_total = -(-int(file_size) // int(part_size))
+        # 流式进度与分片内重传共用一个单调保护：并发分片各 worker
+        # 交错上报、重传时 consumed 回落，都只放行递增的值，卡片
+        # 百分比不来回跳；传完永远放行。1.18.3。
+        monotonic_callback = _monotonic_progress_callback(progress_callback)
         # 并发度 > 1 且多于一片时走并发分片（与远程直传共用执行器）；
         # 否则走原来的顺序循环（单片文件、并发度 0/1 时的行为不变）。
         concurrency = self._upload_concurrency()
@@ -905,10 +983,10 @@ class P115UploadService(OwnerDelegator):
                 parts = self._upload_oss2_parts_concurrently(
                     source, bucket_holder, bucket_name, object_name, upload_id,
                     part_size, file_size, expiration,
-                    progress_callback=progress_callback,
+                    progress_callback=monotonic_callback,
                 )
-                if progress_callback:
-                    progress_callback(file_size, file_size)
+                if monotonic_callback:
+                    monotonic_callback(file_size, file_size)
             else:
                 with source.open("rb") as fileobj:
                     part_number = 1
@@ -935,6 +1013,13 @@ class P115UploadService(OwnerDelegator):
                                     upload_id,
                                     part_number,
                                     data=OssSizedFileAdapter(fileobj, num_to_upload),
+                                    # 流式进度：分片传的时候边传边报，
+                                    # 百分比连续走，不再等整片传完才跳 10MB。
+                                    progress_callback=(
+                                        _oss2_part_progress_callback(
+                                            monotonic_callback, offset, file_size
+                                        )
+                                    ),
                                 )
                                 parts.append(OssPartInfo(part_number, result.etag))
                                 api_meter.record("oss2:part", bytes_=num_to_upload)
@@ -975,8 +1060,8 @@ class P115UploadService(OwnerDelegator):
                             raise last_part_error
                         offset += num_to_upload
                         part_number += 1
-                        if progress_callback:
-                            progress_callback(offset, file_size)
+                        if monotonic_callback:
+                            monotonic_callback(offset, file_size)
         except Exception:
             with contextlib.suppress(Exception):
                 bucket_holder["bucket"].abort_multipart_upload(object_name, upload_id)
