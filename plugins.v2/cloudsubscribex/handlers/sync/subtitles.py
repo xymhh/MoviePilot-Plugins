@@ -379,8 +379,8 @@ class SubtitleService(OwnerDelegator):
                 "transferred": False,
             }
             direct_cloud_resource = (
-                    self._is_cloud_resource_url(item_url)
-                    and self._is_direct_cloud_resource_url(item_url)
+                    self._owner.resource_transfer._is_cloud_resource_url(item_url)
+                    and self._owner.resource_transfer._is_direct_cloud_resource_url(item_url)
             )
             if direct_cloud_resource:
                 record["transferred"] = True
@@ -388,7 +388,7 @@ class SubtitleService(OwnerDelegator):
                 try:
                     record["transferred"] = bool(self._timed_sync_call(
                         "share_transfer",
-                        self._transfer_file,
+                        self._owner.transfer_ops._transfer_file,
                         item_url,
                         subtitle,
                         self._cloud_transfer_path,
@@ -460,7 +460,7 @@ class SubtitleService(OwnerDelegator):
                     subtitle_mediainfo = self._deserialize_mediainfo(
                         item.get("mediainfo") or {}
                     )
-                    subtitle["transferred"] = bool(self._transfer_file(
+                    subtitle["transferred"] = bool(self._owner.transfer_ops._transfer_file(
                         subtitle_url,
                         retry_item,
                         self._cloud_transfer_path,

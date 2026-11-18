@@ -36,6 +36,7 @@ from unittest.mock import MagicMock
 
 from plugin_env import (
     OwnerDelegator,
+    attach_component_fields,
     ensure_package,
     install_app_mocks,
     load_module,
@@ -59,6 +60,7 @@ install_app_mocks(
     "app.sdk", "app.sdk.classification",
     "app.modules.themoviedb", "app.modules.themoviedb.category",
     "app.db", "app.db.models", "app.db.models.downloadhistory",
+    "app.db.models.subscribe",
     "app.db.models.mediaserver", "app.db.downloadhistory_oper",
     "app.db.subscribe_oper", "app.chain", "app.chain.mediaserver",
     "app.helper.mediaserver", "app.application.mediaserver", "sqlalchemy",
@@ -435,35 +437,45 @@ def _make_parity_handler(*, old, scan_files, mp_candidates, plugin_history,
     handler = EpisodeDedupService.__new__(EpisodeDedupService)
     store = SimpleNamespace()
     object.__setattr__(handler, "_owner", store)
-    handler._should_upgrade_candidate = UpgradeRuleScoringService._should_upgrade_candidate.__get__(handler, EpisodeDedupService)
-    # 评分按文件名查表（固定分），避免真实评分规则干扰奇偶比较
-    handler._get_mp_rule_score = lambda rule_title, *a, **k: int(scores.get(str(rule_title or ""), 0))
-    handler._resource_size_bytes = UpgradeRuleScoringService._resource_size_bytes.__get__(handler, EpisodeDedupService)
-    handler._platform_target = SyncNamingService._platform_target.__get__(handler, EpisodeDedupService)
-    handler._platform_target_file = SyncNamingService._platform_target_file.__get__(handler, EpisodeDedupService)
-    handler._resolve_resource_season_dir = SyncNamingService._resolve_resource_season_dir.__get__(handler, EpisodeDedupService)
-    handler._parse_resource_episode_names = SyncNamingService._parse_resource_episode_names.__get__(handler, EpisodeDedupService)
-    # 1.15.0（Phase 3a 第 4 项）：新 _build_episode_baseline 内部调
-    # _scan_cloud_resource_episode_files 做真实网盘文件覆盖，须绑上。
-    handler._scan_cloud_resource_episode_files = SyncNamingService._scan_cloud_resource_episode_files.__get__(handler, EpisodeDedupService)
-    handler._find_cloud_movie_file = SyncNamingService._find_cloud_movie_file.__get__(handler, EpisodeDedupService)
-    handler._cloud_drive_name = lambda: "测试网盘"
+    # Phase 5：显式组合——跨组件调用走 store.<字段>.<方法>；把 scoring /
+    # naming / baseline 的真实组件实例挂到 store 上（与运行期 SyncHandler
+    # 的具名服务字段等价），方法体经 OwnerDelegator 仍从 store 取假配置。
+    # 原来把真实方法逐个 __get__ 绑到 handler 上的写法已不需要，实例自带；
+    # 只有 _build_episode_baseline / _gather_episode_version_candidates
+    # 仍走 store 绑定（调用点是宿主转发/同组件方法，不走具名字段）。
+    attach_component_fields(
+        store, handler, "upgrade_rule_scoring", "naming", "upgrade_baseline",
+    )
+    # 评分按文件名查表（固定分），避免真实评分规则干扰奇偶比较。
+    # 注意：旧 _build（测试文件自带实现）经 self._get_mp_rule_score 调评分，
+    # 走 handler/store；新 _build 经字段调实例方法。同一份 lambda 两处都放，
+    # 两路结果一致。
+    _score_by_rule = (
+        lambda rule_title, *a, **k: int(scores.get(str(rule_title or ""), 0))
+    )
+    handler._get_mp_rule_score = _score_by_rule
+    object.__setattr__(
+        store.upgrade_rule_scoring, "_get_mp_rule_score", _score_by_rule,
+    )
+    object.__setattr__(store.naming, "_cloud_drive_name", lambda: "测试网盘")
     handler._upgrade_mode = "largest"
     handler._episode_dedup_enabled = True
     handler._prefer_template_named_version = False
-    handler._version_matches_rename_template = UpgradeRuleScoringService._version_matches_rename_template.__get__(handler, EpisodeDedupService)
-    handler._template_conformant_version = UpgradeRuleScoringService._template_conformant_version.__get__(handler, EpisodeDedupService)
     handler._CLOUD_MEDIA_ROOT = "/"
     handler._cloud_directories = _FakeDirectories(files=list(scan_files))
     handler._cloud_mutations = _FakeMutations()
     handler._cloud_transfer_path = "/transfer"
     handler._resource_season_dir_cache = None
     handler._resource_season_dir_lock = None
-    handler._platform_rename_path = lambda root_path, subscribe, mediainfo, source_name, season=None, episode=None: (
-        SimpleNamespace(
-            parent=SimpleNamespace(as_posix=lambda: f"/媒体/剧集/Show/Season {int(season or 1):02d}"),
-            name=str(source_name),
-        )
+    object.__setattr__(
+        store.naming,
+        "_platform_rename_path",
+        lambda root_path, subscribe, mediainfo, source_name, season=None, episode=None: (
+            SimpleNamespace(
+                parent=SimpleNamespace(as_posix=lambda: f"/媒体/剧集/Show/Season {int(season or 1):02d}"),
+                name=str(source_name),
+            )
+        ),
     )
     # 基线层
     handler._baseline_cache_lock = threading.RLock()
@@ -472,6 +484,8 @@ def _make_parity_handler(*, old, scan_files, mp_candidates, plugin_history,
     handler._baseline_key = UpgradeBaselineService._baseline_key
     handler._int_or_zero = UpgradeBaselineService._int_or_zero
     handler._copy_episode_items = UpgradeBaselineService._copy_episode_items
+    # _read_ep_priority 是 28 个对外转发方法之一：组件内调 self._read_ep_priority
+    # 走宿主转发，桩留在 handler/store 上（不搬到字段实例）。
     handler._read_ep_priority = lambda *a, **k: {}
     handler._chain = None
     handler._media_server_resolver = SimpleNamespace(

@@ -60,7 +60,7 @@ class UpgradeService(OwnerDelegator):
     def _set_upgrade_phase(
             self, subscribe, phase: str, progress: int, clear_search: bool = False, **extra_kwargs
     ) -> None:
-        self._set_task_phase(subscribe, phase, progress, clear_search=clear_search, **extra_kwargs)
+        self._owner.metadata._set_task_phase(subscribe, phase, progress, clear_search=clear_search, **extra_kwargs)
 
     def _process_tv_subscribe_upgrade(
             self,
@@ -231,7 +231,7 @@ class UpgradeService(OwnerDelegator):
                     subscribe=subscribe,
                     progress_callback=on_upgrade_search_progress,
                 )
-            resource_batches = self._build_transfer_resource_batches(
+            resource_batches = self._owner.resource_transfer._build_transfer_resource_batches(
                 enabled_sources, prefetched_results
             )
             new_priority = dict(existing_ep_pri)
@@ -261,7 +261,7 @@ class UpgradeService(OwnerDelegator):
                         resource_ref = resource.get("resource_ref")
                         if resource_ref:
                             preview_files = resource.get("preview_files") or []
-                            preview_matches = self._match_episode_files(
+                            preview_matches = self._owner.file_matching._match_episode_files(
                                 preview_files,
                                 mediainfo,
                                 subscribe,
@@ -276,11 +276,11 @@ class UpgradeService(OwnerDelegator):
                             ]
                             if preview_candidates:
                                 preview_worthwhile = any(
-                                    self._should_upgrade_candidate(
+                                    self._owner.upgrade_rule_scoring._should_upgrade_candidate(
                                         local_scores.get(episode, 0),
                                         score,
                                         int(baseline.get(episode, {}).get("file_size") or 0),
-                                        self._resource_size_bytes(file_item.get("size")),
+                                        self._owner.upgrade_rule_scoring._resource_size_bytes(file_item.get("size")),
                                         has_existing=episode in baseline,
                                         old_file_name=str(
                                             baseline.get(episode, {}).get("target_file_name")
@@ -299,7 +299,7 @@ class UpgradeService(OwnerDelegator):
                                         f"{self._upgrade_mode}洗版条件，解锁前跳过：{resource_title}"
                                     )
                                     continue
-                    share_url = self._resolve_candidate_resource_url(
+                    share_url = self._owner.resource_transfer._resolve_candidate_resource_url(
                         candidate_resources,
                         resource_index,
                         resource,
@@ -314,10 +314,10 @@ class UpgradeService(OwnerDelegator):
                     if not share_url:
                         continue
 
-                    if not self._is_supported_resource(resource, share_url):
+                    if not self._owner.resource_transfer._is_supported_resource(resource, share_url):
                         logger.warning(
                             f"跳过当前同步链不支持的资源类型 "
-                            f"{self._supported_resource_type(resource, share_url)}：{resource_title}"
+                            f"{self._owner.resource_transfer._supported_resource_type(resource, share_url)}：{resource_title}"
                         )
                         continue
 
@@ -330,10 +330,10 @@ class UpgradeService(OwnerDelegator):
                             continue
 
                     if is_offline_resource:
-                        provider_name = self._prepare_magnet_resource(
+                        provider_name = self._owner.resource_transfer._prepare_magnet_resource(
                             resource, share_url
                         )
-                        if not self._validate_resource_url(
+                        if not self._owner.resource_transfer._validate_resource_url(
                                 share_url,
                                 resource_label="Magnet 链接",
                                 log_prefix=upgrade_log_prefix,
@@ -341,7 +341,7 @@ class UpgradeService(OwnerDelegator):
                         ):
                             continue
                         provider_name = provider_name or resource_title
-                        title_seasons = self._magnet_title_seasons(resource)
+                        title_seasons = self._owner.resource_transfer._magnet_title_seasons(resource)
                         if title_seasons and season not in title_seasons:
                             logger.debug(
                                 f"{upgrade_log_prefix} Magnet 标题预过滤排除："
@@ -350,7 +350,7 @@ class UpgradeService(OwnerDelegator):
                             )
                             continue
                         target_episodes = []
-                        title_episodes = self._magnet_title_episodes(resource, season)
+                        title_episodes = self._owner.resource_transfer._magnet_title_episodes(resource, season)
                         if title_episodes:
                             target_episodes = sorted(
                                 set(episodes_to_search) & title_episodes
@@ -370,7 +370,7 @@ class UpgradeService(OwnerDelegator):
                         )
                         target_episodes = target_episodes or sorted(
                             set(episodes_to_search)
-                            & self._resource_preview_episodes(resource, season)
+                            & self._owner.resource_transfer._resource_preview_episodes(resource, season)
                         ) or sorted(episodes_to_search)
                         target_episode_set = set(target_episodes)
                         upgrade_baseline = {}
@@ -413,8 +413,8 @@ class UpgradeService(OwnerDelegator):
                         )
                         if not pending_key:
                             continue
-                        self._clear_task_search_state(subscribe)
-                        self._append_magnet_pending_history(
+                        self._owner.metadata._clear_task_search_state(subscribe)
+                        self._owner.resource_transfer._append_magnet_pending_history(
                             history=history,
                             mediainfo=mediainfo,
                             subscribe=subscribe,
@@ -433,9 +433,9 @@ class UpgradeService(OwnerDelegator):
                         continue
 
                     selected_file_ids, selected_file_names = (
-                        self._explicit_selection_values(resource)
+                        self._owner.resource_transfer._explicit_selection_values(resource)
                     )
-                    share_files = self._validated_resource_files(
+                    share_files = self._owner.resource_transfer._validated_resource_files(
                         share_url,
                         resource_title=resource_title,
                         target_season=(season if self._skip_other_season_dirs else None),
@@ -453,7 +453,7 @@ class UpgradeService(OwnerDelegator):
                     if manual_resources:
                         # 手动提交的分享以实际包含的集数为准：已存在集数按洗版规则比较后替换或跳过，
                         # 新增集数正常转存，避免只处理已有基线集数而漏掉新集。
-                        _, share_episodes = self._summarize_share_episodes(
+                        _, share_episodes = self._owner.naming._summarize_share_episodes(
                             share_files,
                             season,
                             mediainfo if is_cross_batch else None,
@@ -466,7 +466,7 @@ class UpgradeService(OwnerDelegator):
                     self._set_upgrade_phase(subscribe, "比较版本", 65)
                     matched_items = []
                     skip_reasons: List[str] = []
-                    matched_files = self._match_episode_files(
+                    matched_files = self._owner.file_matching._match_episode_files(
                         share_files,
                         mediainfo,
                         subscribe,
@@ -490,7 +490,7 @@ class UpgradeService(OwnerDelegator):
 
                         file_name = matched_file.get('name', '')
                         # 候选文件大小（搜索接口已自带元数据）
-                        candidate_size = self._resource_size_bytes(matched_file.get("size"))
+                        candidate_size = self._owner.upgrade_rule_scoring._resource_size_bytes(matched_file.get("size"))
 
                         # 现有文件信息（MoviePilot 规则优先级）
                         old_score = local_scores.get(episode, 0)
@@ -499,7 +499,7 @@ class UpgradeService(OwnerDelegator):
 
                         score_gap = new_score - old_score
 
-                        should_upgrade, reason = self._should_upgrade_candidate(
+                        should_upgrade, reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
                             old_score,
                             new_score,
                             int(baseline.get(episode, {}).get("file_size") or 0),
@@ -525,12 +525,12 @@ class UpgradeService(OwnerDelegator):
                             f"{upgrade_log_prefix} E{episode:02d}：{reason}"
                         )
 
-                        target_dir, target_name = self._platform_target(
+                        target_dir, target_name = self._owner.naming._platform_target(
                             self._CLOUD_MEDIA_ROOT, subscribe, mediainfo,
                             file_name, season, episode
                         )
                         if episode in baseline and self._upgrade_mode == "coexist":
-                            target_name = self._coexist_target_name(
+                            target_name = self._owner.upgrade_rule_scoring._coexist_target_name(
                                 target_name,
                                 file_name,
                                 candidate_size,
@@ -545,7 +545,7 @@ class UpgradeService(OwnerDelegator):
                         old_file_id = str(baseline_item.get("cloud_file_id") or "")
                         if episode in baseline and self._upgrade_mode != "coexist" and not old_file_id:
                             if not old_dir or not old_name:
-                                old_dir, old_name = self._platform_target(
+                                old_dir, old_name = self._owner.naming._platform_target(
                                     self._CLOUD_MEDIA_ROOT,
                                     subscribe,
                                     mediainfo,
@@ -582,7 +582,7 @@ class UpgradeService(OwnerDelegator):
                             "upgrade_old_size": int(
                                 baseline.get(episode, {}).get("file_size") or 0
                             ),
-                            "subtitle_files": self._companion_subtitle_files(
+                            "subtitle_files": self._owner.subtitles._companion_subtitle_files(
                                 share_files,
                                 matched_file,
                                 season=season,
@@ -600,7 +600,7 @@ class UpgradeService(OwnerDelegator):
                         continue
 
                     self._set_upgrade_phase(subscribe, "提交替换", 80, clear_search=True)
-                    transfer_results = self._transfer_episode_items(
+                    transfer_results = self._owner.transfer_ops._transfer_episode_items(
                         matched_items,
                         share_url,
                         mediainfo,
@@ -627,10 +627,10 @@ class UpgradeService(OwnerDelegator):
                         success = transfer_result["success"]
                         pending_key = transfer_result["pending_key"]
 
-                        history_item = self._build_transfer_history_item(
+                        history_item = self._owner.transfer_details._build_transfer_history_item(
                             mediainfo=mediainfo,
                             subscribe=subscribe,
-                            status=self._transfer_history_status(success, share_url),
+                            status=self._owner.resource_transfer._transfer_history_status(success, share_url),
                             share_url=share_url,
                             file_name=item["target_name"],
                             source_file_name=file_name,
@@ -688,7 +688,7 @@ class UpgradeService(OwnerDelegator):
                                     item.get("candidate_size") or 0
                                 )
                                 if not batch_detail_source:
-                                    batch_detail_source = self._detail_source_text(
+                                    batch_detail_source = self._owner.transfer_details._detail_source_text(
                                         history_item
                                     )
                             batch_success_episodes.append(episode)
@@ -709,7 +709,7 @@ class UpgradeService(OwnerDelegator):
                             int(episode) for episode in batch_detail_episodes
                             if int(episode) > 0
                         })
-                        self._append_tv_transfer_detail(
+                        self._owner.transfer_details._append_tv_transfer_detail(
                             transfer_details, mediainfo, season, ordered_episodes,
                             notification_kind="upgrade",
                             size_bytes=batch_detail_size,
@@ -726,7 +726,7 @@ class UpgradeService(OwnerDelegator):
                         # 通知详情缺一条不该中断整条洗版流程。
                         logger.debug(f"洗版通知详情写入失败（已忽略）：{error}", exc_info=True)
                     if batch_success_episodes:
-                        self._record_download_history(
+                        self._owner.transfer_details._record_download_history(
                             mediainfo=mediainfo,
                             subscribe=subscribe,
                             path=transfer_results[0]["item"]["target_dir"],

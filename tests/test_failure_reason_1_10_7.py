@@ -441,9 +441,16 @@ class FailureReasonWiringTests(unittest.TestCase):
 
     def test_retry_prefers_fresh_failure_reason(self):
         text = _read_source("handlers", "sync", "retry.py")
-        self.assertIn("self._transfer_failure_reason(file_id)", text)
+        # Phase 5：_transfer_failure_reason 在 transfer_ops 组件上，
+        # retry 经 owner.transfer_ops 调用。
+        self.assertIn(
+            "self._owner.transfer_ops._transfer_failure_reason(file_id)",
+            text,
+        )
         self.assertLess(
-            text.index("self._transfer_failure_reason(file_id)"),
+            text.index(
+                "self._owner.transfer_ops._transfer_failure_reason(file_id)"
+            ),
             text.index('"重试转存失败"'),
             "本次尝试的新原因必须排在通用兜底之前",
         )

@@ -173,6 +173,12 @@ class DeepDeletePerFileTests(unittest.TestCase):
             return Path(text), "ok"
 
         service._configured_media_path = _configured_media_path
+        # Phase 5：逐文件/整目录档经 owner.media_targets._configured_media_path
+        # 定位，桩挂到字段命名空间上（普通赋值会被 OwnerDelegator 转发到
+        # owner 身上，读 service._configured_media_path 仍能取到同一份）。
+        service._owner.media_targets = SimpleNamespace(
+            _configured_media_path=service._configured_media_path,
+        )
         return service
 
     def _season_listing(self, *names):

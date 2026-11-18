@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 
 from plugin_env import (
     ensure_package, install_app_mocks, install_core_delegation, load_module,
+    materialize_handler_fields, migrate_handler_stubs,
     register_mock, set_media_type,
 )
 
@@ -168,6 +169,27 @@ class DummyMpWaitService(PostprocessService):
     def __init__(self):
         owner = types.SimpleNamespace()
         super().__init__(owner)
+        # Phase 5：postprocess 经 owner.transfer_details.<方法> 调用；本文件
+        # 的用例用 _stub 把桩打在 service 实例上，命名空间里的方法要在调用
+        # 时才去实例字典里取当时的桩（用例中途还会换桩），取不到时回退默认值。
+        def _delegate(name, default):
+            def _call(*args, **kwargs):
+                stub = self.__dict__.get(name)
+                if stub is not None:
+                    return stub(*args, **kwargs)
+                return default() if callable(default) else default
+            return _call
+        owner.transfer_details = SimpleNamespace(
+            _notify_pending_file_finalized=_delegate(
+                "_notify_pending_file_finalized", None,
+            ),
+            _restore_pending_media_context=_delegate(
+                "_restore_pending_media_context", lambda: (None, {}),
+            ),
+        )
+        owner.strm_ops = SimpleNamespace(
+            _generate_strm=_delegate("_generate_strm", None),
+        )
         self._organize_after_transfer = True
         self._upgrade_mode = "replace"
         self._FINALIZE_MAX_FAILURES = 3
@@ -570,6 +592,8 @@ class MpOrganizePendingRecordTests(unittest.TestCase):
         handler._upgrade_mode = "replace"
         handler._is_cloud_resource_url = lambda url: False
         handler._is_direct_cloud_resource_url = lambda url: False
+        materialize_handler_fields(handler, "resource_transfer")
+        migrate_handler_stubs(handler)
         pending_key = handler._queue_file_finalize(
             "https://115.com/s/test",
             MEDIA_DIR,
@@ -597,6 +621,8 @@ class MpOrganizePendingRecordTests(unittest.TestCase):
         handler._upgrade_mode = "replace"
         handler._is_cloud_resource_url = lambda url: False
         handler._is_direct_cloud_resource_url = lambda url: False
+        materialize_handler_fields(handler, "resource_transfer")
+        migrate_handler_stubs(handler)
         pending_key = handler._queue_file_finalize(
             "https://115.com/s/test",
             MEDIA_DIR,

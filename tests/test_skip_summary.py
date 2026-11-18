@@ -100,6 +100,18 @@ if "cloudsubscribex.handlers.sync.utils" not in sys.modules:
 else:
     sync_utils_module = sys.modules["cloudsubscribex.handlers.sync.utils"]
 
+# _format_episode_ranges 必须走真实实现：全量运行时 utils 常被前面的
+# 文件 mock 掉（AutoMockModule 的同名属性是 MagicMock，格式化出来就是
+# "<MagicMock ...>"），这里在被 mock 时单独用临时模块名再真加载一次。
+_format_episode_ranges_impl = getattr(
+    sync_utils_module, "format_episode_ranges", None
+)
+if isinstance(_format_episode_ranges_impl, MagicMock):
+    _format_episode_ranges_impl = load_module(
+        "cloudsubscribex.handlers.sync.utils_real",
+        "plugins.v2/cloudsubscribex/handlers/sync/utils.py",
+    ).format_episode_ranges
+
 # ---- 被测模块 ----
 skip_stats_module = load_module(
     "cloudsubscribex.core.services.skip_stats",
@@ -164,7 +176,7 @@ class _StubOwner:
     """职责委托宿主：只提供采集与通知所需的运行态。"""
 
     # 集号区间文案走真实实现，避免断言自己编的格式。
-    _format_episode_ranges = staticmethod(sync_utils_module.format_episode_ranges)
+    _format_episode_ranges = staticmethod(_format_episode_ranges_impl)
 
     def __init__(
             self,
@@ -585,8 +597,14 @@ def _run_skip_branch(case, source: str, test_source: str, **namespace):
     _assert_mismatch_wiring(case, branch, kind_expr)
     collector = SkipStatsCollector()
     probe_logger = _ProbeLogger()
+    # Phase 5：抽取的分支经 self._owner.resource_transfer.<方法> 调用，
+    # owner 上的 resource_transfer 指回 service 自身（这些方法就定义在
+    # ResourceTransferService 上）。
+    owner = _StubOwner(collector=collector)
+    service = ResourceTransferService(owner)
+    owner.resource_transfer = service
     scope = {
-        "self": ResourceTransferService(_StubOwner(collector=collector)),
+        "self": service,
         "logger": probe_logger,
         "SkipStatsCollector": SkipStatsCollector,
         # 候选账本明细会带上资源标题，未显式传入时给空串即可。

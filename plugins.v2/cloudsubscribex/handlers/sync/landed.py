@@ -102,7 +102,7 @@ class LandedVerifyService(OwnerDelegator):
             return result
 
         try:
-            verified, _season_dir, files = self._season_dir_files(
+            verified, _season_dir, files = self._owner.episode_dedup._season_dir_files(
                 subscribe, mediainfo, season
             )
         except Exception as error:  # pragma: no cover - 防御性兜底
@@ -266,7 +266,7 @@ class LandedVerifyService(OwnerDelegator):
         if not candidates:
             return
         try:
-            _verified, season_dir, _files = self._season_dir_files(
+            _verified, season_dir, _files = self._owner.episode_dedup._season_dir_files(
                 subscribe, mediainfo, season
             )
         except Exception:  # pragma: no cover - 防御性兜底

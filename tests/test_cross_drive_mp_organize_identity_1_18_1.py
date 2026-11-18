@@ -40,7 +40,9 @@ except ImportError:  # 直接用 unittest 跑单文件时 tests/ 不在 path 上
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from test_finalize_mp_wait_1_12_6 import SyncHandler
 
-from plugin_env import load_module  # noqa: E402
+from plugin_env import (  # noqa: E402
+    load_module, materialize_handler_fields, migrate_handler_stubs,
+)
 
 # 与 test_ingest_pipeline_1_15_0.py 同样的理由：已加载时复用，未加载
 # 才加载，避免 fork 出第二个模块对象。
@@ -108,6 +110,24 @@ def _subscribe():
     return SimpleNamespace(name="天才谋杀法", id=365)
 
 
+def _attach_fake_owner(service, mapping):
+    """Phase 5：裸组件实例配假 owner——字段命名空间把桩方法指回 service 自身的桩。
+
+    沿用已有的 _owner 命名空间（_ConfirmHost 经 super().__init__ 挂的那个）：
+    __init__ 里普通属性写已被 OwnerDelegator 转发到它身上，换掉会丢属性。
+    """
+    owner = service.__dict__.get("_owner")
+    if owner is None or not hasattr(owner, "__dict__"):
+        owner = SimpleNamespace()
+    for field_name, method_names in mapping.items():
+        namespace = SimpleNamespace()
+        for method_name in method_names:
+            setattr(namespace, method_name, getattr(service, method_name))
+        setattr(owner, field_name, namespace)
+    object.__setattr__(service, "_owner", owner)
+    return owner
+
+
 class _ConfirmHost(TransferOpsMixin):
     """只测 confirm：_generate_or_queue_strm_batch 桩掉，只收 item。"""
 
@@ -116,6 +136,10 @@ class _ConfirmHost(TransferOpsMixin):
         self._upgrade_mode = ""
         self.captured = []
         self._forwarder = forwarder
+        _attach_fake_owner(self, {
+            "resource_transfer": ["_resource_staging_dir"],
+            "strm_ops": ["_generate_or_queue_strm_batch"],
+        })
 
     def _resource_staging_dir(self, url, file_item):
         return "/转存"
@@ -148,6 +172,8 @@ def _queue_host(store):
     handler._upgrade_mode = "replace"
     handler._is_cloud_resource_url = lambda url: False
     handler._is_direct_cloud_resource_url = lambda url: False
+    materialize_handler_fields(handler, "resource_transfer")
+    migrate_handler_stubs(handler)
     return handler
 
 

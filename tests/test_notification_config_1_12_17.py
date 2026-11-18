@@ -109,7 +109,12 @@ class NotificationConfigTests(unittest.TestCase):
         )
 
     def test_lightweight_version_is_gone(self):
-        """轻量版已删除：全仓只剩 media_refresh.py 一个同名定义。"""
+        """轻量版已删除：全仓只剩 media_refresh.py 一个真实实现。
+
+        Phase 5：service.py 上多了一个同名转发器（显式组合的 38 个
+        转发之一），它只有一行、原样委托给 media_refresh，不算第二份
+        实现——这里断言它只能是纯转发。
+        """
         sync_dir = Path(PLUGIN_DIR) / "handlers" / "sync"
         definitions = []
         for path in sorted(sync_dir.glob("*.py")):
@@ -117,7 +122,13 @@ class NotificationConfigTests(unittest.TestCase):
                 r"^    def update_notification_config\(", path.read_text(encoding="utf-8"), re.M
             ):
                 definitions.append(path.name)
-        self.assertEqual(definitions, ["media_refresh.py"])
+        self.assertEqual(definitions, ["media_refresh.py", "service.py"])
+        forwarder = (sync_dir / "service.py").read_text(encoding="utf-8")
+        self.assertRegex(
+            forwarder,
+            r"def update_notification_config\(self,[^)]*\)[^:]*:\n"
+            r"        return self\.media_refresh\.update_notification_config\(",
+        )
         notify_source = (sync_dir / "notify.py").read_text(encoding="utf-8")
         self.assertNotIn("def update_notification_config", notify_source)
 

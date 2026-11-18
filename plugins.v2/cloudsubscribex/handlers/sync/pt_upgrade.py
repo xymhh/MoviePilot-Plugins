@@ -98,7 +98,7 @@ class PtUpgradeService(OwnerDelegator):
             logger.warning(f"PT洗版仅处理可确定单集的电视剧文件：{local_path.name}")
             return None
         episode = episodes[0]
-        valid, episode_files, cloud_dir = self._scan_cloud_resource_episode_files(
+        valid, episode_files, cloud_dir = self._owner.naming._scan_cloud_resource_episode_files(
             subscribe=subscribe,
             mediainfo=mediainfo,
             season=season,
@@ -109,17 +109,17 @@ class PtUpgradeService(OwnerDelegator):
             logger.warning(f"PT洗版无法确认网盘目标目录：{local_path.name}")
             return None
         old_file = episode_files.get(episode)
-        old_score = self._get_mp_rule_score(
+        old_score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
             getattr(old_file, "name", ""),
             int(getattr(old_file, "size", 0) or 0),
             subscribe,
             season,
             mediainfo,
         ) if old_file else 0
-        new_score = self._get_mp_rule_score(
+        new_score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
             local_path.name, file_size, subscribe, season, mediainfo
         )
-        should_upload, reason = self._should_upgrade_candidate(
+        should_upload, reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
             old_score,
             new_score,
             int(getattr(old_file, "size", 0) or 0),
@@ -129,7 +129,7 @@ class PtUpgradeService(OwnerDelegator):
         if not should_upload:
             logger.info(f"PT洗版跳过 {local_path.name}：{reason}")
             return None
-        target_dir, target_name = self._platform_target(
+        target_dir, target_name = self._owner.naming._platform_target(
             self._CLOUD_MEDIA_ROOT,
             subscribe,
             mediainfo,
@@ -145,19 +145,19 @@ class PtUpgradeService(OwnerDelegator):
     def _movie_target(
             self, subscribe, mediainfo, local_path: Path, file_size: int,
     ) -> Optional[Tuple[None, None, str, str, Any, str, int, str]]:
-        existing = self._find_cloud_movie_file(subscribe, mediainfo)
+        existing = self._owner.naming._find_cloud_movie_file(subscribe, mediainfo)
         old_file = existing[2] if existing else None
-        old_score = self._get_mp_rule_score(
+        old_score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
             getattr(old_file, "name", ""),
             int(getattr(old_file, "size", 0) or 0),
             subscribe,
             1,
             mediainfo,
         ) if old_file else 0
-        new_score = self._get_mp_rule_score(
+        new_score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
             local_path.name, file_size, subscribe, 1, mediainfo
         )
-        should_upload, reason = self._should_upgrade_candidate(
+        should_upload, reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
             old_score,
             new_score,
             int(getattr(old_file, "size", 0) or 0),
@@ -167,7 +167,7 @@ class PtUpgradeService(OwnerDelegator):
         if not should_upload:
             logger.info(f"PT洗版跳过 {local_path.name}：{reason}")
             return None
-        target_dir, target_name = self._platform_target(
+        target_dir, target_name = self._owner.naming._platform_target(
             self._CLOUD_MEDIA_ROOT, subscribe, mediainfo, local_path.name
         )
         return (
@@ -234,7 +234,7 @@ class PtUpgradeService(OwnerDelegator):
                 old_cloud_dir, new_score, reason,
             ) = target
             if old_file and self._upgrade_mode == "coexist":
-                target_name = self._coexist_target_name(
+                target_name = self._owner.upgrade_rule_scoring._coexist_target_name(
                     target_name, local_path.name, file_size, checksum
                 )
             staging_name = self._staging_name(local_path, checksum)
@@ -276,7 +276,7 @@ class PtUpgradeService(OwnerDelegator):
                 )
                 return False
             share_url = f"pt://{event_data.get('download_hash')}"
-            _, pending_key = self._generate_or_queue_strm(
+            _, pending_key = self._owner.strm_ops._generate_or_queue_strm(
                 share_url=share_url,
                 cloud_dir=target_dir,
                 file_name=target_name,

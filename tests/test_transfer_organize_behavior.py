@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from plugin_env import (
     ensure_package, install_app_mocks, install_core_delegation, load_module,
+    materialize_handler_fields, migrate_handler_stubs,
 )
 
 install_app_mocks(
@@ -197,7 +198,7 @@ install_app_mocks(
         f"cloudsubscribex.handlers.sync.{sibling}"
         for sibling in (
             "baseline", "cleanup", "history", "matching", "metadata", "movie",
-            "naming", "notify", "platform_history", "postprocess", "pt_upgrade",
+            "naming", "notify", "platform_history", "pt_upgrade",
             "retry", "rule_scoring", "subtitles", "television", "upgrade", "utils",
         )
     ],
@@ -232,6 +233,9 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
 
     def setUp(self):
         self.handler = SyncHandler.__new__(SyncHandler)
+        # Phase 5：具名服务字段按运行期全部建齐（转存管线会经 postprocess /
+        # strm_ops / resource_transfer 等多个字段调用）。
+        materialize_handler_fields(self.handler)
         self.handler._cloud_transfer_path = "/待整理"
         self.handler._organize_after_transfer = False
         self.handler._is_cloud_resource_url = lambda url: False
@@ -266,6 +270,10 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         self.handler._current_task_context = lambda: (None, None)
         self.handler._cloud_directory_snapshot = MagicMock(return_value=(False, {}))
         self.handler._generate_or_queue_strm_batch = MagicMock(return_value={})
+
+        # Phase 5：跨组件方法桩（_resource_staging_dir、_generate_or_queue_strm_batch
+        # 等）需落在具名服务字段实例上，生产代码才取得到；桩本身保留在 handler 上。
+        migrate_handler_stubs(self.handler)
 
         # 构造通用的 mock mediainfo 与 subscribe
         self.mediainfo = MagicMock()
@@ -312,6 +320,8 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
                 "existing_file": "玫瑰战争 {tmdb-299276} - S01E24 - 第24集.mp4",
             },
         ))
+        # Phase 5：上面在 handler 上改的桩要同步到具名服务字段实例上。
+        migrate_handler_stubs(self.handler)
 
         file_item = {
             "id": "quark-file-1",
@@ -319,7 +329,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             "size": 1024,
             "sha1": "A" * 40,
         }
-        ok = self.handler._transfer_file_impl(
+        ok = self.handler.transfer_ops._transfer_file_impl(
             "https://pan.quark.cn/s/sample",
             file_item,
             "/downloads",
@@ -358,7 +368,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             }
         ]
 
-        self.handler._transfer_episode_batch(
+        self.handler.transfer_ops._transfer_episode_batch(
             matched_items=matched_items,
             share_url=share_url,
             mediainfo=self.mediainfo,
@@ -408,7 +418,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             },
         ]
 
-        self.handler._transfer_episode_batch(
+        self.handler.transfer_ops._transfer_episode_batch(
             matched_items=matched_items,
             share_url=share_url,
             mediainfo=self.mediainfo,
@@ -455,7 +465,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             },
         ]
 
-        self.handler._transfer_episode_batch(
+        self.handler.transfer_ops._transfer_episode_batch(
             matched_items=matched_items,
             share_url=share_url,
             mediainfo=self.mediainfo,
@@ -501,7 +511,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             },
         ]
 
-        self.handler._transfer_episode_batch(
+        self.handler.transfer_ops._transfer_episode_batch(
             matched_items=matched_items,
             share_url=share_url,
             mediainfo=self.mediainfo,
@@ -533,6 +543,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             return False, {}
 
         self.handler._cloud_directory_snapshot = fake_snapshot
+        migrate_handler_stubs(self.handler)
 
         matched_items = [
             {
@@ -561,7 +572,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             },
         ]
 
-        self.handler._transfer_episode_batch(
+        self.handler.transfer_ops._transfer_episode_batch(
             matched_items=matched_items,
             share_url=share_url,
             mediainfo=self.mediainfo,
@@ -590,6 +601,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         self.handler._cloud_directory_snapshot = MagicMock(
             return_value=(True, {"美国人质 S01E01 2160p.mkv": found_file})
         )
+        migrate_handler_stubs(self.handler)
 
         matched_items = [
             {
@@ -604,7 +616,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             }
         ]
 
-        self.handler._transfer_episode_batch(
+        self.handler.transfer_ops._transfer_episode_batch(
             matched_items=matched_items,
             share_url=share_url,
             mediainfo=self.mediainfo,
@@ -625,7 +637,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
         self.handler._organize_after_transfer = True
         # trigger_mp_organize 是 MpOrganizeMixin 的方法，helper 用组件实例
         # 调它；在宿主上打桩够不着，必须直接桩组件实例（绕开委托的 __setattr__）。
-        component = self.handler._trigger_mp_organize_for_batch.__self__
+        component = self.handler.mp_organize
         object.__setattr__(
             component, "trigger_mp_organize",
             MagicMock(return_value=(True, {"src_path": "/待整理/a - S01E01.mkv"})),
@@ -655,7 +667,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             },
         ]
 
-        self.handler._transfer_episode_batch(
+        self.handler.transfer_ops._transfer_episode_batch(
             matched_items=matched_items,
             share_url=share_url,
             mediainfo=self.mediainfo,
@@ -674,7 +686,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
     def test_mp_organize_not_triggered_when_trigger_declines(self):
         """P1：MP 整理未接手时不跳插件历史，记录仍有兜底。"""
         self.handler._organize_after_transfer = True
-        component = self.handler._trigger_mp_organize_for_batch.__self__
+        component = self.handler.mp_organize
         object.__setattr__(
             component, "trigger_mp_organize",
             MagicMock(return_value=(
@@ -696,7 +708,7 @@ class TestSyncHandlerEpisodeBatchTransfer(unittest.TestCase):
             },
         ]
 
-        self.handler._transfer_episode_batch(
+        self.handler.transfer_ops._transfer_episode_batch(
             matched_items=matched_items,
             share_url=share_url,
             mediainfo=self.mediainfo,
@@ -741,6 +753,7 @@ class TestSyncHandlerCrossDownloadOrganize(unittest.TestCase):
         self.handler._stop_requested = lambda: False
         self.handler._current_task_context = lambda: (None, None)
         self.handler._cross_transfer_enabled = True
+        self.handler._cloud_drive_registry = {}
         self.handler._cloud_drive = SimpleNamespace(
             key="115", name="115网盘",
             supports=lambda cap: True,
@@ -766,7 +779,8 @@ class TestSyncHandlerCrossDownloadOrganize(unittest.TestCase):
             return_value=self.source
         )
         # transfer_ops 组件上的方法要桩组件实例（宿主赋值够不着）。
-        ops_component = self.handler._transfer_file_impl.__self__
+        materialize_handler_fields(self.handler)
+        ops_component = self.handler.transfer_ops
         object.__setattr__(
             ops_component, "_cross_transfer_staging_path",
             lambda key: "/staging/quark",
@@ -775,13 +789,13 @@ class TestSyncHandlerCrossDownloadOrganize(unittest.TestCase):
             ops_component, "_cleanup_cross_transfer_staging", MagicMock()
         )
         self.failure_reasons = []
-        history_component = self.handler._remember_transfer_failure.__self__
+        history_component = self.handler.transfer_ops  # _remember_transfer_failure 在 transfer_ops 上
         object.__setattr__(
             history_component, "_remember_transfer_failure",
             lambda file_item, reason: self.failure_reasons.append(reason),
         )
         # MP 整理触发器（MpOrganizeMixin 组件）。
-        mp_component = self.handler._trigger_mp_organize_for_batch.__self__
+        mp_component = self.handler.mp_organize
         object.__setattr__(
             mp_component, "trigger_mp_organize",
             MagicMock(return_value=(
@@ -802,6 +816,9 @@ class TestSyncHandlerCrossDownloadOrganize(unittest.TestCase):
         )
         self.mock_trigger = mp_component.trigger_mp_organize
         self.mock_organize_enabled = mp_component._mp_organize_enabled
+        # Phase 5：setUp 里在 handler 上改的桩（_resource_provider_for_url 等）
+        # 要同步到具名服务字段实例上，生产代码才取得到。
+        migrate_handler_stubs(self.handler)
 
     def _run_transfer(self, completed):
         self.manager = _FakeCrossManager(completed)
@@ -810,7 +827,7 @@ class TestSyncHandlerCrossDownloadOrganize(unittest.TestCase):
             "id": "fid1", "name": "S01E01.mkv", "size": 12345,
             "sha1": "ABC", "md5": "DEF",
         }
-        result = self.handler._transfer_file_impl(
+        result = self.handler.transfer_ops._transfer_file_impl(
             "https://115.com/s/sample_share", file_item,
             "/Alist/影视/moviepilot/转存", "S01E01.mkv", "ABC",
             parent_task_id="subscribe:35",

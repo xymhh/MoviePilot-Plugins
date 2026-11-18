@@ -61,7 +61,7 @@ class EpisodeDedupService(OwnerDelegator):
 
         cloud_media_root = getattr(self, "_CLOUD_MEDIA_ROOT", "/")
         try:
-            cloud_dir = self._resolve_resource_season_dir(
+            cloud_dir = self._owner.naming._resolve_resource_season_dir(
                 cloud_media_root, subscribe, mediainfo, season
             )
         except Exception as error:
@@ -148,7 +148,7 @@ class EpisodeDedupService(OwnerDelegator):
             score_key = (name, size)
             score = cache.get(score_key)
             if score is None:
-                score = self._get_mp_rule_score(
+                score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
                     name, size, subscribe, season, mediainfo
                 )
                 cache[score_key] = score
@@ -383,7 +383,7 @@ class EpisodeDedupService(OwnerDelegator):
             """无增益时按模板命名保留旧版本（与洗版判定同一优先级）。"""
             if not prefer_template:
                 return "skip", list(versions), reason
-            template_version = self._template_conformant_version(
+            template_version = self._owner.upgrade_rule_scoring._template_conformant_version(
                 versions, subscribe, mediainfo, season, episode
             )
             if not template_version:
@@ -409,7 +409,7 @@ class EpisodeDedupService(OwnerDelegator):
 
         best_old_score = max(int(v.get("score") or 0) for v in versions)
         best_old_size = max(int(v.get("file_size") or 0) for v in versions)
-        should_upgrade, reason = self._should_upgrade_candidate(
+        should_upgrade, reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
             best_old_score,
             new_score,
             best_old_size,
@@ -494,7 +494,7 @@ class EpisodeDedupService(OwnerDelegator):
         """列出 tmdbid 电影目录内全部视频文件（不再要求文件名与模板一致）。"""
         cloud_media_root = getattr(self, "_CLOUD_MEDIA_ROOT", "/")
         try:
-            cloud_dir, _expected_name = self._platform_target(
+            cloud_dir, _expected_name = self._owner.naming._platform_target(
                 cloud_media_root,
                 subscribe,
                 mediainfo,
@@ -502,7 +502,7 @@ class EpisodeDedupService(OwnerDelegator):
             )
         except Exception as error:
             logger.debug(
-                f"{self._cloud_drive_name()}电影目标路径计算失败：{mediainfo.title_year}，{error}"
+                f"{self._owner.naming._cloud_drive_name()}电影目标路径计算失败：{mediainfo.title_year}，{error}"
             )
             return []
         cloud_directories = getattr(self, "_cloud_directories", None)

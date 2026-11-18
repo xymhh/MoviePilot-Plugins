@@ -154,7 +154,7 @@ class UpgradeBaselineService(OwnerDelegator):
             score_key = (str(rule_title or "").strip(), int(file_size or 0))
             score = cache.get(score_key)
             if score is None:
-                score = self._get_mp_rule_score(
+                score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
                     rule_title, file_size, subscribe, season, mediainfo
                 )
                 cache[score_key] = score
@@ -251,7 +251,7 @@ class UpgradeBaselineService(OwnerDelegator):
         # 动合并），现收进基线内部。扫描失败时只丢覆盖信息，不丢基线本身。
         try:
             cloud_valid, cloud_episode_files, cloud_dir = (
-                self._scan_cloud_resource_episode_files(
+                self._owner.naming._scan_cloud_resource_episode_files(
                     subscribe=subscribe,
                     mediainfo=mediainfo,
                     season=season,
@@ -324,7 +324,7 @@ class UpgradeBaselineService(OwnerDelegator):
                 score_key = (cloud_name, cloud_size)
                 score = cache.get(score_key)
                 if score is None:
-                    score = self._get_mp_rule_score(
+                    score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
                         cloud_name, cloud_size, subscribe, season, mediainfo
                     )
                     cache[score_key] = score

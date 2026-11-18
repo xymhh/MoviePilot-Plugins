@@ -663,13 +663,21 @@ class TestTerminalStateWritesRetryIndex(unittest.TestCase):
     def test_cross_success_unlanded_writes_repair_row(self):
         service, store = self._service()
         # 跨盘：源盘 key 与目标盘不同。
-        service._resource_provider_for_url = lambda url: types.SimpleNamespace(
-            key="quark", name="夸克网盘",
+        # Phase 5：_pending_item_to_terminal_record 与落盘自检经
+        # owner.resource_transfer / owner.landed_verify 调用，桩挂字段上。
+        service._owner.resource_transfer = types.SimpleNamespace(
+            _resource_provider_for_url=lambda url: types.SimpleNamespace(
+                key="quark", name="夸克网盘",
+            ),
         )
         service._cloud_drive = types.SimpleNamespace(key="u115cs")
-        service.verify_landed_records = lambda records: {
-            id(records[0]): {"landed": False, "reason": "missing_in_dir"},
-        }
+        service._owner.landed_verify = types.SimpleNamespace(
+            verify_landed_records=lambda records: {
+                id(records[0]): {
+                    "landed": False, "reason": "missing_in_dir",
+                },
+            },
+        )
         item = self._item()
         self.assertTrue(service._write_terminal_state(item, "key1", "成功"))
         self.assertEqual(len(store.retry_index.rows), 1)

@@ -94,7 +94,7 @@ class SubscribeFlowService(OwnerDelegator):
         （search_sources 的 TV 专属参数），电影不传。
         """
         if manual_resources:
-            self._set_task_phase(
+            self._owner.metadata._set_task_phase(
                 subscribe, "处理手动网盘资源", phase_progress
             )
             return ["manual"], {
@@ -108,13 +108,13 @@ class SubscribeFlowService(OwnerDelegator):
             source_order = self._search_handler.get_enabled_sources()
         if not source_order:
             return [], {}
-        self._set_task_phase(subscribe, phase_label, phase_progress)
+        self._owner.metadata._set_task_phase(subscribe, phase_label, phase_progress)
 
         def on_search_progress(data: Dict[str, Any]) -> None:
             completed = data.get("completed", 0)
             total = max(1, data.get("total", 1))
             current_prog = 45 + int((completed / total) * 20)  # 45% -> 65%
-            self._set_task_phase(
+            self._owner.metadata._set_task_phase(
                 subscribe,
                 data.get("summary") or phase_label,
                 current_prog,

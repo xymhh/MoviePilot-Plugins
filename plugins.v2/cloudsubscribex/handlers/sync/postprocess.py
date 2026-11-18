@@ -1006,7 +1006,7 @@ class PostprocessService(OwnerDelegator):
             "target_drive_key": "",
         }
         try:
-            source_provider = self._resource_provider_for_url(share_url)
+            source_provider = self._owner.resource_transfer._resource_provider_for_url(share_url)
             target_drive = getattr(self, "_cloud_drive", None)
             if (
                     source_provider is not None
@@ -1138,7 +1138,7 @@ class PostprocessService(OwnerDelegator):
         record = self._pending_item_to_terminal_record(item, pending_key, "成功")
         if record is None or str(record.get("transfer_mode") or "") != "cross":
             return
-        verify = getattr(self, "verify_landed_records", None)
+        verify = getattr(self._owner.landed_verify, "verify_landed_records", None)
         if not callable(verify):
             return
         try:
@@ -1266,7 +1266,7 @@ class PostprocessService(OwnerDelegator):
             )
         self._write_terminal_state(item, pending_key, "成功")
         self._queue_subscription_completion(item, media, media_data, ctx)
-        detail = self._notify_pending_file_finalized(
+        detail = self._owner.transfer_details._notify_pending_file_finalized(
             item,
             pending_key,
             strm_path,
@@ -1910,7 +1910,7 @@ class PostprocessService(OwnerDelegator):
             current_final = str(item.get("cloud_dir") or "").rstrip("/") or "/"
             if current_final == staging_dir:
                 try:
-                    calc_media, _ = self._restore_pending_media_context(item, pending_key)
+                    calc_media, _ = self._owner.transfer_details._restore_pending_media_context(item, pending_key)
                     sub_id = int(item.get("subscribe_id") or 0)
                     calc_sub = ctx.subscribe_cache.get(sub_id)
                     if calc_media:
@@ -1919,7 +1919,7 @@ class PostprocessService(OwnerDelegator):
                         ep_val = ep_list[0] if ep_list else (
                             int(item.get("episode")) if item.get("episode") else None
                         )
-                        dyn_dir, dyn_name = self._platform_target(
+                        dyn_dir, dyn_name = self._owner.naming._platform_target(
                             self._CLOUD_MEDIA_ROOT, calc_sub, calc_media,
                             staging_name, season=season_val, episode=ep_val
                         )
@@ -2178,7 +2178,7 @@ class PostprocessService(OwnerDelegator):
             media, media_data = cached_context
             item["mediainfo"] = media_data
         else:
-            media, media_data = self._restore_pending_media_context(
+            media, media_data = self._owner.transfer_details._restore_pending_media_context(
                 item, pending_key
             )
             resolved_key = context_key or self._media_context_key(item)
@@ -2201,7 +2201,7 @@ class PostprocessService(OwnerDelegator):
                 self._update_postprocess_progress(
                     item, pending_key, "subtitle", "检查并整理伴随字幕"
                 )
-                if not self._finalize_subtitle_files(
+                if not self._owner.subtitles._finalize_subtitle_files(
                         item, lambda d: self._cloud_directory_snapshot(d, ctx.directory_snapshots)
                 ):
                     logger.debug(f"伴随字幕整理未完成，跳过字幕继续处理视频主文件：{file_name}")
@@ -2213,7 +2213,7 @@ class PostprocessService(OwnerDelegator):
         self._update_postprocess_progress(
             item, pending_key, "strm", "生成并校验 STRM 文件"
         )
-        strm_path = self._generate_strm(
+        strm_path = self._owner.strm_ops._generate_strm(
             item["cloud_dir"], file_name, target_file=target_file
         )
         if strm_path and not self._strm_file_ready(strm_path):
@@ -2224,7 +2224,7 @@ class PostprocessService(OwnerDelegator):
                 self._update_postprocess_progress(
                     item, pending_key, "subtitle", "检查并整理伴随字幕"
                 )
-                if not self._finalize_subtitle_files(
+                if not self._owner.subtitles._finalize_subtitle_files(
                         item, lambda d: self._cloud_directory_snapshot(d, ctx.directory_snapshots), strm_path=strm_path
                 ):
                     logger.debug(f"伴随字幕整理未完成，跳过字幕继续处理视频主文件：{file_name}")
@@ -2325,7 +2325,7 @@ class PostprocessService(OwnerDelegator):
                     "notify",
                     f"汇总发送 {len(ctx.finalized_details)} 个文件的完成通知",
                 )
-            self._send_finalized_batch(ctx.finalized_details)
+            self._owner.transfer_details._send_finalized_batch(ctx.finalized_details)
 
     def _reconcile_pending_state(self, ctx: PostprocessBatchContext) -> Dict[str, int]:
         """将批次处理结果协调写回持久化存储，并更新前端任务进度状态。
@@ -2447,7 +2447,7 @@ class PostprocessService(OwnerDelegator):
             offline_task: Optional[Dict[str, Any]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         """读取完成后的真实文件树，只移动实际匹配的媒体文件。"""
-        mediainfo, media_data = self._restore_pending_media_context(item, pending_key)
+        mediainfo, media_data = self._owner.transfer_details._restore_pending_media_context(item, pending_key)
         if not mediainfo:
             self._cleanup_failed_offline_task(item, "媒体元数据不存在")
             return []
@@ -2536,7 +2536,7 @@ class PostprocessService(OwnerDelegator):
                     for episode, files in candidates.items()
                 }
             else:
-                episode_files = self._match_episode_files(
+                episode_files = self._owner.file_matching._match_episode_files(
                     video_files,
                     mediainfo,
                     subscribe,
@@ -2549,7 +2549,7 @@ class PostprocessService(OwnerDelegator):
                 if episode_files.get(episode, (None, 0))[0]
             ]
         else:
-            movie_file, movie_score = self._match_movie_file(
+            movie_file, movie_score = self._owner.file_matching._match_movie_file(
                 video_files, mediainfo, subscribe
             )
             if movie_file:
@@ -2573,9 +2573,9 @@ class PostprocessService(OwnerDelegator):
             baseline_key = str(episode) if episode else "movie"
             old_baseline = upgrade_baseline.get(baseline_key) or {}
             is_upgrade = bool(old_baseline)
-            source_size = self._resource_size_bytes(source_file.get("size"))
+            source_size = self._owner.upgrade_rule_scoring._resource_size_bytes(source_file.get("size"))
             if is_upgrade:
-                should_upgrade, reason = self._should_upgrade_candidate(
+                should_upgrade, reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
                     int(old_baseline.get("score") or 0),
                     current_score,
                     int(old_baseline.get("size") or 0),
@@ -2590,7 +2590,7 @@ class PostprocessService(OwnerDelegator):
                     label = f"E{int(episode):02d}" if episode else mediainfo.title
                     logger.debug(f"Magnet 下载后洗版候选跳过 {label}：{reason}")
                     continue
-            cloud_dir, target_name = self._platform_target(
+            cloud_dir, target_name = self._owner.naming._platform_target(
                 self._CLOUD_MEDIA_ROOT,
                 subscribe,
                 mediainfo,
@@ -2603,7 +2603,7 @@ class PostprocessService(OwnerDelegator):
                 target_name = f"{Path(target_name).stem}{source_suffix}"
             mode = str(item.get("upgrade_mode") or self._upgrade_mode)
             if is_upgrade and mode == "coexist":
-                target_name = self._coexist_target_name(
+                target_name = self._owner.upgrade_rule_scoring._coexist_target_name(
                     target_name, source_name, source_size, source_file.get("sha1") or ""
                 )
             if is_upgrade and mode != "coexist":
@@ -2611,7 +2611,7 @@ class PostprocessService(OwnerDelegator):
                 old_name = str(old_baseline.get("file_name") or "").strip()
                 old_file_id = str(old_baseline.get("file_id") or "").strip()
                 if not old_dir or not old_name:
-                    old_dir, old_name = self._platform_target(
+                    old_dir, old_name = self._owner.naming._platform_target(
                         self._CLOUD_MEDIA_ROOT,
                         subscribe,
                         mediainfo,
@@ -2672,7 +2672,7 @@ class PostprocessService(OwnerDelegator):
                 {"season": int(season or 1), "episode": int(episode)}
                 if episode else {}
             )
-            record = self._build_transfer_history_item(
+            record = self._owner.transfer_details._build_transfer_history_item(
                 mediainfo=mediainfo,
                 subscribe=subscribe,
                 status="成功",
@@ -2701,7 +2701,7 @@ class PostprocessService(OwnerDelegator):
 
         if history_records:
             apply_landed = getattr(
-                self, "apply_landed_verification_to_records", None
+                self._owner.landed_verify, "apply_landed_verification_to_records", None
             )
             if callable(apply_landed):
                 apply_landed(subscribe, mediainfo, season, history_records)
@@ -2745,7 +2745,7 @@ class PostprocessService(OwnerDelegator):
         )
         strm_path = None
         if self._strm_generate_enabled and self._strm_generator and self._local_resource_path:
-            strm_path = self._generate_strm(
+            strm_path = self._owner.strm_ops._generate_strm(
                 cloud_dir, target_name, target_file=target_file, lookup_target=False
             )
             if strm_path:
@@ -2763,7 +2763,7 @@ class PostprocessService(OwnerDelegator):
                     logger.debug(f"Magnet 洗版旧文件删除失败：{target_name}")
                     return False
                 self._delete_upgrade_old_strm(replace_item)
-            notify_path = self._resolve_resource_season_dir(
+            notify_path = self._owner.naming._resolve_resource_season_dir(
                 self._local_resource_path,
                 subscribe,
                 mediainfo,
@@ -2829,7 +2829,7 @@ class PostprocessService(OwnerDelegator):
 
         recovered_files = []
         for ep in episodes:
-            cloud_dir, target_name = self._platform_target(
+            cloud_dir, target_name = self._owner.naming._platform_target(
                 self._CLOUD_MEDIA_ROOT,
                 subscribe,
                 mediainfo,
@@ -2886,7 +2886,7 @@ class PostprocessService(OwnerDelegator):
                 {"season": int(season or 1), "episode": int(ep)}
                 if ep else {}
             )
-            record = self._build_transfer_history_item(
+            record = self._owner.transfer_details._build_transfer_history_item(
                 mediainfo=mediainfo,
                 subscribe=subscribe,
                 status="成功",
@@ -2916,7 +2916,7 @@ class PostprocessService(OwnerDelegator):
 
         if history_records:
             apply_landed = getattr(
-                self, "apply_landed_verification_to_records", None
+                self._owner.landed_verify, "apply_landed_verification_to_records", None
             )
             if callable(apply_landed):
                 apply_landed(subscribe, mediainfo, season, history_records)

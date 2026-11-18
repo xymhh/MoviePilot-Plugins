@@ -37,7 +37,7 @@ class TransferDetailsService(OwnerDelegator):
         """
         source_name = ""
         try:
-            provider = self._resource_provider_for_url(share_url)
+            provider = self._owner.resource_transfer._resource_provider_for_url(share_url)
             if provider is not None:
                 source_name = str(getattr(provider, "name", "") or "").strip()
         except Exception as error:  # noqa: BLE001 - 推导失败时按同盘处理
@@ -50,7 +50,7 @@ class TransferDetailsService(OwnerDelegator):
     def _is_cross_share(self, share_url: str) -> bool:
         """该分享是不是跨盘来源（源盘 key 与目标盘不同）。"""
         try:
-            provider = self._resource_provider_for_url(share_url)
+            provider = self._owner.resource_transfer._resource_provider_for_url(share_url)
             target = getattr(self, "_cloud_drive", None)
             return bool(
                 provider is not None
@@ -284,7 +284,7 @@ class TransferDetailsService(OwnerDelegator):
             source_name = str(
                 record.get("source_file_name") or record.get("file_name") or ""
             )
-            context = self._resolve_history_retry_context(record, source_name)
+            context = self._owner.history_retry._resolve_history_retry_context(record, source_name)
             mediainfo = context["mediainfo"]
             subscribe = context.get("subscribe")
             episode = context.get("episode")
@@ -358,7 +358,7 @@ class TransferDetailsService(OwnerDelegator):
 
         notify_path = strm_path
         if not notify_path and mediainfo and self._local_resource_path:
-            notify_path = self._resolve_resource_season_dir(
+            notify_path = self._owner.naming._resolve_resource_season_dir(
                 self._local_resource_path,
                 target_subscribe,
                 mediainfo,
@@ -677,7 +677,7 @@ class TransferDetailsService(OwnerDelegator):
     _write_terminal_state / persist_sync_results 写进重试索引。"""
         media_data = self._serialize_mediainfo(mediainfo)
         media_source, media_id = media_identity(mediainfo)
-        effective_media = self._effective_mediainfo(subscribe, mediainfo)
+        effective_media = self._owner.naming._effective_mediainfo(subscribe, mediainfo)
         cloud_drive_name = str(
             getattr(self._cloud_drive, "name", "网盘") or "网盘"
         ).strip()
@@ -705,8 +705,8 @@ class TransferDetailsService(OwnerDelegator):
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
             **fields,
         }
-        item.update(self._resource_history_meta(resource or {}, share_url))
-        source_provider = self._resource_provider_for_url(share_url)
+        item.update(self._owner.resource_transfer._resource_history_meta(resource or {}, share_url))
+        source_provider = self._owner.resource_transfer._resource_provider_for_url(share_url)
         if (
                 source_provider and self._cloud_drive
                 and source_provider.key != self._cloud_drive.key
@@ -771,7 +771,7 @@ class TransferDetailsService(OwnerDelegator):
     ) -> bool:
         """通过下载历史能力登记一次网盘转存（MP 的 DownloadHistory 是
         唯一载体，插件 history 表在 v1.13.3 删除后仍走这条路）。"""
-        effective_media = self._effective_mediainfo(subscribe, mediainfo)
+        effective_media = self._owner.naming._effective_mediainfo(subscribe, mediainfo)
         provider_name = str(
             getattr(self._cloud_drive, "name", "网盘") or "网盘"
         )

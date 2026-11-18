@@ -80,9 +80,11 @@ class HistoryRetryTargetNameTest(unittest.TestCase):
         self.owner._cloud_transfer_path = "/Alist/影视/moviepilot/转存"
         self.owner._cloud_query.find_file.return_value = None
         self.owner._cross_transfer_manager.cache_info.return_value = {}
-        self.owner._transfer_file.return_value = True
-        self.owner._transfer_failure_reason.return_value = ""
-        self.owner._generate_or_queue_strm.return_value = (None, "pending-key-1")
+        self.owner.transfer_ops._transfer_file.return_value = True
+        self.owner.transfer_ops._transfer_failure_reason.return_value = ""
+        self.owner.strm_ops._generate_or_queue_strm.return_value = (
+            None, "pending-key-1",
+        )
         self.owner._is_ed2k_url.return_value = False
         self.owner._share_transfer.check_share_status.return_value.is_valid = True
         self.owner._share_transfer.list_share_files.return_value = []
@@ -126,8 +128,10 @@ class HistoryRetryTargetNameTest(unittest.TestCase):
         """回归：重试传给 _transfer_file 的目标名必须是整理目标名。"""
         self._retry()
 
-        self.assertEqual(1, self.owner._transfer_file.call_count)
-        args, _kwargs = self.owner._transfer_file.call_args
+        self.assertEqual(
+            1, self.owner.transfer_ops._transfer_file.call_count,
+        )
+        args, _kwargs = self.owner.transfer_ops._transfer_file.call_args
         self.assertEqual(TARGET_NAME, args[3])
         self.assertNotEqual(SOURCE_FILE, args[3])
 
@@ -137,8 +141,8 @@ class HistoryRetryTargetNameTest(unittest.TestCase):
 
         self._retry()
 
-        self.assertEqual(1, self.owner._transfer_file.call_count)
-        args, _kwargs = self.owner._transfer_file.call_args
+        self.assertEqual(1, self.owner.transfer_ops._transfer_file.call_count)
+        args, _kwargs = self.owner.transfer_ops._transfer_file.call_args
         # 传空串：转存层按既有兜底用源文件名（create() 的 title 退路），
         # 这里只锁定“不传 None 且不抛错”，不断言最终落盘名。
         self.assertEqual("", args[3])

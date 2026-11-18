@@ -135,7 +135,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
         # Phase 3a 第 3 项：开场（停止检查 + 预算 + mediainfo）与资源搜索
         # 收进 SubscribeFlowService，TV/电影共用。
         try:
-            if self.check_subscribe_stopped():
+            if self._owner.subscribe_flow.check_subscribe_stopped():
                 return transferred_count
             # 原生 best_version 决定洗版订阅，插件范围进一步限制处理对象。
             # 无订阅绑定的手动提交（如 Emby 电影院卡片转存）没有洗版策略可继承：
@@ -154,7 +154,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     or self._is_cloud_upgrade_subscribe(subscribe)
             )
             ):
-                return self._process_tv_subscribe_upgrade(
+                return self._owner.upgrade._process_tv_subscribe_upgrade(
                     subscribe=subscribe,
                     history=history,
                     transfer_details=transfer_details,
@@ -172,7 +172,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
             # 加载该订阅的历史积分花费（用 tmdb_id + 季数作为唯一标识）；
             # Phase 3a 第 3 项：开场准备收进 SubscribeFlowService。
-            prepared = self.prepare_subscribe_entry(
+            prepared = self._owner.subscribe_flow.prepare_subscribe_entry(
                 subscribe, MediaType.TV, manual_resources,
                 mediainfo_kwargs={"cache": False},
             )
@@ -180,13 +180,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 return transferred_count
             track_points, sub_key, mediainfo = prepared
 
-            self._set_task_phase(subscribe, "核对播出范围", 20)
+            self._owner.metadata._set_task_phase(subscribe, "核对播出范围", 20)
             if not transient_target:
-                correct_count = getattr(self, "_correct_bangumi_episode_total", None)
+                correct_count = getattr(self._owner.metadata, "_correct_bangumi_episode_total", None)
                 if callable(correct_count):
                     correct_count(subscribe, mediainfo)
             season = normalize_season(subscribe.season)
-            cloud_drive_name = self._cloud_drive_name()
+            cloud_drive_name = self._owner.naming._cloud_drive_name()
             total_ep = subscribe.total_episode or 0
             start_ep = subscribe.start_episode or 1
             if total_ep <= 0 and mediainfo:
@@ -228,7 +228,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
             else:
                 unaired_episodes = set()
             # 1. 先读取媒体服务器实际剧集，不混入订阅 note。
-            self._set_task_phase(subscribe, "检查媒体库内容", 30)
+            self._owner.metadata._set_task_phase(subscribe, "检查媒体库内容", 30)
             media_server_valid, media_server_episodes = self._timed_sync_call(
                 "media_server_scan",
                 MediaServerResolver.episode_numbers,
@@ -271,10 +271,10 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     )
 
             # 2. 再读取目标网盘目录；不扫描本地 STRM 路径。
-            self._set_task_phase(subscribe, "检查网盘内容", 40)
+            self._owner.metadata._set_task_phase(subscribe, "检查网盘内容", 40)
             cloud_valid, cloud_episodes, cloud_label = self._timed_sync_call(
                 "cloud_scan",
-                self._scan_cloud_resource_episodes,
+                self._owner.naming._scan_cloud_resource_episodes,
                 subscribe=subscribe,
                 mediainfo=mediainfo,
                 season=season,
@@ -386,7 +386,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
             # 手动资源作为单一来源进入现有匹配转存链；
             # Phase 3a 第 3 项：资源搜索收进 SubscribeFlowService。
-            enabled_sources, prefetched_results = self.collect_subscribe_resources(
+            enabled_sources, prefetched_results = self._owner.subscribe_flow.collect_subscribe_resources(
                 subscribe, mediainfo, MediaType.TV,
                 manual_resources=manual_resources,
                 season=season,
@@ -401,7 +401,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 self._owner._last_skip_reason = "未启用可用的搜索源"
                 return transferred_count
 
-            resource_batches = self._build_transfer_resource_batches(
+            resource_batches = self._owner.resource_transfer._build_transfer_resource_batches(
                 enabled_sources, prefetched_results
             )
             seen_share_urls = set()
@@ -424,7 +424,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     f"{'跨盘' if is_cross_batch else '目标网盘'}候选"
                     f"（当前缺失: {len(missing_episodes)} 集）"
                 )
-                self._set_task_phase(
+                self._owner.metadata._set_task_phase(
                     subscribe,
                     f"处理 {source.upper()} "
                     f"{'跨盘' if is_cross_batch else '目标网盘'}候选",
@@ -433,14 +433,14 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
                 logger.info(
                     f"{search_prefix} 找到候选资源："
-                    f"{self._format_resource_summary(candidate_resources)}"
+                    f"{self._owner.resource_transfer._format_resource_summary(candidate_resources)}"
                 )
 
                 # 遍历搜索结果
                 for resource_index, resource in enumerate(candidate_resources):
                     if self._stop_requested():
                         break
-                    self._set_task_phase(
+                    self._owner.metadata._set_task_phase(
                         subscribe,
                         f"校验候选资源 ({resource_index + 1}/{len(candidate_resources)})",
                         72 + int((resource_index + 1) / len(candidate_resources) * 16),
@@ -449,7 +449,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     share_url = resource.get("url", "")
                     resource_title = resource.get("title", "")
 
-                    share_url = self._resolve_candidate_resource_url(
+                    share_url = self._owner.resource_transfer._resolve_candidate_resource_url(
                         candidate_resources,
                         resource_index,
                         resource,
@@ -463,10 +463,10 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         continue
 
                     share_url = share_url.strip()
-                    if not self._is_supported_resource(resource, share_url):
+                    if not self._owner.resource_transfer._is_supported_resource(resource, share_url):
                         logger.debug(
                             f"跳过当前同步链不支持的资源类型 "
-                            f"{self._supported_resource_type(resource, share_url)}：{resource_title}"
+                            f"{self._owner.resource_transfer._supported_resource_type(resource, share_url)}：{resource_title}"
                         )
                         continue
                     if share_url in seen_share_urls:
@@ -478,7 +478,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         for item in candidate_resources
                         if str(item.get("url") or "").strip()
                     }
-                    resource_input_label = self._resource_input_label(share_url)
+                    resource_input_label = self._owner.resource_transfer._resource_input_label(share_url)
                     logger.debug(
                         f"检查{resource_input_label}：{resource_title} - "
                         f"{self._resource_log_reference(share_url)}"
@@ -495,10 +495,10 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 continue
 
                         if is_offline_resource:
-                            magnet_title = self._prepare_magnet_resource(
+                            magnet_title = self._owner.resource_transfer._prepare_magnet_resource(
                                 resource, share_url
                             )
-                            title_seasons = self._magnet_title_seasons(resource)
+                            title_seasons = self._owner.resource_transfer._magnet_title_seasons(resource)
                             if title_seasons and season not in title_seasons:
                                 logger.debug(
                                     f"离线资源标题预过滤排除：标题季数="
@@ -507,7 +507,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     f"标题={magnet_title or resource_title}"
                                 )
                                 continue
-                            title_episodes = self._magnet_title_episodes(
+                            title_episodes = self._owner.resource_transfer._magnet_title_episodes(
                                 resource, season
                             )
                             if title_episodes:
@@ -526,7 +526,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     continue
                                 target_episodes = sorted(target_episode_set)
                             else:
-                                preview_episodes = self._resource_preview_episodes(
+                                preview_episodes = self._owner.resource_transfer._resource_preview_episodes(
                                     resource, season
                                 )
                                 target_episode_set = (
@@ -538,7 +538,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 )
                                 target_episodes = sorted(target_episode_set)
 
-                            if not self._validate_resource_url(
+                            if not self._owner.resource_transfer._validate_resource_url(
                                     share_url,
                                     resource_label="Magnet 链接" if self._is_magnet_url(share_url) else "离线下载链接",
                                     log_prefix=search_prefix,
@@ -581,7 +581,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 or (resource.get("magnet_metadata") or {}).get("display_name")
                                 or resource_title
                             ).strip()
-                            self._append_magnet_pending_history(
+                            self._owner.resource_transfer._append_magnet_pending_history(
                                 history=history,
                                 mediainfo=mediainfo,
                                 subscribe=subscribe,
@@ -604,7 +604,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             continue
                         share_files = []
                         selected_file_ids, selected_file_names = (
-                            self._explicit_selection_values(resource)
+                            self._owner.resource_transfer._explicit_selection_values(resource)
                         )
                         # 6h 负缓存跳过：如果该资源此前已记录过可用集数，且与当前缺失集完全无交集，免重复列目录
                         if source != "manual" and episode_miss_seen(
@@ -618,7 +618,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
                         # Phase 3a 第 3 项：resource_urls 恒为单元素
                         # [share_url]，循环是死结构，直接调一次。
-                        share_files.extend(self._validated_resource_files(
+                        share_files.extend(self._owner.resource_transfer._validated_resource_files(
                             share_url,
                             resource_title=resource_title,
                             target_season=(season if self._skip_other_season_dirs else None),
@@ -665,7 +665,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 f"{reason}，已跳过：{resource_title} - "
                                 f"{self._resource_log_reference(share_url)}"
                             )
-                            self._record_skip_candidate(
+                            self._owner.resource_transfer._record_skip_candidate(
                                 SkipStatsCollector.KIND_MISMATCH,
                                 share_url,
                                 reason=reason,
@@ -673,7 +673,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             )
                             continue
 
-                        video_count, share_episodes = self._summarize_share_episodes(
+                        video_count, share_episodes = self._owner.naming._summarize_share_episodes(
                             share_files,
                             season,
                             mediainfo if is_cross_batch else None,
@@ -700,7 +700,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 f"{reason}：{mediainfo.title_year} "
                                 f"S{season:02d}，已跳过该资源"
                             )
-                            self._record_skip_candidate(
+                            self._owner.resource_transfer._record_skip_candidate(
                                 SkipStatsCollector.KIND_UNPARSABLE,
                                 share_url,
                                 reason=reason,
@@ -723,7 +723,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 if not share_episodes or episode in share_episodes
                             ]
                         )
-                        matched_files = self._match_episode_files(
+                        matched_files = self._owner.file_matching._match_episode_files(
                             share_files,
                             mediainfo,
                             subscribe,
@@ -734,8 +734,8 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
                         # 1.6.48 按季集判重：懒加载现有版本（目录扫描 + 基线并集）
                         dedup_versions = None
-                        if self._episode_dedup_active() and episodes_to_match:
-                            dedup_versions = self._collect_episode_versions(
+                        if self._owner.episode_dedup._episode_dedup_active() and episodes_to_match:
+                            dedup_versions = self._owner.episode_dedup._collect_episode_versions(
                                 subscribe, mediainfo, season
                             )
 
@@ -749,13 +749,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 logger.debug(f"找到匹配文件：{file_name} -> E{episode:02d}")
 
                                 is_upgrade = False
-                                candidate_size = self._resource_size_bytes(
+                                candidate_size = self._owner.upgrade_rule_scoring._resource_size_bytes(
                                     matched_file.get("size")
                                 )
                                 dedup_old_versions: list = []
                                 if dedup_versions is not None:
                                     dedup_action, dedup_old, dedup_reason = (
-                                        self._episode_dedup_decision(
+                                        self._owner.episode_dedup._episode_dedup_decision(
                                             subscribe,
                                             mediainfo,
                                             season,
@@ -771,7 +771,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                             f"{mediainfo.title} S{season:02d}E{episode:02d} "
                                             f"按季集判重跳过：{dedup_reason}"
                                         )
-                                        self._record_skip_candidate(
+                                        self._owner.resource_transfer._record_skip_candidate(
                                             SkipStatsCollector.KIND_DEDUP_SKIP,
                                             share_url,
                                             reason=f"同集已有更优版本：{dedup_reason}",
@@ -786,12 +786,12 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
                                 organize_enabled = getattr(self, "_organize_after_transfer", True)
                                 if organize_enabled:
-                                    target_dir, target_name = self._platform_target(
+                                    target_dir, target_name = self._owner.naming._platform_target(
                                         self._CLOUD_MEDIA_ROOT, subscribe, mediainfo,
                                         file_name, season, episode
                                     )
                                 else:
-                                    target_dir = self._resource_staging_dir(
+                                    target_dir = self._owner.resource_transfer._resource_staging_dir(
                                         str(matched_file.get("url") or share_url),
                                         matched_file,
                                     )
@@ -806,7 +806,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     "is_upgrade": is_upgrade,
                                     "target_dir": target_dir,
                                     "target_name": target_name,
-                                    "subtitle_files": self._companion_subtitle_files(
+                                    "subtitle_files": self._owner.subtitles._companion_subtitle_files(
                                         share_files,
                                         matched_file,
                                         season=season,
@@ -852,7 +852,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 f"该{resource_input_label}未匹配到 S{season} 的任何缺失剧集："
                                 f"{reason}"
                             )
-                            self._record_skip_candidate(
+                            self._owner.resource_transfer._record_skip_candidate(
                                 SkipStatsCollector.KIND_EPISODE_MISS,
                                 share_url,
                                 reason=reason,
@@ -860,12 +860,12 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             )
                             continue
 
-                        cloud_resource = self._is_cloud_resource_url(share_url)
+                        cloud_resource = self._owner.resource_transfer._is_cloud_resource_url(share_url)
                         direct_cloud_resource = (
                                 cloud_resource
-                                and self._is_direct_cloud_resource_url(share_url)
+                                and self._owner.resource_transfer._is_direct_cloud_resource_url(share_url)
                         )
-                        self._set_task_phase(
+                        self._owner.metadata._set_task_phase(
                             subscribe,
                             "登记网盘剧集整理"
                             if direct_cloud_resource else "转存匹配剧集",
@@ -882,7 +882,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             else f"准备批量转存：{mediainfo.title_year} S{season:02d}，"
                                  f"{len(matched_items)} 个文件到 {self._cloud_transfer_path}"
                         )
-                        transfer_results = self._transfer_episode_items(
+                        transfer_results = self._owner.transfer_ops._transfer_episode_items(
                             matched_items,
                             share_url,
                             mediainfo,
@@ -894,7 +894,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         )
                         if not transfer_results:
                             break
-                        self._set_task_phase(subscribe, "登记文件后处理", 95)
+                        self._owner.metadata._set_task_phase(subscribe, "登记文件后处理", 95)
                         batch_success_episodes = []
                         batch_detail_episodes = {}
                         batch_detail_size: Dict[str, int] = {}
@@ -922,10 +922,10 @@ class TelevisionSyncProcessor(OwnerDelegator):
                             pending_key = transfer_result["pending_key"]
                             item_share_url = item["file"].get("url") or share_url
 
-                            history_item = self._build_transfer_history_item(
+                            history_item = self._owner.transfer_details._build_transfer_history_item(
                                 mediainfo=mediainfo,
                                 subscribe=subscribe,
-                                status=self._transfer_history_status(success, item_share_url),
+                                status=self._owner.resource_transfer._transfer_history_status(success, item_share_url),
                                 share_url=item_share_url,
                                 file_name=item["target_name"],
                                 source_file_name=file_name,
@@ -952,11 +952,11 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     success
                                     and not pending_key
                                     and landed_info is not None
-                                    and not self._landed_confirms_success(landed_info)
+                                    and not self._owner.landed_verify._landed_confirms_success(landed_info)
                             )
                             if success and not pending_key and landed_info is not None:
                                 history_item.update(
-                                    self._landed_verification_fields(landed_info)
+                                    self._owner.landed_verify._landed_verification_fields(landed_info)
                                 )
                                 if landed_blocked:
                                     transition(
@@ -1010,7 +1010,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 # 1.6.48 判重替换：主旧版本由 postprocess 备份删除，其余旧版本此处批量删除
                                 extra_old = item.get("dedup_extra_old_versions") or []
                                 if extra_old:
-                                    self._apply_episode_dedup(
+                                    self._owner.episode_dedup._apply_episode_dedup(
                                         extra_old,
                                         new_score=int(item.get("dedup_new_score") or current_score or 0),
                                         new_size=int(item.get("dedup_new_size") or 0),
@@ -1046,7 +1046,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     )
                                     if not batch_detail_source.get(notification_kind):
                                         batch_detail_source[notification_kind] = (
-                                            self._detail_source_text(history_item)
+                                            self._owner.transfer_details._detail_source_text(history_item)
                                         )
 
                                 batch_success_episodes.append(episode)
@@ -1071,7 +1071,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     int(episode) for episode in episodes
                                     if int(episode) > 0
                                 })
-                                self._append_tv_transfer_detail(
+                                self._owner.transfer_details._append_tv_transfer_detail(
                                     transfer_details, mediainfo, season, ordered_episodes,
                                     notification_kind=notification_kind,
                                     size_bytes=batch_detail_size.get(notification_kind, 0),
@@ -1091,7 +1091,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         # 记录下载历史
                         if batch_success_episodes:
                             episodes_str = StringUtils.format_ep(batch_success_episodes)
-                            self._record_download_history(
+                            self._owner.transfer_details._record_download_history(
                                 mediainfo=mediainfo,
                                 subscribe=subscribe,
                                 path=matched_items[0]["target_dir"],
@@ -1116,7 +1116,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         continue
 
                 if offline_submit_queue:
-                    self._clear_task_search_state(subscribe)
+                    self._owner.metadata._clear_task_search_state(subscribe)
                     successful_pending_keys = self._submit_offline_packages(
                         offline_submit_queue
                     )
@@ -1175,7 +1175,7 @@ class TelevisionSyncProcessor(OwnerDelegator):
 
             # 更新订阅状态
             # 将媒体路径已存在的集数和本次成功转存的集数合并
-            self._set_task_phase(subscribe, "更新订阅进度", 96)
+            self._owner.metadata._set_task_phase(subscribe, "更新订阅进度", 96)
             all_success_episodes = list(set(success_episodes) | existing_episodes_in_resources)
             if all_success_episodes and not transient_target:
                 remaining_lack = self._subscribe_handler.check_and_finish_subscribe(

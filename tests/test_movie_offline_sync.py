@@ -154,6 +154,15 @@ class DummyOfflineSyncHandler:
         self._offline_download.parse_magnet_link.return_value = {
             "metadata": {"metadata_available": True, "torrent_files": ["Coyote.mkv"]}
         }
+        # Phase 5：_queue_magnet_package 经 self.resource_transfer.<方法>
+        # 调用磁力标题解析，桩指回本类同名方法。
+        from types import SimpleNamespace
+        self.resource_transfer = SimpleNamespace(
+            _prepare_magnet_resource=self._prepare_magnet_resource,
+            _magnet_title_seasons=self._magnet_title_seasons,
+            _magnet_title_episodes=self._magnet_title_episodes,
+            _resource_preview_episodes=self._resource_preview_episodes,
+        )
 
     def _get_data(self, key):
         return self._pending_store.get(key, {})

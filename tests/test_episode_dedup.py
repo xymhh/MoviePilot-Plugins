@@ -29,7 +29,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from plugin_env import install_app_mocks, load_module, register_module, ensure_package
+from plugin_env import (
+    attach_component_fields,
+    install_app_mocks,
+    load_module,
+    register_module,
+    ensure_package,
+)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.dirname(current_dir)
@@ -135,14 +141,12 @@ rule_scoring_module = load_module(
     "cloudsubscribex.handlers.sync.rule_scoring",
     "plugins.v2/cloudsubscribex/handlers/sync/rule_scoring.py",
 )
-UpgradeRuleScoringService = rule_scoring_module.UpgradeRuleScoringService
 
 # 加载 naming（被 _find_cloud_movie_file / _platform_target 依赖）
 naming_module = load_module(
     "cloudsubscribex.handlers.sync.naming",
     "plugins.v2/cloudsubscribex/handlers/sync/naming.py",
 )
-SyncNamingService = naming_module.SyncNamingService
 
 
 class _FakeCloudFile:
@@ -196,31 +200,22 @@ def _make_handler(**overrides):
     # _owner 用 SimpleNamespace 承载属性（OwnerDelegator.__setattr__ 转发到 _owner）
     store = SimpleNamespace()
     object.__setattr__(handler, "_owner", store)
-    # 手动混入 scoring / naming 能力（与运行期 SyncHandler 组件委托等价）
-    handler._should_upgrade_candidate = UpgradeRuleScoringService._should_upgrade_candidate.__get__(handler, EpisodeDedupService)
-    handler._get_mp_rule_score = lambda *a, **k: 0
-    handler._resource_size_bytes = UpgradeRuleScoringService._resource_size_bytes.__get__(handler, EpisodeDedupService)
-    handler._platform_target = SyncNamingService._platform_target.__get__(handler, EpisodeDedupService)
-    handler._platform_target_file = SyncNamingService._platform_target_file.__get__(handler, EpisodeDedupService)
-    handler._resolve_resource_season_dir = SyncNamingService._resolve_resource_season_dir.__get__(handler, EpisodeDedupService)
-    handler._find_cloud_movie_file = SyncNamingService._find_cloud_movie_file.__get__(handler, EpisodeDedupService)
-    handler._cloud_drive_name = lambda: "测试网盘"
+    # Phase 5：显式组合——跨组件调用走 store.<字段>.<方法>；把 scoring /
+    # naming 的真实组件实例挂到 store 上（与运行期 SyncHandler
+    # 的具名服务字段等价），方法体经 OwnerDelegator 仍从 store 取假配置。
+    # 原来把真实方法逐个 __get__ 绑到 handler 上的写法已不需要，实例自带。
+    attach_component_fields(store, handler, "upgrade_rule_scoring", "naming")
+    # 评分按文件名查表（固定分），避免真实评分规则干扰奇偶比较
+    object.__setattr__(
+        store.upgrade_rule_scoring, "_get_mp_rule_score", lambda *a, **k: 0,
+    )
+    object.__setattr__(store.naming, "_cloud_drive_name", lambda: "测试网盘")
     handler._upgrade_mode = overrides.get("upgrade_mode", "largest")
     handler._episode_dedup_enabled = overrides.get("episode_dedup_enabled", True)
     # 1.6.50「保留符合重命名格式的版本」：默认关闭（下面这版 _platform_rename_path
     # 桩是恒等的，会让任何文件名都判成「符合模板」），需要时用 overrides 打开并配桩。
     handler._prefer_template_named_version = overrides.get(
         "prefer_template_named_version", False
-    )
-    handler._version_matches_rename_template = (
-        UpgradeRuleScoringService._version_matches_rename_template.__get__(
-            handler, EpisodeDedupService
-        )
-    )
-    handler._template_conformant_version = (
-        UpgradeRuleScoringService._template_conformant_version.__get__(
-            handler, EpisodeDedupService
-        )
     )
     handler._CLOUD_MEDIA_ROOT = "/"
     handler._cloud_directories = overrides.get("cloud_directories")
@@ -232,13 +227,17 @@ def _make_handler(**overrides):
         "build_baseline", lambda *a, **k: {}
     )
     # _platform_rename_path 桩：固定返回 /媒体/剧集/Show/Season 01/name
-    handler._platform_rename_path = overrides.get("platform_rename_path") or (
-        lambda root_path, subscribe, mediainfo, source_name, season=None, episode=None: (
-            SimpleNamespace(
-                parent=SimpleNamespace(as_posix=lambda: f"/媒体/剧集/Show/Season {int(season or 1):02d}"),
-                name=str(source_name),
+    object.__setattr__(
+        store.naming,
+        "_platform_rename_path",
+        overrides.get("platform_rename_path") or (
+            lambda root_path, subscribe, mediainfo, source_name, season=None, episode=None: (
+                SimpleNamespace(
+                    parent=SimpleNamespace(as_posix=lambda: f"/媒体/剧集/Show/Season {int(season or 1):02d}"),
+                    name=str(source_name),
+                )
             )
-        )
+        ),
     )
     return handler
 
@@ -442,7 +441,7 @@ class EpisodeDedupScoreTests(unittest.TestCase):
         """12. 扫描结果必须带 score（不能靠 .get("score") or 0 退化）。"""
         files = [_FakeCloudFile(id="f1", name="Show - S01E01.2160p.mkv", size=900)]
         handler = _make_handler(cloud_directories=_FakeDirectories(files=files))
-        handler._get_mp_rule_score = self._score_by_name
+        object.__setattr__(handler._owner.upgrade_rule_scoring, "_get_mp_rule_score", self._score_by_name)
         result = handler._scan_episode_versions_in_dir(_SUB, _MEDIA, season=1)
         self.assertEqual(result[1][0]["score"], 20)
 
@@ -450,7 +449,7 @@ class EpisodeDedupScoreTests(unittest.TestCase):
         """13. 已有 2160p 旧版本 + 新 1080p 候选 → skip（不得删掉更好的旧文件）。"""
         files = [_FakeCloudFile(id="f1", name="Show - S01E01.2160p.mkv", size=900)]
         handler = _make_handler(cloud_directories=_FakeDirectories(files=files))
-        handler._get_mp_rule_score = self._score_by_name
+        object.__setattr__(handler._owner.upgrade_rule_scoring, "_get_mp_rule_score", self._score_by_name)
         versions = handler._collect_episode_versions(_SUB, _MEDIA, season=1)
         action, old, reason = handler._episode_dedup_decision(
             _SUB, _MEDIA, 1, 1, new_score=10, new_size=500, existing_versions=versions
@@ -462,7 +461,7 @@ class EpisodeDedupScoreTests(unittest.TestCase):
         """14. 已有 1080p 旧版本 + 新 2160p 候选 → replace。"""
         files = [_FakeCloudFile(id="f1", name="Show - S01E01.1080p.mkv", size=500)]
         handler = _make_handler(cloud_directories=_FakeDirectories(files=files))
-        handler._get_mp_rule_score = self._score_by_name
+        object.__setattr__(handler._owner.upgrade_rule_scoring, "_get_mp_rule_score", self._score_by_name)
         versions = handler._collect_episode_versions(_SUB, _MEDIA, season=1)
         action, old, _ = handler._episode_dedup_decision(
             _SUB, _MEDIA, 1, 1, new_score=20, new_size=900, existing_versions=versions
@@ -477,7 +476,7 @@ class EpisodeDedupScoreTests(unittest.TestCase):
             _FakeCloudFile(id="s2", name="Show - S01E01 预告.mkv", size=10),
         ]
         handler = _make_handler(cloud_directories=_FakeDirectories(files=files))
-        handler._get_mp_rule_score = self._score_by_name
+        object.__setattr__(handler._owner.upgrade_rule_scoring, "_get_mp_rule_score", self._score_by_name)
         self.assertEqual(handler._scan_episode_versions_in_dir(_SUB, _MEDIA, season=1), {})
         # 电影侧同样忽略
         self.assertEqual(handler._find_cloud_movie_versions(_SUB, _MEDIA), [])
@@ -585,7 +584,7 @@ class MovieDedupTests(unittest.TestCase):
             _FakeCloudFile(id="m2", name="正相反的你与我.mkv", size=200),
         ]
         handler = self._handler(files)
-        result = handler._find_cloud_movie_file(_SUB, _MEDIA)
+        result = handler._owner.naming._find_cloud_movie_file(_SUB, _MEDIA)
         self.assertIsNotNone(result)
         self.assertEqual(result[1], "正相反的你与我.mkv")
 
@@ -593,7 +592,7 @@ class MovieDedupTests(unittest.TestCase):
         """无精确匹配时回退任一视频（不再返回 None）。"""
         files = [_FakeCloudFile(id="m1", name="完全不同的名字.mkv", size=100)]
         handler = self._handler(files)
-        result = handler._find_cloud_movie_file(_SUB, _MEDIA)
+        result = handler._owner.naming._find_cloud_movie_file(_SUB, _MEDIA)
         self.assertIsNotNone(result, "目录内有视频时不应返回 None")
         self.assertEqual(result[1], "完全不同的名字.mkv")
 
@@ -601,7 +600,7 @@ class MovieDedupTests(unittest.TestCase):
         """目录无视频 → None。"""
         files = [_FakeCloudFile(id="m1", name="notes.txt", size=100)]
         handler = self._handler(files)
-        result = handler._find_cloud_movie_file(_SUB, _MEDIA)
+        result = handler._owner.naming._find_cloud_movie_file(_SUB, _MEDIA)
         self.assertIsNone(result)
 
 
@@ -718,7 +717,7 @@ class TemplateNamedVersionTests(unittest.TestCase):
         """25. 模板名不再一票否决：评分/体积有收益照样升级，只有无收益时才保留。"""
         handler = self._handler(prefer_template_named_version=True)
         # 评分提升 + 现有名符合模板 → 仍然升级（旧行为误判为保留，洗版永久失效）
-        should_upgrade, reason = handler._should_upgrade_candidate(
+        should_upgrade, reason = handler._owner.upgrade_rule_scoring._should_upgrade_candidate(
             3,
             99,
             100,
@@ -732,7 +731,7 @@ class TemplateNamedVersionTests(unittest.TestCase):
         self.assertTrue(should_upgrade)
         self.assertIn("评分提升", reason)
         # 同评分但体积更大 + 符合模板 → largest 模式仍然升级
-        should_upgrade_size, reason_size = handler._should_upgrade_candidate(
+        should_upgrade_size, reason_size = handler._owner.upgrade_rule_scoring._should_upgrade_candidate(
             99,
             99,
             1_500_000_000,
@@ -746,7 +745,7 @@ class TemplateNamedVersionTests(unittest.TestCase):
         self.assertTrue(should_upgrade_size)
         self.assertIn("同评分保留更大文件", reason_size)
         # 同评分且候选没更大 + 符合模板 → 才走模板保留
-        blocked, blocked_reason = handler._should_upgrade_candidate(
+        blocked, blocked_reason = handler._owner.upgrade_rule_scoring._should_upgrade_candidate(
             99,
             99,
             4_800_000_000,
@@ -760,7 +759,7 @@ class TemplateNamedVersionTests(unittest.TestCase):
         self.assertFalse(blocked)
         self.assertIn("已符合当前重命名模板", blocked_reason)
         # 评分降低 + 符合模板 → 保留
-        blocked_lower, _ = handler._should_upgrade_candidate(
+        blocked_lower, _ = handler._owner.upgrade_rule_scoring._should_upgrade_candidate(
             99,
             3,
             100,
@@ -773,7 +772,7 @@ class TemplateNamedVersionTests(unittest.TestCase):
         )
         self.assertFalse(blocked_lower)
         # 未传文件名时行为不变
-        should_upgrade2, reason2 = handler._should_upgrade_candidate(3, 99, 100, 9999)
+        should_upgrade2, reason2 = handler._owner.upgrade_rule_scoring._should_upgrade_candidate(3, 99, 100, 9999)
         self.assertTrue(should_upgrade2)
         self.assertIn("评分提升", reason2)
 

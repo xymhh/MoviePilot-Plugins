@@ -87,7 +87,7 @@ class StrmOpsMixin(OwnerDelegator):
             if len(sample) < 3:
                 sample.append({"path": str(target), "content": content})
 
-        refreshed = self.refresh_media_servers() if (created or updated) else {}
+        refreshed = self._owner.media_refresh.refresh_media_servers() if (created or updated) else {}
         logger.info(
             f"分享 STRM 生成完成：{share_code} 新增 {created} / 更新 {updated} "
             f"/ 跳过 {skipped}，目录={root}，媒体库刷新={refreshed or '未触发'}"
@@ -140,7 +140,7 @@ class StrmOpsMixin(OwnerDelegator):
             except OSError as error:
                 logger.warning(f"分享 STRM 删除失败：{target}（{error}）")
 
-        refreshed = self.refresh_media_servers() if removed else {}
+        refreshed = self._owner.media_refresh.refresh_media_servers() if removed else {}
         logger.info(
             f"分享 STRM 清理完成：{share_code} 删除 {removed} / 不存在 {missing}，"
             f"目录={root}，媒体库刷新={refreshed or '未触发'}"
@@ -181,7 +181,7 @@ class StrmOpsMixin(OwnerDelegator):
                     logger.warning(f"改写 STRM 失败：{path}（{error}）")
                     continue
             migrated += 1
-        refreshed = {} if dry_run else self.refresh_media_servers()
+        refreshed = {} if dry_run else self._owner.media_refresh.refresh_media_servers()
         logger.info(
             f"旧 STRM 迁移完成：{'预演' if dry_run else '执行'} 扫描 {scanned} / "
             f"改写 {migrated} / 跳过 {skipped} / 失败 {failed}，目录={target_root}"

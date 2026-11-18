@@ -217,7 +217,7 @@ class HistoryCleanupService(OwnerDelegator):
     ) -> List[Dict[str, Any]]:
         """处理一个单文件目标：定位父目录、按季集匹配、删文件、清本地 STRM。"""
         try:
-            local_path, _reason = self._configured_media_path(target)
+            local_path, _reason = self._owner.media_targets._configured_media_path(target)
         except Exception as error:
             local_path = self._virtual_media_path(target)
             if local_path is None:
@@ -474,7 +474,7 @@ class HistoryCleanupService(OwnerDelegator):
         if not raw_value:
             return None
         try:
-            mappings = list(self._parsed_media_server_path_mappings())
+            mappings = list(self._owner.media_targets._parsed_media_server_path_mappings())
         except Exception:
             mappings = []
         if not mappings:
@@ -521,7 +521,7 @@ class HistoryCleanupService(OwnerDelegator):
 
         for target in targets:
             try:
-                local_path, _reason = self._configured_media_path(target)
+                local_path, _reason = self._owner.media_targets._configured_media_path(target)
             except Exception as error:
                 local_path = self._virtual_media_path(target)
                 if local_path is None:

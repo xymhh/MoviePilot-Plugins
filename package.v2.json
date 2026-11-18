@@ -3,7 +3,7 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.18.4",
+    "version": "1.19.0",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -380,7 +380,8 @@
       "v1.18.1": "热修复（v1.18.1）：跨盘转存的 MP 整理身份不再在 confirm 阶段丢失——跨盘尾巴与同盘单文件尾巴把身份写在内层 file_item 上，confirm 只读外层导致 pending 记录无身份、finalize 跳过 MP 轮询保护、2 次定位失败就 abort（天才谋杀法 2026 实测）；confirm 改为外层读不到就读内层，同盘批量行为不变。新增 6 条回归单测。",
       "v1.18.2": "依赖钉版（v1.18.2）：上游 p115client 0.0.9.7.7（2026-11-18 发布）在 __init__.py 用了 Python 3.13 才有的 Path.is_file(follow_symlinks=...)，而 MP 容器与 CI 都是 Python 3.12，import 即挂，v1.18.1 的 CI 因此红了 14 个模块（代码本身没问题，新加 6 条单测在 CI 里全过）；该版本 metadata 仍写 requires_python>=3.12，pip 不会拦。requirements 里把 p115client 上限钉到 <0.0.9.7.7（0.0.9.7.6 已核实不含该调用），等上游修好再放开。插件代码无改动。",
       "v1.18.3": "上传体验修复（v1.18.3）：上传卡不再闪——上传进行中每约 10 秒心跳重报最后进度，分片卡住（读超时+重试）时卡也不掉，失败后心跳停、条目 30 秒过期正常消失；oss2 分片接 progress_callback，进度片内连续走（并发分片与重传用单调保护，百分比不来回跳）；电影上传卡也进海报投影（有 tmdb id 或年份即按电影）；oss2 端点由 http 改 https（线上实测 http 每片等响应都 60 秒读超时、https 一条连接流到底）。状态文案未改：MP 下载页只有“下载中/已暂停”两种文案，没有“上传中”状态（前端 DownloadingCard.vue 核对结论）。新增 18 条回归单测。",
-      "v1.18.4": "渠道管理修复（v1.18.4）：PanSou 的限定频道/限定插件在渠道管理编辑弹窗里一直显示“没有可选项”——弹窗复用了配置页的表单结构，但没接动态选项加载链路，field.items 永远是空（标题“已选择 126 / 0 项”，卡片上的 126/27 只是已保存的选中值）；补上与配置页同款的链路：导出 fields/search/index.js 的 resolveDynamicField 供 ChannelManager 复用，formSection 对字段做动态解析，ConfigSection 绑 load-options/refresh-options（调 ui_options?scope=pansou 写进 channelOptions.pansou），打开编辑弹窗时预拉一次。新增 7 条回归单测。"
+      "v1.18.4": "渠道管理修复（v1.18.4）：PanSou 的限定频道/限定插件在渠道管理编辑弹窗里一直显示“没有可选项”——弹窗复用了配置页的表单结构，但没接动态选项加载链路，field.items 永远是空（标题“已选择 126 / 0 项”，卡片上的 126/27 只是已保存的选中值）；补上与配置页同款的链路：导出 fields/search/index.js 的 resolveDynamicField 供 ChannelManager 复用，formSection 对字段做动态解析，ConfigSection 绑 load-options/refresh-options（调 ui_options?scope=pansou 写进 channelOptions.pansou），打开编辑弹窗时预拉一次。新增 7 条回归单测。",
+      "v1.19.0": "Phase 5 显式组合（v1.19.0）：SyncHandler 改显式组合——25 个具名服务字段替代 __getattr__/resolve_component 隐式委托，对外 38 个方法改显式转发；组件间调用全部显式化（self._xxx → self.<具名服务>.<方法>，_effective_mediainfo 逐点确认，命名服务版为准）；测试桩随之迁移到字段实例上，全量 pytest 2130 / unittest 2018 通过。"
     }
   },
   "version": "1.9.85",

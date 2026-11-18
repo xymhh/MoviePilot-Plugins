@@ -101,8 +101,8 @@ class SyncTransferWiringTests(unittest.TestCase):
 
     def test_transfer_file_calls_impl_directly(self):
         handler = self._handler()
-        self.assertTrue(handler._transfer_file(*self._args()))
-        handler._transfer_file_impl.assert_called_once()
+        self.assertTrue(handler.transfer_ops._transfer_file(*self._args()))
+        handler.transfer_ops._transfer_file_impl.assert_called_once()
 
     def test_sync_paused_reads_global_switch(self):
         """暂停开关从 core.sync_pause 读取，且只认严格的 True。"""

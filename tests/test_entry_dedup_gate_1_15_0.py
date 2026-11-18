@@ -65,6 +65,20 @@ def _item(file_id, episode, name, score=50, size=1000):
     }
 
 
+def _attach_fake_owner(service, mapping):
+    """Phase 5：裸组件实例配假 owner——字段命名空间把桩方法指回 service 自身的桩。沿用已有的 _owner 命名空间（若有）：__init__ 里普通属性写已被 OwnerDelegator 转发到它身上，换掉会丢属性。"""
+    owner = service.__dict__.get("_owner")
+    if owner is None or not hasattr(owner, "__dict__"):
+        owner = SimpleNamespace()
+    for field_name, method_names in mapping.items():
+        namespace = SimpleNamespace()
+        for method_name in method_names:
+            setattr(namespace, method_name, getattr(service, method_name))
+        setattr(owner, field_name, namespace)
+    object.__setattr__(service, "_owner", owner)
+    return owner
+
+
 class _Service(TransferOpsMixin):
     """只测入口预检与结果拼回，不跑真实转存。"""
 
@@ -78,6 +92,15 @@ class _Service(TransferOpsMixin):
         self._batch_calls = []
         self._verify_calls = []
         self._collect_error = None
+        _attach_fake_owner(self, {
+            "episode_dedup": [
+                "_episode_dedup_active",
+                "_collect_episode_versions",
+                "_episode_dedup_decision",
+            ],
+            "metadata": ["_set_task_phase"],
+            "landed_verify": ["verify_landed_items"],
+        })
 
     def _episode_dedup_active(self):
         return self._dedup_active
@@ -222,7 +245,9 @@ class EntryDedupGateTests(unittest.TestCase):
             versions={24: [{"file_id": "old-1"}]},
             decisions={24: ("skip", [{"file_id": "old-1"}], "同集已有更优版本")},
         )
-        service._collect_error = RuntimeError("网盘列目录失败")
+        # 挂上 _owner 后普通属性写会被 OwnerDelegator 转发给 owner，
+        # 必须用 object.__setattr__ 才能写到实例自己身上。
+        object.__setattr__(service, "_collect_error", RuntimeError("网盘列目录失败"))
         results = service._transfer_episode_items(
             [_item("f24", 24, "玫瑰战争 - S01E24 - 第24集.mp4")],
             "https://115.com/s/test", _mediainfo(), _subscribe(), 1, "k",

@@ -606,7 +606,7 @@ class HistoryRetryService(OwnerDelegator):
                 "sha1": source_sha1,
                 "md5": record.get("source_md5") or "",
             }
-            success = self._transfer_file(
+            success = self._owner.transfer_ops._transfer_file(
                 canonical_url,
                 transfer_file_item,
                 self._cloud_transfer_path, target_name, source_sha1,
@@ -653,7 +653,7 @@ class HistoryRetryService(OwnerDelegator):
             # 原因一空就只剩一句通用的「重试转存失败」，查不到这次到底
             # 错在哪——LOST10 S01E05 那条就是这么来的。
             reason = (
-                self._transfer_failure_reason(file_id)
+                self._owner.transfer_ops._transfer_failure_reason(file_id)
                 or str(record.get("failure_reason") or "").strip()
                 or "重试转存失败"
             )
@@ -661,7 +661,7 @@ class HistoryRetryService(OwnerDelegator):
             self._upsert_retry_index_row(record, "失败")
             raise RuntimeError(reason)
 
-        strm_path, pending_key = self._generate_or_queue_strm(
+        strm_path, pending_key = self._owner.strm_ops._generate_or_queue_strm(
             canonical_url,
             cloud_dir,
             target_name,
@@ -864,7 +864,7 @@ class HistoryRetryService(OwnerDelegator):
             sites=None,
             custom_words=None,
         )
-        cloud_dir, target_name = self._platform_target(
+        cloud_dir, target_name = self._owner.naming._platform_target(
             root_path=self._CLOUD_MEDIA_ROOT,
             subscribe=target_subscribe,
             mediainfo=mediainfo,

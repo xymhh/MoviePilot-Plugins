@@ -598,7 +598,7 @@ class SyncNamingService(OwnerDelegator):
         调用方（upgrade / pt_upgrade / ``_scan_cloud_resource_episodes``）
         只读 ``.name``/``.size``/``.id``，行为不变。
         """
-        verified, cloud_path, files = self._season_dir_files(
+        verified, cloud_path, files = self._owner.episode_dedup._season_dir_files(
             subscribe, mediainfo, season
         )
         if not verified:

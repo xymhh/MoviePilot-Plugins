@@ -83,6 +83,25 @@ def _subscribe():
     return SimpleNamespace(name="玫瑰战争", id=1)
 
 
+def _attach_fake_owner(service, mapping):
+    """Phase 5：裸组件实例配假 owner——字段命名空间把桩方法指回 service 自身的桩。
+
+    生产代码经 ``self._owner.<字段>.<方法>`` 调用；_PipelineService /
+    _OrganizeService / _ConfirmService 的桩原来是类上的同名方法，宿主
+    __getattr__ 时代能直接取到，现在要显式挂到字段命名空间上。
+    """
+    owner = service.__dict__.get("_owner")
+    if owner is None or not hasattr(owner, "__dict__"):
+        owner = SimpleNamespace()
+    for field_name, method_names in mapping.items():
+        namespace = SimpleNamespace()
+        for method_name in method_names:
+            setattr(namespace, method_name, getattr(service, method_name))
+        setattr(owner, field_name, namespace)
+    object.__setattr__(service, "_owner", owner)
+    return owner
+
+
 class _PipelineService(TransferOpsMixin):
     """只测管线编排：三阶段 + 判重门 + 落盘自检全部桩掉。"""
 
@@ -97,6 +116,14 @@ class _PipelineService(TransferOpsMixin):
         self.confirm_calls = []
         self.verify_calls = []
         self.batch_calls = []
+        _attach_fake_owner(self, {
+            "resource_transfer": [
+                "_is_cloud_resource_url",
+                "_is_direct_cloud_resource_url",
+            ],
+            "metadata": ["_set_task_phase"],
+            "landed_verify": ["verify_landed_items"],
+        })
 
     def _filter_entry_dedup_items(self, items, mediainfo, subscribe, season):
         if self._gate is not None:
@@ -162,8 +189,14 @@ class _PipelineService(TransferOpsMixin):
         return False
 
     def _stop_requested(self):
-        self._stop_calls += 1
-        return self._stop_after is not None and self._stop_calls > self._stop_after
+        # 计数器必须写 self.__dict__：挂上 _owner 后 OwnerDelegator
+        # 的 __setattr__ 会把普通属性写转发给 owner，self._stop_calls += 1
+        # 的写操作就落不到实例上、计数永远是 0。
+        self.__dict__["_stop_calls"] = self.__dict__.get("_stop_calls", 0) + 1
+        return (
+            self._stop_after is not None
+            and self.__dict__["_stop_calls"] > self._stop_after
+        )
 
     def _set_task_phase(self, *args, **kwargs):
         return None
@@ -285,6 +318,10 @@ class _OrganizeService(TransferOpsMixin):
     def __init__(self):
         self.trigger_calls = []
         self.subtitle_calls = []
+        _attach_fake_owner(self, {
+            "mp_organize": ["_trigger_mp_organize_for_batch"],
+            "subtitles": ["_transfer_companion_subtitles"],
+        })
 
     def _trigger_mp_organize_for_batch(
             self, processed_items, success_id_set, mediainfo=None, season=None,
@@ -392,6 +429,10 @@ class _ConfirmService(TransferOpsMixin):
         self._strm_map = strm_map or {}
         self.strm_requests = []
         self.notify_calls = []
+        _attach_fake_owner(self, {
+            "resource_transfer": ["_resource_staging_dir"],
+            "strm_ops": ["_generate_or_queue_strm_batch"],
+        })
 
     def _resource_staging_dir(self, url, file):
         return "/downloads"

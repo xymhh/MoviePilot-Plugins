@@ -93,13 +93,13 @@ class TransferOpsMixin(OwnerDelegator):
         if not items:
             return items, {}
         try:
-            if not self._episode_dedup_active():
+            if not self._owner.episode_dedup._episode_dedup_active():
                 return items, {}
         except Exception as error:
             logger.debug(f"入口判重开关不可用（放行全部）：{error}", exc_info=True)
             return items, {}
         try:
-            versions = self._collect_episode_versions(
+            versions = self._owner.episode_dedup._collect_episode_versions(
                 subscribe, mediainfo, season
             )
         except Exception as error:
@@ -129,7 +129,7 @@ class TransferOpsMixin(OwnerDelegator):
                 )
             except (TypeError, ValueError):
                 new_score = 0
-            action, _old, reason = self._episode_dedup_decision(
+            action, _old, reason = self._owner.episode_dedup._episode_dedup_decision(
                 subscribe,
                 mediainfo,
                 season,
@@ -214,7 +214,7 @@ class TransferOpsMixin(OwnerDelegator):
         签名与返回值。返回 (processed_items, success_ids, cross_batch)。
         """
         try:
-            source_provider = self._resource_provider_for_url(share_url)
+            source_provider = self._owner.resource_transfer._resource_provider_for_url(share_url)
             provider_key = getattr(source_provider, "key", "") or getattr(
                 self._cloud_drive, "key", "default"
             )
@@ -254,7 +254,7 @@ class TransferOpsMixin(OwnerDelegator):
                     if batch_stop_requested():
                         return file_id, None
                     try:
-                        item_staging_dir = self._resource_staging_dir(
+                        item_staging_dir = self._owner.resource_transfer._resource_staging_dir(
                             str(item["file"].get("url") or share_url), item["file"]
                         )
                         save_target_name = (
@@ -376,7 +376,7 @@ class TransferOpsMixin(OwnerDelegator):
                     # 确定每个文件转存的目标路径：关闭整理时按母文件夹保留层级，开启整理时使用统一转存根目录
                     def _item_target_dir(file_dict: Dict[str, Any]) -> str:
                         if not organize_enabled:
-                            return self._resource_staging_dir(str(file_dict.get("url") or share_url), file_dict)
+                            return self._owner.resource_transfer._resource_staging_dir(str(file_dict.get("url") or share_url), file_dict)
                         return self._cloud_transfer_path
 
                     # 本地快照缓存，避免多集同目录时重复列目录
@@ -384,7 +384,7 @@ class TransferOpsMixin(OwnerDelegator):
 
                     def _get_snapshot(dir_path: str) -> Tuple[bool, Dict[str, Any]]:
                         if dir_path not in staging_snapshots:
-                            staging_snapshots[dir_path] = self._cloud_directory_snapshot(dir_path)
+                            staging_snapshots[dir_path] = self._owner.postprocess._cloud_directory_snapshot(dir_path)
                         return staging_snapshots[dir_path]
 
                     # 转存前预检：若对应目标目录已存在待转存文件，直接复用并跳过重复转存
@@ -468,7 +468,7 @@ class TransferOpsMixin(OwnerDelegator):
                                 continue
                             check_path = _item_target_dir(target_item["file"])
                             if check_path not in refreshed_snapshots:
-                                _, check_index = self._cloud_directory_snapshot(check_path)
+                                _, check_index = self._owner.postprocess._cloud_directory_snapshot(check_path)
                                 refreshed_snapshots[check_path] = check_index or {}
                             check_index = refreshed_snapshots[check_path]
                             t_name = str(target_item.get("target_name") or "")
@@ -525,7 +525,7 @@ class TransferOpsMixin(OwnerDelegator):
         # 跨盘、直链、整理关闭时不触发（跨盘是 P2 的事）。
         mp_organized_ids = set()
         if not cross_batch and not direct_cloud_resource and organize_enabled:
-            mp_organized_ids = self._trigger_mp_organize_for_batch(
+            mp_organized_ids = self._owner.mp_organize._trigger_mp_organize_for_batch(
                 processed_items, success_id_set,
                 mediainfo=mediainfo, season=season,
             )
@@ -543,7 +543,7 @@ class TransferOpsMixin(OwnerDelegator):
                 # 字幕匹配被当成按集匹配。
                 subtitle_input_files = list(subtitle_files or [item["file"]])
                 sub_season, sub_episode = None, None
-            item["subtitles"] = self._transfer_companion_subtitles(
+            item["subtitles"] = self._owner.subtitles._transfer_companion_subtitles(
                 share_url=str(item["file"].get("url") or share_url),
                 files=subtitle_input_files,
                 video_file=item["file"],
@@ -576,14 +576,14 @@ class TransferOpsMixin(OwnerDelegator):
         失败”——电影入口靠它区分两种失败）。落盘确认（verify_landed）不在
         这里，在 ``_run_ingest_pipeline`` 的批后统一做。
         """
-        batch_strm_results = self._generate_or_queue_strm_batch(
+        batch_strm_results = self._owner.strm_ops._generate_or_queue_strm_batch(
             [
                 {
                     "result_key": str(item["file"]["id"]),
                     "share_url": str(item["file"].get("url") or share_url),
                     "cloud_dir": item["target_dir"],
                     "file_name": item["target_name"],
-                    "staging_dir": self._resource_staging_dir(
+                    "staging_dir": self._owner.resource_transfer._resource_staging_dir(
                         str(item["file"].get("url") or share_url), item["file"]
                     ),
                     "staging_name": (
@@ -700,9 +700,9 @@ class TransferOpsMixin(OwnerDelegator):
             return []
 
         file_ids = [str(item["file"]["id"]) for item in selected_items]
-        cloud_resource = self._is_cloud_resource_url(share_url)
+        cloud_resource = self._owner.resource_transfer._is_cloud_resource_url(share_url)
         direct_cloud_resource = (
-                cloud_resource and self._is_direct_cloud_resource_url(share_url)
+                cloud_resource and self._owner.resource_transfer._is_direct_cloud_resource_url(share_url)
         )
         organize_enabled = getattr(self, "_organize_after_transfer", True)
         rename_items = {}
@@ -799,7 +799,7 @@ class TransferOpsMixin(OwnerDelegator):
                     f"开始处理转存批次 {batch_index}/{batch_count}："
                     f"文件={len(batch_items)}"
                 )
-                self._set_task_phase(
+                self._owner.metadata._set_task_phase(
                     subscribe,
                     f"正在转存第 {batch_index}/{batch_count} 批剧集",
                     90 + int((batch_index / batch_count) * 4),
@@ -844,7 +844,7 @@ class TransferOpsMixin(OwnerDelegator):
                 and not result.get("pending_key")
                 and not result.get("skip_history")
             ]
-            verify_map = self.verify_landed_items(
+            verify_map = self._owner.landed_verify.verify_landed_items(
                 subscribe, mediainfo, season, verify_items
             )
             for index, result in enumerate(results):
@@ -899,13 +899,13 @@ class TransferOpsMixin(OwnerDelegator):
             media: Optional[Dict[str, Any]] = None,
     ) -> bool:
         should_stop = stop_requested or self._stop_requested
-        cloud_resource = self._is_cloud_resource_url(share_url)
-        source = self._resource_provider_for_url(share_url)
+        cloud_resource = self._owner.resource_transfer._is_cloud_resource_url(share_url)
+        source = self._owner.resource_transfer._resource_provider_for_url(share_url)
         cross_provider = bool(
             source and self._cloud_drive and source.key != self._cloud_drive.key
         )
         if cross_provider:
-            item_media_type = self._normalize_cross_transfer_media_type(
+            item_media_type = self._owner.resource_transfer._normalize_cross_transfer_media_type(
                 file_item.get("media_type") or media_type
             )
             is_manual_override = bool(
@@ -969,7 +969,7 @@ class TransferOpsMixin(OwnerDelegator):
                     file_item, f"无法跨盘转存：{detail}"
                 )
             if cloud_resource:
-                item = self._cloud_file_from_dict(file_item)
+                item = self._owner.resource_transfer._cloud_file_from_dict(file_item)
                 if not item.id:
                     logger.warning(f"无法跨盘整理文件：{source.name} 文件 ID 为空")
                     return self._fail_transfer(
@@ -1091,7 +1091,7 @@ class TransferOpsMixin(OwnerDelegator):
                     # 时文件已在 115 /转存；两种都触发 MP 整理进媒体库。
                     # 整理未接受时本项记失败（文件不在媒体库，下一轮同步
                     # 重试；本地缓存复用，不重复下载）。
-                    if not self._mp_organize_enabled():
+                    if not self._owner.mp_organize._mp_organize_enabled():
                         logger.info(
                             f"MP 整理已关闭，跨盘文件留在本地待手动整理："
                             f"{result_name}"
@@ -1104,7 +1104,7 @@ class TransferOpsMixin(OwnerDelegator):
                         ).strip()
                         local_parts = PurePosixPath(local_path) if local_path else None
                         if local_parts and local_parts.name:
-                            ok, mp_info = self.trigger_mp_organize(
+                            ok, mp_info = self._owner.mp_organize.trigger_mp_organize(
                                 str(local_parts.parent), local_parts.name,
                                 media=effective_media,
                             )
@@ -1114,7 +1114,7 @@ class TransferOpsMixin(OwnerDelegator):
                                 "message": "MP 整理未触发：本地路径为空，文件未进媒体库",
                             }
                     else:
-                        ok, mp_info = self.trigger_mp_organize(
+                        ok, mp_info = self._owner.mp_organize.trigger_mp_organize(
                             save_path, result_name, media=effective_media,
                         )
                     file_item["_mp_organized"] = bool(ok)
@@ -1220,7 +1220,7 @@ class TransferOpsMixin(OwnerDelegator):
             source_sha1=source_sha1,
         ))
         if not success and target_check_name:
-            t_valid, t_index = self._cloud_directory_snapshot(save_path)
+            t_valid, t_index = self._owner.postprocess._cloud_directory_snapshot(save_path)
             if t_valid and (
                     target_check_name in t_index
                     or (target_name and target_name in t_index)
@@ -1233,9 +1233,9 @@ class TransferOpsMixin(OwnerDelegator):
             return False
         # P1：单文件同盘直存（历史重试、手动单传）成功后同样交 MP 整理；
         # 字幕等非视频文件由 trigger 内部的扩展名守卫拦下。
-        if self._mp_organize_enabled():
+        if self._owner.mp_organize._mp_organize_enabled():
             saved_name = str(target_name or file_item.get("name") or "")
-            ok, mp_info = self.trigger_mp_organize(
+            ok, mp_info = self._owner.mp_organize.trigger_mp_organize(
                 save_path, saved_name, media=media,
                 season=(
                     media.get("season") if isinstance(media, dict) else None

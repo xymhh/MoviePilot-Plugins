@@ -114,6 +114,51 @@ class FakeOwner:
         # 1.6.48 判重：默认关闭，避免 MagicMock 脏数据干扰现有转存断言
         self._episode_dedup_enabled = False
         self._upgrade_mode = "largest"
+        # Phase 5：process_tv_subscribe 经 owner.<字段>.<方法> 调用；本类
+        # 的桩原来是类上的同名方法，而字段名会被下面的 __getattr__ 变成
+        # MagicMock 把桩盖住——这里显式建字段命名空间（仍是 MagicMock，
+        # 未定义的照旧返回 Mock），只把类上真实定义的桩指过去。
+        for _field, _methods in {
+            "transfer_ops": ["_transfer_episode_items"],
+            "resource_transfer": [
+                "_build_transfer_resource_batches",
+                "_resource_input_label",
+                "_resolve_candidate_resource_url",
+                "_is_supported_resource",
+                "_explicit_selection_values",
+                "_filter_files_by_explicit_selection",
+                "_validated_resource_files",
+            ],
+            "naming": [
+                "_summarize_share_episodes",
+                "_scan_cloud_resource_episodes",
+                "_platform_target",
+                "_cloud_drive_name",
+            ],
+            "file_matching": ["_match_episode_files"],
+            "metadata": ["_set_task_phase"],
+            "episode_dedup": ["_episode_dedup_active"],
+            "upgrade": ["_process_tv_subscribe_upgrade"],
+            "upgrade_baseline": [
+                "_read_ep_priority", "_build_episode_baseline",
+            ],
+            # check_subscribe_stopped 等开场流程在 subscribe_flow 组件上，
+            # 本类的同名方法就是调 SubscribeFlowService(self) 的薄壳。
+            "subscribe_flow": [
+                "check_subscribe_stopped",
+                "prepare_subscribe_entry",
+                "collect_subscribe_resources",
+            ],
+            "upgrade_rule_scoring": ["_get_mp_rule_score"],
+        }.items():
+            _namespace = MagicMock()
+            for _method in _methods:
+                if any(
+                    _method in _cls.__dict__
+                    for _cls in type(self).__mro__
+                ):
+                    setattr(_namespace, _method, getattr(self, _method))
+            setattr(self, _field, _namespace)
 
     def _cloud_drive_name(self):
         return "115网盘"

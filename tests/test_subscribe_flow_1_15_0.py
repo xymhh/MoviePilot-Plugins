@@ -76,6 +76,11 @@ class _FlowService(SubscribeFlowService):
         self.phase_calls = []
         self.enabled_calls = []
         self.search_calls = []
+        # Phase 5：_collect_resources 经 owner.metadata._set_task_phase
+        # 汇报阶段，桩指回本类同名方法（phase_calls 断言靠它）。
+        self._owner.metadata = SimpleNamespace(
+            _set_task_phase=self._set_task_phase,
+        )
 
     def _stop_requested(self):
         return self._stopped

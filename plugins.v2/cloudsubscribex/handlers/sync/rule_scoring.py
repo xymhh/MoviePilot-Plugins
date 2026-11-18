@@ -94,7 +94,7 @@ class UpgradeRuleScoringService(OwnerDelegator):
         if not name or mediainfo is None:
             return False
         try:
-            expected = self._platform_rename_path(
+            expected = self._owner.naming._platform_rename_path(
                 getattr(self, "_CLOUD_MEDIA_ROOT", "/"),
                 subscribe,
                 mediainfo,

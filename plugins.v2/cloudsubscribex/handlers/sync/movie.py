@@ -46,14 +46,14 @@ class MovieSyncProcessor(OwnerDelegator):
         # Phase 3a 第 3 项：开场（停止检查 + 预算 + mediainfo）与资源搜索
         # 收进 SubscribeFlowService，TV/电影共用。
         try:
-            if self.check_subscribe_stopped():
+            if self._owner.subscribe_flow.check_subscribe_stopped():
                 return transferred_count
             logger.debug(f"处理电影订阅：{subscribe.name} ({subscribe.year})")
 
             # 加载该订阅的历史积分花费（用 tmdb_id 作为唯一标识）；
             # Phase 3a 第 3 项：开场准备收进 SubscribeFlowService
             # （mediainfo 也在这里解析，后面的洗版基线直接用它）。
-            prepared = self.prepare_subscribe_entry(
+            prepared = self._owner.subscribe_flow.prepare_subscribe_entry(
                 subscribe, MediaType.MOVIE, manual_resources,
             )
             if prepared is None:
@@ -80,8 +80,8 @@ class MovieSyncProcessor(OwnerDelegator):
                 )
                 if manual_movie:
                     manual_name = str(manual_movie.get("file_name") or "").strip()
-                    manual_size = self._resource_size_bytes(manual_movie.get("file_size"))
-                    manual_score = self._get_mp_rule_score(
+                    manual_size = self._owner.upgrade_rule_scoring._resource_size_bytes(manual_movie.get("file_size"))
+                    manual_score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
                         manual_name, manual_size, subscribe, 0, mediainfo
                     )
                     movie_history_score = max(movie_history_score, manual_score)
@@ -95,12 +95,12 @@ class MovieSyncProcessor(OwnerDelegator):
                         chain=self._chain, mediainfo=mediainfo
                 ):
                     media_file = Path(str(media_item.get("path") or ""))
-                    media_size = self._resource_size_bytes(media_item.get("size"))
+                    media_size = self._owner.upgrade_rule_scoring._resource_size_bytes(media_item.get("size"))
                     rule_title = str(
                         media_item.get("rule_title") or media_file.name
                     ).strip()
                     media_server_has_size = media_server_has_size or media_size > 0
-                    media_server_score = self._get_mp_rule_score(
+                    media_server_score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
                         rule_title, media_size, subscribe, 0, mediainfo
                     )
                     if media_size:
@@ -115,7 +115,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         )
                 existing_movie = self._timed_sync_call(
                     "cloud_scan",
-                    self._find_cloud_movie_file,
+                    self._owner.naming._find_cloud_movie_file,
                     subscribe,
                     mediainfo,
                 )
@@ -123,7 +123,7 @@ class MovieSyncProcessor(OwnerDelegator):
                     upgrade_target_exists = True
                     existing_dir, existing_name, existing_file = existing_movie
                     if self._strm_generate_enabled:
-                        existing_strm = self._generate_strm(
+                        existing_strm = self._owner.strm_ops._generate_strm(
                             existing_dir,
                             existing_name,
                             target_file=existing_file,
@@ -136,7 +136,7 @@ class MovieSyncProcessor(OwnerDelegator):
                     if not media_server_has_size:
                         file_name, target_file = existing_name, existing_file
                         existing_size = int(getattr(target_file, "size", 0) or 0)
-                        existing_score = self._get_mp_rule_score(
+                        existing_score = self._owner.upgrade_rule_scoring._get_mp_rule_score(
                             file_name, existing_size, subscribe, 0, mediainfo
                         )
                         if existing_score >= movie_history_score:
@@ -162,9 +162,9 @@ class MovieSyncProcessor(OwnerDelegator):
                         return transferred_count
 
             if not manual_resources:
-                release_date = self._calendar_date(mediainfo.release_date)
+                release_date = self._owner.metadata._calendar_date(mediainfo.release_date)
                 if release_date and release_date > datetime.date.today():
-                    self.defer_subscribe_until(
+                    self._owner.metadata.defer_subscribe_until(
                         subscribe,
                         release_date,
                         f"电影上映日期为 {release_date.isoformat()}",
@@ -175,12 +175,12 @@ class MovieSyncProcessor(OwnerDelegator):
                     )
                     self._owner._last_skip_reason = f"电影尚未上映（{release_date.isoformat()}）"
                     return transferred_count
-            self._set_task_phase(subscribe, "检查网盘内容", 25)
+            self._owner.metadata._set_task_phase(subscribe, "检查网盘内容", 25)
 
             if not is_best_version:
                 existing_movie = self._timed_sync_call(
                     "cloud_scan",
-                    self._find_cloud_movie_file,
+                    self._owner.naming._find_cloud_movie_file,
                     subscribe,
                     mediainfo,
                 )
@@ -189,7 +189,7 @@ class MovieSyncProcessor(OwnerDelegator):
                     logger.info(
                         f"目标电影已存在，结束订阅：{cloud_dir.rstrip('/')}/{file_name}"
                     )
-                    self._generate_strm(cloud_dir, file_name)
+                    self._owner.strm_ops._generate_strm(cloud_dir, file_name)
                     self._scrape_metadata(cloud_dir, file_name, mediainfo)
                     if not transient_target:
                         self._subscribe_handler.check_and_finish_subscribe(
@@ -204,7 +204,7 @@ class MovieSyncProcessor(OwnerDelegator):
 
             # 手动资源直接进入现有匹配转存链，否则查询搜索源；
             # Phase 3a 第 3 项：资源搜索收进 SubscribeFlowService。
-            source_order, source_results = self.collect_subscribe_resources(
+            source_order, source_results = self._owner.subscribe_flow.collect_subscribe_resources(
                 subscribe, mediainfo, MediaType.MOVIE,
                 manual_resources=manual_resources,
                 phase_label="搜索候选资源",
@@ -215,7 +215,7 @@ class MovieSyncProcessor(OwnerDelegator):
                     f"手动处理电影 {mediainfo.title}："
                     f"收到 {len(source_results['manual'])} 个资源链接"
                 )
-            resource_batches = self._build_transfer_resource_batches(
+            resource_batches = self._owner.resource_transfer._build_transfer_resource_batches(
                 source_order, source_results
             )
             candidate_resources = [
@@ -231,7 +231,7 @@ class MovieSyncProcessor(OwnerDelegator):
                 self._owner._last_skip_reason = "未找到可用资源"
                 return transferred_count
 
-            self._set_task_phase(subscribe, "筛选候选资源", 60)
+            self._owner.metadata._set_task_phase(subscribe, "筛选候选资源", 60)
             search_label = self._search_handler._search_label(
                 mediainfo, MediaType.MOVIE
             )
@@ -241,7 +241,7 @@ class MovieSyncProcessor(OwnerDelegator):
             ))
             logger.debug(
                 f"[{search_label}][{result_sources}] 找到候选资源："
-                f"{self._format_resource_summary(candidate_resources)}"
+                f"{self._owner.resource_transfer._format_resource_summary(candidate_resources)}"
             )
 
             # 遍历搜索结果，尝试找到并转存电影
@@ -249,7 +249,7 @@ class MovieSyncProcessor(OwnerDelegator):
             for resource_index, resource in enumerate(candidate_resources):
                 if movie_transferred or self._stop_requested():
                     break
-                self._set_task_phase(
+                self._owner.metadata._set_task_phase(
                     subscribe,
                     f"校验候选资源 ({resource_index + 1}/{len(candidate_resources)})",
                     60 + int((resource_index + 1) / len(candidate_resources) * 22),
@@ -270,13 +270,13 @@ class MovieSyncProcessor(OwnerDelegator):
                         preview_matched, preview_score = self._search_handler.select_file_candidate(
                             [{
                                 "name": preview_name,
-                                "size": self._resource_size_bytes(resource.get("size")),
+                                "size": self._owner.upgrade_rule_scoring._resource_size_bytes(resource.get("size")),
                             }],
                             mediainfo,
                             subscribe,
                         )
-                        preview_size = self._resource_size_bytes(resource.get("size"))
-                        preview_decision = self._should_upgrade_candidate(
+                        preview_size = self._owner.upgrade_rule_scoring._resource_size_bytes(resource.get("size"))
+                        preview_decision = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
                             movie_history_score,
                             preview_score,
                             movie_history_size,
@@ -293,7 +293,7 @@ class MovieSyncProcessor(OwnerDelegator):
                                 f"{preview_decision[1]}"
                             )
                             continue
-                share_url = self._resolve_candidate_resource_url(
+                share_url = self._owner.resource_transfer._resolve_candidate_resource_url(
                     candidate_resources,
                     resource_index,
                     resource,
@@ -306,19 +306,19 @@ class MovieSyncProcessor(OwnerDelegator):
                 if not share_url:
                     continue
 
-                if not self._is_supported_resource(resource, share_url):
+                if not self._owner.resource_transfer._is_supported_resource(resource, share_url):
                     logger.debug(
                         f"跳过当前同步链不支持的资源类型 "
-                        f"{self._supported_resource_type(resource, share_url)}：{resource_title}"
+                        f"{self._owner.resource_transfer._supported_resource_type(resource, share_url)}：{resource_title}"
                     )
                     continue
 
-                cloud_resource = self._is_cloud_resource_url(share_url)
+                cloud_resource = self._owner.resource_transfer._is_cloud_resource_url(share_url)
                 direct_cloud_resource = (
-                        cloud_resource and self._is_direct_cloud_resource_url(share_url)
+                        cloud_resource and self._owner.resource_transfer._is_direct_cloud_resource_url(share_url)
                 )
                 logger.info(
-                    f"检查{self._resource_input_label(share_url)}：{resource_title} - "
+                    f"检查{self._owner.resource_transfer._resource_input_label(share_url)}：{resource_title} - "
                     f"{self._resource_log_reference(share_url)}"
                 )
 
@@ -332,17 +332,17 @@ class MovieSyncProcessor(OwnerDelegator):
                             continue
 
                     if is_offline_resource:
-                        provider_name = self._prepare_magnet_resource(
+                        provider_name = self._owner.resource_transfer._prepare_magnet_resource(
                             resource, share_url
                         )
-                        if not self._validate_resource_url(
+                        if not self._owner.resource_transfer._validate_resource_url(
                                 share_url,
                                 resource_label="Magnet 链接",
                                 resource_title=resource_title,
                         ):
                             continue
                         provider_name = provider_name or resource_title
-                        title_seasons = self._magnet_title_seasons(resource)
+                        title_seasons = self._owner.resource_transfer._magnet_title_seasons(resource)
                         if title_seasons:
                             logger.debug(
                                 f"电影离线资源包含剧集季数，已跳过：{provider_name}"
@@ -355,20 +355,20 @@ class MovieSyncProcessor(OwnerDelegator):
                         )
                         if not matched:
                             logger.debug(f"Magnet 元数据未通过平台优先级规则：{provider_name}")
-                            self._record_skip_candidate(
+                            self._owner.resource_transfer._record_skip_candidate(
                                 SkipStatsCollector.KIND_MISMATCH,
                                 share_url,
                                 reason="未通过平台优先级规则",
                                 resource_title=resource_title,
                             )
                             continue
-                        magnet_size = self._resource_size_bytes(
+                        magnet_size = self._owner.upgrade_rule_scoring._resource_size_bytes(
                             resource.get("size")
                             or (resource.get("magnet_metadata") or {}).get("size")
                         )
                         magnet_upgrade = False
                         if upgrade_target_exists and movie_history_score >= 0:
-                            magnet_upgrade, magnet_reason = self._should_upgrade_candidate(
+                            magnet_upgrade, magnet_reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
                                 movie_history_score,
                                 current_score,
                                 movie_history_size,
@@ -384,7 +384,7 @@ class MovieSyncProcessor(OwnerDelegator):
                                     f"电影 {mediainfo.title} Magnet 洗版候选跳过：{magnet_reason}"
                                 )
                                 continue
-                        self._set_task_phase(subscribe, "提交离线下载", 90, clear_search=True)
+                        self._owner.metadata._set_task_phase(subscribe, "提交离线下载", 90, clear_search=True)
                         pending_key = self._queue_magnet_package(
                             resource, share_url, subscribe, mediainfo,
                             sub_key=sub_key if track_points else "",
@@ -400,7 +400,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         )
                         if not pending_key:
                             continue
-                        self._append_magnet_pending_history(
+                        self._owner.resource_transfer._append_magnet_pending_history(
                             history=history,
                             mediainfo=mediainfo,
                             subscribe=subscribe,
@@ -417,9 +417,9 @@ class MovieSyncProcessor(OwnerDelegator):
                         continue
 
                     selected_file_ids, selected_file_names = (
-                        self._explicit_selection_values(resource)
+                        self._owner.resource_transfer._explicit_selection_values(resource)
                     )
-                    share_files = self._validated_resource_files(
+                    share_files = self._owner.resource_transfer._validated_resource_files(
                         share_url,
                         resource_title=resource_title,
                         target_file_ids=selected_file_ids,
@@ -429,10 +429,10 @@ class MovieSyncProcessor(OwnerDelegator):
                     if not share_files:
                         continue
 
-                    require_media_match = self._is_cross_drive_resource(
+                    require_media_match = self._owner.resource_transfer._is_cross_drive_resource(
                         resource, share_url
                     )
-                    matched_file, current_score = self._match_movie_file(
+                    matched_file, current_score = self._owner.file_matching._match_movie_file(
                         share_files,
                         mediainfo,
                         subscribe,
@@ -454,7 +454,7 @@ class MovieSyncProcessor(OwnerDelegator):
                                 f"{mediainfo.title_year}，已跳过该资源"
                             )
                             reason = "目标网盘分享未找到符合规则的电影文件"
-                        self._record_skip_candidate(
+                        self._owner.resource_transfer._record_skip_candidate(
                             SkipStatsCollector.KIND_MISMATCH,
                             share_url,
                             reason=reason,
@@ -471,10 +471,10 @@ class MovieSyncProcessor(OwnerDelegator):
                         upgrade_old_size = movie_history_size
                         dedup_movie_versions: list = []
                         if upgrade_target_exists and movie_history_score >= 0:
-                            candidate_size = self._resource_size_bytes(
+                            candidate_size = self._owner.upgrade_rule_scoring._resource_size_bytes(
                                 matched_file.get("size")
                             )
-                            should_upgrade, reason = self._should_upgrade_candidate(
+                            should_upgrade, reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
                                 movie_history_score,
                                 current_score,
                                 movie_history_size,
@@ -495,11 +495,11 @@ class MovieSyncProcessor(OwnerDelegator):
                                 f"电影 {mediainfo.title} 洗版：{reason}"
                             )
                             # 1.6.48 判重：收集目录内全部旧版本，主旧版本走 postprocess，其余成功后批量删除
-                            if self._episode_dedup_active():
+                            if self._owner.episode_dedup._episode_dedup_active():
                                 try:
                                     dedup_movie_versions = self._timed_sync_call(
                                         "cloud_scan",
-                                        self._find_cloud_movie_versions,
+                                        self._owner.episode_dedup._find_cloud_movie_versions,
                                         subscribe,
                                         mediainfo,
                                     ) or []
@@ -510,18 +510,18 @@ class MovieSyncProcessor(OwnerDelegator):
                                     dedup_movie_versions = []
 
                         organize_enabled = getattr(self, "_organize_after_transfer", True)
-                        staging_dir = self._resource_staging_dir(
+                        staging_dir = self._owner.resource_transfer._resource_staging_dir(
                             share_url, matched_file
                         )
                         if organize_enabled:
-                            save_dir, target_name = self._platform_target(
+                            save_dir, target_name = self._owner.naming._platform_target(
                                 self._CLOUD_MEDIA_ROOT, subscribe, mediainfo, file_name
                             )
                             if is_upgrade and self._upgrade_mode == "coexist":
-                                target_name = self._coexist_target_name(
+                                target_name = self._owner.upgrade_rule_scoring._coexist_target_name(
                                     target_name,
                                     file_name,
-                                    self._resource_size_bytes(matched_file.get("size")),
+                                    self._owner.upgrade_rule_scoring._resource_size_bytes(matched_file.get("size")),
                                     matched_file.get("sha1") or "",
                                 )
                         else:
@@ -531,7 +531,7 @@ class MovieSyncProcessor(OwnerDelegator):
                             f"网盘源文件: {staging_dir}/{file_name}，"
                             f"整理到: {save_dir}/{target_name}"
                             if direct_cloud_resource
-                            else f"跨盘源文件: {self._cloud_resource_path(share_url)}/{file_name}，"
+                            else f"跨盘源文件: {self._owner.resource_transfer._cloud_resource_path(share_url)}/{file_name}，"
                                  f"转存后整理到: {save_dir}/{target_name}"
                             if cloud_resource
                             else f"网盘转存暂存: {staging_dir}/{file_name}，"
@@ -540,7 +540,7 @@ class MovieSyncProcessor(OwnerDelegator):
 
                         if self._stop_requested():
                             break
-                        self._set_task_phase(
+                        self._owner.metadata._set_task_phase(
                             subscribe,
                             "登记网盘文件整理" if direct_cloud_resource else "转存匹配文件",
                             90,
@@ -567,7 +567,7 @@ class MovieSyncProcessor(OwnerDelegator):
                         # 首个成功即停、不做落盘自检）。转存 + 字幕 + STRM
                         # 登记都在管线里；MP 整理由管线 organize 阶段触发
                         # （与旧 _transfer_file 尾巴同口径）。
-                        pipeline_results = self._run_ingest_pipeline(
+                        pipeline_results = self._owner.transfer_ops._run_ingest_pipeline(
                             [{
                                 "file": matched_file,
                                 "target_name": target_name,
@@ -609,16 +609,16 @@ class MovieSyncProcessor(OwnerDelegator):
                                 break
 
                         # 记录历史
-                        history_item = self._build_transfer_history_item(
+                        history_item = self._owner.transfer_details._build_transfer_history_item(
                             mediainfo=mediainfo,
                             subscribe=subscribe,
-                            status=self._transfer_history_status(success, share_url),
+                            status=self._owner.resource_transfer._transfer_history_status(success, share_url),
                             share_url=share_url,
                             file_name=target_name,
                             source_file_name=file_name,
                             cloud_dir=save_dir,
                             resource=resource,
-                            file_size=self._resource_size_bytes(matched_file.get("size")),
+                            file_size=self._owner.upgrade_rule_scoring._resource_size_bytes(matched_file.get("size")),
                             source_sha1=matched_file.get("sha1") or "",
                             source_md5=matched_file.get("md5") or "",
                             rule_score=current_score,
@@ -645,7 +645,7 @@ class MovieSyncProcessor(OwnerDelegator):
                             transferred_count += 1
                             movie_transferred = True
                             movie_history_score = current_score
-                            self._set_task_phase(subscribe, "登记文件后处理", 95)
+                            self._owner.metadata._set_task_phase(subscribe, "登记文件后处理", 95)
                             # STRM 登记已在管线 confirm 阶段完成；转存成功但
                             # 登记失败时管线已把 success 置 False，不会走到这里。
                             pending_key = pipeline_result.get("pending_key") or ""
@@ -662,10 +662,10 @@ class MovieSyncProcessor(OwnerDelegator):
                                 )
                             # 1.6.48 判重：额外旧版本在转存成功后批量删除
                             if extra_old_versions:
-                                self._apply_episode_dedup(
+                                self._owner.episode_dedup._apply_episode_dedup(
                                     extra_old_versions,
                                     new_score=current_score,
-                                    new_size=self._resource_size_bytes(matched_file.get("size")),
+                                    new_size=self._owner.upgrade_rule_scoring._resource_size_bytes(matched_file.get("size")),
                                     subscribe=subscribe,
                                     mediainfo=mediainfo,
                                     season=0,
@@ -681,7 +681,7 @@ class MovieSyncProcessor(OwnerDelegator):
                             # 收集转存详情用于通知：体积直接取转存结果，
                             # 不再从 history 里补（history 表在 v1.13.3 删除）。
                             if not pending_key:
-                                movie_size = self._resource_size_bytes(
+                                movie_size = self._owner.upgrade_rule_scoring._resource_size_bytes(
                                     matched_file.get("size")
                                 )
                                 transfer_details.append({
@@ -699,10 +699,10 @@ class MovieSyncProcessor(OwnerDelegator):
                                     ),
                                     "size": movie_size,
                                     "size_unknown": movie_size <= 0,
-                                    "source": self._detail_source_text(history_item),
+                                    "source": self._owner.transfer_details._detail_source_text(history_item),
                                 })
 
-                            self._record_download_history(
+                            self._owner.transfer_details._record_download_history(
                                 mediainfo=mediainfo,
                                 subscribe=subscribe,
                                 path=save_dir,

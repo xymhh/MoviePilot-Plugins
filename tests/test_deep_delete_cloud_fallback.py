@@ -99,6 +99,11 @@ class DeepDeleteCloudFallbackTest(unittest.TestCase):
             return Path(text), "ok"
 
         service._configured_media_path = _configured_media_path
+        # Phase 5：整目录/逐文件档经 owner.media_targets._configured_media_path
+        # 定位，桩挂到字段命名空间上。
+        service._owner.media_targets = SimpleNamespace(
+            _configured_media_path=service._configured_media_path,
+        )
         return service
 
     def _make_series(self, relative):
@@ -184,6 +189,10 @@ class DeepDeleteLocalPathGoneTest(unittest.TestCase):
             )
 
         self.service._configured_media_path = _boom
+        # Phase 5：同上，boom 桩挂到 media_targets 字段命名空间上。
+        self.service._owner.media_targets = SimpleNamespace(
+            _configured_media_path=self.service._configured_media_path,
+        )
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -194,7 +203,10 @@ class DeepDeleteLocalPathGoneTest(unittest.TestCase):
                 ("/media/strm", str(self.root.parent))
             ] if raw else []
 
-        object.__setattr__(self.service, "_parsed_media_server_path_mappings", _parsed)
+        object.__setattr__(
+            self.service._owner.media_targets,
+            "_parsed_media_server_path_mappings", _parsed,
+        )
 
     def test_deletes_cloud_directory_when_local_strm_gone(self):
         self._set_mappings("/media/strm=/strm")

@@ -430,7 +430,7 @@ class ResourceTransferService(OwnerDelegator):
                 "target_episodes": [entry["episode"]],
                 "finalize_key": finalize_key,
             })
-            history.append(self._build_transfer_history_item(
+            history.append(self._owner.transfer_details._build_transfer_history_item(
                 mediainfo=mediainfo,
                 subscribe=subscribe,
                 status=STATUS_DOWNLOADING,

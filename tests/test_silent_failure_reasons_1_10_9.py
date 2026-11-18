@@ -25,6 +25,7 @@ from unittest.mock import MagicMock, patch
 
 from plugin_env import (
     ensure_package, install_app_mocks, install_core_delegation, load_module,
+    materialize_handler_fields, migrate_handler_stubs,
 )
 
 install_app_mocks(
@@ -109,30 +110,31 @@ def _provider(*, key, name, supports=True, share_transfer=None, file_query=None)
 class FailTransferTests(unittest.TestCase):
     def _handler(self):
         handler = SyncHandler.__new__(SyncHandler)
+        materialize_handler_fields(handler, "transfer_ops")
         return handler
 
     def test_fail_transfer_returns_false_and_remembers(self):
         handler = self._handler()
         file_item = {"id": "fid1", "name": "05.mkv"}
-        self.assertFalse(handler._fail_transfer(file_item, "夸克分享转存失败"))
+        self.assertFalse(handler.transfer_ops._fail_transfer(file_item, "夸克分享转存失败"))
         self.assertEqual(
-            handler._transfer_failure_reason("fid1"), "夸克分享转存失败",
+            handler.transfer_ops._transfer_failure_reason("fid1"), "夸克分享转存失败",
         )
 
     def test_remember_sanitizes_credentials(self):
         handler = self._handler()
         file_item = {"id": "fid1", "name": "05.mkv"}
-        handler._remember_transfer_failure(
+        handler.transfer_ops._remember_transfer_failure(
             file_item, "上传失败：{'user_key': 'FAKEUSERKEY0123456789ABCDEF0123'}",
         )
-        reason = handler._transfer_failure_reason("fid1")
+        reason = handler.transfer_ops._transfer_failure_reason("fid1")
         self.assertIn("'user_key': '***'", reason)
         self.assertNotIn("FAKEUSERKEY0123456789ABCDEF0123", reason)
 
     def test_remember_ignores_empty_file_id(self):
         handler = self._handler()
-        handler._remember_transfer_failure({"name": "05.mkv"}, "某原因")
-        self.assertEqual(handler._transfer_failure_reason(""), "")
+        handler.transfer_ops._remember_transfer_failure({"name": "05.mkv"}, "某原因")
+        self.assertEqual(handler.transfer_ops._transfer_failure_reason(""), "")
 
 
 class ImplSilentGapTests(unittest.TestCase):
@@ -151,6 +153,16 @@ class ImplSilentGapTests(unittest.TestCase):
         # 直接给宿主赋值同名属性不会生效（类属性优先于委托）；改给宿主挂
         # 真实方法要读的 _cloud_transfer_paths，让真实方法自己算。
         handler._cloud_transfer_paths = {"quark": "/staging/quark"}
+        materialize_handler_fields(
+            handler, "transfer_ops", "resource_transfer",
+        )
+        migrate_handler_stubs(handler)
+        # resources 同级模块在本文件被 mock，migrate 认不出它的方法名，
+        # 桩直接挂字段实例上。
+        handler.resource_transfer._is_cloud_resource_url = \
+            handler._is_cloud_resource_url
+        handler.resource_transfer._normalize_cross_transfer_media_type = \
+            handler._normalize_cross_transfer_media_type
         return handler
 
     def _source(self, *, share_transfer=None, file_query=None):
@@ -169,7 +181,10 @@ class ImplSilentGapTests(unittest.TestCase):
 
     def _run_impl(self, handler, source, file_item):
         handler._resource_provider_for_url = lambda url: source
-        return handler._transfer_file_impl(
+        migrate_handler_stubs(handler)
+        handler.resource_transfer._resource_provider_for_url = \
+            handler._resource_provider_for_url
+        return handler.transfer_ops._transfer_file_impl(
             "https://pan.quark.cn/s/abc", file_item, "/转存", "05.mkv",
             source_sha1="A" * 40,
         )
@@ -178,7 +193,7 @@ class ImplSilentGapTests(unittest.TestCase):
         handler = self._handler(enabled=False)
         file_item = self._file_item()
         self.assertFalse(self._run_impl(handler, self._source(), file_item))
-        reason = handler._transfer_failure_reason("fid1")
+        reason = handler.transfer_ops._transfer_failure_reason("fid1")
         self.assertIn("无法跨盘转存", reason)
         self.assertIn("跨盘转存未启用", reason)
 
@@ -186,7 +201,7 @@ class ImplSilentGapTests(unittest.TestCase):
         handler = self._handler()
         file_item = self._file_item(media_type="音乐")
         self.assertFalse(self._run_impl(handler, self._source(), file_item))
-        reason = handler._transfer_failure_reason("fid1")
+        reason = handler.transfer_ops._transfer_failure_reason("fid1")
         self.assertIn("媒体类型", reason)
         self.assertIn("未启用跨盘转存", reason)
 
@@ -201,7 +216,7 @@ class ImplSilentGapTests(unittest.TestCase):
                 handler, self._source(share_transfer=share_transfer), file_item,
             )
         )
-        reason = handler._transfer_failure_reason("fid1")
+        reason = handler.transfer_ops._transfer_failure_reason("fid1")
         self.assertIn("夸克网盘分享转存失败", reason)
         self.assertIn("未返回暂存文件", reason)
 
@@ -222,7 +237,7 @@ class ImplSilentGapTests(unittest.TestCase):
                     file_item,
                 )
             )
-        reason = handler._transfer_failure_reason("fid1")
+        reason = handler.transfer_ops._transfer_failure_reason("fid1")
         self.assertIn("跨盘临时文件尚未可见", reason)
         self.assertIn("/staging/quark/05.mkv", reason)
 
@@ -249,6 +264,16 @@ class SameDriveMpOrganizeIdentityTests(unittest.TestCase):
         handler._cloud_drive = _provider(key="115", name="115网盘")
         handler._stop_requested = lambda: False
         handler._is_cloud_resource_url = lambda url: False
+        # 本文件把 resources 同级模块也 mock 掉了，真实
+        # _normalize_cross_transfer_media_type 是个恒真 MagicMock，
+        # 会误进媒体类型分支；像 ImplSilentGapTests 一样钉成恒等。
+        handler._normalize_cross_transfer_media_type = lambda mt: mt
+        materialize_handler_fields(handler)
+        migrate_handler_stubs(handler)
+        handler.resource_transfer._is_cloud_resource_url = \
+            handler._is_cloud_resource_url
+        handler.resource_transfer._normalize_cross_transfer_media_type = \
+            handler._normalize_cross_transfer_media_type
         return handler
 
     def _run_same_drive(self, handler, file_item, *, trigger_result, parent_task_id=""):
@@ -261,7 +286,12 @@ class SameDriveMpOrganizeIdentityTests(unittest.TestCase):
         )
         source = _provider(key="115", name="115网盘", share_transfer=share_transfer)
         handler._resource_provider_for_url = lambda url: source
-        return handler._transfer_file_impl(
+        migrate_handler_stubs(handler)
+        handler.resource_transfer._resource_provider_for_url = \
+            handler._resource_provider_for_url
+        handler.mp_organize.trigger_mp_organize = \
+            handler.__dict__["trigger_mp_organize"]
+        return handler.transfer_ops._transfer_file_impl(
             "https://115.com/s/abc", file_item, "/转存",
             "凡人修仙传 - S01E200 - 第200集.mkv",
             source_sha1="A" * 40, parent_task_id=parent_task_id,

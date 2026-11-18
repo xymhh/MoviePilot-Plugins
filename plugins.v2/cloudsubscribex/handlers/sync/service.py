@@ -80,7 +80,6 @@ from ...core import (
     CloudDriveCapability,
     CloudDriveProvider,
     get_component,
-    resolve_component,
     MediaScraper,
 )
 from ...core.media import (
@@ -94,32 +93,38 @@ from ...utils import (
 )
 from ...utils.cache import create_platform_ttl_cache
 
-_COMPONENT_TYPES = (
-    MovieSyncProcessor,
-    TelevisionSyncProcessor,
-    HistoryCleanupService,
-    HistoryRetryService,
-    TransferDetailsService,
-    MediaTargetsService,
-    FileMatchingService,
-    PostprocessService,
-    UpgradeBaselineService,
-    UpgradeRuleScoringService,
-    EpisodeDedupService,
-    LandedVerifyService,
-    ResourceTransferService,
-    SubtitleService,
-    UpgradeService,
-    PtUpgradeService,
-    SyncMetadataService,
-    SyncNamingService,
-    SyncNotificationService,
-    SubscribeFlowService,
-    PlatformHistoryService,
-    MediaRefreshMixin,
-    MpOrganizeMixin,
-    StrmOpsMixin,
-    TransferOpsMixin,
+# Phase 5（v1.19.0）：显式组合——25 个职责组件以具名服务字段持有。
+# 构造顺序沿用旧 _COMPONENT_TYPES（顺序本身不再有解析语义，删掉
+# SyncHandler.__getattr__ + resolve_component 的隐式解析后，调用关系
+# 在代码里可见）。每个字段与 _handler_components 缓存指向同一实例
+# （构造时复用 get_component），测试打桩工具 stub_component_method
+# 仍可沿用。
+COMPONENT_FIELDS = (
+    ("movie", MovieSyncProcessor),
+    ("television", TelevisionSyncProcessor),
+    ("history_cleanup", HistoryCleanupService),
+    ("history_retry", HistoryRetryService),
+    ("transfer_details", TransferDetailsService),
+    ("media_targets", MediaTargetsService),
+    ("file_matching", FileMatchingService),
+    ("postprocess", PostprocessService),
+    ("upgrade_baseline", UpgradeBaselineService),
+    ("upgrade_rule_scoring", UpgradeRuleScoringService),
+    ("episode_dedup", EpisodeDedupService),
+    ("landed_verify", LandedVerifyService),
+    ("resource_transfer", ResourceTransferService),
+    ("subtitles", SubtitleService),
+    ("upgrade", UpgradeService),
+    ("pt_upgrade", PtUpgradeService),
+    ("metadata", SyncMetadataService),
+    ("naming", SyncNamingService),
+    ("notifications", SyncNotificationService),
+    ("subscribe_flow", SubscribeFlowService),
+    ("platform_history", PlatformHistoryService),
+    ("media_refresh", MediaRefreshMixin),
+    ("mp_organize", MpOrganizeMixin),
+    ("strm_ops", StrmOpsMixin),
+    ("transfer_ops", TransferOpsMixin),
 )
 
 
@@ -156,12 +161,6 @@ class SyncHandler:
         re.IGNORECASE,
     )
 
-    def _get_component(self, component_type):
-        return get_component(self, component_type, "_handler_components")
-
-    def __getattr__(self, name):
-        return resolve_component(self, _COMPONENT_TYPES, name, "_handler_components")
-
     def __init__(
             self,
             plugin: Optional[Any] = None,
@@ -189,6 +188,13 @@ class SyncHandler:
         :param cloud_media_paths: 各网盘提供方的媒体库路径映射（可选）
         """
         self._plugin = plugin
+
+        # Phase 5（v1.19.0）：显式组合——具名服务字段放在 __init__ 最前面；
+        # 组件只存 _owner、构造无副作用；__init__ 后面会直接调组件方法
+        # （如 _normalize_cross_transfer_media_type），字段必须先就绪。
+        # 字段与 _handler_components 缓存指向同一实例。
+        for _field_name, _component_type in COMPONENT_FIELDS:
+            setattr(self, _field_name, get_component(self, _component_type, "_handler_components"))
 
         def _get_val(name: str, default: Any = None) -> Any:
             if name in kwargs and kwargs[name] is not None:
@@ -239,7 +245,7 @@ class SyncHandler:
         self._cross_transfer_enabled = bool(_get_val("cross_transfer_enabled", False))
         cross_media_types = _get_val("cross_transfer_media_types", ("movie", "tv"))
         self._cross_transfer_media_types = {
-            self._normalize_cross_transfer_media_type(value)
+            self.resource_transfer._normalize_cross_transfer_media_type(value)
             for value in (cross_media_types or ("movie", "tv"))
         }
         self._cloud_drive_registry = _get_val(
@@ -387,14 +393,14 @@ class SyncHandler:
                 str(_get_val("type_folder_tv", "剧集") or "").strip().strip("/") or "剧集"
         )
 
-        paths = cloud_transfer_paths if cloud_transfer_paths is not None else self._configured_transfer_paths(plugin)
+        paths = cloud_transfer_paths if cloud_transfer_paths is not None else self.transfer_ops._configured_transfer_paths(plugin)
         self._cloud_transfer_paths = {
             str(key).strip().lower(): self._normalize_cloud_path(value)
             for key, value in dict(paths or {}).items()
             if str(key).strip()
         }
 
-        media_paths = cloud_media_paths if cloud_media_paths is not None else self._configured_media_paths(plugin)
+        media_paths = cloud_media_paths if cloud_media_paths is not None else self.transfer_ops._configured_media_paths(plugin)
         self._cloud_media_paths = {
             str(key).strip().lower(): self._normalize_cloud_path(value)
             for key, value in dict(media_paths or {}).items()
@@ -561,6 +567,96 @@ class SyncHandler:
             "sync:season_listing", self, maxsize=256,
             ttl=self._RUNTIME_CACHE_TTL,
         )
+
+    # -- 对外 API：显式转发（Phase 5，v1.19.0）--
+    # 插件宿主（__init__.py）与 core/api、core/hook 经 self._sync_handler
+    # 调用的 28 个组件方法：过去靠 SyncHandler.__getattr__ 隐式解析，
+    # 现在是 SyncHandler 上的真实方法，内部转发到具名服务字段；
+    # 调用方与测试一律不用改。签名与组件方法一致。
+
+    def _build_episode_baseline(self, subscribe, mediainfo: MediaInfo, season: int, include_saved: bool=True, score_cache: Optional[Dict[tuple, int]]=None) -> Dict[int, Dict[str, Any]]:
+        return self.upgrade_baseline._build_episode_baseline(subscribe, mediainfo, season, include_saved, score_cache)
+
+    def _read_ep_priority(self, subscribe) -> dict:
+        return self.upgrade_rule_scoring._read_ep_priority(subscribe)
+
+    def _recognize_media_once(self, key: Tuple[Any, ...], **kwargs: Any):
+        return self.metadata._recognize_media_once(key, **kwargs)
+
+    def _self_heal_cleanup(self):
+        return self.upgrade._self_heal_cleanup()
+
+    def _subscribe_mediainfo(self, subscribe: Any, media_type: MediaType, *, cache: bool=True) -> Optional[MediaInfo]:
+        return self.metadata._subscribe_mediainfo(subscribe, media_type, cache=cache)
+
+    def auto_upgrade_scan(self):
+        return self.upgrade.auto_upgrade_scan()
+
+    def begin_notification_batch(self) -> bool:
+        return self.media_refresh.begin_notification_batch()
+
+    def build_transient_media_target(self, media: Dict[str, Any], target_id: int=-1, episodes: Optional[Set[int]]=None, manual_upgrade: bool=False, manual_baseline: Optional[Dict[str, Any]]=None) -> Any:
+        return self.media_targets.build_transient_media_target(media, target_id, episodes, manual_upgrade, manual_baseline)
+
+    def delete_by_media_server_paths(self, paths: List[str]) -> Dict[str, int]:
+        return self.history_cleanup.delete_by_media_server_paths(paths)
+
+    def delete_pending_finalize_tasks(self, pending_keys: Set[str], task_ids: Optional[Set[str]]=None) -> int:
+        return self.postprocess.delete_pending_finalize_tasks(pending_keys, task_ids)
+
+    def finish_notification_batch(self) -> bool:
+        return self.media_refresh.finish_notification_batch()
+
+    def get_pending_finalize_tasks(self) -> List[Dict[str, Any]]:
+        return self.postprocess.get_pending_finalize_tasks()
+
+    def get_subscribe_defer(self, subscribe: Any) -> Optional[Dict[str, str]]:
+        return self.metadata.get_subscribe_defer(subscribe)
+
+    def is_offline_task_finalized(self, info_hash: str) -> bool:
+        return self.transfer_details.is_offline_task_finalized(info_hash)
+
+    def list_media_server_content(self, server: str='', keyword: str='', tmdb_id: Any=None, media_type: str='', limit: int=500) -> Dict[str, Any]:
+        return self.media_targets.list_media_server_content(server, keyword, tmdb_id, media_type, limit)
+
+    def monitor_offline_strm_tasks(self, force: bool=False, pending_keys: Optional[Set[str]]=None, offline_tasks: Optional[List[Dict[str, Any]]]=None, offline_tasks_valid: Optional[bool]=None) -> Dict[str, int]:
+        return self.postprocess.monitor_offline_strm_tasks(force, pending_keys, offline_tasks, offline_tasks_valid)
+
+    def preview_resource_files(self, share_url: str) -> List[Dict[str, Any]]:
+        return self.resource_transfer.preview_resource_files(share_url)
+
+    def process_movie_subscribe(self, subscribe, history: List[dict], transfer_details: List[Dict[str, Any]], transferred_count: int, manual_resources: Optional[List[Dict[str, Any]]]=None, manual_upgrade: bool=False, transient_target: bool=False) -> int:
+        return self.movie.process_movie_subscribe(subscribe, history, transfer_details, transferred_count, manual_resources, manual_upgrade, transient_target)
+
+    def process_pt_upgrade(self, event_data: Dict[str, Any]) -> bool:
+        return self.pt_upgrade.process_pt_upgrade(event_data)
+
+    def process_tv_subscribe(self, subscribe, history: List[dict], transfer_details: List[Dict[str, Any]], transferred_count: int, manual_resources: Optional[List[Dict[str, Any]]]=None, allow_upgrade: bool=True, manual_upgrade: bool=False, target_episodes: Optional[Set[int]]=None, transient_target: bool=False) -> int:
+        return self.television.process_tv_subscribe(subscribe, history, transfer_details, transferred_count, manual_resources, allow_upgrade, manual_upgrade, target_episodes, transient_target)
+
+    def remove_platform_transfer_history_mirror(self) -> int:
+        return self.platform_history.remove_platform_transfer_history_mirror()
+
+    def repair_subscribe_tmdb_id(self, subscribe: Any) -> bool:
+        return self.metadata.repair_subscribe_tmdb_id(subscribe)
+
+    def resolve_media_server_upgrade_targets(self, selections: List[Dict[str, Any]]) -> List[Any]:
+        return self.media_targets.resolve_media_server_upgrade_targets(selections)
+
+    def send_transfer_notification(self, transfer_details: List[Dict[str, Any]], total_count: int) -> None:
+        return self.notifications.send_transfer_notification(transfer_details, total_count)
+
+    def stop_pending_finalize_tasks(self, pending_keys: Set[str]) -> int:
+        return self.postprocess.stop_pending_finalize_tasks(pending_keys)
+
+    def submit_history_retry(self, record_time: str, share_url: str, file_name: str) -> Dict[str, Any]:
+        return self.history_retry.submit_history_retry(record_time, share_url, file_name)
+
+    def submit_history_retry_batch(self, records: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.history_retry.submit_history_retry_batch(records)
+
+    def update_notification_config(self, notify: bool, notification_type: NotificationType, media_server_refresh_enabled: bool, media_servers: List[str], media_server_path_mappings: str, media_server_refresh_delay: int, emby_mediainfo_enabled: bool) -> None:
+        return self.media_refresh.update_notification_config(notify, notification_type, media_server_refresh_enabled, media_servers, media_server_path_mappings, media_server_refresh_delay, emby_mediainfo_enabled)
 
     def persist_sync_results(
             self,
@@ -757,7 +853,7 @@ class SyncHandler:
 
     def close(self) -> None:
         """提交尚未发送的完成通知并释放通知定时器。"""
-        self._flush_transfer_notifications()
+        self.notifications._flush_transfer_notifications()
         self._media_server_notifier.close(flush=True)
 
 
@@ -1077,9 +1173,9 @@ class SyncHandler:
             submit_queue: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """提交离线下载（Magnet/ED2K/直链离线等）到隔离目录；下载完成后再按真实文件树匹配。"""
-        magnet_title = self._prepare_magnet_resource(resource, share_url)
+        magnet_title = self.resource_transfer._prepare_magnet_resource(resource, share_url)
         metadata = resource.get("magnet_metadata") or {}
-        title_seasons = self._magnet_title_seasons(resource)
+        title_seasons = self.resource_transfer._magnet_title_seasons(resource)
         if season is not None and title_seasons and int(season) not in title_seasons:
             logger.debug(
                 "离线资源标题预过滤排除，未请求远端内容元数据："
@@ -1094,7 +1190,7 @@ class SyncHandler:
                 f"标题={magnet_title or share_url}"
             )
             return ""
-        title_episodes = self._magnet_title_episodes(
+        title_episodes = self.resource_transfer._magnet_title_episodes(
             resource, int(season or 1)
         )
         if season is None and title_episodes:
@@ -1106,7 +1202,7 @@ class SyncHandler:
             return ""
         preview_episodes = (
                 title_episodes
-                or self._resource_preview_episodes(resource, int(season or 1))
+                or self.resource_transfer._resource_preview_episodes(resource, int(season or 1))
         )
         target_episode_set = {
             int(value) for value in (target_episodes or []) if int(value) > 0
@@ -1157,8 +1253,8 @@ class SyncHandler:
                     },
                 }
                 resource["magnet_metadata"] = metadata
-                magnet_title = self._prepare_magnet_resource(resource, share_url)
-                title_seasons = self._magnet_title_seasons(resource)
+                magnet_title = self.resource_transfer._prepare_magnet_resource(resource, share_url)
+                title_seasons = self.resource_transfer._magnet_title_seasons(resource)
                 if (
                         season is not None
                         and title_seasons
@@ -1177,7 +1273,7 @@ class SyncHandler:
                         f"标题={magnet_title or share_url}"
                     )
                     return ""
-                title_episodes = self._magnet_title_episodes(
+                title_episodes = self.resource_transfer._magnet_title_episodes(
                     resource, int(season or 1)
                 )
                 metadata_preview = metadata.get("preview_episodes") or {}
@@ -1185,7 +1281,7 @@ class SyncHandler:
                     resource["preview_episodes"] = metadata_preview
                 preview_episodes = (
                         title_episodes
-                        or self._resource_preview_episodes(
+                        or self.resource_transfer._resource_preview_episodes(
                     resource, int(season or 1)
                 )
                 )
@@ -1317,12 +1413,12 @@ class SyncHandler:
                 if mediainfo.type == MediaType.TV:
                     target_ep = target_episodes[0] if target_episodes and len(target_episodes) == 1 else None
                     if target_ep is not None and season is not None:
-                        target_dir, target_name = self._platform_target(
+                        target_dir, target_name = self.naming._platform_target(
                             self._CLOUD_MEDIA_ROOT, subscribe, mediainfo,
                             display_name, int(season), int(target_ep)
                         )
                 else:
-                    target_dir, target_name = self._platform_target(
+                    target_dir, target_name = self.naming._platform_target(
                         self._CLOUD_MEDIA_ROOT, subscribe, mediainfo,
                         display_name
                     )
@@ -1510,10 +1606,10 @@ class SyncHandler:
         provider_key = str(
             getattr(self._cloud_drive, "key", "cloud") or "cloud"
         )
-        cloud_resource = self._is_cloud_resource_url(share_url)
+        cloud_resource = self.resource_transfer._is_cloud_resource_url(share_url)
         task_type = (
             "cloud"
-            if cloud_resource and self._is_direct_cloud_resource_url(share_url)
+            if cloud_resource and self.resource_transfer._is_direct_cloud_resource_url(share_url)
             else "cross_cloud"
             if cloud_resource
             else "share"
@@ -1960,7 +2056,7 @@ class SyncHandler:
                     int(completed_count * 100 / expected_count)
                     if expected_count else 0
                 )
-                self._set_task_phase(
+                self.metadata._set_task_phase(
                     remaining_subscribe,
                     f"{completion_source}完成，订阅进度 "
                     f"{completed_count}/{expected_count or '-'}",
@@ -1973,7 +2069,7 @@ class SyncHandler:
                     f"缺失 {int(getattr(remaining_subscribe, 'lack_episode', 0) or 0)} 集"
                 )
             else:
-                self._set_task_phase(subscribe, "订阅已完成并移至历史", 100)
+                self.metadata._set_task_phase(subscribe, "订阅已完成并移至历史", 100)
                 logger.debug(
                     f"{completion_source}完成后订阅已完结并移至历史："
                     f"{subscribe.name}"
@@ -2074,7 +2170,7 @@ class SyncHandler:
                 if not mediainfo:
                     continue
 
-                found_episodes = self._scan_local_resource_episodes(
+                found_episodes = self.naming._scan_local_resource_episodes(
                     subscribe=subscribe,
                     mediainfo=mediainfo,
                     season=season,

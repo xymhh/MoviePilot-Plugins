@@ -69,19 +69,207 @@ def resolve_component(owner, component_types, name: str, cache_name: str):
     )
 
 
+def _component_field_name(component_type):
+    """Phase 5（v1.19.0）：组件类型 -> SyncHandler 具名服务字段名。
+
+    优先读已加载的 service 模块的 COMPONENT_FIELDS；模块未加载时按
+    组件类的模块名 + 类名查后备映射；都查不到返回 None，调用方退回
+    只写 _handler_components 缓存的旧行为。
+    """
+    module = sys.modules.get("cloudsubscribex.handlers.sync.service")
+    fields = getattr(module, "COMPONENT_FIELDS", None) if module is not None else None
+    if fields:
+        for field_name, cls in fields:
+            if cls is component_type:
+                return field_name
+    for field_name, (mod_name, cls_name) in _FIELD_MODULE.items():
+        if (
+            getattr(component_type, "__module__", None) == mod_name
+            and getattr(component_type, "__name__", None) == cls_name
+        ):
+            return field_name
+    return None
+
+
+def _service_component_fields():
+    """service.COMPONENT_FIELDS 读成 {字段名: 组件类}；未加载时为空。"""
+    module = sys.modules.get("cloudsubscribex.handlers.sync.service")
+    fields = getattr(module, "COMPONENT_FIELDS", None) if module is not None else None
+    return dict(fields or ())
+
+
+# service 模块未加载时的后备映射：字段名 -> （组件模块，类名）。
+# 只在调用方已真实加载对应组件模块时可用（占位 Mock 顶替时不保证）。
+_FIELD_MODULE = {
+    "movie": ("cloudsubscribex.handlers.sync.movie", "MovieSyncProcessor"),
+    "television": ("cloudsubscribex.handlers.sync.television", "TelevisionSyncProcessor"),
+    "history_cleanup": ("cloudsubscribex.handlers.sync.cleanup", "HistoryCleanupService"),
+    "history_retry": ("cloudsubscribex.handlers.sync.retry", "HistoryRetryService"),
+    "transfer_details": ("cloudsubscribex.handlers.sync.transfer_details", "TransferDetailsService"),
+    "media_targets": ("cloudsubscribex.handlers.sync.media_targets", "MediaTargetsService"),
+    "file_matching": ("cloudsubscribex.handlers.sync.matching", "FileMatchingService"),
+    "postprocess": ("cloudsubscribex.handlers.sync.postprocess", "PostprocessService"),
+    "upgrade_baseline": ("cloudsubscribex.handlers.sync.baseline", "UpgradeBaselineService"),
+    "upgrade_rule_scoring": ("cloudsubscribex.handlers.sync.rule_scoring", "UpgradeRuleScoringService"),
+    "episode_dedup": ("cloudsubscribex.handlers.sync.episode_dedup", "EpisodeDedupService"),
+    "landed_verify": ("cloudsubscribex.handlers.sync.landed", "LandedVerifyService"),
+    "resource_transfer": ("cloudsubscribex.handlers.sync.resources", "ResourceTransferService"),
+    "subtitles": ("cloudsubscribex.handlers.sync.subtitles", "SubtitleService"),
+    "upgrade": ("cloudsubscribex.handlers.sync.upgrade", "UpgradeService"),
+    "pt_upgrade": ("cloudsubscribex.handlers.sync.pt_upgrade", "PtUpgradeService"),
+    "metadata": ("cloudsubscribex.handlers.sync.metadata", "SyncMetadataService"),
+    "naming": ("cloudsubscribex.handlers.sync.naming", "SyncNamingService"),
+    "notifications": ("cloudsubscribex.handlers.sync.notify", "SyncNotificationService"),
+    "subscribe_flow": ("cloudsubscribex.handlers.sync.subscribe_flow", "SubscribeFlowService"),
+    "platform_history": ("cloudsubscribex.handlers.sync.platform_history", "PlatformHistoryService"),
+    "media_refresh": ("cloudsubscribex.handlers.sync.media_refresh", "MediaRefreshMixin"),
+    "mp_organize": ("cloudsubscribex.handlers.sync.mp_organize", "MpOrganizeMixin"),
+    "strm_ops": ("cloudsubscribex.handlers.sync.strm_ops", "StrmOpsMixin"),
+    "transfer_ops": ("cloudsubscribex.handlers.sync.transfer_ops", "TransferOpsMixin"),
+}
+
+
+def _resolve_component_class(field_name):
+    """字段名 -> 组件类：优先取 sys.modules 里当前加载的组件模块。
+
+    测试文件常在 service 之后重载某个组件模块（load_module 会换掉
+    sys.modules 里的模块对象）；service.COMPONENT_FIELDS 仍指向第一次
+    加载的类，其模块级绑定（如 MetaInfo）是旧的。取当前模块的类，
+    与测试直接调用的类是同一份。组件模块尚未加载时才退回
+    service.COMPONENT_FIELDS。
+    """
+    mod_name, cls_name = _FIELD_MODULE[field_name]
+    module = sys.modules.get(mod_name)
+    if module is not None:
+        return getattr(module, cls_name)
+    fields = _service_component_fields()
+    if field_name in fields:
+        return fields[field_name]
+    raise ImportError(
+        f"组件模块 {mod_name} 未加载，无法解析具名服务字段 {field_name!r}"
+    )
+
+
+def materialize_handler_fields(handler, *field_names):
+    """Phase 5：给 __new__ 造的 SyncHandler 补建具名服务字段（与 __init__ 同款）。
+
+    每个字段是真实组件实例（owner=handler），与 _handler_components 缓存
+    指向同一实例；不传字段名时补建全部 25 个。
+    """
+    names = field_names or tuple(_FIELD_MODULE)
+    for field_name in names:
+        component_type = _resolve_component_class(field_name)
+        component = component_type(handler)
+        object.__setattr__(handler, field_name, component)
+        handler.__dict__.setdefault("_handler_components", {})[component_type] = component
+    return handler
+
+
+def migrate_handler_stubs(handler):
+    """Phase 5 迁移：把 __new__ handler 实例字典里的方法桩搬到具名服务字段上。
+
+    旧测试把跨组件方法桩直接赋在 handler 实例上（``handler._xxx = fake``），
+    运行期经 OwnerDelegator → 宿主实例字典取到；显式组合后生产代码改走
+    ``handler.<字段>.<方法>``，桩必须落在组件实例自己的 ``__dict__`` 才生效。
+    只搬「恰好是某个组件方法名」的桩（按 COMPONENT_FIELDS 顺序取首个定义者，
+    与旧 resolve_component 顺序一致）；普通配置属性与宿主自有方法不动，
+    桩本身保留在 handler 字典里（直接调 handler._xxx 的旧写法仍可用）。
+    """
+    method_to_field = {}
+    for field_name in _FIELD_MODULE:
+        try:
+            component_type = _resolve_component_class(field_name)
+        except ImportError:
+            continue
+        for name in vars(component_type):
+            if name.startswith("__"):
+                continue
+            if callable(getattr(component_type, name, None)):
+                method_to_field.setdefault(name, field_name)
+    for name in list(handler.__dict__):
+        field_name = method_to_field.get(name)
+        if field_name is None:
+            continue
+        if field_name not in handler.__dict__:
+            materialize_handler_fields(handler, field_name)
+        object.__setattr__(getattr(handler, field_name), name, handler.__dict__[name])
+    return handler
+
+
+def attach_component_fields(owner, host, *field_names):
+    """Phase 5：给裸组件实例的假 owner 挂上具名服务字段（与运行期等价）。
+
+    测试里裸造的组件实例（``EpisodeDedupService.__new__`` 等）用
+    SimpleNamespace 当 _owner；运行期 SyncHandler.__init__ 会建的字段，
+    在这里按需补建：每个字段是真实组件实例（owner=host），挂到 owner 上，
+    并同步进 host 的 _handler_components 缓存（stub_component_method 可用）。
+    """
+    for field_name in field_names:
+        component_type = _resolve_component_class(field_name)
+        component = component_type(host)
+        setattr(owner, field_name, component)
+        host.__dict__.setdefault("_handler_components", {})[component_type] = component
+    return owner
+
+
+def stub_field_method(owner, field_name, method_name, value):
+    """Phase 5：在具名服务字段的组件实例上打桩（字段不存在时先补建）。"""
+    component = getattr(owner, field_name, None)
+    if component is None:
+        raise AttributeError(f"具名服务字段 {field_name!r} 不存在，先调 attach/materialize 补建")
+    object.__setattr__(component, method_name, value)
+    return component
+
+
 def stub_component_method(owner, component_type, name: str, value):
     """在职责组件实例上打桩，模拟拆分前「方法就在宿主类上」的旧结构。
 
     拆分后方法挂在职责类上，直接给宿主赋值同名属性不会生效（类属性优先于
     ``__getattr__`` 委托）；必须写进组件实例自己的 ``__dict__``。
+
+    Phase 5（v1.19.0）：业务代码改走 handler.<具名服务字段> 取组件；
+    若打桩时现场新建了组件实例，同步把具名服务字段指到同一实例，
+    否则 __new__ 造的 handler 上字段不存在，打桩就够不着。
     """
     components = owner.__dict__.setdefault("_handler_components", {})
     component = components.get(component_type)
     if component is None:
         component = component_type(owner)
         components[component_type] = component
+        field_name = _component_field_name(component_type)
+        if field_name is not None and field_name not in owner.__dict__:
+            object.__setattr__(owner, field_name, component)
     object.__setattr__(component, name, value)
     return component
+
+
+def install_real_ttl_cache() -> None:
+    """给 ``app.core.cache.TTLCache`` 注册一个可无限实例化的真实类。
+
+    ``utils/cache.py`` 的 ``_PlatformTTLCache(TTLCache)`` 以它为基类，
+    并在多处模块级代码里调用 ``create_platform_ttl_cache``。TTLCache
+    若只是 MagicMock，第一次实例化后第二次就 ``StopIteration``（Mock
+    以 spec='str' 当基类时的行为）。全量套件里靠 test_cache_json_codec
+    先注册了真实类才不爆；单文件运行时若尚未注册，在这里补一个最小
+    dict 实现。已注册真实类时不覆盖。
+    """
+    existing = sys.modules.get("app.core.cache")
+    current = getattr(existing, "TTLCache", None) if existing is not None else None
+    if isinstance(current, type):
+        return None
+
+    class _DictTTLCache(dict):
+        def __init__(self, region=None, maxsize=None, ttl=None, **kwargs):
+            super().__init__()
+            self.region = region
+            self.maxsize = maxsize
+            self.ttl = ttl
+
+        def set(self, key, value):
+            self[key] = value
+
+    register_module("app.core.cache", TTLCache=_DictTTLCache)
+    return None
 
 
 def install_core_delegation() -> None:
