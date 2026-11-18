@@ -148,7 +148,6 @@ class PostprocessService(OwnerDelegator):
         ("notify", "消息通知"),
     )
 
-    _FINALIZE_MAX_FAILURES = 5
     _FINALIZE_DEAD_LOG = "文件后处理连续失败 {} 次，已终止重试：{}"
     _FINALIZE_DEAD_REASON = "文件后处理连续失败 {} 次，已停止自动重试"
     _FINALIZE_DEAD_TITLE = "网盘文件后处理失败"
@@ -913,26 +912,6 @@ class PostprocessService(OwnerDelegator):
 
         return MpOrganizeTracker()
 
-    def _clear_mp_organizing_for_item(self, item: Dict[str, Any]) -> None:
-        """终态结算时按源路径清除 MP 整理中登记；无身份时什么都不做。"""
-        mp_organize = item.get("mp_organize") if isinstance(item, dict) else None
-        src_path = ""
-        if isinstance(mp_organize, dict):
-            src_path = str(mp_organize.get("src_path") or "").strip()
-        if not src_path:
-            return
-        try:
-            from ...core.services.mp_organize_tracker import (
-                clear_mp_organizing_by_src,
-            )
-        except Exception as error:
-            logger.debug(f"MP 整理登记表不可用，已跳过清除：{error}")
-            return
-        try:
-            clear_mp_organizing_by_src(src_path)
-        except Exception as error:
-            logger.debug(f"清除 MP 整理中登记失败：{error}", exc_info=True)
-
     def _locate_cloud_file_by_dest(
             self, dest_path: str, ctx: PostprocessBatchContext
     ) -> Optional[Any]:
@@ -1047,13 +1026,27 @@ class PostprocessService(OwnerDelegator):
 
     def _write_terminal_state(
             self, item: Dict[str, Any], pending_key: str, status: str,
-            reason: str = "",
+            reason: str = "", sync_monitor: bool = True,
     ) -> bool:
         """写后处理终态（§4.4）：成功不再写插件 history——MP 整理历史是
         唯一载体；失败写进 retry_index（只写可重试的）；跨盘成功但落盘
         自检未通过写一条修复行。始终返回 True——结算不再因找不到历史
         记录而重排队，旧 _resolve_history_record 的 10 次重排队与补写
-        逻辑随 history 一起删除。"""
+        逻辑随 history 一起删除。
+
+        Phase 4 第 7 项：终态同时回写频道监控（_sync_finalize_outcome_to_
+        monitor），成功/失败都写；sync_monitor=False 只用于用户主动删
+        除/停止的任务——那不是 finalize 的终态，不应改监控条目。
+
+        Phase 4 第 1 项：重试索引的终态写入只允许三处（本方法是其一）——
+        ① finalize 终态（本方法）、② 同步结果落盘 persist_sync_results、
+        ③ 重试执行（retry.py 的 _upsert_retry_index_row /
+        _delete_retry_index_row）。_reconcile_pending_state 只同步
+        pending 存储的字段差分，绝不碰重试索引；不要在这里之外再加
+        第四处写入，否则“失败”会在展示面与索引里反复横跳。
+        """
+        if sync_monitor:
+            self._sync_finalize_outcome_to_monitor(item, status, reason)
         if status == "成功":
             self._delete_terminal_index_row(item, pending_key)
             self._write_repair_row_if_unlanded(item, pending_key)
@@ -1083,6 +1076,36 @@ class PostprocessService(OwnerDelegator):
         except Exception as error:  # noqa: BLE001 - 索引写失败不阻塞终态结算
             logger.debug(f"失败终态写重试索引失败：{error}", exc_info=True)
         return True
+
+    def _sync_finalize_outcome_to_monitor(
+            self, item: Dict[str, Any], status: str, reason: str = "",
+    ) -> None:
+        """finalize 终态回写频道监控（Phase 4 第 7 项）。
+
+        按 pending 项的 share_url 找监控条目；监控不可用（无插件宿主、
+        监控未初始化、回写抛异常）时静默跳过，绝不阻塞终态结算。
+        share_url 为空的项（本地文件、手动提交无链接等）没有监控条目
+        可写，直接返回。
+        """
+        share_url = str(item.get("share_url") or "").strip()
+        if not share_url:
+            return
+        plugin = getattr(self, "_plugin", None)
+        if plugin is None:
+            return
+        try:
+            from ...core.tg_monitor import get_channel_monitor
+
+            monitor = get_channel_monitor(plugin)
+            monitor.apply_finalize_outcome(
+                share_url,
+                int(item.get("subscribe_id") or 0),
+                success=(status == "成功"),
+                reason=reason,
+                file_name=str(item.get("file_name") or ""),
+            )
+        except Exception as error:  # noqa: BLE001 - 监控回写失败不阻塞终态
+            logger.debug(f"finalize 终态回写频道监控失败：{error}", exc_info=True)
 
     def _delete_terminal_index_row(
             self, item: Dict[str, Any], pending_key: str
@@ -1168,7 +1191,8 @@ class PostprocessService(OwnerDelegator):
             return 0
         for pending_key, item in removed_items.items():
             self._write_terminal_state(
-                item, pending_key, "失败", "后处理任务已由用户删除"
+                item, pending_key, "失败", "后处理任务已由用户删除",
+                sync_monitor=False,
             )
         self._notify_offline_pending_changed(pending_count)
         return len(removed_keys)
@@ -1182,7 +1206,8 @@ class PostprocessService(OwnerDelegator):
             return 0
         for pending_key, item in removed_items.items():
             self._write_terminal_state(
-                item, pending_key, "失败", "后处理任务已由用户停止"
+                item, pending_key, "失败", "后处理任务已由用户停止",
+                sync_monitor=False,
             )
         self._notify_offline_pending_changed(pending_count)
         return len(removed_keys)
@@ -1240,8 +1265,6 @@ class PostprocessService(OwnerDelegator):
                 item, replacement_path=strm_path
             )
         self._write_terminal_state(item, pending_key, "成功")
-        # v1.12.6 C：成功终态清除 MP 整理中登记（无身份时是空操作）。
-        self._clear_mp_organizing_for_item(item)
         self._queue_subscription_completion(item, media, media_data, ctx)
         detail = self._notify_pending_file_finalized(
             item,
@@ -1285,9 +1308,6 @@ class PostprocessService(OwnerDelegator):
             f"文件后处理失败并停止：{item.get('file_name') or pending_key}，原因：{reason}"
         )
         self._write_terminal_state(item, pending_key, "失败", reason)
-        # v1.12.6 C：所有 abort 都走这里，终态清除 MP 整理中登记集中做
-        # 一次（无身份时是空操作）。
-        self._clear_mp_organizing_for_item(item)
         # 终态失败统一走已有的死任务失败通知口径（同一标题/文案、同一 _notify 开关）：
         # 此前只有 finalize_dead 路径会通知，直接 abort（定位失败、离线超时等）
         # 静默结算，用户收不到任何完成/失败通知——手动转存的跨盘文件一旦走到
@@ -1749,14 +1769,16 @@ class PostprocessService(OwnerDelegator):
             state: str,
             now: float,
     ) -> None:
-        """MP 队列 state 不变满 15 分钟时把登记表文案标为停滞，但不 abort。
+        """MP 队列 state 不变满 15 分钟时把停滞文案写进 pending 项，但不 abort。
 
         MP 是单线程串行队列，队头卡住时后续任务只能排队；这里只提示，
-        不自动取消/重试 MP 队列任务。
+        不自动取消/重试 MP 队列任务。文案存在 pending 项的
+        mp_organize_status_text 字段上，随后处理批次一起落盘（Phase 4：
+        _MP_ORGANIZING 内存登记表已删，下载页改从 pending 记录推导
+        “整理中”态）；state 一变就清掉，避免旧文案残留。
         """
         from ...core.services.mp_organize_tracker import (
             MP_ORGANIZE_QUEUE_STALL_SECONDS,
-            update_mp_organizing_by_src,
         )
 
         wait = item.get("mp_organize_wait")
@@ -1769,18 +1791,11 @@ class PostprocessService(OwnerDelegator):
                 "last_state": state,
                 "last_change_at": now,
             }
+            item.pop("mp_organize_status_text", None)
             return
         if now - last_change_at < MP_ORGANIZE_QUEUE_STALL_SECONDS:
             return
-        src_path = str(mp_organize.get("src_path") or "").strip()
-        if not src_path:
-            return
-        try:
-            update_mp_organizing_by_src(
-                src_path, "整理停滞（队头阻塞，后续任务排队中）"
-            )
-        except Exception as error:
-            logger.debug(f"更新 MP 整理停滞文案失败：{error}", exc_info=True)
+        item["mp_organize_status_text"] = "整理停滞（队头阻塞，后续任务排队中）"
 
     def _poll_mp_organize_state(
             self,
@@ -1820,9 +1835,15 @@ class PostprocessService(OwnerDelegator):
             return ("abort", None, "")
         if state == "failed":
             # detail 已是 MP 原因原文（截断到约 200 字），原样透传。
-            self._abort_single_item(
-                item, pending_key, f"MP 整理失败：{detail}", ctx
-            )
+            # 但 manual_review 的 detail 本身就是完整表述（"MP 整理待人工
+            # 复核"），再加“MP 整理失败：”前缀会读成双重否定——直接用原文。
+            # 归属：manual_review 只由 MP 侧翻转，插件这里只是把它当作
+            # 自己追踪的终态失败（见 mp_organize_tracker 模块 docstring）。
+            if str(detail or "").startswith("MP 整理待人工复核"):
+                reason = str(detail)
+            else:
+                reason = f"MP 整理失败：{detail}"
+            self._abort_single_item(item, pending_key, reason, ctx)
             return ("abort", None, "")
         if state in {"queued", "running", "unavailable"}:
             # unavailable 是 MP 侧不可用（不是“未受理”）：继续等，不走
@@ -1988,21 +2009,28 @@ class PostprocessService(OwnerDelegator):
                 # 前车之鉴）：不计失败、不 abort，只复查，等 MP 侧落定。
                 self._schedule_finalize_retry(item, ctx.now)
                 return
-            fail_count = int(item.get("fail_count") or 0) + 1
-            item["fail_count"] = fail_count
+            # Phase 4：定位失败的计数与超时只调 _finalize_failure（阈值与
+            # 超时在 service.py 一处定义）。能走到这里的项没有 mp_organize
+            # 身份——带身份的项已在前面走 _poll_mp_organize_state，MP 整理
+            # 等待不受 2 次/120 秒约束，只受 MP 90 分钟总超时约束；这里的
+            # 2 次/120 秒只约束插件自己的定位步骤。
+            # 若是普通转存/整理或已完成下载的离线任务，最多允许重试 1 次（给网盘极短暂的元数据刷新时间）；
+            # 只有正在下载中的离线任务才允许重试更多次
             is_offline_downloading = (
                     task_type in {"ed2k", "magnet", "offline"}
                     and not bool(item.get("download_completed_at"))
             )
-            # 若是普通转存/整理或已完成下载的离线任务，最多允许重试 1 次（给网盘极短暂的元数据刷新时间）；
-            # 只有正在下载中的离线任务才允许重试更多次
-            max_failures = self._FINALIZE_MAX_FAILURES if is_offline_downloading else 2
             ready_at = float(item.get("download_completed_at") or created_at)
-            timeout_seconds = self._OFFLINE_TIMEOUT if is_offline_downloading else 120.0
-
-            if fail_count >= max_failures or (ctx.now - ready_at >= timeout_seconds):
+            timeout_seconds = (
+                self._OFFLINE_TIMEOUT if is_offline_downloading
+                else self._FINALIZE_LOCATE_TIMEOUT_SECONDS
+            )
+            if self._finalize_failure(
+                    item, pending_key, now=ctx.now, ready_at=ready_at,
+                    timeout_seconds=timeout_seconds,
+            ):
                 reason = (
-                    f"网盘文件定位失败（在转存路径 {staging_dir} 及目标路径均未找到匹配文件，已尝试 {fail_count} 次）"
+                    f"网盘文件定位失败（在转存路径 {staging_dir} 及目标路径均未找到匹配文件，已尝试 {item.get('fail_count', 0)} 次）"
                 )
                 self._abort_single_item(item, pending_key, reason, ctx)
             else:
@@ -2300,7 +2328,14 @@ class PostprocessService(OwnerDelegator):
             self._send_finalized_batch(ctx.finalized_details)
 
     def _reconcile_pending_state(self, ctx: PostprocessBatchContext) -> Dict[str, int]:
-        """将批次处理结果协调写回持久化存储，并更新前端任务进度状态。"""
+        """将批次处理结果协调写回持久化存储，并更新前端任务进度状态。
+
+        只做一件事：把 ctx.pending 里本批处理过的项与持久化存储里的同
+        代项做字段差分同步（改了的字段写回、删了的字段清掉、已终态的项
+        出队）。Phase 4 第 1 项：本方法绝不碰重试索引——终态写索引只
+        允许 finalize（_write_terminal_state）、persist_sync_results
+        与重试执行三处；这里即使看到失败项也不写行、不删行。
+        """
         with self._offline_pending_lock:
             current_pending = self._get_data(self._OFFLINE_PENDING_KEY) or {}
             for pending_key in ctx.due_keys:
@@ -2913,29 +2948,42 @@ class PostprocessService(OwnerDelegator):
         )
 
     def _finalize_failure(
-            self, item: Dict[str, Any], pending_key: str, max_failures: Optional[int] = None
+            self, item: Dict[str, Any], pending_key: str, max_failures: Optional[int] = None,
+            now: Optional[float] = None, ready_at: Optional[float] = None,
+            timeout_seconds: Optional[float] = None,
     ) -> bool:
         """记录一次后处理实际失败（如重命名/移动/定位缺失）。
 
         达到连续失败上限后返回 True，并将任务标记为死任务（finalize_dead），
         由后续监控扫描彻底移出队列并记录失败历史与通知，终止无限重试。
+
+        阈值与超时只在 service.py（SyncHandler）定义一处：离线任务用
+        _FINALIZE_MAX_FAILURES，其余用 _FINALIZE_MAX_FAILURES_LOCAL。
+        now/ready_at/timeout_seconds 同时给出时，定位等待超时也判死——
+        但超时只约束插件自己的定位/移动步骤；MP 整理等待走
+        _poll_mp_organize_state（90 分钟总超时），不走这里。
         """
         task_type = str(item.get("task_type") or "share").strip().lower()
         is_offline = task_type in {"ed2k", "magnet", "offline"}
         threshold = max_failures if max_failures is not None else (
-            self._FINALIZE_MAX_FAILURES if is_offline else 2
+            self._FINALIZE_MAX_FAILURES if is_offline else self._FINALIZE_MAX_FAILURES_LOCAL
         )
         fail_count = int(item.get("fail_count") or 0) + 1
         item["fail_count"] = fail_count
-        if fail_count < threshold:
-            return False
-        item["finalize_dead"] = True
-        item["next_check_at"] = 0.0
-        logger.error(
-            self._FINALIZE_DEAD_LOG.format(
-                fail_count, str(item.get("file_name") or pending_key)
-            )
+        timed_out = (
+            now is not None and ready_at is not None and timeout_seconds is not None
+            and float(now) - float(ready_at) >= float(timeout_seconds)
         )
+        if fail_count < threshold and not timed_out:
+            return False
+        if fail_count >= threshold:
+            item["finalize_dead"] = True
+            item["next_check_at"] = 0.0
+            logger.error(
+                self._FINALIZE_DEAD_LOG.format(
+                    fail_count, str(item.get("file_name") or pending_key)
+                )
+            )
         return True
 
     def _notify_finalize_dead(

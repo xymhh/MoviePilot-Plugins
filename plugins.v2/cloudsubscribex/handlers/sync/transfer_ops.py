@@ -65,26 +65,6 @@ def _release_staging_ref(key: str) -> int:
         return 0
 
 
-def _mark_mp_organizing(parent_task_id: str, mp_organize: Dict[str, Any]) -> None:
-    """把已触发的 MP 整理登记进整理中登记表（v1.12.6 B）。
-
-    登记表由 transfer_ops 写入、下载页读取、finalize 终态时清除。
-    登记只是跨组件交接用的 bookkeeping，导入或登记失败时只记日志，
-    绝不能打断转存流程。
-    """
-    if not parent_task_id or not isinstance(mp_organize, dict):
-        return
-    try:
-        from ...core.services.mp_organize_tracker import mark_mp_organizing
-    except Exception as error:
-        logger.debug(f"MP 整理登记表不可用，已跳过登记：{error}")
-        return
-    try:
-        mark_mp_organizing(parent_task_id, mp_organize)
-    except Exception as error:
-        logger.debug(f"登记 MP 整理中状态失败：{error}", exc_info=True)
-
-
 class TransferOpsMixin(OwnerDelegator):
     """转存执行：秒传/跨盘/失败记录/结果核验/暂存清理。"""
 
@@ -627,6 +607,10 @@ class TransferOpsMixin(OwnerDelegator):
                     "upgrade_old_file_id": item.get("upgrade_old_file_id"),
                     "upgrade_old_size": item.get("upgrade_old_size") or 0,
                     "subtitles": item.get("subtitles") or [],
+                    # Phase 4 第 6 项：同盘批量触发的 MP 整理身份随项进
+                    # pending 记录（_build_pending_record 原样收下），
+                    # finalize 改走 MP 轮询、不再 2 次定位失败就判死。
+                    "mp_organize": item.get("mp_organize"),
                     "skip_history": bool(
                         (item.get("resource") or {}).get("skip_history")
                         or str(item["file"]["id"]) in mp_organized_ids
@@ -1129,8 +1113,6 @@ class TransferOpsMixin(OwnerDelegator):
                     file_item["_mp_organized"] = bool(ok)
                     if ok:
                         file_item["mp_organize"] = mp_info
-                        if parent_task_id:
-                            _mark_mp_organizing(parent_task_id, mp_info)
                     else:
                         info = mp_info if isinstance(mp_info, dict) else {}
                         reason = info.get("reason")
@@ -1140,9 +1122,9 @@ class TransferOpsMixin(OwnerDelegator):
                             # 的重复来源，后续由缓存清理处理。
                             # v1.12.17：显式置 _mp_organized，让这条记录
                             # 拿到 skip_history（与同盘批量对齐）；但不
-                            # 置 mp_organize 身份、不登记 _mark_mp_organizing——
-                            # 这次根本没触发 MP 整理，finalize 没有可轮询
-                            # 的对象，置了反而会被判“MP 整理未受理”而 abort。
+                            # 置 mp_organize 身份——这次根本没触发 MP 整理，
+                            # finalize 没有可轮询的对象，置了反而会被判
+                            # “MP 整理未受理”而 abort。
                             file_item["_mp_organized"] = True
                             existing = info.get("existing_file")
                             logger.info(
@@ -1257,8 +1239,6 @@ class TransferOpsMixin(OwnerDelegator):
                 # 触发失败不影响本次直存结果（文件已在 115 /转存/，老定位找得到）。
                 file_item["mp_organize"] = mp_info
                 file_item["_mp_organized"] = True
-                if parent_task_id:
-                    _mark_mp_organizing(parent_task_id, mp_info)
         return success
 
     def _ensure_share_transfer_available(self, provider_key: str) -> None:

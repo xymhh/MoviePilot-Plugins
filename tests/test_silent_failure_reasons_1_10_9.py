@@ -261,20 +261,19 @@ class SameDriveMpOrganizeIdentityTests(unittest.TestCase):
         )
         source = _provider(key="115", name="115网盘", share_transfer=share_transfer)
         handler._resource_provider_for_url = lambda url: source
-        transfer_ops_mod = sys.modules["cloudsubscribex.handlers.sync.transfer_ops"]
-        with patch.object(transfer_ops_mod, "_mark_mp_organizing") as mock_mark:
-            result = handler._transfer_file_impl(
-                "https://115.com/s/abc", file_item, "/转存",
-                "凡人修仙传 - S01E200 - 第200集.mkv",
-                source_sha1="A" * 40, parent_task_id=parent_task_id,
-                media={"media_type": "tv", "tmdb_id": 106449, "season": 1},
-            )
-        return result, mock_mark
+        return handler._transfer_file_impl(
+            "https://115.com/s/abc", file_item, "/转存",
+            "凡人修仙传 - S01E200 - 第200集.mkv",
+            source_sha1="A" * 40, parent_task_id=parent_task_id,
+            media={"media_type": "tv", "tmdb_id": 106449, "season": 1},
+        )
 
-    def test_trigger_success_writes_identity_and_marks(self):
+    def test_trigger_success_writes_identity(self):
+        """触发成功：MP 整理身份写进 file_item（Phase 4：登记表已删，
+        不再另行登记，身份本身就是下载页推导“整理中”的依据）。"""
         handler = self._handler()
         file_item = {"id": "fid1", "name": "凡人修仙传 - S01E200 - 第200集.mkv"}
-        result, mock_mark = self._run_same_drive(
+        result = self._run_same_drive(
             handler, file_item,
             trigger_result=(True, dict(self._INFO)),
             parent_task_id="subscribe:123",
@@ -282,12 +281,11 @@ class SameDriveMpOrganizeIdentityTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(file_item.get("mp_organize"), self._INFO)
         self.assertTrue(file_item.get("_mp_organized"))
-        mock_mark.assert_called_once_with("subscribe:123", self._INFO)
 
     def test_trigger_decline_keeps_success_without_identity(self):
         handler = self._handler()
         file_item = {"id": "fid1", "name": "凡人修仙传 - S01E200 - 第200集.mkv"}
-        result, mock_mark = self._run_same_drive(
+        result = self._run_same_drive(
             handler, file_item,
             trigger_result=(
                 False, {"reason": "not_accepted", "message": "MP 整理未接受"},
@@ -296,19 +294,17 @@ class SameDriveMpOrganizeIdentityTests(unittest.TestCase):
         )
         self.assertTrue(result)
         self.assertNotIn("mp_organize", file_item)
-        mock_mark.assert_not_called()
 
-    def test_trigger_success_without_parent_task_skips_mark(self):
+    def test_trigger_success_without_parent_task_writes_identity(self):
         handler = self._handler()
         file_item = {"id": "fid1", "name": "凡人修仙传 - S01E200 - 第200集.mkv"}
-        result, mock_mark = self._run_same_drive(
+        result = self._run_same_drive(
             handler, file_item,
             trigger_result=(True, dict(self._INFO)),
             parent_task_id="",
         )
         self.assertTrue(result)
         self.assertEqual(file_item.get("mp_organize"), self._INFO)
-        mock_mark.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -461,6 +461,16 @@ class MpOrganizeMixin(OwnerDelegator):
                         ok = True
                 if ok:
                     accepted.add(file_id)
+                    # Phase 4 第 6 项：触发成功时把 MP 整理身份写进处理项，
+                    # 随管线进 pending 记录（与跨盘路 file_item["mp_organize"]
+                    # 一致）。之前这里只记 file_id、把 _info 丢了，pending
+                    # 项没有身份，finalize 跳过 _poll_mp_organize_state
+                    # 保护、定位 2 次就报“后处理失败”，而 MP 整理随后自己
+                    # 完成——2026-11-18 当天 7 条失败通知里 6 条是这种误报。
+                    # already_in_library 时不写：这次根本没触发 MP 整理，
+                    # finalize 没有可轮询的对象，写了反而会被判“未受理”。
+                    if isinstance(_info, dict) and _info.get("src_path"):
+                        item["mp_organize"] = dict(_info)
             except Exception as error:
                 logger.debug(
                     f"触发 MP 整理异常，已跳过该项：{target_name}，{error}",

@@ -1,15 +1,24 @@
-"""MP 整理中登记表与整理轮询器（v1.12.6 B/C）。
+"""MP 整理轮询器（v1.12.6 C，Phase 4 去掉整理中内存登记表）。
 
-跨组件交接用的整理中登记表：transfer_ops 在 MP 整理触发成功后写入，
-下载页读取它展示“整理中”态，finalize 在任务终态时清除。
+MpOrganizeTracker 轮询 MP 侧的整理状态：先查 MP 整理历史（成功记录、
+失败记录），再查 durable 待整理登记（人工复核态），最后查内存整理队列。
+成功只认历史记录 status 为 True，不用任何目标存在性判断（目标可能只是
+同名小文件）；失败原因原样透传 MP 的 errmsg/last_error。
 
-MpOrganizeTracker 轮询 MP 侧的整理状态（v1.12.6 C）：先查 MP 整理历史
-（成功记录、失败记录），再查 durable 待整理登记（人工复核态），最后查
-内存整理队列。成功只认历史记录 status 为 True，不用任何目标存在性判断
-（目标可能只是同名小文件）；失败原因原样透传 MP 的 errmsg/last_error。
+manual_review 归属（Phase 4 第 4 项）：人工复核态只由 MP 侧产生与翻转
+（某步骤执行异常后外部结果 unknown、禁止自动重放，需人工在 MP 里处理
+后 MP 自己翻转状态）；插件从不写 MP 的 TransferPending 记录，只能把
+manual_review 当作插件自己追踪的终态失败——停止重试、写失败终态、通知
+用户——但绝不因此取消或重放 MP 侧的整理任务。
+
+Phase 4：第 3 项删掉了 ``_MP_ORGANIZING`` 内存登记表——它只是下载页
+“整理中”展示用的第二份状态，finalize 漏清就僵尸、重启就丢，与“MP
+整理历史是唯一账本”相悖。下载页现在改从持久化 pending 记录推导“整理中”
+（带 mp_organize 身份且尚未 moved_at 的项，见 SyncRuntimeService
+._serialize_runtime_tasks）；停滞文案写在 pending 项的
+mp_organize_status_text 字段上，随后处理批次一起落盘。
 """
 
-import time
 from contextlib import contextmanager
 from typing import Dict, Iterator, Optional, Tuple
 
@@ -25,71 +34,6 @@ MP_ORGANIZE_GRACE_SECONDS = 10 * 60
 #: 失败原因截断长度（约 200 字，原样呈现不改写）。
 _MP_ORGANIZE_DETAIL_LIMIT = 200
 
-#: parent_task_id -> 登记项；登记项结构见 mark_mp_organizing。
-_MP_ORGANIZING: Dict[str, Dict[str, object]] = {}
-
-
-def mark_mp_organizing(
-        parent_task_id: str,
-        mp_organize: Dict[str, object],
-        status_text: str = "",
-) -> None:
-    """登记一项目前正在 MP 整理（触发成功后由 transfer_ops 调用）。
-
-    :param parent_task_id: 父任务 id（如订阅任务 id）
-    :param mp_organize: trigger_mp_organize 成功时返回的 info
-        （含 src_path/target_dir/target_storage/target_name 等）
-    :param status_text: 展示用的当前状态文案（可空）
-    """
-    key = str(parent_task_id or "").strip()
-    if not key:
-        return
-    _MP_ORGANIZING[key] = {
-        "mp_organize": dict(mp_organize or {}),
-        "status_text": str(status_text or ""),
-        "updated_at": time.time(),
-    }
-
-
-def clear_mp_organizing(parent_task_id: str) -> None:
-    """清除一项目的整理中登记（finalize 终态时调用）。"""
-    _MP_ORGANIZING.pop(str(parent_task_id or "").strip(), None)
-
-
-def list_mp_organizing() -> Dict[str, Dict[str, object]]:
-    """返回全部整理中登记项的浅拷贝（调用方不要直接改原表）。"""
-    return dict(_MP_ORGANIZING)
-
-
-def _matching_mp_organizing_keys(src_path: str) -> list:
-    """找出登记表中 src_path 相同的全部登记键。"""
-    src = str(src_path or "").strip()
-    if not src:
-        return []
-    return [
-        key
-        for key, entry in _MP_ORGANIZING.items()
-        if str(
-            (entry.get("mp_organize") or {}).get("src_path") or ""
-        ) == src
-    ]
-
-
-def clear_mp_organizing_by_src(src_path: str) -> None:
-    """按源路径清除整理中登记（finalize 侧不知道 parent_task_id 时用）。"""
-    for key in _matching_mp_organizing_keys(src_path):
-        _MP_ORGANIZING.pop(key, None)
-
-
-def update_mp_organizing_by_src(src_path: str, status_text: str) -> None:
-    """按源路径更新整理中登记的状态文案（如队列停滞提示）。"""
-    for key in _matching_mp_organizing_keys(src_path):
-        entry = _MP_ORGANIZING.get(key)
-        if entry is None:
-            continue
-        entry["status_text"] = str(status_text or "")
-        entry["updated_at"] = time.time()
-
 
 def _truncate_detail(text: str) -> str:
     """失败原因原文截断到约 200 字，不解析、不改写。"""
@@ -103,8 +47,9 @@ class MpOrganizeTracker:
     """轮询 MP 整理链，判断一次 MP 整理当前处于什么状态。
 
     顺序：MP 整理历史 → durable 待整理登记（人工复核）→ 内存整理队列。
-    成功只认历史记录 status 为 True；人工复核（某步骤执行异常后外部结果
-    unknown、禁止自动重放）按失败处理，原因取 last_error 原文。
+    成功只认历史记录 status 为 True；人工复核按失败处理，原因取
+    last_error 原文。归属见模块 docstring：manual_review 只由 MP 侧
+    产生与翻转，插件只把它当作自己追踪的终态失败，不写 MP 的记录。
 
     :param history_oper: 可注入的整理历史操作对象（测试用 fake）；
         不传时每次 poll 用 SessionFactory 新开会话构造真实 Oper。
@@ -218,6 +163,8 @@ class MpOrganizeTracker:
                 if execution_state in {"manual_review", "failed"}:
                     reason = str(getattr(pending, "last_error", "") or "")
                     if execution_state == "manual_review":
+                        # 归属：manual_review 是 MP 侧的状态，插件只读不写；
+                        # 这里把它映射为插件追踪的终态失败（见模块 docstring）。
                         detail = (
                             _truncate_detail(reason)
                             if reason.strip()
@@ -247,6 +194,7 @@ class MpOrganizeTracker:
                 if state == "failed":
                     return ("failed", "MP 整理失败（队列任务已失败）", None)
                 if state == "manual_review":
+                    # 同上：MP 侧的人工复核态，插件只读不写，当终态失败处理。
                     return ("failed", "MP 整理待人工复核", None)
                 # running / completed / 未知态：MP 手里还有这个任务，
                 # 历史尚未结算，按进行中处理，等下一轮再看历史。

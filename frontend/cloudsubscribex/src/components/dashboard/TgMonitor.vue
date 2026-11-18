@@ -147,7 +147,7 @@
           </span>
           <span class="flex-grow-1" />
           <v-chip v-if="item.status === 'failed'" size="x-small" color="error" variant="flat" class="flex-shrink-0">
-            失败
+            {{ failureStageLabel(item) }}
           </v-chip>
           <v-btn
             v-if="canTransfer(item)"
@@ -349,11 +349,22 @@ const hasApi = computed(() => Boolean(status.value.has_api))
 const FILTERS = [
   { value: "todo", title: "待处理", test: (item) => ["queued", "new", "failed"].includes(item.status) },
   { value: "failed", title: "失败", test: (item) => item.status === "failed" },
+  // Phase 4 第 7 项：失败分阶段筛选。老数据没有 failure_stage 字段，
+  // 默认按订阅失败算（历史上唯一的失败写入方是 _apply_group_outcome）。
+  { value: "failed-subscribe", title: "订阅失败", test: (item) => item.status === "failed" && item.failure_stage !== "postprocess" },
+  { value: "failed-postprocess", title: "后处理失败", test: (item) => item.status === "failed" && item.failure_stage === "postprocess" },
   { value: "transferred", title: "已转存", test: (item) => item.status === "transferred" },
   { value: "skipped", title: "未转存", test: (item) => item.status === "skipped" },
   { value: "ignored", title: "已忽略", test: (item) => item.status === "ignored" },
   { value: "all", title: "全部", test: () => true },
 ]
+
+// Phase 4 第 7 项：失败按阶段显示——订阅处理阶段失败与后处理失败分开。
+function failureStageLabel(item) {
+  if (item.failure_stage === "postprocess") return "后处理失败"
+  if (item.failure_stage === "subscribe") return "订阅失败"
+  return "失败"
+}
 
 // 顶部四张卡：待处理 / 已转存 / 未转存 / 失败。数字本身就是筛选按钮。
 const summaryStats = computed(() => {
@@ -373,6 +384,19 @@ const summaryStats = computed(() => {
     },
     { value: "skipped", title: "未转存", tone: "muted", count: rows.filter((i) => i.status === "skipped").length },
     { value: "failed", title: "失败", tone: "error", count: rows.filter((i) => i.status === "failed").length },
+    // Phase 4 第 7 项：失败按阶段拆两张卡（与 FILTERS 的分阶段筛选对应）。
+    {
+      value: "failed-subscribe",
+      title: "订阅失败",
+      tone: "error",
+      count: rows.filter((i) => i.status === "failed" && i.failure_stage !== "postprocess").length,
+    },
+    {
+      value: "failed-postprocess",
+      title: "后处理失败",
+      tone: "error",
+      count: rows.filter((i) => i.status === "failed" && i.failure_stage === "postprocess").length,
+    },
   ]
 })
 

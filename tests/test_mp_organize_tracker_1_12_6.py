@@ -96,8 +96,6 @@ def _job(src_path, state, storage="local"):
 
 
 class TestMpOrganizeTrackerHistory(unittest.TestCase):
-    def setUp(self):
-        tracker_module._MP_ORGANIZING.clear()
 
     def test_history_success_returns_succeeded_with_exact_dest(self):
         """历史有成功记录 → succeeded，detail 与 dest 均为精确 dest。"""
@@ -180,8 +178,6 @@ class TestMpOrganizeTrackerHistory(unittest.TestCase):
 
 
 class TestMpOrganizeTrackerPendingAndQueue(unittest.TestCase):
-    def setUp(self):
-        tracker_module._MP_ORGANIZING.clear()
 
     def test_manual_review_pending_is_failed_with_last_error(self):
         """人工复核登记 → failed，detail 为 last_error 原文（如上传失败）。"""
@@ -203,6 +199,28 @@ class TestMpOrganizeTrackerPendingAndQueue(unittest.TestCase):
         self.assertEqual(
             pending.calls, [("get_by_identity", "local", SRC)]
         )
+
+    def test_manual_review_pending_without_error_is_failed(self):
+        """人工复核登记无 last_error → failed，detail 为默认文案。
+
+        Phase 4 第 4 项：manual_review 只由 MP 侧产生与翻转，插件
+        只把它当作自己追踪的终态失败；无原因时用默认文案，不编造原因。
+        """
+        pending = FakePendingOper(
+            record=SimpleNamespace(
+                execution_state="manual_review",
+                last_error="",
+            )
+        )
+        poller = MpOrganizeTracker(
+            history_oper=FakeHistoryOper(),
+            pending_oper=pending,
+            jobview=FakeJobview(),
+        )
+        state, detail, dest = poller.poll(_mp_organize())
+        self.assertEqual(state, "failed")
+        self.assertEqual(detail, "MP 整理待人工复核")
+        self.assertIsNone(dest)
 
     def test_failed_pending_execution_state_is_failed(self):
         """durable 登记已终态失败 → failed，detail 为 last_error 原文。"""
@@ -338,43 +356,3 @@ class TestMpOrganizeTrackerPendingAndQueue(unittest.TestCase):
 
 def _raising(*args, **kwargs):
     raise ImportError("app.db.transferhistory_oper 不可用")
-
-
-class TestMpOrganizingRegistryBySrc(unittest.TestCase):
-    def setUp(self):
-        tracker_module._MP_ORGANIZING.clear()
-
-    def test_clear_by_src_removes_all_entries_with_same_src(self):
-        """按源路径清除：同一 src 的多条登记（不同 parent）一次清掉。"""
-        info = _mp_organize()
-        tracker_module.mark_mp_organizing("parent-1", info)
-        tracker_module.mark_mp_organizing("parent-2", info)
-        tracker_module.mark_mp_organizing(
-            "parent-3", _mp_organize(src_path="/downloads/其它.mkv")
-        )
-        tracker_module.clear_mp_organizing_by_src(SRC)
-        remaining = tracker_module.list_mp_organizing()
-        self.assertNotIn("parent-1", remaining)
-        self.assertNotIn("parent-2", remaining)
-        self.assertIn("parent-3", remaining)
-
-    def test_update_by_src_sets_status_text(self):
-        """按源路径更新文案：同一 src 的多条登记都更新，只改文案与时间。"""
-        info = _mp_organize()
-        tracker_module.mark_mp_organizing("parent-1", info)
-        tracker_module.mark_mp_organizing("parent-2", info)
-        tracker_module.update_mp_organizing_by_src(
-            SRC, "整理停滞（队头阻塞，后续任务排队中）"
-        )
-        for key in ("parent-1", "parent-2"):
-            entry = tracker_module._MP_ORGANIZING.get(key)
-            self.assertEqual(
-                entry["status_text"], "整理停滞（队头阻塞，后续任务排队中）"
-            )
-            self.assertEqual(entry["mp_organize"]["src_path"], SRC)
-
-    def test_clear_by_src_with_unknown_src_is_noop(self):
-        """按不存在的源路径清除是空操作，不抛异常。"""
-        tracker_module.mark_mp_organizing("parent-1", _mp_organize())
-        tracker_module.clear_mp_organizing_by_src("/downloads/不存在.mkv")
-        self.assertIn("parent-1", tracker_module.list_mp_organizing())

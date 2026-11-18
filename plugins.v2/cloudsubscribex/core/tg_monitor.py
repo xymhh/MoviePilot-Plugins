@@ -893,6 +893,9 @@ class TgChannelMonitor:
                         batch_ids, "failed",
                         match_status="failed",
                         failure_kind="permanent",
+                        # Phase 4 第 7 项：失败分阶段——这里是订阅处理阶段
+                        # （转存提交前就异常），与后处理失败区分开。
+                        failure_stage="subscribe",
                         auto_transfer_error=message[:300],
                     )
                 logger.warning(f"TG 频道转存批次异常：{error}")
@@ -920,6 +923,8 @@ class TgChannelMonitor:
                     [item_id], "failed",
                     match_status="failed",
                     failure_kind="permanent",
+                    # Phase 4 第 7 项：订阅处理阶段失败（未到后处理）。
+                    failure_stage="subscribe",
                     auto_transfer_error="缺少目标订阅",
                 )
                 continue
@@ -971,6 +976,8 @@ class TgChannelMonitor:
         if not callable(single_handler):
             self._mark_items(
                 item_ids, "failed",
+                # Phase 4 第 7 项：订阅处理阶段失败（未到后处理）。
+                failure_stage="subscribe",
                 auto_transfer_error="自动转存未启用：插件未提供转存处理器",
             )
             return
@@ -1079,6 +1086,9 @@ class TgChannelMonitor:
                 # 这一条已经跑通：把中断计数清零，免得下次升级被历史次数拖累。
                 "retry_count": 0,
                 "failure_kind": "",
+                # Phase 4 第 7 项：转存成功即清掉失败阶段（终态由
+                # finalize 回写 apply_finalize_outcome 再确认）。
+                "failure_stage": "",
             })
             self._mark_items(item_ids, "transferred", **changes)
             logger.info(
@@ -1103,6 +1113,8 @@ class TgChannelMonitor:
                     skip_reason=text[:100],
                     retry_count=0,
                     failure_kind="",
+                    # Phase 4 第 7 项：跳过不是失败，阶段字段同样清掉。
+                    failure_stage="",
                 )
             return
         if _is_interrupted_message(message):
@@ -1115,12 +1127,93 @@ class TgChannelMonitor:
         changes.update({
             "match_status": "failed",
             "failure_kind": "permanent",
+            # Phase 4 第 7 项：失败分阶段——这里是订阅处理阶段失败
+            # （同步/转存提交时就失败，文件还没进后处理）；后处理失败
+            # 由 finalize 终态回写 apply_finalize_outcome 另行标记。
+            "failure_stage": "subscribe",
             "auto_transfer_error": (message or "转存失败")[:300],
         })
         self._mark_items(item_ids, "failed", **changes)
         logger.warning(
             f"TG 频道自动转存失败（订阅 {subscribe_id}）：{message}"
         )
+
+    def apply_finalize_outcome(
+            self, share_url: str, subscribe_id: int, *,
+            success: bool, reason: str = "", file_name: str = "",
+    ) -> int:
+        """finalize 终态回写频道监控条目（Phase 4 第 7 项）。
+
+        按 pending 项的 share_url 定位监控条目：链接在入库时全局去重，
+        同一 URL 只属于一条监控记录；subscribe_id 有值且条目也有值时
+        再核对一致（不一致不写——不是同一订阅的终态）。file_name 仅作
+        调用方上下文保留，匹配不依赖它。
+
+        成功：订阅失败（postprocess 阶段）→ transferred（文件后来还是
+        落库了，失败已翻转）；已 transferred 的只补终态字段
+        finalize_status/finalize_completed_at；订阅阶段失败与 skipped
+        不动（那不是这条后处理的终态）。
+        失败：已 transferred → failed（failure_stage="postprocess"，
+        原因写“后处理失败：…”）；已是 postprocess 失败 → 更新原因与
+        时间；订阅阶段失败不动。
+
+        返回被改动的条目数。调用方（finalize）应包 try/except：监控
+        不可用绝不能阻塞终态结算。
+        """
+        url = str(share_url or "").strip()
+        if not url:
+            return 0
+        now = int(time.time())
+        touched = 0
+        with self._items_lock:
+            items = list(self._store.load(ITEMS_KEY, []) or [])
+            for item in items:
+                links = item.get("links") or []
+                if not any(
+                        str(link or "").strip() == url for link in links
+                ):
+                    continue
+                item_sub = int(item.get("subscribe_id") or 0)
+                if subscribe_id > 0 and item_sub > 0 and item_sub != subscribe_id:
+                    continue
+                status = str(item.get("status") or "")
+                stage = str(item.get("failure_stage") or "")
+                if success:
+                    if status == "failed" and stage == "postprocess":
+                        item["status"] = "transferred"
+                        item["match_status"] = "transferred"
+                        item["auto_transfer_error"] = ""
+                        item["failure_kind"] = ""
+                        item["failure_stage"] = ""
+                        item["retry_count"] = 0
+                        item["finalize_status"] = "landed"
+                        item["finalize_completed_at"] = now
+                        touched += 1
+                    elif status == "transferred":
+                        item["finalize_status"] = "landed"
+                        item["finalize_completed_at"] = now
+                        touched += 1
+                else:
+                    if status == "transferred":
+                        item["status"] = "failed"
+                        item["match_status"] = "failed"
+                        item["failure_kind"] = "permanent"
+                        item["failure_stage"] = "postprocess"
+                        item["auto_transfer_error"] = (
+                            f"后处理失败：{reason or '转存失败'}"
+                        )[:300]
+                        item["finalize_status"] = "failed"
+                        item["finalize_failed_at"] = now
+                        touched += 1
+                    elif status == "failed" and stage == "postprocess":
+                        item["auto_transfer_error"] = (
+                            f"后处理失败：{reason or '转存失败'}"
+                        )[:300]
+                        item["finalize_failed_at"] = now
+                        touched += 1
+            if touched:
+                self._store.save(ITEMS_KEY, items)
+        return touched
 
     def _requeue_interrupted(self, item_ids: List[str], message: str) -> None:
         """把「被中断」的条目写回 queued，等下次启动由队列恢复逻辑续跑。
@@ -1146,6 +1239,8 @@ class TgChannelMonitor:
                     item["status"] = "failed"
                     item["match_status"] = "failed"
                     item["failure_kind"] = "permanent"
+                    # Phase 4 第 7 项：多次被中断而停跑，是订阅处理阶段失败。
+                    item["failure_stage"] = "subscribe"
                     item["auto_transfer_error"] = (
                         f"连续 {attempts} 次被中断，已停止自动续跑：{message or ''}"
                     )[:300]

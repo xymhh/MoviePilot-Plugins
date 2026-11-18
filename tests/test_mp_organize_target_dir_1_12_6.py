@@ -45,11 +45,6 @@ mp_organize = load_module(
 )
 MpOrganizeMixin = mp_organize.MpOrganizeMixin
 
-tracker = load_module(
-    "cloudsubscribex.core.services.mp_organize_tracker",
-    "plugins.v2/cloudsubscribex/core/services/mp_organize_tracker.py",
-)
-
 
 class TestTriggerMpOrganizeTargetDirectory(unittest.TestCase):
     def setUp(self):
@@ -65,7 +60,6 @@ class TestTriggerMpOrganizeTargetDirectory(unittest.TestCase):
         FakeDirectoryHelper.calls = []
         FakeDirectoryHelper.next_result = "found"
         FakeDirectoryHelper.last_conf = None
-        tracker._MP_ORGANIZING.clear()
         self.mediainfo = MagicMock()
         self.mediainfo.type = MediaType.TV
         # 调用方传的 MediaInfo 默认带分类（真实 MP 识别结果有分类），
@@ -201,46 +195,3 @@ class TestTriggerMpOrganizeTargetDirectory(unittest.TestCase):
                 kwargs["target_directory"].library_path, "/媒体库/剧集"
             )
             self.assertEqual(kwargs["target_storage"], "u115cs")
-
-
-class TestMpOrganizeTrackerRegistry(unittest.TestCase):
-    """v1.12.6 B：整理中登记表（只建登记表部分）。"""
-
-    def setUp(self):
-        tracker._MP_ORGANIZING.clear()
-
-    def test_constants(self):
-        self.assertEqual(tracker.MP_ORGANIZE_WAIT_TIMEOUT_SECONDS, 90 * 60)
-        self.assertEqual(tracker.MP_ORGANIZE_QUEUE_STALL_SECONDS, 15 * 60)
-        self.assertEqual(tracker.MP_ORGANIZE_GRACE_SECONDS, 10 * 60)
-
-    def test_mark_get_list_and_clear(self):
-        info = {
-            "src_path": "/downloads/a.mkv",
-            "target_dir": "/媒体库/剧集",
-            "target_storage": "u115cs",
-        }
-        tracker.mark_mp_organizing("subscribe:35", info, "整理中")
-        entry = tracker._MP_ORGANIZING.get("subscribe:35")
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry["mp_organize"], info)
-        self.assertEqual(entry["status_text"], "整理中")
-        self.assertIsInstance(entry["updated_at"], float)
-        self.assertIn("subscribe:35", tracker.list_mp_organizing())
-        tracker.clear_mp_organizing("subscribe:35")
-        self.assertIsNone(tracker._MP_ORGANIZING.get("subscribe:35"))
-        self.assertEqual(tracker.list_mp_organizing(), {})
-
-    def test_mark_ignores_empty_task_id(self):
-        tracker.mark_mp_organizing("", {"src_path": "x"})
-        self.assertEqual(tracker.list_mp_organizing(), {})
-
-    def test_reset_clears_all(self):
-        tracker.mark_mp_organizing("a", {"src_path": "x"})
-        tracker.mark_mp_organizing("b", {"src_path": "y"})
-        tracker._MP_ORGANIZING.clear()
-        self.assertEqual(tracker.list_mp_organizing(), {})
-
-
-if __name__ == "__main__":
-    unittest.main()

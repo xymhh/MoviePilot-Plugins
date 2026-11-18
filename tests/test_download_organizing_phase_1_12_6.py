@@ -1,18 +1,17 @@
-"""1.12.6 D：下载页“整理中”态。
+"""1.12.6 D：下载页“整理中”态（Phase 4 改为 pending 记录推导）。
 
 覆盖 core/downloader_view.py 的 organizing 档与
-core/services/runtime.py 的登记表保留合并：
+core/services/runtime.py 的 pending 推导保留合并：
 - download_only 成功后父任务仍在下载页，transfer_phase="organizing"，
   display_phase="organizing"，进度不伪造（不是 100%，速度为空）；
-- 登记表 status_text 为停滞文案时下载页显示该文案；
-- 登记表清掉（且 finalize 把父任务结算为终态）后任务离开下载页
+- pending 项的 mp_organize_status_text 为停滞文案时下载页显示该文案；
+- pending 项出队（finalize 把父任务结算为终态）后任务离开下载页
   （downloading  tab 不再出现；600 秒完成态保留是既有设计，不测）；
-- 无登记表条目时行为与现有一模一样（回归基线）。
+- 无 pending 整理中项时行为与现有一模一样（回归基线）。
 
 harness 复用 test_download_upload_phase_1_10_11.py：FakeTransferManager /
-FakeOwner / _parent / _serialize 不另起一套桩。登记表模块在全量收集时
-会被后收集的文件重载，所以 setUp 里每次从 sys.modules 取当前模块，
-不要用模块级绑定的旧引用。
+FakeOwner / _parent / _serialize 不另起一套桩。FakeSyncHandler 只提供
+get_pending_finalize_tasks，模拟持久化 pending 存储。
 """
 
 from __future__ import annotations
@@ -82,21 +81,17 @@ SyncRuntimeService = load_module(
     "plugins.v2/cloudsubscribex/core/services/runtime.py",
 ).SyncRuntimeService
 
-# 登记表模块只保证已加载；用例里每次从 sys.modules 取当前模块
-# （后收集的文件会重载它，模块级引用会指向旧表）。
-load_module(
-    "cloudsubscribex.core.services.mp_organize_tracker",
-    "plugins.v2/cloudsubscribex/core/services/mp_organize_tracker.py",
-)
-
-TRACKER_MODULE_NAME = "cloudsubscribex.core.services.mp_organize_tracker"
-
 STALL_TEXT = "整理停滞（队头阻塞，后续任务排队中）"
 
 
-def _tracker():
-    """取当前登记表模块（重载后 sys.modules 里的才是最新表）。"""
-    return sys.modules[TRACKER_MODULE_NAME]
+class FakeSyncHandler:
+    """最小的 pending 存储桩：只提供 get_pending_finalize_tasks。"""
+
+    def __init__(self, pending_items):
+        self._pending_items = pending_items
+
+    def get_pending_finalize_tasks(self):
+        return [dict(item) for item in self._pending_items]
 
 
 class _Torrent:
@@ -119,10 +114,10 @@ class FakeTransferManager:
 class FakeOwner:
     """最小可用的宿主：只提供运行态序列化真正会读到的字段。"""
 
-    def __init__(self, tasks, transfers):
+    def __init__(self, tasks, transfers, pending_items=None):
         self._sync_tasks = {task["id"]: dict(task) for task in tasks}
         self._sync_tasks_lock = Lock()
-        self._sync_handler = None
+        self._sync_handler = FakeSyncHandler(pending_items or [])
         self._cross_transfer_manager = FakeTransferManager(transfers)
 
 
@@ -151,8 +146,10 @@ def _success_child(**extra):
     return task
 
 
-def _serialize(tasks, transfers):
-    service = SyncRuntimeService(owner=FakeOwner(tasks, transfers))
+def _serialize(tasks, transfers, pending_items=None):
+    service = SyncRuntimeService(
+        owner=FakeOwner(tasks, transfers, pending_items)
+    )
     return service._serialize_runtime_tasks()
 
 
@@ -165,6 +162,16 @@ def _organizing_info():
         "target_name": "另一个妈妈",
         "file_name": "另一个妈妈.mkv",
     }
+
+
+def _pending_item(**extra):
+    """带 MP 整理身份、尚未 moved_at 的 pending 后处理记录。"""
+    item = {
+        "subscribe_id": 1,
+        "mp_organize": _organizing_info(),
+    }
+    item.update(extra)
+    return item
 
 
 class OrganizingDisplayTests(unittest.TestCase):
@@ -229,18 +236,15 @@ class OrganizingDisplayTests(unittest.TestCase):
 
 
 class OrganizingRuntimeTests(unittest.TestCase):
-    """D2：runtime 按登记表保留父任务并以 organizing 展示。"""
+    """D2：runtime 按 pending 记录保留父任务并以 organizing 展示。"""
 
     def setUp(self):
         set_media_type()
-        _tracker()._MP_ORGANIZING.clear()
-
-    def tearDown(self):
-        _tracker()._MP_ORGANIZING.clear()
 
     def test_download_only_success_parent_stays_on_download_page(self):
-        _tracker().mark_mp_organizing("subscribe:1", _organizing_info())
-        result = _serialize([_parent()], [_success_child()])
+        result = _serialize(
+            [_parent()], [_success_child()], [_pending_item()]
+        )
         self.assertEqual(len(result), 1)
         parent = result[0]
         self.assertEqual(parent["transfer_phase"], "organizing")
@@ -257,9 +261,8 @@ class OrganizingRuntimeTests(unittest.TestCase):
         self.assertIsNone(torrent.upspeed)
 
     def test_organizing_parent_with_no_transfers_at_all(self):
-        # 子任务记录已被跨盘管理器清理，只剩登记表条目时父任务仍保留。
-        _tracker().mark_mp_organizing("subscribe:1", _organizing_info())
-        result = _serialize([_parent()], [])
+        # 子任务记录已被跨盘管理器清理，只剩 pending 整理中项时父任务仍保留。
+        result = _serialize([_parent()], [], [_pending_item()])
         self.assertEqual(len(result), 1)
         parent = result[0]
         self.assertEqual(parent["transfer_phase"], "organizing")
@@ -269,10 +272,10 @@ class OrganizingRuntimeTests(unittest.TestCase):
 
     def test_organizing_covers_postprocessing_phase_text(self):
         # 父任务同时在后处理：整理中文案覆盖后处理文案，不打架。
-        _tracker().mark_mp_organizing("subscribe:1", _organizing_info())
         result = _serialize(
             [_parent(phase="文件后处理已结束", status="postprocessing")],
             [_success_child()],
+            [_pending_item()],
         )
         parent = result[0]
         self.assertEqual(parent["transfer_phase"], "organizing")
@@ -281,44 +284,46 @@ class OrganizingRuntimeTests(unittest.TestCase):
 
     def test_organizing_caps_stale_full_progress(self):
         # 父任务自带进度被人写成 100 时，整理中也不显示 100%。
-        _tracker().mark_mp_organizing("subscribe:1", _organizing_info())
-        result = _serialize([_parent(progress=100)], [_success_child()])
+        result = _serialize(
+            [_parent(progress=100)], [_success_child()], [_pending_item()]
+        )
         self.assertEqual(result[0]["progress"], 95)
         torrent = _view.task_to_torrent(result[0], torrent_cls=_Torrent)
         self.assertEqual(torrent.progress, 95.0)
 
     def test_stall_status_text_shown_on_download_page(self):
-        _tracker().mark_mp_organizing(
-            "subscribe:1", _organizing_info(), STALL_TEXT
+        result = _serialize(
+            [_parent()],
+            [_success_child()],
+            [_pending_item(mp_organize_status_text=STALL_TEXT)],
         )
-        result = _serialize([_parent()], [_success_child()])
         parent = result[0]
         self.assertEqual(parent["transfer_phase"], "organizing")
         self.assertEqual(parent["phase"], STALL_TEXT)
 
-    def test_registry_cleared_removes_organizing_display(self):
-        # 登记表清掉后合并不再打 organizing 标记：只剩成功子任务的
+    def test_pending_gone_removes_organizing_display(self):
+        # pending 项出队后合并不再打 organizing 标记：只剩成功子任务的
         # 父任务不再带 transfer_phase="organizing"。
-        _tracker().mark_mp_organizing("subscribe:1", _organizing_info())
         self.assertEqual(
-            _serialize([_parent()], [_success_child()])[0]["transfer_phase"],
+            _serialize(
+                [_parent()], [_success_child()], [_pending_item()]
+            )[0]["transfer_phase"],
             "organizing",
         )
-        _tracker().clear_mp_organizing("subscribe:1")
         parent = _serialize([_parent()], [_success_child()])[0]
         self.assertNotEqual(parent.get("transfer_phase"), "organizing")
         self.assertNotEqual(parent.get("phase"), "MP 整理中")
 
     def test_terminal_parent_leaves_downloading_tab(self):
-        # finalize 终态：登记表清掉 + 父任务结算为 completed，下载页的
+        # finalize 终态：pending 项出队 + 父任务结算为 completed，下载页的
         # downloading 查询不再返回它（完成态 600 秒保留是既有设计，
         # 这里只断言它离开“下载中”列表）。
-        _tracker().mark_mp_organizing("subscribe:1", _organizing_info())
         self.assertEqual(
-            _serialize([_parent()], [_success_child()])[0]["transfer_phase"],
+            _serialize(
+                [_parent()], [_success_child()], [_pending_item()]
+            )[0]["transfer_phase"],
             "organizing",
         )
-        _tracker().clear_mp_organizing("subscribe:1")
         finished = _parent(
             status="completed", phase="已转存 1 个文件",
             progress=100, finished_at=time.time(),
@@ -332,8 +337,8 @@ class OrganizingRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(torrents, [])
 
-    def test_no_registry_entry_behaves_as_before(self):
-        # 回归基线：无登记表条目时合并行为与 1.10.11 一模一样。
+    def test_no_pending_item_behaves_as_before(self):
+        # 回归基线：无 pending 整理中项时合并行为与 1.10.11 一模一样。
         transfers = [
             {
                 "id": "cross:a", "parent_task_id": "subscribe:1",
@@ -354,9 +359,9 @@ class OrganizingRuntimeTests(unittest.TestCase):
             parent["download_speed_bytes_per_second"], 1048576
         )
 
-    def test_no_registry_and_no_active_transfers_skips_merge(self):
-        # 无登记表、无活跃子任务：合并跳过，父任务保持原样（不带
-        # transfer_active / transfer_phase），与旧行为一致。
+    def test_no_pending_and_no_active_transfers_skips_merge(self):
+        # 无 pending 整理中项、无活跃子任务：合并跳过，父任务保持原样
+        # （不带 transfer_active / transfer_phase），与旧行为一致。
         result = _serialize([_parent()], [_success_child()])
         parent = result[0]
         self.assertNotIn("transfer_phase", parent)

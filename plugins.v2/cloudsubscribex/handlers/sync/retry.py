@@ -283,7 +283,12 @@ class HistoryRetryService(OwnerDelegator):
         self._upsert_retry_index_row(record, "失败")
 
     def _upsert_retry_index_row(self, record: Dict[str, Any], status: str) -> bool:
-        """把一条 history 形状记录写进重试索引（失败/处理中/待修复成功行）。"""
+        """把一条 history 形状记录写进重试索引（失败/处理中/待修复成功行）。
+
+        Phase 4 第 1 项：本方法是重试索引终态写入的三处之一（另两处是
+        finalize 终态 _write_terminal_state 与同步结果落盘
+        persist_sync_results）。
+        """
         try:
             get_store = getattr(self, "_get_data_store", None)
             if not callable(get_store):

@@ -129,6 +129,15 @@ class SyncHandler:
     _OFFLINE_PENDING_KEY = "pending_offline_strm"
     _OFFLINE_CHECK_DELAYS = (10, 20, 40, 60, 120, 300)
     _OFFLINE_TIMEOUT = 30 * 60
+    # Phase 4：finalize 阈值与超时只在这里定义一处，postprocess.py 只
+    # 引用、不再自立类常量。离线任务（ed2k/magnet/offline）连续失败
+    # _FINALIZE_MAX_FAILURES 次判死；其余任务（插件自己的定位/移动）
+    # _FINALIZE_MAX_FAILURES_LOCAL 次或 _FINALIZE_LOCATE_TIMEOUT_SECONDS
+    # 秒未定位到判死。MP 整理等待不受这两个约束（走
+    # _poll_mp_organize_state 的 90 分钟总超时）。
+    _FINALIZE_MAX_FAILURES = 5
+    _FINALIZE_MAX_FAILURES_LOCAL = 2
+    _FINALIZE_LOCATE_TIMEOUT_SECONDS = 120.0
     _FILE_FINALIZE_TIMEOUT = 30 * 60
     _OFFLINE_MONITOR_LEASE_SECONDS = 15 * 60
     _MEDIA_RECOGNITION_CACHE_LIMIT = 256
@@ -559,7 +568,11 @@ class SyncHandler:
     ) -> int:
         """本轮同步结果落盘（v1.13.3 §1.4）：只把失败（可重试）与跨盘成功
         待修复行写进重试索引；同盘成功行不写（MP 整理历史是唯一载体）。
-        返回写入行数，写入后通知前端刷新。"""
+        返回写入行数，写入后通知前端刷新。
+
+        Phase 4 第 1 项：本方法是重试索引终态写入的三处之一（另两处是
+        finalize 终态 _write_terminal_state 与重试执行 retry.py）。
+        """
         count = 0
         get_store = getattr(self, "_get_data_store", None)
         if not callable(get_store):

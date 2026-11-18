@@ -13,7 +13,6 @@
 """
 
 import json
-import sys
 import threading
 import types
 import unittest
@@ -96,15 +95,6 @@ tracker_module = load_module(
 )
 
 
-def _tracker():
-    """取当前 sys.modules 里的 tracker 模块。
-
-    全量收集时后加载的文件会用 load_module 重载它，模块级绑定会指向
-    旧对象、与 postprocess 懒导入拿到的不是同一个登记表；断言与登记
-    必须每次从 sys.modules 取当前模块。
-    """
-    return sys.modules["cloudsubscribex.core.services.mp_organize_tracker"]
-
 _service_module = load_module(
     "cloudsubscribex.handlers.sync.service",
     "plugins.v2/cloudsubscribex/handlers/sync/service.py",
@@ -181,6 +171,8 @@ class DummyMpWaitService(PostprocessService):
         self._organize_after_transfer = True
         self._upgrade_mode = "replace"
         self._FINALIZE_MAX_FAILURES = 3
+        self._FINALIZE_MAX_FAILURES_LOCAL = 2
+        self._FINALIZE_LOCATE_TIMEOUT_SECONDS = 120.0
         self._OFFLINE_CHECK_DELAYS = [60, 120, 300, 600]
         self._OFFLINE_TIMEOUT = 3600
         self._FILE_FINALIZE_TIMEOUT = 1800
@@ -236,7 +228,6 @@ class FinalizeMpWaitTests(unittest.TestCase):
         # 会覆盖 app.schemas.types 上的桩，模块级那次到执行时已失效。
         global MediaType
         MediaType = set_media_type()
-        _tracker()._MP_ORGANIZING.clear()
         self.service = DummyMpWaitService()
         self.abort_calls = []
         _stub(
@@ -291,6 +282,19 @@ class FinalizeMpWaitTests(unittest.TestCase):
         self.assertIn(errmsg, self.abort_calls[0]["reason"])
         self.assertIn("MP 整理失败", self.abort_calls[0]["reason"])
 
+    def test_manual_review_abort_reason_not_doubled(self):
+        """manual_review：abort 原因直接用 MP 原文，不加“MP 整理失败：”前缀。
+
+        Phase 4 第 4 项：detail 已是完整表述“MP 整理待人工复核”，
+        再加前缀会读成“MP 整理失败：MP 整理待人工复核”。
+        """
+        item = _item(NOW - 300)
+        self._run(item, ("failed", "MP 整理待人工复核", None))
+        self.assertEqual(len(self.abort_calls), 1)
+        self.assertEqual(
+            self.abort_calls[0]["reason"], "MP 整理待人工复核"
+        )
+
     def test_missing_within_grace_retries(self):
         """触发 10 分钟宽限内无记录：只复查，不 abort、不计 fail。"""
         item = _item(NOW - 60)
@@ -315,36 +319,37 @@ class FinalizeMpWaitTests(unittest.TestCase):
         self.assertEqual(len(self.abort_calls), 1)
         self.assertIn("MP 整理超时", self.abort_calls[0]["reason"])
 
-    def test_stall_updates_registry_text_without_abort(self):
-        """同一 state 满 15 分钟：登记表文案标停滞，但不 abort、不重试 MP。"""
+    def test_stall_writes_status_text_on_pending_item(self):
+        """同一 state 满 15 分钟：停滞文案写进 pending 项，不 abort、不重试 MP。
+
+        Phase 4：_MP_ORGANIZING 内存登记表已删，停滞文案存在 pending 项的
+        mp_organize_status_text 字段上，随后处理批次一起落盘。
+        """
         item = _item(NOW - 20 * 60)
         item["mp_organize_wait"] = {
             "last_state": "queued",
             "last_change_at": NOW - 16 * 60,
         }
-        _tracker().mark_mp_organizing("parent-1", item["mp_organize"])
         self._run(item, ("queued", "MP 整理排队中", None))
         self.assertEqual(self.abort_calls, [])
-        entry = _tracker()._MP_ORGANIZING.get("parent-1")
         self.assertEqual(
-            entry["status_text"], "整理停滞（队头阻塞，后续任务排队中）"
+            item.get("mp_organize_status_text"),
+            "整理停滞（队头阻塞，后续任务排队中）",
         )
 
     def test_stall_not_triggered_before_15_minutes(self):
-        """同一 state 不满 15 分钟：登记表文案不动。"""
+        """同一 state 不满 15 分钟：pending 项上不写停滞文案。"""
         item = _item(NOW - 20 * 60)
         item["mp_organize_wait"] = {
             "last_state": "queued",
             "last_change_at": NOW - 5 * 60,
         }
-        _tracker().mark_mp_organizing("parent-1", item["mp_organize"])
         self._run(item, ("queued", "MP 整理排队中", None))
-        entry = _tracker()._MP_ORGANIZING.get("parent-1")
-        self.assertEqual(entry["status_text"], "")
+        self.assertNotIn("mp_organize_status_text", item)
 
     def test_succeeded_locates_nested_dest_and_finalizes(self):
         """S01E234 回归：历史成功 + 文件在 /转存/<剧名>/Season 1/ 下，
-        按 dest 精确父目录定位，走完 STRM、清 pending、清登记表。"""
+        按 dest 精确父目录定位，走完 STRM、清 pending。"""
         dest_file = SimpleNamespace(
             name=FILE_NAME, id="f1", size=123456, sha1="ABCDEF",
         )
@@ -373,7 +378,6 @@ class FinalizeMpWaitTests(unittest.TestCase):
             lambda *args, **kwargs: None,
         )
         item = _item(NOW - 600)
-        _tracker().mark_mp_organizing("parent-1", item["mp_organize"])
         tracker, pending, ctx = self._run(
             item, ("succeeded", DEST_PATH, DEST_PATH)
         )
@@ -384,7 +388,6 @@ class FinalizeMpWaitTests(unittest.TestCase):
         self.assertEqual(file_name, FILE_NAME)
         self.assertIs(target_file, dest_file)
         self.assertNotIn("key1", pending)
-        self.assertEqual(_tracker().list_mp_organizing(), {})
         self.assertIn(DEST_PARENT, self.service._snapshot_calls)
 
     def test_succeeded_dest_missing_retries_without_failure(self):
@@ -421,8 +424,12 @@ class FinalizeMpWaitTests(unittest.TestCase):
             self.service._locate_cloud_file_by_dest("", ctx)
         )
 
-    def test_real_abort_clears_registry(self):
-        """真实 _abort_single_item 终态结算时按源路径清除登记表。"""
+    def test_real_abort_settles_pending(self):
+        """真实 _abort_single_item 终态结算：清 pending、计失败。
+
+        Phase 4：_MP_ORGANIZING 内存登记表已删，终态结算不再需要
+        “清登记表”这一步——pending 记录出队即下载页不再显示“整理中”。
+        """
         service = DummyMpWaitService()
         _stub(
             service, "_write_terminal_state",
@@ -430,16 +437,14 @@ class FinalizeMpWaitTests(unittest.TestCase):
         )
         _stub(service, "_notify_finalize_dead", lambda item, key: None)
         item = _item(NOW - 300)
-        _tracker().mark_mp_organizing("parent-1", item["mp_organize"])
         pending = {"key1": item}
         ctx = _ctx(pending)
         service._abort_single_item(item, "key1", "测试原因", ctx)
-        self.assertEqual(_tracker().list_mp_organizing(), {})
         self.assertNotIn("key1", pending)
         self.assertEqual(ctx.failed, 1)
 
-    def test_real_commit_clears_registry(self):
-        """真实 _commit_single_item 成功终态时按源路径清除登记表。"""
+    def test_real_commit_settles_pending(self):
+        """真实 _commit_single_item 成功终态：清 pending、计完成。"""
         service = DummyMpWaitService()
         _stub(
             service, "_write_terminal_state",
@@ -450,11 +455,9 @@ class FinalizeMpWaitTests(unittest.TestCase):
             lambda *args, **kwargs: None,
         )
         item = _item(NOW - 300)
-        _tracker().mark_mp_organizing("parent-1", item["mp_organize"])
         pending = {"key1": item}
         ctx = _ctx(pending)
         service._commit_single_item(item, "key1", None, None, {}, ctx)
-        self.assertEqual(_tracker().list_mp_organizing(), {})
         self.assertNotIn("key1", pending)
         self.assertEqual(ctx.completed, 1)
 
@@ -490,7 +493,6 @@ class MpOrganizePendingRecordTests(unittest.TestCase):
     def setUp(self):
         global MediaType
         MediaType = set_media_type()
-        _tracker()._MP_ORGANIZING.clear()
 
     @staticmethod
     def _fake_self():

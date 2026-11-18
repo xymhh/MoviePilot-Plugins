@@ -151,6 +151,8 @@ class DummyPostprocessService(PostprocessService):
         self._organize_after_transfer = organize_after_transfer
         self._upgrade_mode = "replace"
         self._FINALIZE_MAX_FAILURES = 3
+        self._FINALIZE_MAX_FAILURES_LOCAL = 2
+        self._FINALIZE_LOCATE_TIMEOUT_SECONDS = 120.0
         self._OFFLINE_CHECK_DELAYS = [60, 120, 300, 600]
         self._OFFLINE_TIMEOUT = 3600
         self._cloud_batch_mutations = MagicMock()
@@ -472,6 +474,59 @@ class TestReconcilePendingState(unittest.TestCase):
         self.assertEqual(saved["task_still_pending"]["fail_count"], 1)
         self.assertEqual(result["pending"], 1)
 
+    def test_reconcile_never_touches_retry_index(self):
+        """Phase 4 第 1 项：调和只同步 pending 存储的字段差分，绝不碰
+        重试索引——终态写索引只允许 finalize / persist_sync_results /
+        重试执行三处。这里即使有失败项（fail_count 3）与已终态出队项，
+        索引也不应多一行、不少一行。"""
+        service = DummyPostprocessService()
+        service._OFFLINE_PENDING_KEY = "offline_pending"
+        store = _FakeDataStore()
+        # _FakeRetryIndex 只记 upsert；删行也记下来，防止静默删行。
+        deletes = []
+        store.retry_index.delete_by_record_ids = (
+            lambda record_ids: deletes.extend(record_ids) or True
+        )
+        service._get_data_store = store
+        service._get_data_store["offline_pending"] = {
+            "task_completed": {
+                "created_at": 100.0, "share_url": "url1", "file_name": "f1", "task_type": "share",
+                "_monitor_token": "token_A"
+            },
+            "task_failed": {
+                "created_at": 200.0, "share_url": "url2", "file_name": "f2", "task_type": "share",
+                "_monitor_token": "token_A", "fail_count": 2
+            }
+        }
+
+        ctx = PostprocessBatchContext(
+            pending={
+                "task_failed": {
+                    "created_at": 200.0, "share_url": "url2", "file_name": "f2", "task_type": "share",
+                    "fail_count": 3
+                }
+            },
+            pending_snapshot={
+                "task_completed": {
+                    "created_at": 100.0, "share_url": "url1", "file_name": "f1", "task_type": "share"
+                },
+                "task_failed": {
+                    "created_at": 200.0, "share_url": "url2", "file_name": "f2", "task_type": "share"
+                }
+            },
+            due_keys=["task_completed", "task_failed"],
+            now=1000.0,
+            monitor_token="token_A",
+            task_map={},
+            tasks_valid=True,
+            subscribe_cache={}
+        )
+
+        service._reconcile_pending_state(ctx)
+
+        self.assertEqual(store.retry_index.rows, [])
+        self.assertEqual(deletes, [])
+
 
 # ---------------------------------------------------------------------------
 # 1.6.46：历史终态文件级兜底匹配 + 重排队终止保证 + 日志降噪
@@ -645,6 +700,143 @@ class TestTerminalStateWritesRetryIndex(unittest.TestCase):
             service._write_terminal_state(item, "key1", "失败", "网络超时")
         )
         self.assertEqual(store.retry_index.rows, [])
+
+
+class _RecordingMonitor:
+    """记录 apply_finalize_outcome 调用的监控替身。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def apply_finalize_outcome(
+            self, share_url, subscribe_id, *, success, reason="", file_name="",
+    ):
+        self.calls.append({
+            "share_url": share_url,
+            "subscribe_id": subscribe_id,
+            "success": success,
+            "reason": reason,
+            "file_name": file_name,
+        })
+        return 1
+
+
+class TestTerminalStateSyncsMonitor(unittest.TestCase):
+    """Phase 4 第 7 项：finalize 终态回写频道监控的接线。
+
+    _write_terminal_state 成功/失败都调监控；用户主动删除/停止不调
+    （那不是 finalize 的终态）；无 share_url / 无插件宿主时静默跳过。
+    监控模块用 sys.modules 里的替身注入，避免加载真实 tg_monitor
+    （它依赖 telethon 等重型模块）。
+    """
+
+    def setUp(self):
+        self.monitor = _RecordingMonitor()
+        self._real_tg_module = sys.modules.get("cloudsubscribex.core.tg_monitor")
+        sys.modules["cloudsubscribex.core.tg_monitor"] = types.SimpleNamespace(
+            get_channel_monitor=lambda plugin: self.monitor,
+        )
+        self.addCleanup(self._restore_tg_module)
+
+    def _restore_tg_module(self):
+        if self._real_tg_module is None:
+            sys.modules.pop("cloudsubscribex.core.tg_monitor", None)
+        else:
+            sys.modules["cloudsubscribex.core.tg_monitor"] = self._real_tg_module
+
+    def _service(self):
+        service = DummyPostprocessService()
+        service._OFFLINE_PENDING_KEY = _OFFLINE_KEY
+        store = _FakeDataStore()
+        service._get_data_store = store
+        service._save_data = lambda key, value: None
+        # _plugin 经 OwnerDelegator 写到宿主 SimpleNamespace 上。
+        service._plugin = types.SimpleNamespace()
+        return service, store
+
+    @staticmethod
+    def _item(**overrides):
+        item = {
+            "file_name": "Show.S01E01.mkv",
+            "staging_name": "Show.S01E01.mkv",
+            "share_url": "https://pan.example.com/s/ABC",
+            "cloud_dir": "/media/tv",
+            "file_size": 123456,
+            "source_sha1": "A1B2C3D4",
+            "season": 1,
+            "episode": 1,
+            "subscribe_id": 101,
+            "created_at": 1_700_000_000.0,
+            "mediainfo": {
+                "tmdb_id": 123,
+                "title": "测试剧",
+                "type": "电视剧",
+                "year": "2026",
+            },
+        }
+        item.update(overrides)
+        return item
+
+    def test_success_syncs_monitor(self):
+        service, _store = self._service()
+        self.assertTrue(
+            service._write_terminal_state(self._item(), "key1", "成功")
+        )
+        self.assertEqual(len(self.monitor.calls), 1)
+        call = self.monitor.calls[0]
+        self.assertTrue(call["success"])
+        self.assertEqual(call["share_url"], "https://pan.example.com/s/ABC")
+        self.assertEqual(call["subscribe_id"], 101)
+        self.assertEqual(call["file_name"], "Show.S01E01.mkv")
+
+    def test_failure_syncs_monitor_with_reason(self):
+        service, _store = self._service()
+        self.assertTrue(
+            service._write_terminal_state(
+                self._item(), "key1", "失败", "网盘文件定位失败",
+            )
+        )
+        self.assertEqual(len(self.monitor.calls), 1)
+        call = self.monitor.calls[0]
+        self.assertFalse(call["success"])
+        self.assertEqual(call["reason"], "网盘文件定位失败")
+
+    def test_user_delete_does_not_sync_monitor(self):
+        service, _store = self._service()
+        service._get_data_store[_OFFLINE_KEY] = {
+            "key1": self._item(),
+        }
+        self.assertEqual(service.delete_pending_finalize_tasks({"key1"}), 1)
+        self.assertEqual(self.monitor.calls, [])
+
+    def test_user_stop_does_not_sync_monitor(self):
+        service, _store = self._service()
+        service._get_data_store[_OFFLINE_KEY] = {
+            "key1": self._item(),
+        }
+        self.assertEqual(service.stop_pending_finalize_tasks({"key1"}), 1)
+        self.assertEqual(self.monitor.calls, [])
+
+    def test_no_share_url_skips_monitor(self):
+        service, _store = self._service()
+        self.assertTrue(
+            service._write_terminal_state(
+                self._item(share_url=""), "key1", "失败", "网络超时",
+            )
+        )
+        self.assertEqual(self.monitor.calls, [])
+
+    def test_no_plugin_skips_monitor_without_error(self):
+        service = DummyPostprocessService()
+        service._OFFLINE_PENDING_KEY = _OFFLINE_KEY
+        service._get_data_store = _FakeDataStore()
+        service._save_data = lambda key, value: None
+        # 不设 _plugin：回写静默跳过，不阻塞终态结算。
+        self.assertTrue(
+            service._write_terminal_state(self._item(), "key1", "成功")
+        )
+        self.assertEqual(self.monitor.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

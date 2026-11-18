@@ -312,6 +312,20 @@ class StrmOpsMixin(OwnerDelegator):
                 )
             return None
         template_values = self._playback_reference.reference_values(target_file)
+        if not self._strm_template_values_complete(template_values):
+            # 磁力路径：matched 文件来自 move 接口返回，playback_values
+            # 里没有 pickcode 等模板变量（2026-11-18 秒速5厘米实测，
+            # STRM 生成报“缺少模板变量：pickcode”）；按最终文件名重新
+            # 定位一次——目录清单里的文件带完整 playback_values。
+            # 刷新失败或仍不完整时走原来的路（write 会报模板错并记日志）。
+            refreshed = self._refresh_strm_target_file(cloud_dir, file_name)
+            if refreshed is not None:
+                refreshed_values = self._playback_reference.reference_values(
+                    refreshed
+                )
+                if self._strm_template_values_complete(refreshed_values):
+                    target_file = refreshed
+                    template_values = refreshed_values
         try:
             strm_path, content = self._strm_generator.write(
                 local_root=self._local_resource_path,
@@ -325,6 +339,33 @@ class StrmOpsMixin(OwnerDelegator):
             return strm_path
         except (OSError, StrmTemplateError) as error:
             logger.error(f"生成 STRM 失败：{file_name}，原因：{error}")
+            return None
+
+    def _strm_template_values_complete(
+            self, template_values: Dict[str, str],
+    ) -> bool:
+        """模板变量是否齐全：playback_reference 声明的变量都得有非空值。"""
+        required = getattr(
+            self._playback_reference, "template_variables", None,
+        ) or frozenset()
+        return all(
+            str(template_values.get(name) or "").strip() for name in required
+        )
+
+    def _refresh_strm_target_file(
+            self, cloud_dir: str, file_name: str,
+    ) -> Optional[CloudFile]:
+        """按最终文件名重新定位目标文件（取目录清单里的完整 playback_values）。
+
+        刷新失败返回 None，调用方走原来的路，不阻塞 STRM 生成。
+        """
+        cloud_query = getattr(self, "_cloud_query", None)
+        if cloud_query is None:
+            return None
+        try:
+            return cloud_query.find_file(cloud_dir, file_name)
+        except Exception as error:  # noqa: BLE001 - 刷新失败不阻塞 STRM 生成
+            logger.debug(f"STRM 目标文件刷新失败：{error}", exc_info=True)
             return None
 
     def _generate_or_queue_strm(

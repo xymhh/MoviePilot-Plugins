@@ -26,6 +26,21 @@ sync_lock = Lock()
 _COMPLETED_TASK_RETENTION_SECONDS = 600.0
 
 
+def _organizing_task_id(item: Dict[str, Any]) -> str:
+    """pending 后处理记录 → 下载页父任务 id。
+
+    与 PostprocessService._postprocess_task_id 同口径：订阅项取
+    subscribe_id，非订阅项取 sub_key。注意不能用记录里的 task_id
+    字段——磁力/ed2k 项的 task_id 是离线任务哈希（info_hash），
+    不是父任务 id。
+    """
+    subscribe_id = int(item.get("subscribe_id") or 0)
+    if subscribe_id > 0:
+        return f"subscribe:{subscribe_id}"
+    sub_key = str(item.get("sub_key") or "").strip()
+    return f"media:{sub_key}" if sub_key else ""
+
+
 class SyncRuntimeService(OwnerDelegator):
     """管理同步任务运行态及离线任务生命周期。"""
 
@@ -827,22 +842,55 @@ class SyncRuntimeService(OwnerDelegator):
         if current != previous:
             self._mark_runtime_changed()
 
+    def _organizing_entries_from_pending(self) -> Dict[str, Dict[str, Any]]:
+        """从 pending 后处理记录推导“MP 整理中”条目（Phase 4，替代登记表）。
+
+        条目形状与旧登记表一致：{"mp_organize": ..., "status_text": ...}。
+        只有带 mp_organize 身份且尚未 moved_at 的项才算整理中；停滞文案
+        取 pending 项上的 mp_organize_status_text（由
+        _track_mp_organize_stall 写进记录）。_sync_handler 未就绪或
+        pending 存储不可读时返回空字典，下载页退回无整理中态。
+        """
+        entries: Dict[str, Dict[str, Any]] = {}
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler:
+            return entries
+        get_pending = getattr(sync_handler, "get_pending_finalize_tasks", None)
+        if not callable(get_pending):
+            return entries
+        try:
+            pending_items = get_pending()
+        except Exception:
+            return entries
+        for item in pending_items or []:
+            if not isinstance(item, dict):
+                continue
+            mp_organize = item.get("mp_organize")
+            if not isinstance(mp_organize, dict) or not mp_organize:
+                continue
+            if item.get("moved_at"):
+                continue
+            task_id = _organizing_task_id(item)
+            if not task_id:
+                continue
+            entries[task_id] = {
+                "mp_organize": mp_organize,
+                "status_text": str(item.get("mp_organize_status_text") or ""),
+            }
+        return entries
+
     def _serialize_runtime_tasks(self) -> List[Dict[str, Any]]:
         """合并订阅任务与其跨盘子任务，避免同一操作重复展示。"""
         tasks = self._serialize_sync_tasks()
         transfer_manager = getattr(self, "_cross_transfer_manager", None)
         if not transfer_manager:
             return tasks
-        # 整理中登记表（v1.12.6 B/C）：transfer_ops 在 MP 整理触发成功后
-        # 按 parent_task_id 登记，finalize 终态时清除。这里每次调用都重新
-        # 取当前模块——登记表模块可能被测试重载，顶层 import 会绑到旧表。
-        organizing_entries: Dict[str, Dict[str, Any]] = {}
-        try:
-            from .mp_organize_tracker import list_mp_organizing
-
-            organizing_entries = list_mp_organizing()
-        except Exception:
-            organizing_entries = {}
+        # Phase 4：_MP_ORGANIZING 内存登记表已删。下载页的“MP 整理中”态
+        # 改从持久化的 pending 后处理记录推导（见
+        # _organizing_entries_from_pending）：带 mp_organize 身份、尚未
+        # moved_at 的项即正在等 MP 整理终态；pending 记录在终态时出队，
+        # 所以这里不可能残留过期“整理中”。
+        organizing_entries = self._organizing_entries_from_pending()
         tasks_by_id = {
             str(task.get("id") or ""): task for task in tasks
             if task.get("id")
@@ -857,8 +905,8 @@ class SyncRuntimeService(OwnerDelegator):
                 continue
             grouped_transfers.setdefault(parent_id, []).append(transfer)
 
-        # 有登记表条目的父任务即使子任务已全部结束也要保留在下载页
-        # （MP 整理中）；没有登记表条目也没有活跃子任务的才跳过。
+        # 有整理中 pending 项的父任务即使子任务已全部结束也要保留在下载页
+        # （MP 整理中）；没有整理中 pending 项也没有活跃子任务的才跳过。
         parent_ids = list(grouped_transfers.keys())
         for parent_id in organizing_entries:
             if parent_id in tasks_by_id and parent_id not in grouped_transfers:
@@ -923,9 +971,9 @@ class SyncRuntimeService(OwnerDelegator):
                 messages[message] = messages.get(message, 0) + 1
             # 父任务按阶段展示：有子任务在下载看已下载占比，都下完看已上传占比；
             # 旧的加权总进度（下载 0-50、上传 50-100）会让“下载完了”还显示 50%。
-            # organizing 覆盖一切：只要登记表里还有该父任务，就按 MP 整理中
-            # 展示——哪怕父任务同时在后处理（postprocessing 的 95% 待收尾
-            # 文案不再出现），也不按字节算进度。
+            # organizing 覆盖一切：只要 pending 里还有该父任务的整理中项，
+            # 就按 MP 整理中展示——哪怕父任务同时在后处理（postprocessing 的
+            # 95% 待收尾文案不再出现），也不按字节算进度。
             if organizing_entry:
                 transfer_phase = "organizing"
                 status_text = str(

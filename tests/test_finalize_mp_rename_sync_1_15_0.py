@@ -14,7 +14,6 @@ item["file_name"] 写成 dest 的真实值，_organize_and_finalize_single_item
 （不直接 import 该文件：它的模块级加载依赖全量收集顺序，子集跑会
 因 app.chain 未装桩而失败；这里自带一份完整桩）。
 """
-import sys
 import types
 import unittest
 from pathlib import Path
@@ -95,10 +94,6 @@ tracker_module = load_module(
 )
 
 
-def _tracker():
-    """取当前 sys.modules 里的 tracker 模块（见 test_finalize_mp_wait）。"""
-    return sys.modules["cloudsubscribex.core.services.mp_organize_tracker"]
-
 
 FILE_NAME = "吞噬星空 {tmdb-101172} - S01E234 - 第234集.mkv"
 SRC_PATH = "/downloads/" + FILE_NAME
@@ -171,6 +166,8 @@ class DummyMpWaitService(PostprocessService):
         self._organize_after_transfer = True
         self._upgrade_mode = "replace"
         self._FINALIZE_MAX_FAILURES = 3
+        self._FINALIZE_MAX_FAILURES_LOCAL = 2
+        self._FINALIZE_LOCATE_TIMEOUT_SECONDS = 120.0
         self._OFFLINE_CHECK_DELAYS = [60, 120, 300, 600]
         self._OFFLINE_TIMEOUT = 3600
         self._FILE_FINALIZE_TIMEOUT = 1800
@@ -224,7 +221,6 @@ class MpRenameSyncTests(unittest.TestCase):
     def setUp(self):
         global MediaType
         MediaType = set_media_type()
-        _tracker()._MP_ORGANIZING.clear()
         self.service = DummyMpWaitService()
         self.abort_calls = []
         _stub(
@@ -301,7 +297,6 @@ class MpRenameSyncTests(unittest.TestCase):
         )
         item = _item(NOW - 600)
         item["file_name"] = PLUGIN_NAME
-        _tracker().mark_mp_organizing("parent-1", item["mp_organize"])
         tracker, pending, ctx = self._run(
             item, ("succeeded", DEST_PATH, DEST_PATH)
         )

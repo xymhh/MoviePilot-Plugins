@@ -48,7 +48,6 @@ class EpisodeTelemetryTests(unittest.TestCase):
     def _stub_commit_path(self, resolve_result=True):
         _stub(self.service, "_update_postprocess_progress", lambda *a, **k: None)
         _stub(self.service, "_write_terminal_state", lambda *a, **k: resolve_result)
-        _stub(self.service, "_clear_mp_organizing_for_item", lambda *a, **k: None)
         _stub(self.service, "_queue_subscription_completion", lambda *a, **k: None)
         _stub(self.service, "_notify_pending_file_finalized", lambda *a, **k: None)
         _stub(self.service, "_postprocess_task_id", lambda item: None)
@@ -83,7 +82,6 @@ class EpisodeTelemetryTests(unittest.TestCase):
         """
         _stub(self.service, "_update_postprocess_progress", lambda *a, **k: None)
         _stub(self.service, "_write_terminal_state", lambda *a, **k: True)
-        _stub(self.service, "_clear_mp_organizing_for_item", lambda *a, **k: None)
         _stub(self.service, "_notify_finalize_dead", lambda *a, **k: None)
         _stub(self.service, "_postprocess_task_id", lambda item: None)
         item = _item(NOW - 300)

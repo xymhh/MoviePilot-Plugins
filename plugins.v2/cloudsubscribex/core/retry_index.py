@@ -7,6 +7,13 @@
 
 history 表本身在 v1.13.2 才删，本版两边并行跑：重试入口先查索引，
 查不到或索引不可用时回落 history 扫描。
+
+Phase 4 第 1 项：索引的终态写入只允许三处——① finalize 终态
+（PostprocessService._write_terminal_state）、② 同步结果落盘
+（SyncHandler.persist_sync_results）、③ 重试执行
+（handlers/sync/retry.py 的 _upsert_retry_index_row /
+_delete_retry_index_row）；其余代码（尤其是
+_reconcile_pending_state）只读不写，不要再加第四处。
 """
 
 from __future__ import annotations
