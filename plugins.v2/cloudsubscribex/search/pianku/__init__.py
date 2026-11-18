@@ -1,7 +1,7 @@
 """片库搜索渠道。"""
 
 from .client import PiankuClient, PiankuError
-from .provider import PIANKU_RESOURCE_TYPES, create_pianku_provider
+from .definition import PIANKU_RESOURCE_TYPES
 from .resource import PiankuResourceService
 from .security import PiankuGate, PiankuGateError
 from .service import PiankuSearchService
@@ -14,5 +14,4 @@ __all__ = [
     "PiankuGateError",
     "PiankuResourceService",
     "PiankuSearchService",
-    "create_pianku_provider",
 ]

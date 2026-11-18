@@ -6,7 +6,8 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from .client import Dian115Error
-from .provider import create_dian115_provider
+from ...core.search import SearchPolicy
+from ..provider import POINTS_CAPABILITIES, build_search_provider
 from ...core.definitions import (
     CheckinDefinition,
     FieldSpec,
@@ -239,10 +240,8 @@ class Dian115SourceDefinition(SearchSourceDefinition):
         ]
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
-        """组装 Provider；客户端统一由 Dian115SearchService 持有（含签到转盘配置）。"""
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
+        """从 owner 建 service（含签到转盘配置）；客户端统一由 service 持有。"""
         ctx = context or {}
         dian115_service = ctx.get("dian115_service")
         if not dian115_service and ctx.get("owner"):
@@ -252,6 +251,26 @@ class Dian115SourceDefinition(SearchSourceDefinition):
             except Exception:
                 dian115_service = None
         if dian115_service and getattr(dian115_service, "available", False):
-            return create_dian115_provider(dian115_service)
+            return dian115_service
         return None
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        if not service:
+            return None
+        return build_search_provider(
+            key="dian115",
+            name="Dian115",
+            resource_types=service.resource_types,
+            service=service,
+            client=service.get_client(),
+            capabilities=POINTS_CAPABILITIES,
+            policy=SearchPolicy(
+                cacheable=True,
+                cache_context=service.cache_context,
+                max_concurrency=1,
+            ),
+        )
 

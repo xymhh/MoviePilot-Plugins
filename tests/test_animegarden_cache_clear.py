@@ -96,19 +96,23 @@ register_mock(
     AnimeGardenClientError=type("AnimeGardenClientError", (Exception,), {}),
 )
 
-# ---- 真实模块：core/search.py、animegarden/service.py、animegarden/provider.py ----
-SearchCapability = load_module(
+# ---- 真实模块：core/search.py、animegarden/service.py、search/provider.py ----
+_search_core = load_module(
     "cloudsubscribex.core.search",
     "plugins.v2/cloudsubscribex/core/search.py",
-).SearchCapability
+)
+SearchCapability = _search_core.SearchCapability
+SearchPolicy = _search_core.SearchPolicy
 AnimeGardenSearchService = load_module(
     "cloudsubscribex.search.animegarden.service",
     "plugins.v2/cloudsubscribex/search/animegarden/service.py",
 ).AnimeGardenSearchService
-create_animegarden_provider = load_module(
-    "cloudsubscribex.search.animegarden.provider",
-    "plugins.v2/cloudsubscribex/search/animegarden/provider.py",
-).create_animegarden_provider
+_search_provider_module = load_module(
+    "cloudsubscribex.search.provider",
+    "plugins.v2/cloudsubscribex/search/provider.py",
+)
+build_search_provider = _search_provider_module.build_search_provider
+MAGNET_CAPABILITIES = _search_provider_module.MAGNET_CAPABILITIES
 
 
 class FakeAnimeGardenClient:
@@ -178,8 +182,13 @@ class TestAnimeGardenCacheClear(unittest.TestCase):
 
     def test_provider_cache_maintenance_path(self):
         """走真实 SearchProvider 能力表调用清缓存（对齐线上清理链路）。"""
-        provider = create_animegarden_provider(
-            self.service, {"base_url": self.base_url, "limit": 10}
+        provider = build_search_provider(
+            key="animegarden",
+            name="AnimeGarden",
+            resource_types={"magnet"},
+            service=self.service,
+            capabilities=MAGNET_CAPABILITIES,
+            policy=SearchPolicy(cache_context={"base_url": self.base_url, "limit": 10}),
         )
         self.assertIn(SearchCapability.CACHE_MAINTENANCE, provider.capabilities)
 

@@ -92,6 +92,9 @@ register_package("cloudsubscribex.utils")
 register_mock("cloudsubscribex.utils.cache", create_platform_ttl_cache=MagicMock())
 
 register_package("cloudsubscribex.search")
+# 注意：online_docs/service.py 在导入时就要从 ..types 取
+# SUPPORTED_RESOURCE_TYPES / normalize_resource_type（v1.21.0 起 definition
+# 改为导入真实 service，不再只走 mock 的 provider）。
 register_module("cloudsubscribex.search.types", RESOURCE_TYPE_DISPLAY={
     "115": {"name": "115网盘"},
     "123": {"name": "123云盘"},
@@ -105,7 +108,10 @@ register_module("cloudsubscribex.search.types", RESOURCE_TYPE_DISPLAY={
     "xunlei": {"name": "迅雷云盘"},
     "magnet": {"name": "磁力链接"},
     "ed2k": {"name": "电驴链接"},
-})
+}, SUPPORTED_RESOURCE_TYPES=frozenset({
+    "115", "123", "quark", "guangya", "tianyi", "yun139", "alipan",
+    "ed2k", "magnet",
+}), normalize_resource_type=lambda value: str(value or "").strip().lower())
 
 # 注册各驱动子包以支持相对导入，并加载真实 share service
 register_package("cloudsubscribex.drive.tianyi", paths=[_plugin_dir("drive", "tianyi")])
@@ -117,7 +123,6 @@ register_mock("cloudsubscribex.drive.guangya.client")
 
 register_package("cloudsubscribex.search.online_docs", paths=[_plugin_dir("search", "online_docs")])
 register_mock("cloudsubscribex.search.online_docs.client")
-register_mock("cloudsubscribex.search.online_docs.provider")
 
 TianyiShareService = load_module(
     "cloudsubscribex.drive.tianyi.share",

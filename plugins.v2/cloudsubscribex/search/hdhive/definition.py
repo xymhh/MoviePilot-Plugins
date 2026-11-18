@@ -7,8 +7,9 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from .open.client import HDHiveOpenAPIClient, HDHiveOpenAPIError
-from .provider import create_hdhive_provider
 from .web.client import HDHiveClient, HDHiveWebError
+from ...core.search import SearchPolicy
+from ..provider import POINTS_PREVIEW_CAPABILITIES, build_search_provider
 from ...core.definitions import (
     CheckinDefinition,
     FieldSpec,
@@ -410,9 +411,7 @@ class HDHiveSourceDefinition(SearchSourceDefinition):
         )
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         ctx = context or {}
         hdhive_service = ctx.get("hdhive_service")
         if not hdhive_service and ctx.get("owner"):
@@ -422,6 +421,27 @@ class HDHiveSourceDefinition(SearchSourceDefinition):
             except Exception:
                 hdhive_service = None
         if hdhive_service and getattr(hdhive_service, "available", False):
-            return create_hdhive_provider(hdhive_service)
+            return hdhive_service
         return None
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        if not service:
+            return None
+        return build_search_provider(
+            key="hdhive",
+            name="HDHive",
+            resource_types=service.resource_types,
+            service=service,
+            client=service.get_client(),
+            capabilities=POINTS_PREVIEW_CAPABILITIES,
+            policy=SearchPolicy(
+                cacheable=True,
+                cache_empty_results=False,
+                cache_context=service.cache_context,
+                max_concurrency=1,
+            ),
+        )
 

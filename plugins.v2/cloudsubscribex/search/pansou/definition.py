@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .client import PanSouClient
-from .provider import create_pansou_provider
 from .service import PanSouSearchService
 from ...core.definitions import FieldSpec, GroupSpec, SearchSourceDefinition
+from ...core.search import SearchPolicy
+from ..provider import MAGNET_CAPABILITIES, build_search_provider
 
 
 class PanSouSourceDefinition(SearchSourceDefinition):
@@ -238,16 +239,11 @@ class PanSouSourceDefinition(SearchSourceDefinition):
         return options
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         ctx = context or {}
         owner = ctx.get("owner")
         if not client:
             return None
-        if owner:
-            setattr(owner, "_pansou_client", client)
-
         resource_types = ctx.get("resource_types", ())
         channels = [v.strip() for v in cls.config_value(config, "pansou_channels", []) or [] if str(v).strip()]
         plugins = [v.strip() for v in cls.config_value(config, "pansou_plugins", []) or [] if str(v).strip()]
@@ -261,8 +257,7 @@ class PanSouSourceDefinition(SearchSourceDefinition):
             concurrency = None
         result_limit = int(cls.config_value(config, "pansou_result_limit", 10) or 10)
         refresh = bool(cls.config_value(config, "pansou_refresh", True))
-
-        pansou_service = service or PanSouSearchService(
+        return PanSouSearchService(
             client=client,
             resource_types=resource_types,
             channels=channels,
@@ -273,14 +268,39 @@ class PanSouSourceDefinition(SearchSourceDefinition):
             refresh=refresh,
             owner=owner,
         )
-        return create_pansou_provider(
-            pansou_service,
-            resource_types,
-            {
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        ctx = context or {}
+        owner = ctx.get("owner")
+        if not service or not client:
+            return None
+        if owner:
+            setattr(owner, "_pansou_client", client)
+
+        resource_types = ctx.get("resource_types", ())
+        channels = [v.strip() for v in cls.config_value(config, "pansou_channels", []) or [] if str(v).strip()]
+        plugins = [v.strip() for v in cls.config_value(config, "pansou_plugins", []) or [] if str(v).strip()]
+        concurrency = cls.config_value(config, "pansou_concurrency", None)
+        try:
+            concurrency = int(concurrency) if concurrency else None
+        except (TypeError, ValueError):
+            concurrency = None
+        result_limit = int(cls.config_value(config, "pansou_result_limit", 10) or 10)
+        refresh = bool(cls.config_value(config, "pansou_refresh", True))
+        return build_search_provider(
+            key="pansou",
+            name="PanSou",
+            resource_types=resource_types,
+            service=service,
+            capabilities=MAGNET_CAPABILITIES,
+            policy=SearchPolicy(cache_context={
                 "channels": channels,
                 "plugins": plugins,
                 "concurrency": concurrency,
                 "result_limit": result_limit,
                 "refresh": refresh,
-            },
+            }),
         )

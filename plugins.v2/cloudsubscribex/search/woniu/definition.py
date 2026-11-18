@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .client import WoniuClient, WoniuError
-from .provider import create_woniu_provider
 from .resource import WoniuResourceService
 from .service import WoniuSearchService
+from ...core.search import SearchPolicy
+from ..provider import DELEGATING_CAPABILITIES, build_search_provider
 from ...core.definitions import (
     CheckinDefinition,
     FieldSpec,
@@ -147,19 +148,33 @@ class WoniuSourceDefinition(SearchSourceDefinition):
         ]
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         ctx = context or {}
         resource_types = ctx.get("resource_types", ())
         if not client or not getattr(client, "is_configured", False) or not resource_types:
             return None
         resources = WoniuResourceService(client)
         limit = int(cls.config_value(config, "woniu_result_limit", 10) or 10)
-        svc = WoniuSearchService(client, resources, resource_types, limit)
-        return create_woniu_provider(
-            svc,
-            client,
-            resource_types,
-            {"result_limit": limit, "resource_types": list(resource_types)},
+        return WoniuSearchService(client, resources, resource_types, limit)
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        ctx = context or {}
+        resource_types = ctx.get("resource_types", ())
+        if not service or not client or not getattr(client, "is_configured", False) or not resource_types:
+            return None
+        limit = int(cls.config_value(config, "woniu_result_limit", 10) or 10)
+        return build_search_provider(
+            key="woniu",
+            name="蜗牛",
+            resource_types=resource_types,
+            service=service,
+            client=client,
+            capabilities=DELEGATING_CAPABILITIES,
+            policy=SearchPolicy(
+                cacheable=False,
+                cache_context={"result_limit": limit, "resource_types": list(resource_types)},
+            ),
         )

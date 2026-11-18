@@ -1,7 +1,6 @@
 """HDHive WebAPI 资源查询、详情解析与解锁。"""
 
 import copy
-import random
 import re
 import threading
 import time
@@ -12,6 +11,7 @@ from app.log import logger
 
 from .action import ServerActionResponse
 from .client import HDHiveClient, HDHiveWebError
+from ...ratelimit import UnlockLimiter
 from .parser import (
     ED2K_URL_RE,
     HDHIVE_DETAIL_RESOURCE_TYPES,
@@ -47,79 +47,6 @@ from ...matching import positive_ints
 from ....utils.cache import create_platform_ttl_cache
 
 
-class _UnlockLimiter:
-    """资源服务级解锁节流与账号串行化。"""
-
-    WINDOW_SECONDS = 60.0
-    _STATE_LOCK = threading.RLock()
-    _HISTORIES: Dict[str, deque] = {}
-    _LOCKS: Dict[str, threading.RLock] = {}
-    _READY_ATS: Dict[str, float] = {}
-
-    def __init__(self, session_key: str, per_window: int):
-        self._key = str(session_key or "")
-        self._per_window = max(1, min(int(per_window or 2), 3))
-
-    def lock(self) -> threading.RLock:
-        with self._STATE_LOCK:
-            return self._LOCKS.setdefault(self._key, threading.RLock())
-
-    @property
-    def per_window(self) -> int:
-        return self._per_window
-
-    def record(self) -> None:
-        with self._STATE_LOCK:
-            history = self._HISTORIES.setdefault(self._key, deque())
-            now = time.monotonic()
-            self._evict(history, now)
-            history.append(now)
-
-    def wait_for_slot(self, stop_requested, cooldown_remaining) -> None:
-        def ensure_runnable():
-            if stop_requested():
-                raise HDHiveWebError("HDHive 解锁等待已停止", code="stopped")
-            remaining = cooldown_remaining()
-            if remaining > 0:
-                raise HDHiveWebError(
-                    "HDHive WebAPI 处于风控冷却期，跳过解锁"
-                    f"（剩余 {int(remaining + 0.999)} 秒）",
-                    code="rate_limited",
-                )
-
-        while True:
-            ensure_runnable()
-            wait_seconds = self._next_wait_seconds()
-            if wait_seconds <= 0:
-                return
-            logger.debug(f"HDHive 解锁接口按节奏等待 {wait_seconds:.1f} 秒")
-            deadline = time.monotonic() + wait_seconds
-            while deadline > time.monotonic():
-                ensure_runnable()
-                time.sleep(min(deadline - time.monotonic(), 0.25))
-
-    def _next_wait_seconds(self) -> float:
-        interval = self.WINDOW_SECONDS / self._per_window + random.uniform(1.0, 4.0)
-        with self._STATE_LOCK:
-            history = self._HISTORIES.setdefault(self._key, deque())
-            now = time.monotonic()
-            self._evict(history, now)
-            ready_at = self._READY_ATS.setdefault(
-                self._key, now + random.uniform(3.0, 8.0)
-            )
-            wait_seconds = max(ready_at - now, 0.0)
-            if history:
-                wait_seconds = max(wait_seconds, interval - (now - history[-1]))
-            if len(history) >= self._per_window:
-                wait_seconds = max(
-                    wait_seconds, self.WINDOW_SECONDS - (now - history[0])
-                )
-            return wait_seconds
-
-    @classmethod
-    def _evict(cls, history: deque, now: float) -> None:
-        while history and now - history[0] >= cls.WINDOW_SECONDS:
-            history.popleft()
 
 
 class HDHiveResourceService:
@@ -165,7 +92,19 @@ class HDHiveResourceService:
         )
         session_key = client.cache_namespace
         self._session_key = session_key
-        self._unlock_limiter = _UnlockLimiter(session_key, unlocks_per_minute)
+        self._unlock_limiter = UnlockLimiter(
+            session_key,
+            unlocks_per_minute,
+            namespace="hdhive",
+            max_per_window=3,
+            key_default="",
+            min_interval=True,
+            first_delay=(3.0, 8.0),
+            error_factory=HDHiveWebError,
+            cooldown_message="HDHive WebAPI 处于风控冷却期，跳过解锁",
+            stopped_message="HDHive 解锁等待已停止",
+            log_prefix="HDHive 解锁接口按节奏等待",
+        )
         self._resource_cache = create_platform_ttl_cache(
             "hdhive:web:rows",
             session_key,

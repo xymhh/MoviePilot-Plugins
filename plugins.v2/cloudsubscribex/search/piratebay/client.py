@@ -1,29 +1,28 @@
 """海盗湾 (The Pirate Bay / apibay) 搜索客户端。"""
 
 import html
-import threading
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
+from ..base_client import BaseSearchClient
 from ..http_client import (
-    RequestGate,
     gated_request,
     normalize_proxies,
-    normalize_proxy_address,
     requests,
 )
 from ..magnet import build_magnet_url
-from ...utils.cache import create_platform_ttl_cache
 
 
 class PirateBayError(RuntimeError):
     """海盗湾请求或解析失败。"""
 
 
-class PirateBayClient:
+class PirateBayClient(BaseSearchClient):
     """通过 apibay.org API 搜索海盗湾磁力资源。"""
 
     DEFAULT_BASE_URL = "https://apibay.org"
+    _GATE_NAME = "PirateBay"
+    _CACHE_REGION = "piratebay_search"
     _HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -39,48 +38,11 @@ class PirateBayClient:
             timeout: int = 20,
             request_interval: float = 1.0,
     ) -> None:
-        self._raw_base_url = str(base_url or self.DEFAULT_BASE_URL).strip()
-        self.base_url = self._raw_base_url.rstrip("/") or self.DEFAULT_BASE_URL
-        self._proxy = normalize_proxy_address(proxy)
-        self.timeout = max(5, int(timeout or 20))
-        self.request_interval = max(0.2, float(request_interval or 1.0))
-        self._gate = RequestGate.shared(
-            "PirateBay",
-            f"{self.base_url}|{self._proxy}",
-            request_interval=self.request_interval,
-            minimum_interval=0.2,
-            serial_requests=False,
-        )
-        self._cache = create_platform_ttl_cache("piratebay_search", ttl=1800, maxsize=500)
-        self._cache_lock = threading.Lock()
-
-    @property
-    def proxy(self) -> str:
-        return self._proxy
-
-    def update_config(
-            self,
-            base_url: Optional[str] = None,
-            proxy: Optional[str] = None,
-            timeout: Optional[int] = None,
-            request_interval: Optional[float] = None,
-    ) -> None:
-        if base_url is not None:
-            raw = str(base_url).strip()
-            self._raw_base_url = raw or self.DEFAULT_BASE_URL
-            self.base_url = self._raw_base_url.rstrip("/") or self.DEFAULT_BASE_URL
-        if proxy is not None:
-            self._proxy = normalize_proxy_address(proxy)
-        if timeout is not None:
-            self.timeout = max(5, int(timeout or 20))
-        if request_interval is not None:
-            self.request_interval = max(0.2, float(request_interval or 1.0))
-        self._gate = RequestGate.shared(
-            "PirateBay",
-            f"{self.base_url}|{self._proxy}",
-            request_interval=self.request_interval,
-            minimum_interval=0.2,
-            serial_requests=False,
+        super().__init__(
+            base_url=base_url,
+            proxy=proxy,
+            timeout=timeout,
+            request_interval=request_interval,
         )
 
     def search(self, query: str, cat: int = 0) -> List[Dict[str, Any]]:

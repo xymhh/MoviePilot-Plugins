@@ -5,10 +5,27 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .client import PiankuClient
-from .provider import PIANKU_RESOURCE_TYPES, create_pianku_provider
 from .resource import PiankuResourceService
 from .service import PiankuSearchService
 from ...core.definitions import FieldSpec, GroupSpec, SearchSourceDefinition
+from ...core.search import SearchPolicy
+from ..provider import PIANKU_CAPABILITIES, build_search_provider
+
+#: 片库可稳定解析并交由后续转存链路的资源类型。
+PIANKU_RESOURCE_TYPES = frozenset({
+    "magnet",
+    "ed2k",
+    "quark",
+    "baidu",
+    "alipan",
+    "uc",
+    "xunlei",
+    "guangya",
+    "115",
+    "123",
+    "tianyi",
+    "yun139",
+})
 
 
 class PiankuSourceDefinition(SearchSourceDefinition):
@@ -125,19 +142,29 @@ class PiankuSourceDefinition(SearchSourceDefinition):
         ]
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         if not client:
             return None
         result_limit = int(cls.config_value(config, "pianku_result_limit", 20) or 20)
         detail_limit = cls.DETAIL_LIMIT
         resources = PiankuResourceService(client, result_limit, detail_limit)
-        search_service = PiankuSearchService(
+        return PiankuSearchService(
             client, resources, PIANKU_RESOURCE_TYPES, result_limit
         )
-        return create_pianku_provider(
-            search_service,
-            PIANKU_RESOURCE_TYPES,
-            {"result_limit": result_limit, "detail_limit": detail_limit},
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        if not service:
+            return None
+        result_limit = int(cls.config_value(config, "pianku_result_limit", 20) or 20)
+        detail_limit = cls.DETAIL_LIMIT
+        return build_search_provider(
+            key="pianku",
+            name="片库",
+            resource_types=PIANKU_RESOURCE_TYPES,
+            service=service,
+            capabilities=PIANKU_CAPABILITIES,
+            policy=SearchPolicy(cache_context={"result_limit": result_limit, "detail_limit": detail_limit}),
         )

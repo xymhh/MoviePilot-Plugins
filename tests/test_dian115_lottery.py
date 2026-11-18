@@ -90,8 +90,8 @@ service_module = load_module(
     "plugins.v2/cloudsubscribex/search/dian115/service.py",
 )
 load_module(
-    "cloudsubscribex.search.dian115.provider",
-    "plugins.v2/cloudsubscribex/search/dian115/provider.py",
+    "cloudsubscribex.search.provider",
+    "plugins.v2/cloudsubscribex/search/provider.py",
 )
 definition_module = load_module(
     "cloudsubscribex.search.dian115.definition",
@@ -258,8 +258,13 @@ class TestDian115LotteryWiring(unittest.TestCase):
     def test_provider_checkin_capability_has_lottery_enabled(self):
         """Provider 的签到能力对象就是带转盘配置的客户端（端到端）。"""
         owner = _make_owner(**_base_config())
+        # v1.21.0 起 create_provider 不再自建 service：先走 create_service
+        # 从 owner 建出真实服务，再把它传给 create_provider。
+        service = Dian115SourceDefinition.create_service(
+            None, _base_config(), {"owner": owner}
+        )
         provider = Dian115SourceDefinition.create_provider(
-            None, None, _base_config(), {"owner": owner}
+            service, None, _base_config(), {"owner": owner}
         )
         checkin_client = provider.require(SearchCapability.CHECKIN)
         self.assertIsInstance(checkin_client, Dian115Client)

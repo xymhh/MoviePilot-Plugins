@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Optional
 
 from .client import MikanClient
-from .provider import create_mikan_provider
 from .service import MikanSearchService
 from ...core.definitions import FieldSpec, GroupSpec, SearchSourceDefinition
+from ...core.search import SearchPolicy
+from ..provider import MAGNET_CAPABILITIES, build_search_provider
 
 
 class MikanSourceDefinition(SearchSourceDefinition):
@@ -184,14 +185,25 @@ class MikanSourceDefinition(SearchSourceDefinition):
         )
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         if not client:
             return None
         limit = int(cls.config_value(config, "mikan_result_limit", 10) or 10)
-        return create_mikan_provider(
-            MikanSearchService(client, result_limit=limit),
-            {"base_url": client.base_url, "limit": limit},
+        return MikanSearchService(client, result_limit=limit)
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        if not service or not client:
+            return None
+        limit = int(cls.config_value(config, "mikan_result_limit", 10) or 10)
+        return build_search_provider(
+            key="mikan",
+            name="Mikan",
+            resource_types={"magnet"},
+            service=service,
+            capabilities=MAGNET_CAPABILITIES,
+            policy=SearchPolicy(cache_context={"base_url": client.base_url, "limit": limit}),
         )
 

@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .client import UIndexClient
-from .provider import create_uindex_provider
 from .service import UIndexSearchService
 from ...core.definitions import FieldSpec, GroupSpec, SearchSourceDefinition
+from ...core.search import SearchPolicy
+from ..provider import MAGNET_CAPABILITIES, build_search_provider
 
 
 class UIndexSourceDefinition(SearchSourceDefinition):
@@ -110,13 +111,24 @@ class UIndexSourceDefinition(SearchSourceDefinition):
         ]
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         if not client:
             return None
         limit = int(cls.config_value(config, "uindex_result_limit", 20) or 20)
-        return create_uindex_provider(
-            UIndexSearchService(client, limit),
-            {"result_limit": limit},
+        return UIndexSearchService(client, limit)
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        if not service:
+            return None
+        limit = int(cls.config_value(config, "uindex_result_limit", 20) or 20)
+        return build_search_provider(
+            key="uindex",
+            name="UIndex",
+            resource_types={"magnet"},
+            service=service,
+            capabilities=MAGNET_CAPABILITIES,
+            policy=SearchPolicy(cache_context={"result_limit": limit}),
         )

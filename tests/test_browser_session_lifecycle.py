@@ -79,9 +79,9 @@ pianku_service_module = load_module(
     "brwsessx.search.pianku.service",
     os.path.join(plugins_v2_path, "cloudsubscribex", "search", "pianku", "service.py"),
 )
-pianku_provider_module = load_module(
-    "brwsessx.search.pianku.provider",
-    os.path.join(plugins_v2_path, "cloudsubscribex", "search", "pianku", "provider.py"),
+search_provider_module = load_module(
+    "brwsessx.search.provider",
+    os.path.join(plugins_v2_path, "cloudsubscribex", "search", "provider.py"),
 )
 search_core = load_module(
     "brwsessx.core.search",
@@ -92,7 +92,8 @@ BrowserPageSession = cloudflare.BrowserPageSession
 browser_idle_seconds = cloudflare.browser_idle_seconds
 park_page = cloudflare.park_page
 PiankuSearchService = pianku_service_module.PiankuSearchService
-create_pianku_provider = pianku_provider_module.create_pianku_provider
+build_search_provider = search_provider_module.build_search_provider
+PIANKU_CAPABILITIES = search_provider_module.PIANKU_CAPABILITIES
 SearchCapability = search_core.SearchCapability
 
 
@@ -212,7 +213,13 @@ class PiankuLifecycleTest(unittest.TestCase):
 
     def test_provider_declares_lifecycle(self) -> None:
         service = PiankuSearchService(client=None, resources=None, resource_types=())
-        provider = create_pianku_provider(service, (), {})
+        provider = build_search_provider(
+            key="pianku",
+            name="片库",
+            resource_types=(),
+            service=service,
+            capabilities=PIANKU_CAPABILITIES,
+        )
         self.assertTrue(provider.supports(SearchCapability.LIFECYCLE))
         self.assertIs(provider.require(SearchCapability.LIFECYCLE), service)
 

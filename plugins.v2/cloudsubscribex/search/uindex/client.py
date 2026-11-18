@@ -1,31 +1,32 @@
 import html
 import re
-import threading
 from typing import Any, Dict, List, Optional
 from urllib.parse import quote, unquote
 
 from app.log import logger
 
 from .security import UIndexSecurity, UIndexSecurityError
+from ..base_client import BaseSearchClient
 from ..http_client import (
-    RequestGate,
     gated_idempotent_request,
     normalize_proxies,
     request_error_summary,
     requests,
 )
 from ..magnet import _HASH_REGEX, _MAGNET_REGEX, parse_size_str
-from ...utils.cache import create_platform_ttl_cache
 
 
 class UIndexError(RuntimeError):
     """UIndex 请求或解析失败。"""
 
 
-class UIndexClient:
+class UIndexClient(BaseSearchClient):
     """通过 UIndex 检索磁力资源。"""
 
     DEFAULT_BASE_URL = "https://uindex.org"
+    _GATE_NAME = "UIndex"
+    _CACHE_REGION = "uindex_search"
+    _PROXY_STYLE = "raw"
     _HEADERS = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -51,53 +52,16 @@ class UIndexClient:
             request_interval: float = 1.0,
             request_timeout: Optional[int] = None,
     ) -> None:
-        self._raw_base_url = str(base_url or self.DEFAULT_BASE_URL).strip()
-        self.base_url = self._raw_base_url.rstrip("/") or self.DEFAULT_BASE_URL
-        self._proxy = str(proxy or "").strip()
-        effective_timeout = request_timeout if request_timeout is not None else timeout
-        self.timeout = max(5, int(effective_timeout or 20))
-        self.request_interval = max(0.2, float(request_interval or 1.0))
-        self._gate = RequestGate.shared(
-            "UIndex",
-            f"{self.base_url}|{self._proxy}",
-            request_interval=self.request_interval,
-            minimum_interval=0.2,
-            serial_requests=False,
+        super().__init__(
+            base_url=base_url,
+            proxy=proxy,
+            timeout=timeout,
+            request_interval=request_interval,
+            request_timeout=request_timeout,
         )
-        self._cache = create_platform_ttl_cache("uindex_search", ttl=1800, maxsize=500)
-        self._cache_lock = threading.Lock()
         self._security = UIndexSecurity(self._proxy)
 
-    @property
-    def proxy(self) -> str:
-        return self._proxy
-
-    def update_config(
-            self,
-            base_url: Optional[str] = None,
-            proxy: Optional[str] = None,
-            timeout: Optional[int] = None,
-            request_interval: Optional[float] = None,
-            request_timeout: Optional[int] = None,
-    ) -> None:
-        if base_url is not None:
-            raw = str(base_url).strip()
-            self._raw_base_url = raw or self.DEFAULT_BASE_URL
-            self.base_url = self._raw_base_url.rstrip("/") or self.DEFAULT_BASE_URL
-        if proxy is not None:
-            self._proxy = str(proxy or "").strip()
-        effective_timeout = request_timeout if request_timeout is not None else timeout
-        if effective_timeout is not None:
-            self.timeout = max(5, int(effective_timeout or 20))
-        if request_interval is not None:
-            self.request_interval = max(0.2, float(request_interval or 1.0))
-        self._gate = RequestGate.shared(
-            "UIndex",
-            f"{self.base_url}|{self._proxy}",
-            request_interval=self.request_interval,
-            minimum_interval=0.2,
-            serial_requests=False,
-        )
+    def _on_config_updated(self) -> None:
         self._security.update_config(proxy=self._proxy)
 
     def search(self, query: str) -> List[Dict[str, Any]]:

@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .client import JuyingClient, JuyingError
-from .provider import create_juying_provider
 from .resource import JuyingResourceService
 from .service import JuyingSearchService
+from ...core.search import SearchPolicy
+from ..provider import DELEGATING_CAPABILITIES, build_search_provider
 from ...core.definitions import (
     CheckinDefinition,
     FieldSpec,
@@ -145,9 +146,7 @@ class JuyingSourceDefinition(SearchSourceDefinition):
         ]
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         ctx = context or {}
         owner = ctx.get("owner")
         resources = JuyingResourceService(client) if client else None
@@ -155,10 +154,27 @@ class JuyingSourceDefinition(SearchSourceDefinition):
         if not client or not resources or not r_types or not getattr(client, "is_configured", False):
             return None
         limit = int(cls.config_value(config, "juying_result_limit", 20) or 20)
-        svc = JuyingSearchService(client, resources, r_types, limit)
-        return create_juying_provider(
-            svc,
-            client,
-            r_types,
-            {"result_limit": limit, "resource_types": list(r_types)},
+        return JuyingSearchService(client, resources, r_types, limit)
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        ctx = context or {}
+        owner = ctx.get("owner")
+        r_types = ctx.get("resource_types", ()) or getattr(owner, "_juying_resource_types", ())
+        if not service or not client or not r_types or not getattr(client, "is_configured", False):
+            return None
+        limit = int(cls.config_value(config, "juying_result_limit", 20) or 20)
+        return build_search_provider(
+            key="juying",
+            name="聚影",
+            resource_types=r_types,
+            service=service,
+            client=client,
+            capabilities=DELEGATING_CAPABILITIES,
+            policy=SearchPolicy(
+                cacheable=False,
+                cache_context={"result_limit": limit, "resource_types": list(r_types)},
+            ),
         )

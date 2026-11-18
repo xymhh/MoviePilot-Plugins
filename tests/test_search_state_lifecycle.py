@@ -193,12 +193,12 @@ class TestSearchStateLifecycle(unittest.TestCase):
         mock_logger.reset_mock()
         registry_mod.create_search_registry({})
 
-        # 检查是否聚合成单条 debug 日志包含 dummy1 和 dummy2
-        debug_messages = [call.args[0] for call in mock_logger.debug.call_args_list if call.args]
-        skipped_lines = [msg for msg in debug_messages if "未配置搜索渠道已跳过" in msg]
+        # 检查是否聚合成单条 info 日志，含 dummy1 和 dummy2 及其跳过原因
+        info_messages = [call.args[0] for call in mock_logger.info.call_args_list if call.args]
+        skipped_lines = [msg for msg in info_messages if "搜索渠道已跳过" in msg]
         self.assertEqual(len(skipped_lines), 1)
-        self.assertIn("dummy1", skipped_lines[0])
-        self.assertIn("dummy2", skipped_lines[0])
+        self.assertIn("dummy1（not-configured）", skipped_lines[0])
+        self.assertIn("dummy2（not-configured）", skipped_lines[0])
 
 if __name__ == "__main__":
     unittest.main()

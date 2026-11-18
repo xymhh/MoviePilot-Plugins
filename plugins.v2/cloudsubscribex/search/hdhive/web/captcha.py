@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
-import threading
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -24,6 +23,8 @@ except ImportError:
 from app.log import logger
 
 from .action import ServerActionProtocol, ServerActionResponse
+
+from ...captcha_model import NpzLinearCaptchaModel
 from .parser import decode_embedded_text, response_body, response_text
 
 BASE_URL = "https://re0.me"
@@ -363,50 +364,35 @@ def _hog_feature(np, image):
     return np.concatenate(blocks)
 
 
-class HDHiveCaptchaRecognizer:
+class HDHiveCaptchaRecognizer(NpzLinearCaptchaModel):
     """延迟加载本地模型并识别五字符动态验证码。"""
 
     def __init__(self, model_path: Optional[Path] = None):
-        self._model_path = model_path or Path(__file__).with_name("captcha.bin")
-        self._bundle = None
-        self._lock = threading.RLock()
+        super().__init__(
+            model_path or Path(__file__).with_name("captcha.bin"),
+            error_factory=HDHiveCaptchaError,
+            load_numpy=lambda: _dependencies()[0],
+            extra_keys=(
+                ("threshold", lambda value: float(value.item())),
+                ("min_component", lambda value: int(value.item())),
+            ),
+            check_dependencies_first=False,
+            log_loading=lambda path: logger.debug(
+                f"HDHive 验证码模型加载：{path.name}"
+            ),
+            log_loaded=lambda bundle, path: logger.info(
+                "HDHive 验证码模型加载完成："
+                f"大小 {path.stat().st_size}，"
+                f"类别 {len(bundle['classes'])}，"
+                f"阈值 {bundle['threshold']:.4f}"
+            ),
+            missing_message=lambda path: f"HDHive 验证码模型不存在：{path}",
+            version_message=lambda version: "不支持的模型格式",
+            invalid_message=lambda error: f"HDHive 验证码模型加载失败：{error}",
+        )
 
     def _model(self):
-        with self._lock:
-            if self._bundle is not None:
-                return self._bundle
-            if not self._model_path.is_file():
-                raise HDHiveCaptchaError(
-                    f"HDHive 验证码模型不存在：{self._model_path}",
-                    code="captcha_model_missing",
-                )
-            logger.debug(f"HDHive 验证码模型加载：{self._model_path.name}")
-            np, _, _ = _dependencies()
-            try:
-                with np.load(self._model_path, allow_pickle=False) as model:
-                    if int(model["format_version"].item()) != 1:
-                        raise ValueError("不支持的模型格式")
-                    self._bundle = {
-                        "threshold": float(model["threshold"].item()),
-                        "min_component": int(model["min_component"].item()),
-                        "mean": model["mean"].astype(np.float32),
-                        "scale": model["scale"].astype(np.float32),
-                        "coef": model["coef"].astype(np.float32),
-                        "intercept": model["intercept"].astype(np.float32),
-                        "classes": model["classes"].astype("<U1"),
-                    }
-                logger.info(
-                    "HDHive 验证码模型加载完成："
-                    f"大小 {self._model_path.stat().st_size}，"
-                    f"类别 {len(self._bundle['classes'])}，"
-                    f"阈值 {self._bundle['threshold']:.4f}"
-                )
-            except Exception as error:
-                raise HDHiveCaptchaError(
-                    f"HDHive 验证码模型加载失败：{error}",
-                    code="captcha_model_invalid",
-                ) from error
-            return self._bundle
+        return self._load()
 
     def ensure_ready(self) -> None:
         """在发起验证码后续请求前完成模型存在性与格式检查。"""
@@ -452,8 +438,7 @@ class HDHiveCaptchaRecognizer:
             ).resize((32, 56), Image.Resampling.BILINEAR)
             images.append(np.asarray(crop, dtype=np.float32) / 255)
         features = np.stack([_hog_feature(np, image) for image in images])
-        normalized = (features - bundle["mean"]) / bundle["scale"]
-        decisions = normalized @ bundle["coef"].T + bundle["intercept"]
+        decisions, _ = self.classify(features)
         prediction = bundle["classes"][np.argmax(decisions, axis=1)]
         ordered = np.sort(decisions, axis=1)
         answer = "".join(prediction)

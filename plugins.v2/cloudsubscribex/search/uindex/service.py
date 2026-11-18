@@ -1,20 +1,22 @@
 """UIndex 搜索服务实现。"""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from app.log import logger
 from app.schemas.types import MediaType
 
 from .client import UIndexClient, UIndexError
-from ..magnet import clear_cache, media_titles, normalize_magnets
-from ..matching import extract_season, extract_year, resource_title_matches, unique_texts
-from ...core.search import SearchQuery
+from ..base import BaseMagnetSearchService
+from ..magnet import media_titles
+from ..matching import extract_year, unique_texts
 
 
-class UIndexSearchService:
+class UIndexSearchService(BaseMagnetSearchService):
+    source_key = "uindex"
+    client_error = UIndexError
+
     def __init__(self, client: UIndexClient, result_limit: int = 20):
-        self._client = client
-        self._result_limit = result_limit
+        super().__init__(client, result_limit)
 
     @classmethod
     def _is_mostly_ascii(cls, text: str) -> bool:
@@ -61,62 +63,5 @@ class UIndexSearchService:
             keywords.append(t)
         return unique_texts(keywords)
 
-    def search(self, query: SearchQuery) -> List[Dict[str, Any]]:
-        mediainfo = query.mediainfo
-        if not mediainfo:
-            return []
-
-        keywords = self._keywords(mediainfo, query.media_type, query.season)
-        if not keywords:
-            return []
-
-        limit = query.result_limit or self._result_limit
-        exp_titles = media_titles(mediainfo)
-        expected_year = extract_year(getattr(mediainfo, "year", None))
-        collected = []
-        seen_hashes = set()
-
-        for kw in keywords[:3]:
-            try:
-                entries = self._client.search(kw)
-            except UIndexError as err:
-                logger.warning(f"UIndex 检索关键词 '{kw}' 失败：{err}")
-                continue
-
-            for item in entries:
-                h = item.get("info_hash")
-                if not h or h in seen_hashes:
-                    continue
-
-                # 季号匹配
-                cand_season = extract_season(item.get("title"))
-                if query.media_type == MediaType.TV and query.season:
-                    if cand_season is not None and cand_season != query.season:
-                        continue
-                elif query.media_type == MediaType.MOVIE:
-                    if cand_season is not None:
-                        continue
-
-                # 电影年份检查
-                if query.media_type == MediaType.MOVIE:
-                    cand_year = extract_year(item.get("title"))
-                    if expected_year and cand_year and cand_year != expected_year:
-                        continue
-
-                # 标题校验：资源标题必须包含媒体目标标题中的至少一个
-                if exp_titles and not resource_title_matches(
-                        item.get("title"), exp_titles, expected_year=expected_year
-                ):
-                    continue
-                seen_hashes.add(h)
-                collected.append(item)
-                if len(collected) >= limit:
-                    break
-
-            if len(collected) >= limit:
-                break
-
-        return normalize_magnets(collected, "uindex")
-
-    def clear_cache(self) -> int:
-        return clear_cache(self._client)
+    def _on_client_error(self, keyword: str, err: Exception) -> None:
+        logger.warning(f"UIndex 检索关键词 '{keyword}' 失败：{err}")

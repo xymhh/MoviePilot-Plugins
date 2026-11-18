@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from io import BytesIO
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
@@ -15,6 +14,8 @@ except ImportError:
     Image = None
 
 from app.log import logger
+
+from ..captcha_model import NpzLinearCaptchaModel
 
 # 图像尺寸与插槽切分参数
 IMAGE_WIDTH = 150
@@ -115,62 +116,31 @@ def _compute_hog(image: np.ndarray) -> np.ndarray:
     return np.concatenate(blocks)
 
 
-class PinglianCaptchaRecognizer:
-    """盘链验证码识别器"""
+def _load_numpy():
+    _check_dependencies()
+    return np
+
+
+class PinglianCaptchaRecognizer(NpzLinearCaptchaModel):
+    """盘链验证码识别器（模型加载走共用基类，特征提取仍在本文件）。"""
 
     def __init__(self, model_path: Optional[Path] = None):
-        self._model_path = model_path or Path(__file__).with_name("captcha.bin")
-        self._bundle: Optional[dict[str, np.ndarray]] = None
-        self._lock = threading.RLock()
+        super().__init__(
+            model_path or Path(__file__).with_name("captcha.bin"),
+            error_factory=PinglianCaptchaError,
+            load_numpy=_load_numpy,
+            check_dependencies_first=True,
+            log_loaded=lambda bundle, path: logger.debug(
+                f"盘链验证码模型加载成功：类别数 {len(bundle['classes'])}，"
+                f"体积 {path.stat().st_size / 1024:.1f} KB"
+            ),
+            missing_message=lambda path: f"盘链验证码模型不存在：{path}",
+            version_message=lambda version: f"不支持的验证码模型格式版本：{version}",
+            invalid_message=lambda error: f"盘链验证码模型加载失败：{error}",
+        )
 
     def _ensure_loaded(self) -> dict[str, np.ndarray]:
-        if self._bundle is not None:
-            return self._bundle
-
-        with self._lock:
-            if self._bundle is not None:
-                return self._bundle
-
-            _check_dependencies()
-            if not self._model_path.is_file():
-                raise PinglianCaptchaError(
-                    f"盘链验证码模型不存在：{self._model_path}",
-                    code="captcha_model_missing",
-                )
-
-            try:
-                with np.load(self._model_path, allow_pickle=False) as data:
-                    version = int(data["format_version"].item())
-                    if version != 1:
-                        raise ValueError(f"不支持的验证码模型格式版本：{version}")
-
-                    bundle = {
-                        "classes": data["classes"].astype("<U1"),
-                        "coef": data["coef"].astype(np.float32),
-                        "intercept": data["intercept"].astype(np.float32),
-                        "mean": data["mean"].astype(np.float32),
-                        "scale": data["scale"].astype(np.float32),
-                    }
-                self._bundle = bundle
-                logger.debug(
-                    f"盘链验证码模型加载成功：类别数 {len(bundle['classes'])}，"
-                    f"体积 {self._model_path.stat().st_size / 1024:.1f} KB"
-                )
-            except Exception as error:
-                raise PinglianCaptchaError(
-                    f"盘链验证码模型加载失败：{error}",
-                    code="captcha_model_invalid",
-                ) from error
-
-            return self._bundle
-
-    @property
-    def is_ready(self) -> bool:
-        try:
-            self._ensure_loaded()
-            return True
-        except Exception:
-            return False
+        return self._load()
 
     def recognize(self, image_bytes: bytes) -> Tuple[str, float]:
         """识别 4 字符验证码，返回 (预测文本, 置信度评分)。"""
@@ -179,8 +149,7 @@ class PinglianCaptchaRecognizer:
         slots = _extract_slots(foreground)
 
         features = np.stack([_compute_hog(slot) for slot in slots])
-        normalized = (features - bundle["mean"]) / bundle["scale"]
-        scores = normalized @ bundle["coef"].T + bundle["intercept"]
+        scores, _ = self.classify(features)
 
         best_indices = np.argmax(scores, axis=1)
         classes = bundle["classes"]

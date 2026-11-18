@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .client import PinglianClient, PinglianError
-from .provider import create_pinglian_provider
 from .service import PinglianSearchService
+from ...core.search import SearchPolicy
+from ..provider import PINGLIAN_CAPABILITIES, build_search_provider
 from ...core.definitions import (
     CheckinDefinition,
     FieldSpec,
@@ -154,15 +155,29 @@ class PinglianSourceDefinition(SearchSourceDefinition):
             ),
         ]
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         ctx = context or {}
         resource_types = ctx.get("resource_types", ())
         if not client or not getattr(client, "is_configured", False) or not resource_types:
             return None
         limit = int(cls.config_value(config, "pinglian_result_limit", 10) or 10)
-        svc = PinglianSearchService(client, resource_types, limit)
-        return create_pinglian_provider(
-            svc, client, resource_types, {"result_limit": limit}
+        return PinglianSearchService(client, resource_types, limit)
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        ctx = context or {}
+        resource_types = ctx.get("resource_types", ())
+        if not service or not client or not getattr(client, "is_configured", False) or not resource_types:
+            return None
+        limit = int(cls.config_value(config, "pinglian_result_limit", 10) or 10)
+        return build_search_provider(
+            key="pinglian",
+            name="盘链",
+            resource_types=resource_types,
+            service=service,
+            client=client,
+            capabilities=PINGLIAN_CAPABILITIES,
+            policy=SearchPolicy(cache_context={"result_limit": limit}),
         )

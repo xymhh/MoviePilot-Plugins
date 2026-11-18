@@ -1,9 +1,7 @@
 import copy
 import re
 import threading
-import time
-from collections import deque
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 from app.log import logger
@@ -13,6 +11,7 @@ from ...utils import MediaFileParser
 from ...utils.cache import create_platform_ttl_cache
 from ..types import normalize_resource_type, resource_type_from_url
 from .client import HDHavenClient, HDHavenError
+from ..ratelimit import UnlockLimiter
 
 
 def decode_embedded_text(value: Any) -> str:
@@ -79,66 +78,6 @@ def normalize_share_url(
     return candidate if valid_share_url(candidate, resource_type_value) else ""
 
 
-class _UnlockLimiter:
-    """资源解锁节流控制。"""
-
-    WINDOW_SECONDS = 60.0
-    _STATE_LOCK = threading.RLock()
-    _HISTORIES: Dict[str, deque] = {}
-    _LOCKS: Dict[str, threading.RLock] = {}
-
-    def __init__(self, session_key: str, per_window: int = 2):
-        self._key = str(session_key or "default")
-        self._per_window = max(1, min(int(per_window or 2), 5))
-
-    def lock(self) -> threading.RLock:
-        with self._STATE_LOCK:
-            return self._LOCKS.setdefault(self._key, threading.RLock())
-
-    @property
-    def per_window(self) -> int:
-        return self._per_window
-
-    def _evict(self, history: deque, now: float) -> None:
-        while history and (now - history[0]) >= self.WINDOW_SECONDS:
-            history.popleft()
-
-    def _next_wait_seconds(self) -> float:
-        with self._STATE_LOCK:
-            history = self._HISTORIES.setdefault(self._key, deque())
-            now = time.monotonic()
-            self._evict(history, now)
-            if len(history) < self._per_window:
-                return 0.0
-            return max(0.0, (history[0] + self.WINDOW_SECONDS) - now)
-
-    def record(self) -> None:
-        with self._STATE_LOCK:
-            history = self._HISTORIES.setdefault(self._key, deque())
-            now = time.monotonic()
-            self._evict(history, now)
-            history.append(now)
-
-    def wait_for_slot(self, cooldown_remaining: Optional[Callable[[], float]] = None) -> None:
-        def ensure_runnable():
-            if cooldown_remaining:
-                remaining = cooldown_remaining()
-                if remaining > 0:
-                    raise HDHavenError(
-                        f"HDHaven 处于风控冷却期，跳过解锁（剩余 {int(remaining + 0.999)} 秒）",
-                        code="rate_limited",
-                    )
-
-        while True:
-            ensure_runnable()
-            wait_seconds = self._next_wait_seconds()
-            if wait_seconds <= 0:
-                return
-            logger.debug(f"HDHaven 解锁按节奏等待 {wait_seconds:.1f} 秒")
-            deadline = time.monotonic() + wait_seconds
-            while deadline > time.monotonic():
-                ensure_runnable()
-                time.sleep(min(deadline - time.monotonic(), 0.25))
 
 
 def preview_episodes_from_files(
@@ -247,7 +186,14 @@ class HDHavenResourceService:
         self.client = client
         session_key = f"{client.username or 'default'}"
         self._session_key = session_key
-        self._unlock_limiter = _UnlockLimiter(session_key, unlocks_per_minute)
+        self._unlock_limiter = UnlockLimiter(
+            session_key,
+            unlocks_per_minute,
+            namespace="hdhaven",
+            error_factory=HDHavenError,
+            cooldown_message="HDHaven 处于风控冷却期，跳过解锁",
+            log_prefix="HDHaven 解锁按节奏等待",
+        )
         self._preview_cache = create_platform_ttl_cache(
             "hdhaven:preview", session_key, maxsize=256, ttl=self._PREVIEW_CACHE_TTL
         )

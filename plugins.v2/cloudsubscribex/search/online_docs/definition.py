@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .client import OnlineDocumentClient
-from .provider import create_online_docs_provider
+from .service import OnlineDocumentSearchService
 from ...core.definitions import FieldSpec, GroupSpec, SearchSourceDefinition
+from ..provider import MAGNET_CAPABILITIES, build_search_provider
 
 
 class OnlineDocsSourceDefinition(SearchSourceDefinition):
@@ -53,11 +54,23 @@ class OnlineDocsSourceDefinition(SearchSourceDefinition):
         ]
 
     @classmethod
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
+        if not client:
+            return None
+        return OnlineDocumentSearchService(client)
+
+    @classmethod
     def create_provider(
             cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
     ) -> Any:
         ctx = context or {}
         resource_types = ctx.get("resource_types", ())
-        if not client or not resource_types:
+        if not service or not resource_types:
             return None
-        return create_online_docs_provider(client, resource_types)
+        return build_search_provider(
+            key="online_docs",
+            name="在线文档",
+            resource_types=resource_types,
+            service=service,
+            capabilities=MAGNET_CAPABILITIES,
+        )

@@ -40,12 +40,13 @@ def create_search_registry(
         **extra_context,
     }
 
-    skipped = []
+    skipped = {}
+    outcome = {}
     for def_cls in SearchSourceRegistry.get_definitions():
         has_capability = getattr(def_cls, "has_capability", None)
         if callable(has_capability) and not has_capability("query"):
             # 推送型渠道（如频道监控）只走侧车，不参与搜索组装与超时预算。
-            skipped.append(def_cls.id)
+            skipped[def_cls.id] = "no-query-capability"
             continue
         try:
             client = def_cls.create_client(config, context)
@@ -53,11 +54,17 @@ def create_search_registry(
             provider = def_cls.create_provider(service, client, config, context)
             if provider:
                 registry.register(provider, replace=True)
+                outcome[def_cls.id] = None
             else:
-                skipped.append(def_cls.id)
+                skipped[def_cls.id] = "not-configured"
         except Exception as _err:
             logger.debug(f"搜索渠道 [{def_cls.id}] 注册失败：{_err}", exc_info=True)
+            skipped[def_cls.id] = "registration-failed"
 
     if skipped:
-        logger.debug(f"未配置搜索渠道已跳过：{', '.join(skipped)}")
+        details = "、".join(
+            f"{source_id}（{reason}）" for source_id, reason in skipped.items()
+        )
+        logger.info(f"搜索渠道已跳过：{details}")
+    SearchSourceRegistry.record_registry_outcome({**outcome, **skipped})
     return registry

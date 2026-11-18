@@ -18,6 +18,15 @@ class SearchSourceRegistry:
     _definitions: Dict[str, Type[SearchSourceDefinition]] = {}
     _ordered_definitions: Optional[tuple[Type[SearchSourceDefinition], ...]] = None
     _scanned: bool = False
+    #: 最近一次 create_search_registry 的结果：id -> None（已注册）或跳过原因
+    #: （not-configured / registration-failed / no-query-capability）。
+    #: 未跑过组装的 id 不在其中，目录里按 unknown 标注，不编造原因。
+    _last_registry_outcome: Dict[str, Optional[str]] = {}
+
+    @classmethod
+    def record_registry_outcome(cls, outcome: Dict[str, Optional[str]]) -> None:
+        """记录最近一次搜索组装的结果，供 get_source_catalog 标注未启用原因。"""
+        cls._last_registry_outcome = dict(outcome)
 
     @classmethod
     def register(cls, definition_cls: Type[SearchSourceDefinition]) -> None:
@@ -79,6 +88,8 @@ class SearchSourceRegistry:
                 "color": def_cls.color,
                 # 能力位：query 可按关键词搜索；push 由侧车推送候选；notify 只发通知。
                 "capabilities": sorted(def_cls.capabilities or ()),
+                # 未启用原因：None 表已注册；unknown 表尚未跑过组装、无从判断。
+                "disabled_reason": cls._last_registry_outcome.get(def_cls.id, "unknown"),
             }
             for def_cls in cls.get_definitions()
         ]

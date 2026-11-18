@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 from .client import HDHavenClient, HDHavenError
-from .provider import create_hdhaven_provider
+from ...core.search import SearchPolicy
+from ..provider import POINTS_PREVIEW_CAPABILITIES, build_search_provider
 from ...core.definitions import (
     CheckinDefinition,
     FieldSpec,
@@ -223,9 +224,7 @@ class HDHavenSourceDefinition(SearchSourceDefinition):
         )
 
     @classmethod
-    def create_provider(
-            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
-    ) -> Any:
+    def create_service(cls, client: Any, config: Dict[str, Any], context: Optional[Any] = None) -> Any:
         ctx = context or {}
         hdhaven_service = ctx.get("hdhaven_service")
         if not hdhaven_service and ctx.get("owner"):
@@ -235,6 +234,27 @@ class HDHavenSourceDefinition(SearchSourceDefinition):
             except Exception:
                 hdhaven_service = None
         if hdhaven_service and getattr(hdhaven_service, "available", False):
-            return create_hdhaven_provider(hdhaven_service)
+            return hdhaven_service
         return None
+
+    @classmethod
+    def create_provider(
+            cls, service: Any, client: Any, config: Dict[str, Any], context: Optional[Any] = None
+    ) -> Any:
+        if not service:
+            return None
+        return build_search_provider(
+            key="hdhaven",
+            name="HDHaven",
+            resource_types=service.resource_types,
+            service=service,
+            client=service.get_client(),
+            capabilities=POINTS_PREVIEW_CAPABILITIES,
+            policy=SearchPolicy(
+                cacheable=True,
+                cache_empty_results=False,
+                cache_context=service.cache_context,
+                max_concurrency=1,
+            ),
+        )
 
