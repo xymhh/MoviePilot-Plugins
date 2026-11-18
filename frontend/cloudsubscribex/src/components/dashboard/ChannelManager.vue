@@ -278,6 +278,8 @@
             @notify="notify"
             @test-source="handleFormTestSource"
             @refresh-account="refreshAccount"
+            @load-options="loadChannelDynamicOptions"
+            @refresh-options="refreshChannelDynamicOptions"
             @hdhive-oauth-start="startHdhiveOAuth"
             @hdhive-oauth-exchange="exchangeHdhiveOAuth"
           />
@@ -316,6 +318,7 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue"
 import { useDisplay } from "vuetify"
 
 import ConfigSection from "../config/ConfigSection.vue"
+import { resolveDynamicField } from "../../config/fields/search/index.js"
 
 const props = defineProps({
   api: { type: [Object, Function], required: true },
@@ -362,7 +365,15 @@ const scanningId = ref("")
 // 传给 ConfigSection 的账户信息：配置页（Config.vue）用同一份 options
 // 喂 AccountInfo；渠道页之前传的是空对象，account 字段永远显示
 // “账号未连接”，登录状态和账户详情都出不来。这里按需拉取并缓存。
-const channelOptions = reactive({ searchAccounts: {} })
+// 动态选项（如 PanSou 的限定频道/插件）也走同一份 options：配置页用
+// resolveDynamicField + ui_options 链路填充 field.items；渠道页之前没接，
+// 勾选弹窗里一直是“没有可选项”（2026-11-18 用户截图实锤，v1.18.4 补）。
+const channelOptions = reactive({
+  searchAccounts: {},
+  pansou: {},
+  dynamicOptionLoading: {},
+  dynamicOptionErrors: {},
+})
 const refreshingAccounts = ref([])
 const hdhiveOauthAction = ref("")
 let hdhiveOauthWindow = null
@@ -413,6 +424,61 @@ async function loadChannelAccounts() {
   }
   for (const key of [...new Set(keys)]) {
     await refreshAccount(key, { silent: true })
+  }
+}
+
+// 动态选项加载：与配置页 loadDynamicOptions/loadOptions 同款语义。
+// 字段打开勾选弹窗时由 MultiSelectDialogField 触发 load-options；
+// 打开编辑弹窗时也预拉一次，避免用户点开字段时还在等首轮加载。
+const loadedDynamicScopes = new Set()
+const dynamicScopeRequests = new Map()
+
+async function loadChannelDynamicOptions(descriptor, { refresh = false } = {}) {
+  const scope = String(descriptor?.scope || "").trim().toLowerCase()
+  if (!scope) return
+  if (!refresh && loadedDynamicScopes.has(scope)) return
+  if (dynamicScopeRequests.has(scope)) return dynamicScopeRequests.get(scope)
+  const task = (async () => {
+    channelOptions.dynamicOptionLoading[scope] = true
+    channelOptions.dynamicOptionErrors[scope] = ""
+    try {
+      const query = new URLSearchParams({ scope })
+      if (refresh) query.set("refresh", "true")
+      const data = await request("get", `plugin/${props.pluginId}/ui_options?${query}`)
+      const payload = data?.data ?? data ?? {}
+      const scopeOptions =
+        payload?.[scope] && typeof payload[scope] === "object" ? payload[scope] : {}
+      channelOptions[scope] = scopeOptions
+      loadedDynamicScopes.add(scope)
+    } catch (error) {
+      channelOptions.dynamicOptionErrors[scope] = `加载失败：${error.message || error}`
+    } finally {
+      channelOptions.dynamicOptionLoading[scope] = false
+    }
+  })()
+  dynamicScopeRequests.set(scope, task)
+  try {
+    await task
+  } finally {
+    dynamicScopeRequests.delete(scope)
+  }
+}
+
+function refreshChannelDynamicOptions(descriptor) {
+  return loadChannelDynamicOptions(descriptor, { refresh: true })
+}
+
+/** 当前表单是否含动态选项字段；有则在打开编辑时预拉一次。 */
+function preloadChannelDynamicOptions() {
+  const scopes = new Set()
+  for (const group of formSection.value.groups || []) {
+    for (const field of group.fields || []) {
+      const scope = String(field?.dynamicOptions?.scope || "").trim().toLowerCase()
+      if (scope) scopes.add(scope)
+    }
+  }
+  for (const scope of scopes) {
+    void loadChannelDynamicOptions({ scope })
   }
 }
 
@@ -559,13 +625,21 @@ function schemaFor(type) {
   return schemas.value.find((schema) => schema.id === type) || null
 }
 
-/** 传给 ConfigSection 的合成 section：直接复用后端下发的表单结构。 */
+/** 传给 ConfigSection 的合成 section：直接复用后端下发的表单结构。
+ * 动态选项字段（如 PanSou 的限定频道/插件）在这里做 resolveDynamicField
+ * 注入，与配置页 createSearchSection 同款；不做这一步 field.items
+ * 永远是空，勾选弹窗只会显示“没有可选项”。 */
 const formSection = computed(() => {
   const schema = schemaFor(form.type)
   return {
     value: form.type,
     title: typeLabel(form.type),
-    groups: schema?.groups || [],
+    groups: (schema?.groups || []).map((group) => ({
+      ...group,
+      fields: (Array.isArray(group.fields) ? group.fields : []).map((field) =>
+        resolveDynamicField(field, channelOptions),
+      ),
+    })),
   }
 })
 
@@ -718,6 +792,7 @@ function openCreate() {
   form.config = applySchemaDefaults({}, form.type)
   dialogVisible.value = true
   void loadChannelAccounts()
+  void preloadChannelDynamicOptions()
 }
 
 function onTypeChange(value) {
@@ -728,6 +803,7 @@ function onTypeChange(value) {
   form.config = applySchemaDefaults({}, value)
   form.tg = { channel: "", keywords: "", exclude_keywords: "", scan_limit: 20 }
   void loadChannelAccounts()
+  void preloadChannelDynamicOptions()
 }
 
 function openEdit(item) {
@@ -749,6 +825,7 @@ function openEdit(item) {
   })
   dialogVisible.value = true
   void loadChannelAccounts()
+  void preloadChannelDynamicOptions()
 }
 
 function splitList(text) {

@@ -1,6 +1,6 @@
 import {createCommonSearchGroups} from "./common.js";
 
-function resolveDynamicField(field, options) {
+export function resolveDynamicField(field, options) {
   const descriptor = field?.dynamicOptions;
   if (!descriptor?.scope || !descriptor?.key) return field;
   const scope = String(descriptor.scope);
