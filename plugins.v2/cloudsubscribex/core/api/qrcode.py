@@ -72,49 +72,6 @@ class QRCodeService(OwnerDelegator):
             logger.error(f"获取网盘登录二维码失败：{provider} - {error}")
             return {"success": False, "message": str(error)}
 
-    def api_vue_check_qrcode(
-            self,
-            provider: str = "115",
-            uid: str = "",
-            time: str = "",
-            sign: str = "",
-            client_type: str = "alipaymini",
-            qr_token: str = "",
-            uni_id: str = "",
-            device_code: str = "",
-            device_id: str = "",
-            client_id: str = "",
-            t: str = "",
-            ck: str = "",
-            uuid: str = "",
-            encryuuid: str = "",
-            req_id: str = "",
-            lt: str = "",
-            param_id: str = "",
-    ) -> dict:
-        try:
-            return self._check_qrcode_session(provider, {
-                "uid": uid,
-                "time": time,
-                "sign": sign,
-                "client_type": client_type,
-                "qr_token": qr_token,
-                "uni_id": uni_id,
-                "device_code": device_code,
-                "device_id": device_id,
-                "client_id": client_id,
-                "t": t,
-                "ck": ck,
-                "uuid": uuid,
-                "encryuuid": encryuuid,
-                "req_id": req_id,
-                "lt": lt,
-                "param_id": param_id,
-            })
-        except Exception as error:
-            logger.error(f"检查网盘扫码登录状态失败：{provider} - {error}")
-            return {"success": False, "message": str(error)}
-
     def api_vue_check_qrcode_post(self, payload: Dict[str, Any]) -> dict:
         """POST 版本的扫码状态检查，避免把临时凭据放进 URL。"""
         data = dict(payload or {})

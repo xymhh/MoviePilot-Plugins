@@ -62,9 +62,9 @@ import {computed, ref, watch} from "vue";
 const props = defineProps({
   modelValue: Boolean,
   api: {type: [Object, Function], required: true},
+  pluginId: { type: String, default: "CloudSubscribeX" },
 });
 const emit = defineEmits(["update:modelValue"]);
-const pluginId = "CloudSubscribeX";
 
 const loading = ref(false);
 const error = ref("");
@@ -88,7 +88,7 @@ async function run() {
   loading.value = true;
   error.value = "";
   try {
-    const result = await props.api.get(`plugin/${pluginId}/doctor`);
+    const result = await props.api.get(`plugin/${props.pluginId}/doctor`);
     if (result?.success === false) {
       error.value = result.message || "体检接口返回失败";
       items.value = [];

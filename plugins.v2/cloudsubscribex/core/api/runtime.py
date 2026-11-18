@@ -6,7 +6,7 @@ import time
 from threading import Thread
 from typing import Any, Dict, List, Optional
 
-from app.core.config import global_vars, settings
+from app.core.config import global_vars
 from app.log import logger
 from fastapi import Request
 from fastapi.responses import StreamingResponse
@@ -22,16 +22,15 @@ from ...utils import clear_magnet_metadata_cache
 
 class RuntimeApi(OwnerDelegator):
     def api_vue_stop_sync(self) -> dict:
-        return self.api_stop_sync(settings.API_TOKEN)
+        return self.api_stop_sync()
 
     def api_vue_stop_sync_task(self, payload: Dict[str, Any]) -> dict:
         return self.api_stop_sync_task(
-            settings.API_TOKEN,
             str((payload or {}).get("task_id") or ""),
         )
 
     def api_vue_runtime_status(self) -> dict:
-        return self.api_runtime_status(settings.API_TOKEN)
+        return self.api_runtime_status()
 
     async def api_vue_runtime_stream(self, request: Request) -> StreamingResponse:
         """以单条 SSE 连接推送运行态，合并高频进度变化。"""
@@ -122,15 +121,14 @@ class RuntimeApi(OwnerDelegator):
             return None
 
     def api_vue_offline_tasks(self, refresh: bool = False) -> dict:
-        return self.api_offline_tasks(settings.API_TOKEN, refresh)
+        return self.api_offline_tasks(refresh)
 
     def api_vue_refresh_offline_tasks(self) -> dict:
         """显式刷新离线任务；周期读取保持只读缓存语义。"""
-        return self.api_offline_tasks(settings.API_TOKEN, refresh=True)
+        return self.api_offline_tasks(refresh=True)
 
     def api_vue_delete_offline_task(self, payload: Dict[str, Any]) -> dict:
         return self.api_delete_offline_task(
-            settings.API_TOKEN,
             str((payload or {}).get("task_id") or ""),
             str((payload or {}).get("pending_key") or ""),
             delete_source_file=bool((payload or {}).get("delete_source_file", False)),
@@ -148,7 +146,6 @@ class RuntimeApi(OwnerDelegator):
             if str(value).strip()
         ]
         return self.api_delete_offline_tasks(
-            settings.API_TOKEN,
             task_ids,
             pending_keys,
             delete_source_file=bool((payload or {}).get("delete_source_file", False)),
@@ -166,7 +163,6 @@ class RuntimeApi(OwnerDelegator):
             if str(value).strip()
         ]
         return self.api_retry_offline_tasks(
-            settings.API_TOKEN,
             pending_keys,
             task_ids,
         )

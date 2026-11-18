@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import copy
-import datetime
 import os
 from typing import Any, Dict
 from urllib.parse import quote, urlencode
@@ -35,64 +34,6 @@ def _display_catalog() -> dict:
 _UI_OPTIONS_CACHE = create_platform_ttl_cache(
     "ui:options", maxsize=16, ttl=2 * 60
 )
-# key 带版本号：平台 TTL 缓存跨插件重载存活，换结构时必须换前缀，否则旧条目缺字段
-_AIRED_INFO_CACHE = create_platform_ttl_cache(
-    "ui:aired:v2", maxsize=512, ttl=6 * 60 * 60
-)
-
-# 追更日历：只展示未来 N 天内的待更新集（TMDB 只有日期，没有钟点）
-_CALENDAR_HORIZON_DAYS = 30
-
-
-def _aired_episode_info(tmdb_id: int, season: int) -> dict | None:
-    """按 TMDB 本季分集返回已播数量、最新已播日期，以及未来待更新的集（追更日历数据）。
-
-    TMDB 只给日期没有钟点，所以日历只到「哪天播」，不编造时间。
-    未来集与已播集来自同一次 season detail 请求，不额外增加 API 调用。
-    """
-    try:
-        from app.modules.themoviedb.tmdbapi import TmdbApi
-
-        detail = TmdbApi().get_tv_season_detail(int(tmdb_id), int(season)) or {}
-        today_date = datetime.date.today()
-        today = today_date.isoformat()
-        horizon = (today_date + datetime.timedelta(days=_CALENDAR_HORIZON_DAYS)).isoformat()
-        aired: list[tuple[str, int]] = []
-        upcoming: list[dict[str, Any]] = []
-        for item in detail.get("episodes") or []:
-            if not isinstance(item, dict):
-                continue
-            air_date = str(item.get("air_date") or "").strip()
-            if not air_date:
-                continue
-            try:
-                episode = int(item.get("episode_number") or 0)
-            except (TypeError, ValueError):
-                episode = 0
-            if episode <= 0:
-                continue
-            if air_date <= today:
-                aired.append((air_date, episode))
-            elif air_date <= horizon:
-                upcoming.append({"episode": episode, "air_date": air_date})
-        upcoming.sort(key=lambda item: (item["air_date"], item["episode"]))
-        if not aired:
-            return {"aired": 0, "episode": 0, "air_date": "", "upcoming": upcoming}
-        aired.sort(key=lambda item: (item[0], item[1]))
-        latest_date, latest_episode = aired[-1]
-        return {
-            "aired": len(aired),
-            "episode": latest_episode,
-            "air_date": latest_date,
-            "upcoming": upcoming,
-        }
-    except Exception as err:  # noqa: BLE001 - TMDB 不可用时只隐藏已播信息
-        logger.debug(
-            f"查询已播集数失败 tmdb={tmdb_id} season={season}: {err}",
-            exc_info=True,
-        )
-        return None
-
 
 
 
@@ -209,79 +150,6 @@ class PageApi(OwnerDelegator):
                 },
             },
         }
-
-    def api_vue_aired_counts(self, payload: dict) -> dict:
-        """批量查询订阅的已播集数与最新一集开播日期：前端先渲染列表，再异步补齐。"""
-        raw_items = (payload or {}).get("items") if isinstance(payload, dict) else []
-        entries: dict[str, tuple[int, int]] = {}
-        for item in raw_items or []:
-            if not isinstance(item, dict):
-                continue
-            try:
-                tmdb_id = int(item.get("tmdb_id") or 0)
-                raw_season = item.get("season")
-                season = 1 if raw_season in (None, "") else int(raw_season)
-            except (TypeError, ValueError):
-                continue
-            if tmdb_id <= 0 or season < 0:
-                continue
-            entries[f"{tmdb_id}:{season}"] = (tmdb_id, season)
-
-        counts: dict[str, int] = {}
-        latest: dict[str, dict] = {}
-        upcoming: dict[str, list] = {}
-        pending: list[tuple[str, int, int]] = []
-        for key, (tmdb_id, season) in entries.items():
-            cached = _AIRED_INFO_CACHE.get(key)
-            # 旧结构（无 upcoming 字段）视为未命中，升级后自动补齐日历数据
-            if isinstance(cached, dict) and "upcoming" in cached:
-                counts[key] = max(0, int(cached.get("aired") or 0))
-                if cached.get("air_date"):
-                    latest[key] = {
-                        "episode": int(cached.get("episode") or 0),
-                        "air_date": str(cached.get("air_date")),
-                    }
-                if cached.get("upcoming"):
-                    upcoming[key] = list(cached.get("upcoming") or [])
-            elif cached is not None:
-                counts[key] = max(0, int(cached))
-            else:
-                pending.append((key, tmdb_id, season))
-
-        if pending:
-            from concurrent.futures import ThreadPoolExecutor, as_completed
-
-            executor = ThreadPoolExecutor(max_workers=min(6, len(pending)))
-            futures = {
-                executor.submit(
-                    _aired_episode_info, tmdb_id, season
-                ): key
-                for key, tmdb_id, season in pending
-            }
-            try:
-                for future in as_completed(futures, timeout=8):
-                    key = futures[future]
-                    try:
-                        info = future.result()
-                    except Exception:  # noqa: BLE001 - 单条失败不影响其它订阅
-                        info = None
-                    if not isinstance(info, dict):
-                        continue
-                    counts[key] = max(0, int(info.get("aired") or 0))
-                    if info.get("air_date"):
-                        latest[key] = {
-                            "episode": int(info.get("episode") or 0),
-                            "air_date": str(info.get("air_date")),
-                        }
-                    if info.get("upcoming"):
-                        upcoming[key] = list(info.get("upcoming") or [])
-                    _AIRED_INFO_CACHE.set(key, info)
-            except Exception as err:  # noqa: BLE001 - 超时后保留已有结果
-                logger.debug(f"批量查询已播集数超时：{err}", exc_info=True)
-            finally:
-                executor.shutdown(wait=False)
-
-        return {"success": True, "data": {"counts": counts, "latest": latest, "upcoming": upcoming}}
 
     def api_vue_history_summary(self) -> dict:
         """失败记录页统计（v1.13.3）：重试索引里的失败/待修复/处理中行数。"""

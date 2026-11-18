@@ -195,7 +195,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.22.0"
+    plugin_version = "1.23.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -2426,7 +2426,7 @@ class CloudSubscribeX(_PluginBase):
                 # 合成上传卡：上传走 MP 整理链，没法从下载页停止。
                 continue
             try:
-                result = self.api_stop_sync_task(settings.API_TOKEN, task_id)
+                result = self.api_stop_sync_task(task_id)
             except Exception as error:  # noqa: BLE001 - 单任务停止失败不影响其它
                 logger.debug(f"停止任务失败：{task_id}，{type(error).__name__}")
                 continue

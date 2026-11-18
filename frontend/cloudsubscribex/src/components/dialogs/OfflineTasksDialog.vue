@@ -194,9 +194,9 @@ import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
 const props = defineProps({
   modelValue: Boolean,
   api: {type: [Object, Function], required: true},
+  pluginId: { type: String, default: "CloudSubscribeX" },
 })
 const emit = defineEmits(["update:modelValue"]);
-const pluginId = "CloudSubscribeX";
 const tasks = ref([]);
 const quota = ref({});
 const updatedAt = ref(0);
@@ -307,8 +307,8 @@ async function load(force = false) {
     try {
       const response = unwrapResponse(
         force
-          ? await props.api.post(`plugin/${pluginId}/offline/refresh`)
-          : await props.api.get(`plugin/${pluginId}/offline`),
+          ? await props.api.post(`plugin/${props.pluginId}/offline/refresh`)
+          : await props.api.get(`plugin/${props.pluginId}/offline`),
       )
       if (response.success === false) {
         throw new Error(response.message || "加载失败");
@@ -371,7 +371,7 @@ async function retryTasks(pendingKeys) {
   error.value = "";
   try {
     const response = unwrapResponse(
-      await props.api.post(`plugin/${pluginId}/offline/retry`, {
+      await props.api.post(`plugin/${props.pluginId}/offline/retry`, {
         pending_keys: keys.filter((key) => key.startsWith("pending:")).map((key) => key.slice(8)),
         task_ids: keys.filter((key) => key.startsWith("offline:")).map((key) => key.slice(8)),
       }),
@@ -430,12 +430,12 @@ async function deleteTask() {
   try {
     const response = unwrapResponse(
       batchDeleting.value
-        ? await props.api.post(`plugin/${pluginId}/offline/delete_batch`, {
+        ? await props.api.post(`plugin/${props.pluginId}/offline/delete_batch`, {
           task_ids: selectedHashes.value,
           pending_keys: selectedPendingKeys.value,
           delete_source_file: deleteSourceFile.value,
         })
-        : await props.api.post(`plugin/${pluginId}/offline/delete`, {
+        : await props.api.post(`plugin/${props.pluginId}/offline/delete`, {
           task_id: pendingTask.value.id,
           pending_key: pendingTask.value.pending_key,
           delete_source_file: deleteSourceFile.value,

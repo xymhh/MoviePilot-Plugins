@@ -113,6 +113,7 @@ const props = defineProps({
   config: {type: Object, default: () => ({attrs: {}})},
   allowRefresh: {type: Boolean, default: true},
   refreshInterval: {type: Number, default: 0},
+  pluginId: {type: String, default: "CloudSubscribeX"},
 })
 
 const loading = ref(false);
@@ -223,7 +224,7 @@ async function loadOverview() {
   loading.value = true;
   error.value = "";
   try {
-    const result = await props.api.get("plugin/CloudSubscribeX/checkin/overview?days=7");
+    const result = await props.api.get(`plugin/${props.pluginId}/checkin/overview?days=7`);
     if (!result?.success) throw new Error(result?.message || "获取签到数据失败");
     overview.value = result.data || {summary: {}, schedule: {}, channels: []};
     loaded.value = true;

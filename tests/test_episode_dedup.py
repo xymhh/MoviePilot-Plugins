@@ -545,7 +545,8 @@ class EpisodeDedupSkipStatusContractTests(unittest.TestCase):
         self.assertIn('!== "处理中"', table)
         workbench = self._read("frontend/cloudsubscribex/src/components/PluginWorkbench.vue")
         self.assertIn('const historyStatus = ref("失败")', workbench)
-        self.assertIn("group.pending_count", workbench)
+        # v1.23.0：总览模式已删，overviewGroups（group.pending_count 等
+        # 分组计数）随之删除；失败记录页仍默认只看失败。
 
     def test_frontend_status_map_covers_history_statuses(self):
         """20. 统一状态表必须覆盖后端全部历史状态词，漏一个就会显示成原始值。"""

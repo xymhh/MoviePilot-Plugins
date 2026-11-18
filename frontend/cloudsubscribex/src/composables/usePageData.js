@@ -1,9 +1,11 @@
-import {computed, reactive, ref} from "vue";
+import {reactive, ref} from "vue";
 import {applyDisplayCatalog} from "./resourceUtils";
 
 // v1.13.3：转存记录页瘦身为失败记录页——后端只返回重试索引里的失败与
 // 跨盘成功待修复行（failures 扁平列表），不再有按媒体分组的 history_groups、
 // 订阅进度 subscribes_progress 与 Emby 播放项 emby_play_items。
+// v1.23.0：总览统计卡片已删，不再拉 history/summary，stats/historyStats/
+// loadSummary 一并删除。
 export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
   const failures = ref([]);
   const loading = ref(false);
@@ -18,12 +20,6 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     },
     enableCloudUpgrade: false,
   })
-  const historyStats = reactive({
-    failed: 0,
-    repair: 0,
-    processing: 0,
-    total: 0,
-  })
   const historyQuery = reactive({
     page: 1,
     pageSize: 10,
@@ -31,39 +27,8 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     // 行状态过滤："" 全部 / "失败" / "成功"（待修复）/ "处理中"
     status: "",
   })
-  const stats = computed(() => [
-    {
-      title: "失败",
-      value: historyStats.failed,
-      color: "error",
-      icon: "mdi-alert-circle-outline",
-      filter: "失败",
-    },
-    {
-      title: "待修复",
-      value: historyStats.repair,
-      color: "warning",
-      icon: "mdi-wrench-outline",
-      filter: "成功",
-    },
-    {
-      title: "处理中",
-      value: historyStats.processing,
-      color: "info",
-      icon: "mdi-progress-clock",
-      filter: "处理中",
-    },
-    {
-      title: "全部记录",
-      value: historyStats.total,
-      color: "primary",
-      icon: "mdi-clipboard-text-clock-outline",
-      filter: "",
-    },
-  ])
 
   let pageRequestSequence = 0;
-  let summaryRequestSequence = 0;
 
   function pageQueryString() {
     const query = new URLSearchParams({
@@ -112,30 +77,6 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
     }
   }
 
-  async function loadSummary(showError = true) {
-    const requestId = ++summaryRequestSequence;
-    try {
-      const result = await api.get(`plugin/${pluginId}/history/summary`);
-      if (!result?.success) {
-        throw new Error(result?.message || "加载失败记录摘要失败");
-      }
-      if (requestId !== summaryRequestSequence) return false;
-      const data = result.data || {};
-      Object.assign(historyStats, {
-        failed: Math.max(0, Number(data.failed || 0)),
-        repair: Math.max(0, Number(data.repair || 0)),
-        processing: Math.max(0, Number(data.processing || 0)),
-        total: Math.max(0, Number(data.total || 0)),
-      })
-      return true;
-    } catch (error) {
-      if (requestId === summaryRequestSequence && showError) {
-        notify(error.message || "加载失败记录摘要失败", "error");
-      }
-      return false;
-    }
-  }
-
   async function updateHistoryQuery(nextQuery = {}) {
     const normalized = {
       page: Math.max(1, Number(nextQuery.page ?? historyQuery.page) || 1),
@@ -155,7 +96,7 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       clear_points_history: Boolean(clearPointsHistory),
     })
     if (!result?.success) throw new Error(result?.message || "清空失败");
-    await Promise.all([loadPage(false), loadSummary(false)]);
+    await loadPage(false);
     return result.message || "失败记录已清空";
   }
 
@@ -171,7 +112,7 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       episode: record.episode,
     })
     if (!result?.success) throw new Error(result?.message || "删除失败");
-    await Promise.all([loadPage(false), loadSummary(false)]);
+    await loadPage(false);
     return result.message || "失败记录已删除";
   }
 
@@ -189,18 +130,15 @@ export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeX") {
       records: identities,
     })
     if (!result?.success) throw new Error(result?.message || "批量删除失败");
-    await Promise.all([loadPage(false), loadSummary(false)]);
+    await loadPage(false);
     return result.message || "所选失败记录已删除";
   }
 
   return {
     failures,
     historyPage,
-    historyStats,
     loading,
-    stats,
     loadPage,
-    loadSummary,
     updateHistoryQuery,
     clearHistory,
     deleteHistory,

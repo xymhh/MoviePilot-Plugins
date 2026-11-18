@@ -113,37 +113,7 @@
       </div>
     </header>
 
-    <section class="overview-band" aria-label="失败记录统计">
-      <div class="overview-title d-flex align-center ga-2 mb-2">
-        <v-icon icon="mdi-chart-box-outline" color="primary" size="small" />
-        <span class="text-subtitle-2 font-weight-bold">失败记录统计</span>
-      </div>
-      <StatsGrid :stats="stats" class="overview-stats-grid" @select="handleStatSelect" />
-    </section>
-
-    <section v-if="mode === 'overview'" class="overview-list" aria-label="失败动态">
-      <div class="overview-list-title d-flex align-center ga-2">
-        <v-icon icon="mdi-alert-circle-outline" color="error" size="small" />
-        <span class="text-subtitle-2 font-weight-bold">{{ overviewListTitle }}</span>
-        <span class="text-caption text-medium-emphasis">点上方统计卡片可切换</span>
-      </div>
-      <MediaHub
-        :items="overviewGroups"
-        :tasks="runtime.tasks"
-        :is-subscribe-mode="false"
-        :show-filter-chips="false"
-        :empty-title="overviewEmptyTitle"
-        :empty-hint="overviewEmptyHint"
-        :api="api"
-        :loading="loading"
-        :retrying-key="retryingHistoryKey"
-        @refresh="loadPage"
-        @retry="confirmRetryHistory"
-        @retry-failed="confirmRetryFailedHistory"
-        @delete="confirmDeleteHistory" />
-    </section>
-
-    <section v-else class="history-workspace" aria-label="失败记录">
+    <section class="history-workspace" aria-label="失败记录">
       <HistoryTable
         :api="api"
         :items="failures"
@@ -156,7 +126,7 @@
         :deleting-key="deletingHistoryKey"
         :status-filter="historyStatus"
         @refresh="loadPage"
-        @query-change="updateHistoryQuery"
+        @query-change="onHistoryQueryChange"
         @clear="openClearHistory"
         @retry="confirmRetryHistory"
         @retry-failed="confirmRetryFailedHistory"
@@ -168,14 +138,12 @@
         @open-media="openMediaDetail" />
     </section>
 
-    <OfflineTasksDialog v-if="offlineSupported" v-show="offlineVisible" v-model="offlineVisible" :api="api" />
+    <OfflineTasksDialog v-if="offlineSupported" v-show="offlineVisible" v-model="offlineVisible" :api="api" :plugin-id="pluginId" />
     <ManualResourceDialog
       v-show="manualVisible"
       v-model="manualVisible"
       :api="api"
       :plugin-id="pluginId"
-      :initial-mode="manualInitialMode"
-      :initial-media="manualInitialMedia"
       @started="manualStarted" />
     <ConfirmDialog
       v-model="searchConfirmVisible"
@@ -243,7 +211,7 @@
       <div v-else-if="stoppableTaskCount > 0">确认停止当前 {{ stoppableTaskCount }} 个等待或运行中的任务？</div>
       <div v-else>确认停止当前订阅任务？</div>
     </ConfirmDialog>
-    <DoctorDialog v-model="doctorVisible" :api="api" />
+    <DoctorDialog v-model="doctorVisible" :api="api" :plugin-id="pluginId" />
     <v-dialog v-model="configVisible" attach="body" max-width="62rem" :fullscreen="isMobile" class="config-dialog">
       <Config
         v-if="configVisible"
@@ -307,8 +275,6 @@ import {computed, defineAsyncComponent, onMounted, onUnmounted, ref} from "vue";
 import {useDisplay} from "vuetify";
 
 import HistoryTable from "./dashboard/HistoryTable.vue";
-import MediaHub from "./dashboard/MediaHub.vue";
-import StatsGrid from "./dashboard/StatsGrid.vue";
 import DoctorDialog from "./dialogs/DoctorDialog.vue";
 import {useHistoryPageData} from "../composables/usePageData.js";
 import {useRuntimeData} from "../composables/useRuntimeData.js";
@@ -324,8 +290,6 @@ const props = defineProps({
   api: { type: [Object, Function], default: () => ({}) },
   pluginId: { type: String, default: "CloudSubscribeX" },
   navKey: { type: String, default: "main" },
-  // 1.10.3：总览（overview）只留统计 + 转存动态；历史记录（history）为侧栏整页。
-  mode: { type: String, default: "overview" },
   // MoviePilot 宿主以全屏弹窗打开插件页时传入；独立页面路由不传。
   onClose: { type: Function, default: null },
 })
@@ -402,12 +366,9 @@ const fallbackType = ref("success")
 const snackbarTextStyle = computed(() => ({
   color: `rgb(var(--v-theme-on-${fallbackType.value || "success"}))`,
 }))
-const overviewFilter = ref("失败")
 const historyStatus = ref("失败")
 const offlineVisible = ref(false)
 const manualVisible = ref(false)
-const manualInitialMode = ref("links")
-const manualInitialMedia = ref(null)
 const stopVisible = ref(false)
 const stoppingTask = ref(null)
 const stopping = ref(false)
@@ -447,11 +408,8 @@ function notify(text, type = "success") {
 const {
   failures,
   historyPage,
-  historyStats,
   loading,
-  stats,
   loadPage,
-  loadSummary,
   updateHistoryQuery,
   clearHistory: clearHistoryRequest,
   deleteHistory: deleteHistoryRequest,
@@ -467,7 +425,6 @@ function scheduleHistoryRefresh() {
   }
   historyRefreshTimer = window.setTimeout(async () => {
     historyRefreshTimer = null
-    await loadSummary(false)
     if (historyDirty.value) {
       historyDirty.value = false
       await loadPage(false)
@@ -488,90 +445,20 @@ const {
 })
 
 onMounted(() => {
-  void loadSummary()
-  // v1.13.3：总览默认看失败记录，首屏就按状态查服务端；历史页同样默认
-  // 只看失败（顶部统计卡片可切待修复/处理中/全部）。
-  if (props.mode === "overview") {
-    void updateHistoryQuery({status: "失败", page: 1})
-  } else {
-    void updateHistoryQuery({status: "失败", page: 1})
-  }
+  // v1.23.0：插件主页直接进失败记录页，首屏就按状态查服务端，默认只看失败。
+  void updateHistoryQuery({status: "失败", page: 1})
   void loadTransferPause()
 })
 onUnmounted(() => {
   if (historyRefreshTimer !== null) window.clearTimeout(historyRefreshTimer)
 })
 
-function handleStatSelect(stat) {
-  const filter = String(stat?.filter || "").trim()
-  historyStatus.value = filter
-  // 总览页用同一过滤切失败动态；历史页用 historyStatus 过滤表格。
-  // 过滤走服务端状态查询（失败 / 成功=待修复 / 处理中 / "" 全部）。
-  overviewFilter.value = filter
-  void updateHistoryQuery({
-    status: filter,
-    page: 1,
-  })
+// HistoryTable 的筛选 chip（× 清除筛选）走 query-change 回来时，
+// 同步 historyStatus，否则 chip 上仍显示旧筛选。
+function onHistoryQueryChange(query) {
+  historyStatus.value = String(query?.status ?? "")
+  return updateHistoryQuery(query)
 }
-
-const overviewEmptyTitle = computed(() =>
-  overviewFilter.value === "失败"
-    ? "暂无失败记录"
-    : overviewFilter.value === "成功"
-      ? "暂无待修复记录"
-      : overviewFilter.value === "处理中"
-        ? "暂无处理中记录"
-        : "暂无失败记录",
-)
-const overviewEmptyHint = computed(() =>
-  overviewFilter.value === "失败"
-    ? "失败的转存会出现在这里，可直接重试"
-    : overviewFilter.value === "成功"
-      ? "跨盘成功但落盘自检未通过的记录会出现在这里，可标记成功或重试"
-      : overviewFilter.value === "处理中"
-        ? "正在重试的记录会出现在这里"
-        : "失败与待修复的转存会出现在这里",
-)
-
-const overviewListTitle = computed(() =>
-  overviewFilter.value === "失败"
-    ? "失败记录（可重试）"
-    : overviewFilter.value === "成功"
-      ? "待修复记录"
-      : overviewFilter.value === "处理中"
-        ? "处理中记录"
-        : "失败记录",
-)
-// v1.13.3：总览动态不再用后端分组，失败记录是扁平列表，这里按媒体
-// 就地分组供 MediaHub 展示（每组 records 即该媒体的失败行）。
-const overviewGroups = computed(() => {
-  const byKey = new Map()
-  for (const record of failures.value || []) {
-    const key = `${record.tmdb_id || ""}|${record.title || record.file_name || ""}|${record.type || ""}`
-    let group = byKey.get(key)
-    if (!group) {
-      group = {
-        group_key: key,
-        title: record.title || record.file_name || "未知",
-        year: record.year || "",
-        type: record.type || "",
-        tmdb_id: record.tmdb_id || 0,
-        season: Number(record.season || 0),
-        subscribe_id: record.subscribe_id || null,
-        records: [],
-        failed_count: 0,
-        pending_count: 0,
-        success_count: 0,
-      }
-      byKey.set(key, group)
-    }
-    group.records.push(record)
-    if (record.status === "失败") group.failed_count += 1
-    else if (record.status === "处理中") group.pending_count += 1
-    else group.success_count += 1
-  }
-  return [...byKey.values()]
-})
 
 const stoppableTaskCount = computed(
   () => (runtime.tasks || []).filter((task) => ["queued", "running"].includes(task.status)).length,
@@ -616,14 +503,10 @@ async function confirmImmediateSearch() {
 
 async function manualStarted(text) {
   notify(text)
-  await loadSummary(false)
-  if (props.mode === "history") await loadPage(false)
-  else historyDirty.value = true
+  await loadPage(false)
 }
 
-function openManualDialog(mode = "links", media = null) {
-  manualInitialMode.value = mode === "upgrade" ? "upgrade" : "links"
-  manualInitialMedia.value = media ? { ...media } : null
+function openManualDialog() {
   manualVisible.value = true
 }
 
@@ -718,7 +601,7 @@ async function retryHistory() {
       file_name: record.file_name,
     })
     if (!result?.success) throw new Error(result?.message || "重试失败")
-    await Promise.all([loadPage(false), loadSummary(false)])
+    await loadPage(false)
     retryVisible.value = false
     retryingRecord.value = null
     notify(result.message || "已重新提交处理")
@@ -778,7 +661,7 @@ async function retryFailedBatch() {
     notify(`已提交 ${submitted} 条，跳过 ${skipped} 条`)
     retryBatchVisible.value = false
     retryBatchRecords.value = []
-    await Promise.all([loadPage(false), loadSummary(false)])
+    await loadPage(false)
   } catch (e) {
     notify(e.message || "批量重试失败", "error")
   } finally {
@@ -820,7 +703,7 @@ async function markHistorySuccess() {
     let skipped = 0
     for (let index = 0; index < records.length; index += MARK_SUCCESS_CHUNK_SIZE) {
       const chunk = records.slice(index, index + MARK_SUCCESS_CHUNK_SIZE)
-      const result = await api.post("plugin/CloudSubscribeX/history/mark_success", { records: chunk })
+      const result = await api.post(`plugin/${props.pluginId}/history/mark_success`, { records: chunk })
       if (!result?.success) throw new Error(result?.message || "批量标记成功失败")
       const data = result?.data || {}
       updated += Number(data.updated ?? 0)
@@ -829,7 +712,7 @@ async function markHistorySuccess() {
     notify(`已标记 ${updated} 条为成功${skipped ? `，跳过 ${skipped} 条` : ""}`)
     markSuccessVisible.value = false
     markSuccessRecords.value = []
-    await Promise.all([loadPage(false), loadSummary(false)])
+    await loadPage(false)
   } catch (error) {
     notify(error.message || "批量标记成功失败", "error")
   } finally {
@@ -913,9 +796,7 @@ async function deleteHistory() {
 
 .app-header,
 .app-identity,
-.app-actions,
-.overview-title,
-.overview-metric {
+.app-actions {
   display: flex;
   align-items: center;
 }
@@ -1024,64 +905,6 @@ async function deleteHistory() {
   font-size: 0.8rem;
 }
 
-.overview-band {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  gap: 8px;
-  min-width: 0;
-}
-
-.overview-title {
-  gap: 8px;
-  padding-inline: 2px;
-  font-size: 0.875rem;
-  font-weight: 600;
-}
-
-.overview-metrics {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  overflow: hidden;
-  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  border-radius: 8px;
-  background: rgb(var(--v-theme-surface));
-}
-
-.overview-metric {
-  min-width: 0;
-  gap: 10px;
-  padding: 12px 16px;
-}
-
-.overview-metric + .overview-metric {
-  border-left: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-}
-
-.overview-metric > div,
-.overview-metric span,
-.overview-metric strong {
-  display: block;
-  min-width: 0;
-}
-
-.overview-metric span {
-  color: rgba(var(--v-theme-on-surface), 0.62);
-  font-size: 0.75rem;
-}
-
-.overview-metric strong {
-  margin-top: 2px;
-  font-size: 1.15rem;
-  line-height: 1.2;
-}
-
-
-
-
-
-
-
 .workspace-window,
 
 
@@ -1139,10 +962,6 @@ async function deleteHistory() {
 
 
 @media (max-width: 600px) {
-  .overview-metric--desktop-only {
-    display: none;
-  }
-
   .cloud-app-page {
     overflow-x: hidden;
     overflow-y: auto;
@@ -1254,57 +1073,7 @@ async function deleteHistory() {
   .settings-action .action-label {
     display: none;
   }
-
-  .overview-metrics {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-
-  .workspace-window,
-
-  .hub-pane :deep(.runtime-panel),
-  .history-view-switch,
-  .hub-pane :deep(.task-list),
-  .workspace-history .history-pane :deep(.history-table-root),
-  .workspace-history .history-pane :deep(.history-mobile-list),
-
-  .workspace-history .history-pane :deep(.history-table-root),
-
-
-  .overview-metric {
-    padding: 9px 12px;
-  }
-
-
-
-
-
 }
-.overview-list {
-  display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex: 1 1 auto;
-  flex-direction: column;
-  gap: 8px;
-  overflow: hidden;
-  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
-  border-radius: 8px;
-  background: rgb(var(--v-theme-surface));
-  padding: 12px;
-}
-
-.overview-list-title {
-  flex: 0 0 auto;
-  gap: 8px;
-  padding-inline: 2px;
-}
-
-.overview-list :deep(.media-hub-root) {
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
 .history-workspace {
   display: flex;
   min-width: 0;

@@ -108,7 +108,7 @@ class TestGetModuleDeclaration(unittest.TestCase):
             module["stop_torrents"](hashs=[task_hash("subscribe:123")])
         )
         self.assertEqual(
-            plugin._stop_calls, [("test-token", "subscribe:123")]
+            plugin._stop_calls, ["subscribe:123"]
         )
         files = module["torrent_files"](tid=task_hash("cross:abcdef123456"))
         self.assertEqual(len(files), 1)

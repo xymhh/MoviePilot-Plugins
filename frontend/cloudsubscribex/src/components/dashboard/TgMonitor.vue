@@ -303,9 +303,8 @@ const props = defineProps({
   api: { type: Object, required: true },
   notify: { type: Function, default: () => {} },
   active: { type: Boolean, default: false },
+  pluginId: { type: String, default: "CloudSubscribeX" },
 })
-
-const PLUGIN = "CloudSubscribeX"
 const status = ref({
   enabled: false,
   configured: false,
@@ -626,12 +625,12 @@ function errorClass(item) {
 }
 
 async function loadStatus() {
-  const result = await props.api.get(`plugin/${PLUGIN}/tg/status`)
+  const result = await props.api.get(`plugin/${props.pluginId}/tg/status`)
   if (result?.success) status.value = result.data || status.value
 }
 
 async function loadItems() {
-  const result = await props.api.get(`plugin/${PLUGIN}/tg/items`)
+  const result = await props.api.get(`plugin/${props.pluginId}/tg/items`)
   if (result?.success) {
     items.value = result.data?.items || []
     if (result.data?.status) status.value = result.data.status
@@ -646,7 +645,7 @@ async function scan() {
   if (scanning.value) return
   scanning.value = true
   try {
-    const result = await props.api.post(`plugin/${PLUGIN}/tg/scan`, {})
+    const result = await props.api.post(`plugin/${props.pluginId}/tg/scan`, {})
     if (result?.success) {
       props.notify(result.message || "扫描完成", "success")
       await refreshAll()
@@ -663,7 +662,7 @@ async function retryFailed() {
   retrying.value = true
   try {
     // 1.7.114：批量把失败条目塞回队列（后端会沿用已匹配的订阅，单次上限 50 条）。
-    const result = await props.api.post(`plugin/${PLUGIN}/tg/retry_failed`, {})
+    const result = await props.api.post(`plugin/${props.pluginId}/tg/retry_failed`, {})
     if (result?.success) {
       props.notify(result.message || "已重新排队", "success")
       await refreshAll()
@@ -679,7 +678,7 @@ async function ensureSubscribes() {
   if (subscribes.value.length) return
   loadingSubscribes.value = true
   try {
-    const result = await props.api.get(`plugin/${PLUGIN}/tg/subscribes`)
+    const result = await props.api.get(`plugin/${props.pluginId}/tg/subscribes`)
     if (result?.success) subscribes.value = result.data?.subscribes || []
   } finally {
     loadingSubscribes.value = false
@@ -708,7 +707,7 @@ async function submitTransfer() {
   }
   transferring.value = true
   try {
-    const result = await props.api.post(`plugin/${PLUGIN}/tg/transfer`, {
+    const result = await props.api.post(`plugin/${props.pluginId}/tg/transfer`, {
       id: currentItem.value?.id,
       subscribe_id: targetSubscribeId.value,
     })
@@ -725,12 +724,12 @@ async function submitTransfer() {
 }
 
 async function ignore(item) {
-  const result = await props.api.post(`plugin/${PLUGIN}/tg/ignore`, { ids: [item.id] })
+  const result = await props.api.post(`plugin/${props.pluginId}/tg/ignore`, { ids: [item.id] })
   if (result?.success) await refreshAll()
 }
 
 async function remove(item) {
-  const result = await props.api.post(`plugin/${PLUGIN}/tg/delete`, { ids: [item.id] })
+  const result = await props.api.post(`plugin/${props.pluginId}/tg/delete`, { ids: [item.id] })
   if (result?.success) await refreshAll()
 }
 
@@ -745,7 +744,7 @@ async function submitLogin() {
   loginLoading.value = true
   try {
     if (loginStep.value === "phone") {
-      const result = await props.api.post(`plugin/${PLUGIN}/tg/login/start`, { phone: phone.value })
+      const result = await props.api.post(`plugin/${props.pluginId}/tg/login/start`, { phone: phone.value })
       if (result?.success) {
         loginStep.value = "code"
         props.notify(result.data?.message || "验证码已发送", "success")
@@ -755,7 +754,7 @@ async function submitLogin() {
       return
     }
     const payload = loginStep.value === "code" ? { code: code.value } : { password: password.value }
-    const result = await props.api.post(`plugin/${PLUGIN}/tg/login/code`, payload)
+    const result = await props.api.post(`plugin/${props.pluginId}/tg/login/code`, payload)
     if (result?.success && result.data?.need_password) {
       loginStep.value = "password"
       props.notify("需要两步验证密码", "info")
@@ -774,7 +773,7 @@ async function submitLogin() {
 }
 
 async function logout() {
-  const result = await props.api.post(`plugin/${PLUGIN}/tg/logout`, {})
+  const result = await props.api.post(`plugin/${props.pluginId}/tg/logout`, {})
   if (result?.success) {
     props.notify("已清除 TG 会话", "success")
     await refreshAll()

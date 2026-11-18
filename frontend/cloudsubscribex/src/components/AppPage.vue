@@ -1,6 +1,6 @@
 <template>
-  <!-- 1.10.3：插件主页瘦成总览（统计 + 转存动态）；实现见 PluginWorkbench。 -->
-  <PluginWorkbench :api="api" :plugin-id="pluginId" :nav-key="navKey" :on-close="onClose" mode="overview" />
+  <!-- v1.23.0：总览模式已删，插件主页直接进失败记录页（默认只看失败）；实现见 PluginWorkbench。 -->
+  <PluginWorkbench :api="api" :plugin-id="pluginId" :nav-key="navKey" :on-close="onClose" />
 </template>
 
 <script setup>

@@ -77,12 +77,6 @@ const mockFailures = [
 
 const mockApi = {
   get(url) {
-    if (url.includes("/history/summary")) {
-      return Promise.resolve({
-        success: true,
-        data: { failed: 8, repair: 2, processing: 1, total: 11 },
-      });
-    }
     if (url.includes("/page_data")) {
       return Promise.resolve({
         success: true,

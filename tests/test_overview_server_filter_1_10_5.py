@@ -1,3 +1,14 @@
+"""失败记录页的服务端状态筛选（原 1.10.5 总览筛选）。
+
+v1.23.0（§11 前端收敛第 1 项）：总览模式已删——插件主页直接进失败
+记录页，mode prop、StatsGrid、MediaHub、overviewGroups/overviewFilter
+与 handleStatSelect 一并删除；首屏仍默认只看失败（服务端 status 查询），
+筛选 chip（× 清除）经 query-change 回写 historyStatus。用户 2026-11-18
+定夺：MediaHub.vue / MediaDrawer.vue / StatsGrid.vue 三个孤儿文件随
+v1.23.0 一并删除（抽屉的重试/删除本就是 HistoryTable 的行操作）。
+本文件只守删完之后仍成立的契约：首屏默认失败筛选、筛选 chip 同步。
+"""
+
 import os
 import re
 import unittest
@@ -10,27 +21,8 @@ def _read(rel_path: str) -> str:
         return f.read()
 
 
-class TestOverviewServerSideFilter(unittest.TestCase):
-    def test_stat_select_pushes_filter_to_server(self):
-        source = _read(
-            "frontend/cloudsubscribex/src/components/PluginWorkbench.vue"
-        )
-        handle = re.search(
-            r"function handleStatSelect\(stat\) \{(.*?)\n\}",
-            source,
-            re.S,
-        )
-        self.assertIsNotNone(handle)
-        body = handle.group(1)
-        self.assertIn("overviewFilter.value = filter", body)
-        self.assertIn("updateHistoryQuery", body)
-        # v1.13.3：单个 status 字符串直传服务端，不再经 statuses 数组；
-        # 秒传失败伪状态已删，失败就是失败，不再映射成两类。
-        self.assertIn("status: filter", body)
-        self.assertNotIn("overviewStatusesFor", source)
-        self.assertNotIn("秒传失败", source)
-
-    def test_overview_mount_queries_failed_on_server(self):
+class TestHistoryServerSideFilter(unittest.TestCase):
+    def test_history_mount_queries_failed_on_server(self):
         source = _read(
             "frontend/cloudsubscribex/src/components/PluginWorkbench.vue"
         )
@@ -41,59 +33,62 @@ class TestOverviewServerSideFilter(unittest.TestCase):
         )
         self.assertIsNotNone(mounted)
         body = mounted.group(1)
-        self.assertIn('props.mode === "overview"', body)
         self.assertIn('updateHistoryQuery({status: "失败", page: 1})', body)
-        # v1.13.3：首屏拉数走 loadSummary + updateHistoryQuery（其内部
-        # 触发 loadPage），不再在 onMounted 里直接调 loadPage(false)。
-        self.assertIn("loadSummary()", body)
+        # v1.23.0：总览已删，首屏不再拉 history/summary（统计卡片已删），
+        # 也不再按 mode 分支。
+        self.assertNotIn("loadSummary", body)
+        self.assertNotIn("props.mode", body)
 
-    def test_overview_media_hub_hides_subscribe_chips(self):
+    def test_overview_mode_deleted(self):
         source = _read(
             "frontend/cloudsubscribex/src/components/PluginWorkbench.vue"
         )
-        mount = re.search(
-            r"<MediaHub(.*?) />",
+        for gone in (
+            "handleStatSelect",
+            "overviewFilter",
+            "overviewGroups",
+            "overviewEmptyTitle",
+            "overviewEmptyHint",
+            "overviewListTitle",
+            "StatsGrid",
+            "MediaHub",
+        ):
+            self.assertNotIn(gone, source)
+        self.assertNotIn("props.mode", source)
+
+    def test_status_chip_syncs_on_query_change(self):
+        # 统计卡片删掉后，HistoryTable 的筛选 chip（× 清除筛选）是唯一
+        # 的筛选入口；query-change 回来时必须同步 historyStatus，否则
+        # chip 上仍显示旧筛选。
+        source = _read(
+            "frontend/cloudsubscribex/src/components/PluginWorkbench.vue"
+        )
+        self.assertIn('@query-change="onHistoryQueryChange"', source)
+        handler = re.search(
+            r"function onHistoryQueryChange\(query\) \{(.*?)\n\}",
             source,
             re.S,
         )
-        self.assertIsNotNone(mount)
-        attrs = mount.group(1)
-        self.assertIn(':show-filter-chips="false"', attrs)
-        self.assertIn(':empty-title="overviewEmptyTitle"', attrs)
-        self.assertIn(':empty-hint="overviewEmptyHint"', attrs)
-        self.assertIn('暂无失败记录', source)
-        self.assertIn('失败的转存会出现在这里，可直接重试', source)
+        self.assertIsNotNone(handler)
+        body = handler.group(1)
+        self.assertIn("historyStatus.value", body)
+        self.assertIn("updateHistoryQuery", body)
 
 
-class TestMediaHubOverviewProps(unittest.TestCase):
-    def test_filter_chips_gated_by_prop(self):
-        source = _read(
-            "frontend/cloudsubscribex/src/components/dashboard/MediaHub.vue"
-        )
-        self.assertIn(
-            'showFilterChips: { type: Boolean, default: true }', source
-        )
-        self.assertIn('v-if="showFilterChips"', source)
-
-    def test_release_strip_only_in_subscribe_mode(self):
-        source = _read(
-            "frontend/cloudsubscribex/src/components/dashboard/MediaHub.vue"
-        )
-        self.assertIn('v-if="isSubscribeMode && hasTvGroups"', source)
-
-    def test_empty_state_uses_props(self):
-        source = _read(
-            "frontend/cloudsubscribex/src/components/dashboard/MediaHub.vue"
-        )
-        self.assertIn(
-            'emptyTitle: { type: String, default: "暂无匹配的追更订阅" }',
-            source,
-        )
-        self.assertIn("emptyHint", source)
-        self.assertIn(
-            '{{ searchKeyword.trim() ? "没有匹配的记录" : emptyTitle }}',
-            source,
-        )
+class TestDeletedOrphanFiles(unittest.TestCase):
+    def test_orphan_files_are_deleted(self):
+        # 用户 2026-11-18 定夺：MediaHub / MediaDrawer / StatsGrid
+        # 随 v1.23.0 一并删除（不再挂载，抽屉的重试/删除本就是
+        # HistoryTable 的行操作）。
+        for rel_path in (
+            "frontend/cloudsubscribex/src/components/dashboard/MediaHub.vue",
+            "frontend/cloudsubscribex/src/components/dashboard/MediaDrawer.vue",
+            "frontend/cloudsubscribex/src/components/dashboard/StatsGrid.vue",
+        ):
+            self.assertFalse(
+                os.path.exists(os.path.join(REPO_ROOT, rel_path)),
+                f"孤儿文件 {rel_path} 应已删除",
+            )
 
 
 if __name__ == "__main__":

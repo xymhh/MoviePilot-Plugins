@@ -100,13 +100,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "获取历史记录分页数据",
             },
             {
-                "path": "/aired_counts",
-                "endpoint": self.api_vue_aired_counts,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "批量查询订阅已播集数与最新开播日期",
-            },
-            {
                 "path": "/doctor",
                 "endpoint": self.api_vue_doctor,
                 "methods": ["GET"],
@@ -613,13 +606,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "获取网盘登录二维码",
-            },
-            {
-                "path": "/qrcode/check",
-                "endpoint": self.api_vue_check_qrcode,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "检查网盘扫码登录状态",
             },
             {
                 "path": "/qrcode/check",

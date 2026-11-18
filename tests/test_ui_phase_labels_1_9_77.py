@@ -4,8 +4,9 @@
 
 1.9.86：RuntimeTaskStrip.vue 已随「任务进度改走下载管理页」删除，
 test_sub_text_uses_format_size（浮条专属的 bytesText 易读体积断言）一并退役；
-PHASE_LABELS / taskPhaseText / formatSize 仍由 taskUtils.js 提供并被 MediaHub 使用，
-其余断言保留。
+PHASE_LABELS / taskPhaseText / formatSize 仍由 taskUtils.js 提供（MediaHub
+是最后一个消费方，已随 v1.23.0 删除；HistoryTable 与 OfflineTasksDialog
+各有自己的本地 formatSize），其余断言保留。
 """
 import os
 import unittest

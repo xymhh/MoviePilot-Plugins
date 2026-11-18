@@ -347,7 +347,7 @@
         </main>
       </div>
     </v-card>
-    <QrCodeDialog v-show="qrVisible" v-model="qrVisible" :api="api" :provider="qrProvider" @success="handleQrSuccess" />
+    <QrCodeDialog v-show="qrVisible" v-model="qrVisible" :api="api" :provider="qrProvider" :plugin-id="pluginId || sourcePluginId || 'CloudSubscribeX'" @success="handleQrSuccess" />
     <DirectoryDialog
       v-show="directoryVisible"
       v-model="directoryVisible"

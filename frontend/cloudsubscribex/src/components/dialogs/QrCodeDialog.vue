@@ -85,9 +85,9 @@ const props = defineProps({
   modelValue: Boolean,
   api: { type: [Object, Function], required: true },
   provider: { type: String, default: "115" },
+  pluginId: { type: String, default: "CloudSubscribeX" },
 })
 const emit = defineEmits(["update:modelValue", "success"])
-const pluginId = "CloudSubscribeX"
 const providerMeta = ref({});
 const channels = computed(() => Array.isArray(providerMeta.value.channels) ? providerMeta.value.channels : []);
 const providerName = computed(() => providerMeta.value.name || "网盘");
@@ -153,7 +153,7 @@ async function checkStatus() {
   if (!session.value) return
   try {
     const result = unwrapResponse(
-      await props.api.post(`plugin/${pluginId}/qrcode/check`, buildStatusPayload()),
+      await props.api.post(`plugin/${props.pluginId}/qrcode/check`, buildStatusPayload()),
     )
     if (result.success === false) {
       throw new Error(result.message || "检查登录状态失败")
@@ -202,7 +202,7 @@ async function loadQrCode() {
       provider: props.provider,
       client_type: channel.value,
     })
-    const result = unwrapResponse(await props.api.get(`plugin/${pluginId}/qrcode?${query}`))
+    const result = unwrapResponse(await props.api.get(`plugin/${props.pluginId}/qrcode?${query}`))
     if (result.success === false) {
       throw new Error(result.message || "获取二维码失败")
     }

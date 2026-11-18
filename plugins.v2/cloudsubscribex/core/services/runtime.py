@@ -1048,17 +1048,13 @@ class SyncRuntimeService(OwnerDelegator):
                 parent["status"] = "stopping"
         return tasks
 
-    def api_runtime_status(self, apikey: str) -> dict:
-        if apikey != settings.API_TOKEN:
-            return {"success": False, "message": "API密钥错误"}
+    def api_runtime_status(self) -> dict:
         return {
             "success": True,
             "data": self._runtime_snapshot(),
         }
 
-    def api_stop_sync(self, apikey: str) -> dict:
-        if apikey != settings.API_TOKEN:
-            return {"success": False, "message": "API密钥错误"}
+    def api_stop_sync(self) -> dict:
         self.cancel_pending_subscribe_searches()
         transfer_manager = getattr(self, "_cross_transfer_manager", None)
         if transfer_manager:
@@ -1075,7 +1071,7 @@ class SyncRuntimeService(OwnerDelegator):
             ]
         if not self._sync_running:
             for task_id in pending_task_ids:
-                self.api_stop_sync_task(apikey, task_id)
+                self.api_stop_sync_task(task_id)
             if pending_task_ids:
                 return {
                     "success": True,
@@ -1094,7 +1090,7 @@ class SyncRuntimeService(OwnerDelegator):
                     task["phase"] = "等待安全停止"
                     stop_event.set()
         for task_id in pending_task_ids:
-            self.api_stop_sync_task(apikey, task_id)
+            self.api_stop_sync_task(task_id)
         self._set_sync_status("stopping", "已收到停止请求，等待当前操作安全结束", self._sync_progress)
         logger.info("收到快速停止请求，当前操作结束后将立即停止任务")
         return {"success": True, "message": "已发送停止请求"}
@@ -1118,9 +1114,7 @@ class SyncRuntimeService(OwnerDelegator):
                )
         }
 
-    def api_stop_sync_task(self, apikey: str, task_id: str) -> dict:
-        if apikey != settings.API_TOKEN:
-            return {"success": False, "message": "API密钥错误"}
+    def api_stop_sync_task(self, task_id: str) -> dict:
         with self._sync_tasks_lock:
             task = self._sync_tasks.get(task_id)
             if not task:
@@ -1417,9 +1411,7 @@ class SyncRuntimeService(OwnerDelegator):
         finally:
             self._offline_monitor_lock.release()
 
-    def api_offline_tasks(self, apikey: str, refresh: bool = False) -> dict:
-        if apikey != settings.API_TOKEN:
-            return {"success": False, "message": "API密钥错误"}
+    def api_offline_tasks(self, refresh: bool = False) -> dict:
         offline_tasks = self._offline_task_service()
         if not offline_tasks:
             return {"success": False, "message": "当前网盘不支持离线任务", "data": []}
@@ -1522,12 +1514,9 @@ class SyncRuntimeService(OwnerDelegator):
 
     def api_retry_offline_tasks(
             self,
-            apikey: str,
             pending_keys: List[str],
             task_ids: Optional[List[str]] = None,
     ) -> dict:
-        if apikey != settings.API_TOKEN:
-            return {"success": False, "message": "API密钥错误"}
         offline_tasks = self._offline_task_service()
         if not offline_tasks:
             return {"success": False, "message": "当前网盘不支持离线任务"}
@@ -1573,10 +1562,8 @@ class SyncRuntimeService(OwnerDelegator):
         }
 
     def api_delete_offline_task(
-            self, apikey: str, task_id: str, pending_key: str = "", delete_source_file: bool = False
+            self, task_id: str, pending_key: str = "", delete_source_file: bool = False
     ) -> dict:
-        if apikey != settings.API_TOKEN:
-            return {"success": False, "message": "API密钥错误"}
         offline_tasks = self._offline_task_service()
         if not offline_tasks:
             return {"success": False, "message": "当前网盘不支持离线任务"}
@@ -1635,13 +1622,10 @@ class SyncRuntimeService(OwnerDelegator):
 
     def api_delete_offline_tasks(
             self,
-            apikey: str,
             task_ids: List[str],
             pending_keys: Optional[List[str]] = None,
             delete_source_file: bool = False,
     ) -> dict:
-        if apikey != settings.API_TOKEN:
-            return {"success": False, "message": "API密钥错误"}
         offline_tasks = self._offline_task_service()
         if not offline_tasks:
             return {"success": False, "message": "当前网盘不支持离线任务"}

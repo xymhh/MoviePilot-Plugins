@@ -1,9 +1,11 @@
 """1.10.3：插件 UI 按流程复用 MP 界面，无法复用的新建导航。
 
-- 追更列表走 MP 订阅页、网盘资源走 MP 探索页：插件主页瘦成总览
-  （PluginWorkbench mode="overview"：统计 + 转存动态），不再有页签；
-- 历史记录没有 MP 代替：独立成主侧栏导航（history），实现仍是
-  PluginWorkbench（mode="history"），与总览共用同一份逻辑；
+- 追更列表走 MP 订阅页、网盘资源走 MP 探索页：插件主页不再有页签；
+- 历史记录没有 MP 代替：独立成主侧栏导航（history），实现是
+  PluginWorkbench；
+- v1.23.0（§11 前端收敛第 1 项）：总览模式已删，插件主页直接进
+  失败记录页（默认只看失败），mode prop 已删，StatsGrid/MediaHub
+  已随孤儿文件删除（用户 2026-11-18 定夺），MP 首页 Dashboard widget 是唯一总览；
 - 1.10.4：网盘整理不新增导航（1.10.3 的 organize 入口已撤），整理设置
   只留在配置页（organize 分组，高级设置里），整理台随导航一起删除；
 - 频道监控与签到状态并进渠道页（AppPageChannels）——1.13.2 已废止该合并：
@@ -118,20 +120,25 @@ class TestWorkbenchThinShells(unittest.TestCase):
         source = _read(
             "frontend/cloudsubscribex/src/components/PluginWorkbench.vue"
         )
-        self.assertIn("StatsGrid", source)
-        self.assertIn("MediaHub", source)
+        # v1.23.0：总览已删，只剩失败记录整表；统计卡片与转存动态不再挂载。
         self.assertIn("HistoryTable", source)
+        self.assertNotIn("StatsGrid", source)
+        self.assertNotIn("MediaHub", source)
         self.assertNotIn("<v-tab", source)
         self.assertNotIn("TgMonitor", source)
         self.assertNotIn("OrganizePanel", source)
-        self.assertIn('mode: { type: String, default: "overview" }', source)
-        self.assertIn("overviewGroups", source)
-        self.assertIn("overviewFilter", source)
+        # mode prop 已删（v-model 里的 "mode" 子串不算）。
+        self.assertNotIn("props.mode", source)
+        self.assertNotIn("mode: {", source)
+        self.assertNotIn('mode="', source)
+        self.assertNotIn("overviewGroups", source)
+        self.assertNotIn("overviewFilter", source)
 
-    def test_app_page_is_overview_shell(self):
+    def test_app_page_is_history_shell(self):
+        # v1.23.0：插件主页直接进失败记录页，不再是总览壳，不再传 mode。
         source = _read("frontend/cloudsubscribex/src/components/AppPage.vue")
         self.assertIn("PluginWorkbench", source)
-        self.assertIn('mode="overview"', source)
+        self.assertNotIn("mode=", source)
         self.assertNotIn("<v-tab", source)
         self.assertNotIn("MediaHub", source)
         self.assertNotIn("HistoryTable", source)
@@ -141,7 +148,7 @@ class TestWorkbenchThinShells(unittest.TestCase):
             "frontend/cloudsubscribex/src/components/AppPageHistory.vue"
         )
         self.assertIn("PluginWorkbench", source)
-        self.assertIn('mode="history"', source)
+        self.assertNotIn("mode=", source)
         self.assertNotIn("<v-tab", source)
 
     def test_organize_page_and_panel_deleted(self):

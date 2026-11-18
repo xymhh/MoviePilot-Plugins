@@ -170,8 +170,8 @@ def _plugin():
     plugin._sync_tasks = {}
     plugin._sync_tasks_lock = threading.RLock()
     plugin._stop_calls = []
-    plugin.api_stop_sync_task = lambda apikey, task_id: (
-        plugin._stop_calls.append((apikey, task_id)),
+    plugin.api_stop_sync_task = lambda task_id: (
+        plugin._stop_calls.append(task_id),
         {"success": True, "message": "已请求停止"},
     )[1]
     return plugin
@@ -286,7 +286,7 @@ class TestPluginListTorrents(unittest.TestCase):
             plugin.stop_torrents(hashs=[task_hash("subscribe:123")])
         )
         self.assertEqual(
-            plugin._stop_calls, [("test-token", "subscribe:123")]
+            plugin._stop_calls, ["subscribe:123"]
         )
         self.assertFalse(plugin.stop_torrents(hashs=["0" * 40]))
         self.assertFalse(plugin.stop_torrents())

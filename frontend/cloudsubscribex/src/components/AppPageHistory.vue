@@ -1,6 +1,6 @@
 <template>
-  <!-- 1.10.3：转存记录独立成主侧栏导航；1.13.3 瘦身为失败记录页（只列重试索引里的失败与待修复行）；实现见 PluginWorkbench。 -->
-  <PluginWorkbench :api="api" :plugin-id="pluginId" :nav-key="navKey" :on-close="onClose" mode="history" />
+  <!-- 1.10.3：转存记录独立成主侧栏导航；1.13.3 瘦身为失败记录页（只列重试索引里的失败与待修复行）；v1.23.0：总览模式已删，PluginWorkbench 只剩失败记录页，mode prop 已删。 -->
+  <PluginWorkbench :api="api" :plugin-id="pluginId" :nav-key="navKey" :on-close="onClose" />
 </template>
 
 <script setup>

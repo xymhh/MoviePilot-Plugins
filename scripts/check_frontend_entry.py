@@ -14,9 +14,11 @@
 签到状态（CheckinDashboard）只留 MP 首页 checkin widget。
 1.13.3：转存记录页瘦身为失败记录页——HistoryTable 只列重试索引里的
 失败与待修复行（扁平表，不再按媒体分组/展开子记录，不再有洗版/补发
-通知/Emby 播放入口）；总览动态仍用 MediaHub，overviewGroups 由扁平
-失败记录在前端就地分组。PluginWorkbench 按 mode="overview"|"history"
-渲染总览与历史两页；Page 只做转发。
+通知/Emby 播放入口）。
+v1.23.0（§11 前端收敛第 1 项）：总览模式已删——插件主页（AppPage）
+直接进失败记录页（默认只看失败），mode prop 已删，只剩 history
+一种模式；总览统计卡片（StatsGrid）与转存动态（MediaHub）不再挂载，
+MP 首页 Dashboard widget 是唯一总览；Page 只做转发。
 
 用法：python3 scripts/check_frontend_entry.py [项目根]
 """
@@ -64,17 +66,18 @@ def main(root: Path) -> int:
     tg_monitor_text = app_tg_monitor.read_text(encoding="utf-8")
     page_text = page.read_text(encoding="utf-8")
 
-    # 薄壳：不含页签，只转发 PluginWorkbench
-    for name, text, mode in (
-        ("AppPage", app_text, "overview"),
-        ("AppPageHistory", history_text, "history"),
+    # 薄壳：不含页签，只转发 PluginWorkbench；v1.23.0 起 mode prop 已删，
+    # 两壳都不再传 mode（AppPage 即失败记录页）。
+    for name, text in (
+        ("AppPage", app_text),
+        ("AppPageHistory", history_text),
     ):
         if re.search(r"<v-tab\b", text):
             errors.append(f"{name} 不应再有页签（1.10.3 已并掉）")
         if "PluginWorkbench" not in text:
             errors.append(f"{name} 应转发 PluginWorkbench")
-        if f'mode="{mode}"' not in text:
-            errors.append(f"{name} 应以 mode=\"{mode}\" 转发 PluginWorkbench")
+        if re.search(r"\bmode=", text):
+            errors.append(f"{name} 不应再传 mode（v1.23.0 已删 mode prop）")
 
     # 1.13.2：渠道页只留渠道管理；频道监控独立成导航；签到只留首页 widget。
     if "ChannelManager" not in channels_text:
@@ -92,19 +95,20 @@ def main(root: Path) -> int:
     if re.search(r"<v-tab\b", tg_monitor_text):
         errors.append("AppPageTgMonitor 不应有页签")
 
-    # 唯一实现：总览动态 + 历史整表都在 PluginWorkbench，不再有页签
+    # 唯一实现：失败记录整表在 PluginWorkbench，不再有页签；v1.23.0 起
+    # 总览已删，不再挂载统计卡片与转存动态，不再有 mode/overview 代码。
     if re.search(r"<v-tab\b", wb_text):
         errors.append("PluginWorkbench 不应再有页签（1.10.3 已并掉）")
-    for component in ("StatsGrid", "MediaHub", "HistoryTable"):
-        if component not in wb_text:
-            errors.append(f"PluginWorkbench 未挂载 {component}")
-    for gone in ("TgMonitor", "OrganizePanel"):
+    if "HistoryTable" not in wb_text:
+        errors.append("PluginWorkbench 未挂载 HistoryTable")
+    for gone in ("TgMonitor", "OrganizePanel", "StatsGrid", "MediaHub"):
         if gone in wb_text:
             errors.append(f"PluginWorkbench 不应再挂载 {gone}（已移出插件主页）")
-    if 'mode: { type: String, default: "overview" }' not in wb_text:
-        errors.append("PluginWorkbench 缺少 mode prop（overview/history）")
-    if "overviewGroups" not in wb_text or "overviewFilter" not in wb_text:
-        errors.append("PluginWorkbench 总览动态缺少 overviewGroups/overviewFilter")
+    if re.search(r"\bmode\b", wb_text):
+        errors.append("PluginWorkbench 不应再有 mode（v1.23.0 已删总览模式）")
+    for gone in ("overviewGroups", "overviewFilter", "overviewEmptyTitle", "overviewEmptyHint", "overviewListTitle"):
+        if gone in wb_text:
+            errors.append(f"PluginWorkbench 不应再有 {gone}（v1.23.0 已删总览）")
 
     for ref in sorted(set(re.findall(r'@click="(\w*Visible) = true"', wb_text))):
         if f'v-model="{ref}"' not in wb_text:
@@ -146,7 +150,7 @@ def report(errors: list[str]) -> int:
         for line in errors:
             print(f"  - {line}")
         return 1
-    print("前端单入口校验通过：PluginWorkbench 双模式 + 侧栏历史/渠道/频道监控页，Page 为转发壳")
+    print("前端单入口校验通过：PluginWorkbench 单页（失败记录）+ 侧栏历史/渠道/频道监控页，Page 为转发壳")
     return 0
 
 
