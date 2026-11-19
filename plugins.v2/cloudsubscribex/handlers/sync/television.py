@@ -214,19 +214,27 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 mediainfo, season
             )
             today = date.today().isoformat()
-            # TMDB 没给播出日期的集同样算「未播出」：空日期不是已播出的证据。
-            # 2026-11-08 谷雨事故：E11-E30 的 air_date 为 null，旧逻辑当成已播出，
-            # 结果一个标称「完结」的假资源把 22 集碎片直接塞进了媒体库。
-            # 整季一条日期都没有时（TMDB 无分集数据）无从判断，退回旧口径，
-            # 否则该剧会永远卡在「缺集尚未播出」。
-            if target_episode_air_dates:
-                unaired_episodes = {
+            # v1.27.1 新口径（用户 2026-11-19 定：按分享里实际有的集来算，不推算日期）：
+            # - TMDB 日期确定在今天之后的集 → 未播出，照旧挡住（不计入已有、不进缺集）。
+            # - TMDB 没给日期的集 → 不再算未播出：留在缺集里，转不转存只由分享里
+            #   实际解析出的视频文件集号决定（下面「分享文件集号 ∩ 缺集」匹配）。
+            #   国产日更剧 TMDB 常晚几天才补日期（多喜一家人 E09 起无日期，
+            #   旧口径让已出的 E09/E10 每轮被当成「未播出」跳过）。
+            # 2026-11-08 谷雨事故（标称「完结」的假资源塞进 22 集碎片）不再靠日期守卫兜，
+            # 由标题守卫、分享根目录守卫与逐文件集号匹配挡；日期守卫只挡确定未来的集。
+            # 整季一条日期都没有时（TMDB 无分集数据）同样不挡，与旧口径一致。
+            unaired_episodes: Set[int] = {
+                episode for episode in expected_episodes
+                if target_episode_air_dates.get(episode)
+                and target_episode_air_dates[episode] > today
+            }
+            undated_episodes: Set[int] = (
+                {
                     episode for episode in expected_episodes
                     if not target_episode_air_dates.get(episode)
-                    or target_episode_air_dates[episode] > today
                 }
-            else:
-                unaired_episodes = set()
+                if target_episode_air_dates else set()
+            )
             # 1. 先读取媒体服务器实际剧集，不混入订阅 note。
             self._owner.metadata._set_task_phase(subscribe, "检查媒体库内容", 30)
             media_server_valid, media_server_episodes = self._timed_sync_call(
@@ -258,8 +266,8 @@ class TelevisionSyncProcessor(OwnerDelegator):
             # 2026-11-13：物理事实优先。TMDB 分集日期可能错位或缺失（例如
             # 玫瑰战争 E05 已在库里却被无 air_date 判为「未播出」，订阅 note 被剔除），
             # 媒体库已存在的集显然已播出，不应被未播出守卫挡掉。
-            # 谷雨事故防护不变：TMDB 整季无分集数据时 unaired_episodes 为空，旧口径照旧；
-            # 库里没有的集仍按 TMDB 日期判定，泄露版/假资源照样挡。
+            # v1.27.1 起无日期的集本就不算未播出；这里只剩「日期在未来但库里已有」的
+            # 情况（TMDB 日期错位），同样以物理事实为准。
             if unaired_episodes and media_server_valid and media_server_episodes:
                 library_episodes = set(media_server_episodes) & expected_episodes
                 if library_episodes:
@@ -290,7 +298,8 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 return transferred_count
             cloud_matched = set(cloud_episodes & expected_episodes)
             if unaired_episodes:
-                # 未播出集即使网盘里已有（泄露/错包），也不计入“已入库”。
+                # 日期确定在未来的集即使网盘里已有（泄露/错包），也不计入“已入库”；
+                # 无日期的集按物理事实计入已有（v1.27.1，与 2026-11-13 口径一致）。
                 cloud_matched -= unaired_episodes
             # 以当前目标网盘实际存在的剧集为准计算缺集，彻底解耦外部媒体库可能残留的旧源索引
             existing_episodes_in_resources = set(cloud_matched)
@@ -349,21 +358,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
                 ]
 
             # 未播出集数不参与转存：部分资源站会提前放出“全集/泄露版”，
-            # 或把别的剧打包冒充，必须按 TMDB 单集播出日期挡住。
+            # 或把别的剧打包冒充；TMDB 日期确定在未来的集按日期挡住。
             if unaired_episodes:
                 skipped = set(missing_episodes) & unaired_episodes
                 if skipped:
-                    undated = {
-                        episode for episode in skipped
-                        if not target_episode_air_dates.get(episode)
-                    }
-                    detail = (
-                        f"（其中 {len(undated)} 集 TMDB 无播出日期）"
-                        if undated else ""
-                    )
                     logger.info(
-                        f"{mediainfo.title_year} S{season:02d} 跳过未播出剧集："
-                        f"{self._format_episode_ranges(skipped)}{detail}"
+                        f"{mediainfo.title_year} S{season:02d} 跳过未播出剧集"
+                        f"（TMDB 日期在未来）：{self._format_episode_ranges(skipped)}"
                     )
                     missing_episodes = [
                         episode for episode in missing_episodes
@@ -375,6 +376,13 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     )
                     self._owner._last_skip_reason = "缺集尚未播出，等待更新"
                     return transferred_count
+            undated_missing = set(missing_episodes) & undated_episodes
+            if undated_missing:
+                logger.info(
+                    f"{mediainfo.title_year} S{season:02d} 无播出日期的 "
+                    f"{len(undated_missing)} 集按分享实际文件判定："
+                    f"{self._format_episode_ranges(undated_missing)}"
+                )
 
             logger.debug(
                 f"{mediainfo.title_year} S{season:02d} 待转存剧集："

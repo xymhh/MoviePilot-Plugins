@@ -224,7 +224,10 @@ class TestBAiredInLibrary(unittest.TestCase):
         self.assertIn("if unaired_episodes and media_server_valid and media_server_episodes:", self.source)
 
     def test_guyu_protection_comment_kept(self):
-        self.assertIn("谷雨事故防护不变", self.source)
+        # v1.27.1：日期守卫只挡确定未来的集；谷雨类假全集改由标题/根目录守卫
+        # 与逐文件集号匹配挡（无日期的集按分享实际文件判定）。
+        self.assertIn("谷雨事故", self.source)
+        self.assertIn("日期守卫只挡确定未来的集", self.source)
 
 
 if __name__ == "__main__":

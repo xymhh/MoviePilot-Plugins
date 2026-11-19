@@ -889,6 +889,9 @@ class SyncExecutionService(OwnerDelegator):
             ).append(subscribe)
 
         completed_subscribes = 0
+        # v1.27.1：本轮未转存的真实原因（取各组结果里最后一个非空原因），
+        # 写进最终的 _sync_context，由执行结果带给频道监控。
+        run_skip_reason = ""
         if grouped_subscribes:
             ordered_manual_seasons = bool(
                 manual_target
@@ -926,7 +929,7 @@ class SyncExecutionService(OwnerDelegator):
                 }
 
                 def collect_future_result(future) -> None:
-                    nonlocal completed_subscribes, transferred_count
+                    nonlocal completed_subscribes, transferred_count, run_skip_reason
                     group = future_groups[future]
                     try:
                         result = future.result()
@@ -1024,6 +1027,9 @@ class SyncExecutionService(OwnerDelegator):
                             )
                     transfer_details.extend(result["transfer_details"])
                     transferred_count += int(result["transferred"] or 0)
+                    group_reason = str(result.get("skip_reason") or "").strip()
+                    if group_reason:
+                        run_skip_reason = group_reason
                     completed_subscribes += len(group)
                     progress_text = (
                         f"正在按季整理媒体（{completed_subscribes}/{total_subscribes}）"
@@ -1132,6 +1138,7 @@ class SyncExecutionService(OwnerDelegator):
                 "transferred": transferred_count,
                 "action_name": action_name,
                 "phase": "保存结果与发送通知",
+                "skip_reason": run_skip_reason,
             },
         )
         pending_finalize_count = 0
@@ -1405,12 +1412,10 @@ class SyncExecutionService(OwnerDelegator):
                 success = False
             finally:
                 stop_requested = self._stop_requested()
+                # 频道监控等手动提交需要知道「一条都没转存」的真实原因：
+                # v1.27.1 起由 _do_sync 汇总各组结果写进 _sync_context["skip_reason"]
+                # （来源唯一：SyncHandler.last_skip_reason()）。
                 run_context = dict(self._sync_context or {})
-                # 频道监控等手动提交需要知道「一条都没转存」的真实原因。
-                if not run_context.get("skip_reason"):
-                    run_context["skip_reason"] = str(
-                        getattr(self, "_last_skip_reason", "") or ""
-                    )
                 with self._sync_tasks_lock:
                     current_tasks = [
                         task for task in self._sync_tasks.values()

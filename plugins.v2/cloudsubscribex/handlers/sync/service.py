@@ -200,6 +200,11 @@ class SyncHandler:
         for _field_name, _component_type in COMPONENT_FIELDS:
             setattr(self, _field_name, get_component(self, _component_type, "_handler_components"))
 
+        # v1.27.1：单订阅「一条都没转存」的真实原因，唯一归属在 SyncHandler
+        # （见下方 _last_skip_reason 属性）。按线程隔离：订阅组在线程池里并发跑，
+        # 共用这一个 SyncHandler，一组的原因不能被另一组覆盖或清空。
+        self._skip_reason_local = threading.local()
+
         def _get_val(name: str, default: Any = None) -> Any:
             if name in kwargs and kwargs[name] is not None:
                 return kwargs[name]
@@ -621,6 +626,33 @@ class SyncHandler:
     # 自此攒起）；后者有 hasattr 守卫，悄悄返回“同步服务未就绪”（STRM
     # 增量/全量补齐自此停摆）。新增转发务必同步补测试
     # test_sync_handler_forwarder_coverage_1_26_1.py 的调用点扫描。
+
+    # -- 单订阅未转存原因（v1.27.1，唯一来源）--
+    # 写入方：本处理器的组件经 ``self._owner._last_skip_reason = ...`` 写
+    # （television / movie / subscribe_flow），落到这个属性；读取方：运行态
+    # 服务 ``_run_subscription_group`` 经 ``last_skip_reason()`` 读，随组结果
+    # 交给同步执行层。v1.27.0 及以前读的是插件实例上的同名属性（每组开头
+    # 清空、组件从不写那里），读出来恒为空，频道监控只能退回「本轮无新集」。
+
+    def _skip_reason_store(self) -> threading.local:
+        store = self.__dict__.get("_skip_reason_local")
+        if store is None:
+            # 测试里经 __new__ 构造、未跑 __init__ 时按需补上。
+            store = threading.local()
+            self.__dict__["_skip_reason_local"] = store
+        return store
+
+    @property
+    def _last_skip_reason(self) -> str:
+        return str(getattr(self._skip_reason_store(), "value", "") or "")
+
+    @_last_skip_reason.setter
+    def _last_skip_reason(self, value: Any) -> None:
+        self._skip_reason_store().value = str(value or "")
+
+    def last_skip_reason(self) -> str:
+        """当前线程最近一次单订阅处理「未转存」的真实原因。"""
+        return self._last_skip_reason.strip()
 
     def _build_episode_baseline(self, subscribe, mediainfo: MediaInfo, season: int, include_saved: bool=True, score_cache: Optional[Dict[tuple, int]]=None) -> Dict[int, Dict[str, Any]]:
         return self.upgrade_baseline._build_episode_baseline(subscribe, mediainfo, season, include_saved, score_cache)

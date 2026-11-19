@@ -653,7 +653,9 @@ class SyncRuntimeService(OwnerDelegator):
         initial_history_count = len(local_history)
         transfer_details: List[Dict[str, Any]] = []
         transferred_count = 0
-        self._last_skip_reason = ""
+        # v1.27.1：本组「一条都没转存」的真实原因随组结果返回（组是并发跑的，
+        # 不再写插件实例上的共享属性）。
+        group_skip_reason = ""
         direct_cloud_paths = self._direct_cloud_manual_resources(
             manual_resources
         )
@@ -712,11 +714,13 @@ class SyncRuntimeService(OwnerDelegator):
                     )
                 transferred_count += int(task_count or 0)
                 if int(task_count or 0) <= 0:
-                    skip_reason = str(
-                        getattr(self, "_last_skip_reason", "") or ""
-                    ).strip()
+                    # v1.27.1：原因由 SyncHandler 的组件写在 SyncHandler 上
+                    # （唯一来源）；以前这里读的是插件实例自己的
+                    # _last_skip_reason（组开头清空、组件从不写那里），
+                    # 读出来恒为空，频道监控只能退回「本轮无新集」。
+                    skip_reason = self._sync_handler.last_skip_reason()
                     if skip_reason:
-                        self._last_skip_reason = skip_reason
+                        group_skip_reason = skip_reason
                 stopped = bool(task_event and task_event.is_set())
                 pending_items = self._pending_finalize_items(subscribe)
                 pending_count = len(pending_items)
@@ -808,6 +812,7 @@ class SyncRuntimeService(OwnerDelegator):
             ],
             "transfer_details": transfer_details,
             "transferred": transferred_count,
+            "skip_reason": group_skip_reason,
         }
 
     def _set_sync_status(
