@@ -22,16 +22,52 @@ from ...core import CloudDriveCapability, OwnerDelegator
 class OfflineTaskService(OwnerDelegator):
     """管理离线任务的查看、重试、删除与网盘文件终态后处理监控。"""
 
+    @staticmethod
+    def _pending_count_or_zero(sync_handler: Any) -> int:
+        """取待处理记录数；取不到时返回 0（异常路径的 result 仍要带 pending 数）。"""
+        try:
+            return len(sync_handler.get_pending_finalize_tasks())
+        except Exception:
+            return 0
+
+    def _log_monitor_heartbeat(self, result: Dict[str, Any]) -> None:
+        """v1.26.0：监控每轮结果记 INFO（节流）。
+
+        成功路径此前全是 DEBUG，任务停跑与正常等待在日志里无法区分；
+        只在完成/失败数>0 或待处理数变化时记一行：心跳停 = 监控没在完成轮次。
+        """
+        completed = int(result.get("completed") or 0)
+        failed = int(result.get("failed") or 0)
+        pending = int(result.get("pending") or 0)
+        last_pending = self.__dict__.get("_monitor_last_pending")
+        self.__dict__["_monitor_last_pending"] = pending
+        if not completed and not failed and last_pending == pending:
+            return
+        logger.info(
+            f"网盘文件后处理监控：完成 {completed} 个，失败 {failed} 个，待处理 {pending} 个"
+        )
+
     def _monitor_offline_task_groups(
             self,
             sync_handler: Any,
             offline_service: Optional[Any],
             kwargs: Dict[str, Any],
     ) -> Dict[str, Any]:
-        groups = sync_handler.get_due_offline_task_groups(
-            force=bool(kwargs.get("force")),
-            pending_keys=kwargs.get("pending_keys"),
-        )
+        try:
+            groups = sync_handler.get_due_offline_task_groups(
+                force=bool(kwargs.get("force")),
+                pending_keys=kwargs.get("pending_keys"),
+            )
+        except Exception as error:
+            # v1.26.0：分组异常不再直抛给调度器（只进主日志、插件侧静默），
+            # 在插件日志记 ERROR 并返回带待处理数的 result，监控继续下一轮。
+            logger.error(f"媒体后处理分组失败：{error}", exc_info=True)
+            return {
+                "checked": 0,
+                "completed": 0,
+                "failed": 0,
+                "pending": self._pending_count_or_zero(sync_handler),
+            }
         with self._sync_tasks_lock:
             stopping_keys = {
                 str(pending_key)
@@ -63,15 +99,32 @@ class OfflineTaskService(OwnerDelegator):
                 and offline_service
                 and shared_kwargs.get("offline_tasks") is None
         ):
-            snapshot = offline_service.get_offline_task_list_snapshot(
-                force=True,
-            )
-            shared_kwargs["offline_tasks"] = snapshot.get("tasks") or []
-            shared_kwargs["offline_tasks_valid"] = bool(snapshot.get("refresh_ok"))
+            try:
+                snapshot = offline_service.get_offline_task_list_snapshot(
+                    force=True,
+                )
+            except Exception as error:
+                # v1.26.0：前置快照失败不阻断本轮——各组在
+                # _prepare_postprocess_context 里需要时还会自己拉一次。
+                logger.error(f"媒体后处理离线快照失败：{error}", exc_info=True)
+            else:
+                shared_kwargs["offline_tasks"] = snapshot.get("tasks") or []
+                shared_kwargs["offline_tasks_valid"] = bool(snapshot.get("refresh_ok"))
 
         if len(groups) == 1:
             shared_kwargs["pending_keys"] = set(groups[0]["pending_keys"])
-            return sync_handler.monitor_offline_strm_tasks(**shared_kwargs)
+            try:
+                return sync_handler.monitor_offline_strm_tasks(**shared_kwargs)
+            except Exception as error:
+                # v1.26.0：单组路径此前无任何 try/except，异常直抛给调度器、
+                # 整批零处理且插件日志零记录；现在记 ERROR 并返回带待处理数的 result。
+                logger.error(f"媒体后处理单组执行失败：{error}", exc_info=True)
+                return {
+                    "checked": 0,
+                    "completed": 0,
+                    "failed": 0,
+                    "pending": self._pending_count_or_zero(sync_handler),
+                }
 
         policy = getattr(getattr(self, "_cloud_drive", None), "policy", None)
         worker_count = min(
@@ -142,9 +195,11 @@ class OfflineTaskService(OwnerDelegator):
         try:
             notification_batch_started = sync_handler.begin_notification_batch()
             try:
-                return self._monitor_offline_task_groups(
+                result = self._monitor_offline_task_groups(
                     sync_handler, offline_service, kwargs
                 )
+                self._log_monitor_heartbeat(result)
+                return result
             finally:
                 if notification_batch_started:
                     sync_handler.finish_notification_batch()
@@ -192,9 +247,9 @@ class OfflineTaskService(OwnerDelegator):
             is_offline_type = task_type in {"magnet", "ed2k", "offline"}
             task_id = str(item.get("task_id") or "").upper()
             task = task_by_id.get(task_id) if task_id else None
-            # 只有明确是离线类型，或在网盘返回的离线任务中存在对应 task_id 的任务，才参与离线列表合并
-            if not is_offline_type and not task:
-                continue
+            # v1.26.0：全部待后处理记录都参与合并——有对应离线任务的合
+            # 并进该任务，没有的合成 pending: 项（分享类无真实离线任务
+            # id，旧守卫会把它们全拦在合成支路之外，界面上完全不可见）。
             offline_pending_count += 1
             pending_meta = {
                 "pending_key": item.get("pending_key"),
@@ -212,9 +267,14 @@ class OfflineTaskService(OwnerDelegator):
             }
             if task:
                 task.update(pending_meta)
-            elif is_offline_type:
+            else:
+                # v1.26.0：分享类 pending 记录也进快照（带 finalize_pending
+                # 标记），在 OfflineTasksDialog 展示——此前只有离线类或在
+                # 网盘离线任务里有对应 task_id 的才进，分享转存的待处理
+                # 记录在界面上完全不可见。合成项不带 id：对话框按 pending_key
+                # 选择/重试/删除；带 id 会被当成真实离线任务 id 去重启 115
+                # 任务。离线类沿用旧形状（id 即真实离线任务 id）。
                 synthetic = {
-                    "id": task_id,
                     "name": item.get("file_name") or "未命名文件",
                     "state": "processing",
                     "completed": False,
@@ -224,6 +284,8 @@ class OfflineTaskService(OwnerDelegator):
                     "add_time": int(item.get("created_at") or 0),
                     **pending_meta,
                 }
+                if is_offline_type:
+                    synthetic["id"] = task_id
                 tasks.insert(0, synthetic)
         if self._sync_handler:
             pending_task_keys = {
@@ -445,11 +507,13 @@ class OfflineTaskService(OwnerDelegator):
                     max_instances=2,
                     coalesce=True,
                 )
-                logger.debug(f"网盘文件终态后处理监控已启动（待处理 {pending_count} 个）")
+                # v1.26.0：监控启动/停止提为 INFO——此前是 DEBUG，任务停跑
+                # 在插件日志里不可见（见根因 (a)/(b)）。
+                logger.info(f"网盘文件终态后处理监控已启动（待处理 {pending_count} 个）")
                 return
 
             if registry.remove_job("CloudSubscribe_OfflineMonitor"):
-                logger.debug("网盘文件终态后处理队列已清空，监控已停止")
+                logger.info("网盘文件终态后处理队列已清空，监控已停止")
 
     def monitor_offline_tasks(self):
         """轻量检查到期节点，实际网盘请求间隔由待处理任务控制。"""

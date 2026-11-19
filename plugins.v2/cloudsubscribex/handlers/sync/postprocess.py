@@ -1809,8 +1809,9 @@ class PostprocessService(OwnerDelegator):
         :return: (action, found_file, dest_parent)；action 为 retry（已调度
             复查，调用方直接返回）、abort（已 abort，调用方直接返回）、
             located（dest 文件已找到，调用方继续成功分支）、dest_missed
-            （历史成功但 dest 查无文件，调用方回落平铺定位，仍找不到时
-            只复查、不计 fail_count、不 abort）。
+            （历史成功但 dest 查无文件：found_file 为 MP 历史 dest 完整路径
+            字符串、dest_parent 为其父目录，供调用方模糊定位/直接结算，
+            不再无限复查——见 v1.26.0 _commit_mp_organize_success）。
         """
         from ...core.services.mp_organize_tracker import (
             MP_ORGANIZE_GRACE_SECONDS,
@@ -1883,10 +1884,101 @@ class PostprocessService(OwnerDelegator):
                 if actual_name:
                     item["file_name"] = actual_name
                 return ("located", found, str(Path(str(dest_path)).parent))
-            return ("dest_missed", None, "")
+            # v1.26.0：历史成功但 dest 查无文件时，把 dest 完整路径与父目录
+            # 一并返回，调用方先做模糊定位、仍找不到时以 MP 历史为准直接结算，
+            # 不再无限复查（见 _organize_and_finalize_single_item）。
+            return (
+                "dest_missed",
+                dest_path or None,
+                str(Path(str(dest_path)).parent) if dest_path else "",
+            )
         # 未知态：当作等待处理，只复查、不计失败。
         self._schedule_finalize_retry(item, ctx.now)
         return ("retry", None, "")
+
+    def _fuzzy_locate_in_dest_parent(
+            self,
+            item: Dict[str, Any],
+            pending_key: str,
+            dest_path: str,
+            dest_parent: str,
+            ctx: PostprocessBatchContext,
+    ) -> Optional[Any]:
+        """在 MP 历史 dest 的父目录做模糊定位（哈希/前后缀/季集，含递归子目录）。
+
+        dest 精确查找失败时调用：MP 会改名并嵌进子目录（剧集“剧名/Season 1/”、
+        电影“电影名 (年份) {tmdbid}/”），平铺精确名查不到不代表文件不在库。
+        命中返回文件对象，未命中返回 None（调用方以 MP 历史为准直接结算）。
+        """
+        parent = str(dest_parent or "").strip()
+        if not parent:
+            return None
+        dest_name = Path(str(dest_path or "")).name
+        candidate_names = [
+            str(item.get("file_name") or ""),
+            str(item.get("staging_name") or ""),
+            dest_name,
+            extract_ed2k_filename(str(item.get("share_url") or "")),
+        ]
+        res_file_list = (item.get("resource") or {}).get("file_list")
+        if isinstance(res_file_list, list) and res_file_list:
+            candidate_names.append(str(res_file_list[0]).strip())
+        return self._locate_cloud_file(
+            parent,
+            candidate_names,
+            self._extract_item_hash(item),
+            ctx,
+            item=item,
+            recursive=True,
+        )
+
+    def _commit_mp_organize_success(
+            self,
+            item: Dict[str, Any],
+            pending_key: str,
+            dest_path: str,
+            dest_parent: str,
+            ctx: PostprocessBatchContext,
+    ) -> None:
+        """MP 整理历史已成功、模糊定位仍找不到文件时直接结算。
+
+        文件已确认在媒体库（MP 整理历史成功是唯一账本），继续等定位不会
+        有变化。文件名以 MP 历史 dest 为准同步；STRM 本轮尽量生成，生成
+        不了记 WARNING（由后续 STRM 增量补齐兜底），不要静默丢 STRM。
+        元数据刮削跳过：文件已由 MP 整理入库，插件按自己算的路径去刮削
+        只会找错地方。
+        """
+        dest_name = Path(str(dest_path or "")).name
+        if dest_name:
+            item["file_name"] = dest_name
+        item["moved_at"] = ctx.now
+        media, media_data = self._owner.transfer_details._restore_pending_media_context(
+            item, pending_key
+        )
+        strm_path = None
+        if (
+                self._strm_generate_enabled
+                and self._strm_generator
+                and self._local_resource_path
+                and dest_parent
+                and dest_name
+        ):
+            try:
+                strm_path = self._owner.strm_ops._generate_strm(
+                    dest_parent, dest_name
+                )
+            except Exception as error:
+                logger.debug(
+                    f"dest_missed 结算时 STRM 生成异常：{error}", exc_info=True
+                )
+                strm_path = None
+            if not strm_path:
+                logger.warning(
+                    "MP 整理已成功但文件定位不到，STRM 未生成"
+                    "（待 STRM 增量补齐）："
+                    f"{dest_path or pending_key}"
+                )
+        self._finalize_ready_item(item, pending_key, strm_path, media, media_data, ctx)
 
     def _organize_and_finalize_single_item(
             self, item: Dict[str, Any], pending_key: str, ctx: PostprocessBatchContext
@@ -1941,6 +2033,8 @@ class PostprocessService(OwnerDelegator):
         # 按历史 dest 精确路径定位，跳过平铺目录扫描。
         mp_organize = item.get("mp_organize")
         mp_dest_missed = False
+        mp_dest_path = ""
+        mp_dest_parent = ""
         if (
                 isinstance(mp_organize, dict) and mp_organize
                 and not target_file and not already_moved
@@ -1960,6 +2054,9 @@ class PostprocessService(OwnerDelegator):
                 file_name = str(item.get("file_name") or file_name)
             elif mp_action == "dest_missed":
                 mp_dest_missed = True
+                # found_file 位是 MP 历史 dest 完整路径字符串。
+                mp_dest_path = mp_found if isinstance(mp_found, str) else ""
+                mp_dest_parent = mp_dest_dir or ""
 
         # 仅在尚未就绪物理文件时才执行网盘检索与状态广播，避免重复检查与多余推送
         if not target_file:
@@ -2005,37 +2102,63 @@ class PostprocessService(OwnerDelegator):
 
         if not target_file:
             if mp_dest_missed:
-                # MP 历史已成功但 dest 查无文件（S01E06 库内查找不一致就是
-                # 前车之鉴）：不计失败、不 abort，只复查，等 MP 侧落定。
-                self._schedule_finalize_retry(item, ctx.now)
-                return
-            # Phase 4：定位失败的计数与超时只调 _finalize_failure（阈值与
-            # 超时在 service.py 一处定义）。能走到这里的项没有 mp_organize
-            # 身份——带身份的项已在前面走 _poll_mp_organize_state，MP 整理
-            # 等待不受 2 次/120 秒约束，只受 MP 90 分钟总超时约束；这里的
-            # 2 次/120 秒只约束插件自己的定位步骤。
-            # 若是普通转存/整理或已完成下载的离线任务，最多允许重试 1 次（给网盘极短暂的元数据刷新时间）；
-            # 只有正在下载中的离线任务才允许重试更多次
-            is_offline_downloading = (
-                    task_type in {"ed2k", "magnet", "offline"}
-                    and not bool(item.get("download_completed_at"))
-            )
-            ready_at = float(item.get("download_completed_at") or created_at)
-            timeout_seconds = (
-                self._OFFLINE_TIMEOUT if is_offline_downloading
-                else self._FINALIZE_LOCATE_TIMEOUT_SECONDS
-            )
-            if self._finalize_failure(
-                    item, pending_key, now=ctx.now, ready_at=ready_at,
-                    timeout_seconds=timeout_seconds,
-            ):
-                reason = (
-                    f"网盘文件定位失败（在转存路径 {staging_dir} 及目标路径均未找到匹配文件，已尝试 {item.get('fail_count', 0)} 次）"
+                # v1.26.0：MP 历史已成功但 dest 精确查找不到文件（MP 改名/
+                # 嵌套入库，插件按自己算的路径定位不到）——不再无限复查。
+                # 先在 dest 父目录做一次模糊定位（含递归子目录）；命中则
+                # 按已定位继续走正常流程；仍找不到则以 MP 历史成功为准
+                # 直接 commit，STRM 由后续增量补齐生成。
+                fuzzy = self._fuzzy_locate_in_dest_parent(
+                    item, pending_key, mp_dest_path, mp_dest_parent, ctx
                 )
-                self._abort_single_item(item, pending_key, reason, ctx)
-            else:
-                self._schedule_finalize_retry(item, ctx.now)
-            return
+                if fuzzy is not None:
+                    target_file = fuzzy
+                    already_moved = True
+                    staging_dir = mp_dest_parent or staging_dir
+                    ctx.moved_files[pending_key] = fuzzy
+                    found_name = str(getattr(fuzzy, "name", "") or "").strip()
+                    if found_name:
+                        file_name = found_name
+                        item["file_name"] = found_name
+                    item["moved_at"] = ctx.now
+                    logger.info(
+                        "MP 整理已成功但 dest 精确查找不到，模糊定位命中："
+                        f"{staging_dir}/{found_name or file_name}"
+                    )
+                else:
+                    self._commit_mp_organize_success(
+                        item, pending_key, mp_dest_path, mp_dest_parent, ctx
+                    )
+                    return
+            if not target_file:
+                # v1.26.0：模糊定位命中后 target_file 已就绪，跳过定位失败
+                # 计数与重试调度，直接落到下面的正常流程（STRM/终态）。
+                # Phase 4：定位失败的计数与超时只调 _finalize_failure（阈值与
+                # 超时在 service.py 一处定义）。能走到这里的项没有 mp_organize
+                # 身份——带身份的项已在前面走 _poll_mp_organize_state，MP 整理
+                # 等待不受 2 次/120 秒约束，只受 MP 90 分钟总超时约束；这里的
+                # 2 次/120 秒只约束插件自己的定位步骤。
+                # 若是普通转存/整理或已完成下载的离线任务，最多允许重试 1 次（给网盘极短暂的元数据刷新时间）；
+                # 只有正在下载中的离线任务才允许重试更多次
+                is_offline_downloading = (
+                        task_type in {"ed2k", "magnet", "offline"}
+                        and not bool(item.get("download_completed_at"))
+                )
+                ready_at = float(item.get("download_completed_at") or created_at)
+                timeout_seconds = (
+                    self._OFFLINE_TIMEOUT if is_offline_downloading
+                    else self._FINALIZE_LOCATE_TIMEOUT_SECONDS
+                )
+                if self._finalize_failure(
+                        item, pending_key, now=ctx.now, ready_at=ready_at,
+                        timeout_seconds=timeout_seconds,
+                ):
+                    reason = (
+                        f"网盘文件定位失败（在转存路径 {staging_dir} 及目标路径均未找到匹配文件，已尝试 {item.get('fail_count', 0)} 次）"
+                    )
+                    self._abort_single_item(item, pending_key, reason, ctx)
+                else:
+                    self._schedule_finalize_retry(item, ctx.now)
+                return
 
         if item.get("upgrade") and str(
                 item.get("upgrade_mode") or self._upgrade_mode
@@ -2258,16 +2381,77 @@ class PostprocessService(OwnerDelegator):
             if item.get("finalize_dead"):
                 self._handle_finalize_dead_item(item, pending_key, ctx)
                 continue
+            try:
+                self._dispatch_due_item(item, pending_key, ctx)
+            except Exception as error:
+                # v1.26.0：单项异常只记 ERROR、计一次失败并调度重试，不拖垮
+                # 同组其余项与批次收尾（_flush_batch_postprocess）。
+                logger.error(
+                    f"后处理单项异常：{pending_key}"
+                    f"（{item.get('file_name') or ''}），{error}",
+                    exc_info=True,
+                )
+                if pending_key not in ctx.pending:
+                    # 本轮内已结算（commit/abort）后才抛的异常：终态已定，
+                    # 不再二次结算，只记日志。
+                    continue
+                try:
+                    if self._finalize_failure(item, pending_key):
+                        self._abort_single_item(
+                            item, pending_key, f"后处理异常：{error}", ctx
+                        )
+                    else:
+                        self._schedule_finalize_retry(item, ctx.now)
+                except Exception as settle_error:
+                    logger.error(
+                        f"后处理单项异常后结算失败：{pending_key}，{settle_error}",
+                        exc_info=True,
+                    )
+            if pending_key in ctx.pending:
+                self._expire_overdue_pending_item(item, pending_key, ctx)
 
-            task_type = str(item.get("task_type") or "share").strip().lower()
-            if task_type in {"magnet", "ed2k", "offline"}:
-                task, ready = self._poll_offline_ready(item, pending_key, ctx)
-                if not ready:
-                    continue
-                if task_type == "magnet":
-                    self._finalize_magnet_due_item(item, pending_key, ctx, task)
-                    continue
-            self._organize_and_finalize_single_item(item, pending_key, ctx)
+    def _dispatch_due_item(
+            self, item: Dict[str, Any], pending_key: str, ctx: PostprocessBatchContext
+    ) -> None:
+        """单项分发：离线类先轮询离线就绪，磁力走磁力收尾，其余走整理收尾。"""
+        task_type = str(item.get("task_type") or "share").strip().lower()
+        if task_type in {"magnet", "ed2k", "offline"}:
+            task, ready = self._poll_offline_ready(item, pending_key, ctx)
+            if not ready:
+                return
+            if task_type == "magnet":
+                self._finalize_magnet_due_item(item, pending_key, ctx, task)
+                return
+        self._organize_and_finalize_single_item(item, pending_key, ctx)
+
+    def _expire_overdue_pending_item(
+            self, item: Dict[str, Any], pending_key: str, ctx: PostprocessBatchContext
+    ) -> bool:
+        """v1.26.0 绝对过期：自首次出现起超限仍未结算，强制 abort 进失败记录。
+
+        时钟用 first_seen_at（重登记时保留，不可重置），不用 created_at。
+        老记录缺 first_seen_at 时以 created_at 回填并记 INFO，本轮不直接
+        过期（给主修复一次结算机会，下一轮再按回填值判定）。
+        与 _abort_single_item 同口径：写失败历史、清队列、推任务终态、发失败通知。
+        :return: 是否已过期 abort。
+        """
+        first_seen = item.get("first_seen_at")
+        if first_seen is None:
+            first_seen = float(item.get("created_at") or ctx.now)
+            item["first_seen_at"] = first_seen
+            logger.info(
+                f"后处理记录补记首次出现时间：{item.get('file_name') or pending_key}"
+            )
+            return False
+        if ctx.now - float(first_seen) <= self._PENDING_ABSOLUTE_TIMEOUT_SECONDS:
+            return False
+        self._abort_single_item(
+            item, pending_key,
+            "后处理超时（超过 "
+            f"{int(self._PENDING_ABSOLUTE_TIMEOUT_SECONDS // 3600)} 小时未完成）",
+            ctx,
+        )
+        return True
 
     def _flush_batch_postprocess(self, ctx: PostprocessBatchContext) -> None:
         """批次后处理收尾：批量回收洗版旧文件、批量提交订阅集数、发送批次聚合通知。"""
@@ -2420,12 +2604,22 @@ class PostprocessService(OwnerDelegator):
             offline_tasks_valid: Optional[bool] = None,
     ) -> Dict[str, int]:
         """检查离线下载和网盘文件后处理；手动刷新可立即重试指定任务。"""
-        ctx = self._prepare_postprocess_context(
-            force=force,
-            pending_keys=pending_keys,
-            offline_tasks=offline_tasks,
-            offline_tasks_valid=offline_tasks_valid,
-        )
+        try:
+            ctx = self._prepare_postprocess_context(
+                force=force,
+                pending_keys=pending_keys,
+                offline_tasks=offline_tasks,
+                offline_tasks_valid=offline_tasks_valid,
+            )
+        except Exception as error:
+            # v1.26.0：批次初始化异常不再直抛给调度器（只进主日志、插件侧
+            # 静默），在插件日志记 ERROR 并返回带待处理数的 result，监控继续下一轮。
+            logger.error(f"后处理批次初始化失败：{error}", exc_info=True)
+            try:
+                pending_count = len(self.get_pending_finalize_tasks())
+            except Exception:
+                pending_count = 0
+            return {"checked": 0, "completed": 0, "failed": 0, "pending": pending_count}
         if not ctx:
             return {"checked": 0, "completed": 0, "failed": 0, "pending": 0}
         if not ctx.due_keys:

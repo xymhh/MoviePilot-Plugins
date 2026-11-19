@@ -4,7 +4,8 @@
 - MP 等待态（queued/running）下 fail_count 不涨、120 秒过去也不 abort；
 - MP 成功后按历史 dest 精确嵌套路径定位（S01E234 回归：文件在
   /转存/<剧名>/Season 1/ 下也能找到），走完 STRM 并清 pending 与登记表；
-- MP 成功但 dest 查无文件时只复查、不计 fail_count、不 abort；
+- MP 成功但 dest 查无文件时不再无限复查（v1.26.0：模糊定位不到则以 MP 历史
+  为准直接 commit；旧行为“只复查”会让记录永远留着，下载页 95% 卡不消失）；
 - MP 失败后 abort 原因取 MP 原文；missing 超宽限 abort“未受理”；
   queued/running 超 90 分钟 abort“超时”；队列停滞 15 分钟只更新文案；
 - 终态（abort/commit）集中清除 MP 整理中登记；
@@ -412,9 +413,10 @@ class FinalizeMpWaitTests(unittest.TestCase):
         self.assertNotIn("key1", pending)
         self.assertIn(DEST_PARENT, self.service._snapshot_calls)
 
-    def test_succeeded_dest_missing_retries_without_failure(self):
-        """历史成功但 dest 查无文件：回落平铺定位仍找不到时只复查，
-        不计 fail、不 abort（S01E06 库内查找不一致的前车之鉴）。"""
+    def test_succeeded_dest_missing_settles_by_mp_history(self):
+        """v1.26.0：历史成功但 dest 查无文件：模糊定位不到时以 MP 历史为准
+        直接 commit，不再无限复查、不计 fail、不 abort（S01E06 库内查找不
+        一致的前车之鉴——旧行为“只复查”会让记录永远留着，下载页 95% 卡不消失）。"""
         self.service._snapshot_map = {}
         item = _item(NOW - 600)
         _tracker, pending, ctx = self._run(
@@ -422,8 +424,9 @@ class FinalizeMpWaitTests(unittest.TestCase):
         )
         self.assertEqual(self.abort_calls, [])
         self.assertEqual(int(item.get("fail_count") or 0), 0)
-        self.assertIn("key1", pending)
-        self.assertGreater(float(item.get("next_check_at") or 0), NOW)
+        self.assertNotIn("key1", pending)
+        self.assertEqual(item.get("file_name"), FILE_NAME)
+        self.assertTrue(item.get("moved_at"))
         self.assertIn(DEST_PARENT, self.service._snapshot_calls)
 
     def test_locate_cloud_file_by_dest_nested_path(self):

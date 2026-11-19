@@ -145,6 +145,10 @@ class SyncHandler:
     _FINALIZE_LOCATE_TIMEOUT_SECONDS = 120.0
     _FILE_FINALIZE_TIMEOUT = 30 * 60
     _OFFLINE_MONITOR_LEASE_SECONDS = 15 * 60
+    # v1.26.0：待后处理记录的绝对过期（自首次出现起算）。created_at 会被
+    # 重登记重置（_build_pending_record 的 fresh_attempt），不能当作时钟；
+    # first_seen_at 在重登记时保留（见 _build_pending_record），只增不减。
+    _PENDING_ABSOLUTE_TIMEOUT_SECONDS = 6 * 60 * 60
     _MEDIA_RECOGNITION_CACHE_LIMIT = 256
     _PLATFORM_ROOT_CACHE_LIMIT = 256
     _RESOURCE_SEASON_DIR_CACHE_LIMIT = 256
@@ -1479,6 +1483,11 @@ class SyncHandler:
                 "staging_name": display_name,
                 "episode": target_episodes[0] if target_episodes and len(target_episodes) == 1 else None,
                 "created_at": now,
+                # v1.26.0：首次出现时间；重复提交同一 pending_key 时保留旧值，
+                # 不跟着整条记录被覆盖而重置（绝对过期的时钟，见 _build_pending_record）。
+                "first_seen_at": float(
+                    (pending.get(pending_key) or {}).get("first_seen_at") or now
+                ),
                 "next_check_at": now + self._OFFLINE_CHECK_DELAYS[0],
                 "check_index": 0,
                 "history_ready": True,
@@ -1811,6 +1820,10 @@ class SyncHandler:
             "created_at": (
                 now if fresh_attempt else float(current.get("created_at") or now)
             ),
+            # v1.26.0：首次出现时间，重登记时保留旧值、绝不跟着 fresh_attempt
+            # 重置；绝对过期的唯一时钟（见 postprocess._expire_overdue_pending_item）。
+            # 老记录没有该字段时取 now（本轮首次出现即为 first_seen）。
+            "first_seen_at": float(current.get("first_seen_at") or now),
             "download_completed_at": (
                 0.0 if fresh_attempt
                 else float(current.get("download_completed_at") or 0.0)
