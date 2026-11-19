@@ -414,7 +414,7 @@ class MoviePilotRegistration(OwnerDelegator):
                 "endpoint": self.api_vue_tg_transfer,
                 "methods": ["POST"],
                 "auth": "bear",
-                "summary": "把 TG 资源转存到订阅",
+                "summary": "手动转存频道监控条目（单条或多条，入转存队列）",
             },
             {
                 "path": "/tg/retry_failed",

@@ -99,6 +99,21 @@ INTERRUPTED_ERROR_HINTS = (
 INTERRUPTED_RETRY_LIMIT = 3
 # 手动「重试全部失败」单次上限（复用转存队列，避免一次性把网盘打满）。
 RETRY_BATCH_LIMIT = 50
+# v1.28.0：频道监控手动转存（错过的条目可补转）。这些状态允许重新入队；
+# queued / transferring / processing 正在处理，transferred 已完成，都不收。
+MANUAL_TRANSFER_STATUSES = frozenset({"new", "pending", "skipped", "failed", "ignored"})
+MANUAL_TRANSFER_LIMIT = 50
+_REQUEUE_REJECT_MESSAGES = {
+    "not_found": "记录不存在，可能已被清理",
+    "queued": "已在转存队列中",
+    "in_flight": "正在转存，请稍候",
+    "transferred": "已转存，无需重复转存",
+    "no_links": "该消息没有可转存的网盘链接",
+    "no_subscribe": "没有匹配到订阅，请选择要转存到的订阅",
+    "not_allowed": "当前状态不支持转存",
+    "queue_full": "转存队列已满，请稍后再试",
+    "over_limit": "单次最多转存 50 条，其余请稍后再提交",
+}
 
 # 同一进程里只允许一个监控线程：插件热重载会创建新实例，旧实例如果
 # 没被 stop，多个线程会同时扫描并触发 Telegram 限流。
@@ -912,8 +927,10 @@ class TgChannelMonitor:
             if not item or str(item.get("status") or "") != "queued":
                 continue
             try:
+                # v1.28.0：手动转存时用户选的订阅优先于扫描匹配结果。
                 subscribe_id = int(
-                    item.get("matched_subscribe_id")
+                    item.get("manual_subscribe_id")
+                    or item.get("matched_subscribe_id")
                     or item.get("subscribe_id") or 0
                 )
             except (TypeError, ValueError):
@@ -2095,35 +2112,192 @@ class TgChannelMonitor:
         return score
 
     # ------------------------------------------------------------------ 查询
+    @staticmethod
+    def _target_subscribe_of(item: Dict[str, Any]) -> int:
+        try:
+            return max(0, int(
+                item.get("manual_subscribe_id")
+                or item.get("matched_subscribe_id")
+                or item.get("subscribe_id") or 0
+            ))
+        except (TypeError, ValueError):
+            return 0
+
+    def _ensure_transfer_worker(self) -> None:
+        """手动入队前确保转存 worker 在跑（监控停用时 worker 也会停）。"""
+        thread = self._transfer_thread
+        if thread is not None and thread.is_alive():
+            return
+        if not (
+                callable(getattr(self, "_auto_transfer_handler", None))
+                or callable(getattr(self, "_auto_transfer_batch_handler", None))
+        ):
+            # 插件还没注入转存处理器（初始化未完成）：拉起 worker 也只会把
+            # 条目标成「自动转存未启用」，留在 queued 等 configure 后再跑。
+            return
+        self._start_transfer_worker()
+
+    # 入队时快照、队列满时原样恢复的字段。
+    _REQUEUE_SNAPSHOT_FIELDS = (
+        "status", "match_status", "failure_kind", "retry_count",
+        "auto_transfer_error", "manual_subscribe_id",
+    )
+
+    def _requeue_items(
+            self, item_ids: Iterable[str], *,
+            allowed_statuses: Iterable[str],
+            subscribe_id: int = 0,
+            manual: bool = False,
+    ) -> Dict[str, Any]:
+        """把条目重新放进转存队列——手动转存与「重试失败」的唯一入口。
+
+        判定与改状态在同一把 ``_items_lock`` 里完成（状态机：只有允许的
+        状态才能翻成 queued），连点两次或两个请求并发时，第二次看到的已是
+        queued，直接返回「已在转存队列中」。真正的转存仍由转存 worker 走
+        ``_process_transfer_items → _transfer_group → _apply_group_outcome``，
+        结果与原因按自动转存同一口径写回条目。
+        """
+        allowed = frozenset(str(status) for status in allowed_statuses)
+        override = self._subscribe_id_value(subscribe_id)
+        ordered: List[str] = []
+        for raw in item_ids or []:
+            text = str(raw or "").strip()
+            if text and text not in ordered:
+                ordered.append(text)
+        results: Dict[str, Dict[str, Any]] = {}
+        accepted: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+        if ordered:
+            # 先把 worker 拉起来：它启动时会恢复残留 queued 条目，放在认领之前，
+            # 免得把本次认领的条目也入队一遍、再被误报成「队列已满」。
+            self._ensure_transfer_worker()
+        now = int(time.time())
+        with self._items_lock:
+            items = list(self._store.load(ITEMS_KEY, []) or [])
+            by_id = {str(item.get("id")): item for item in items}
+            for item_id in ordered:
+                item = by_id.get(item_id)
+                status = str((item or {}).get("status") or "")
+                if item is None:
+                    reason = "not_found"
+                elif status == "queued":
+                    reason = "queued"
+                elif status in self._IN_FLIGHT_STATUSES:
+                    reason = "in_flight"
+                elif status == "transferred":
+                    reason = "transferred"
+                elif status not in allowed:
+                    reason = "not_allowed"
+                elif not (item.get("links") or []):
+                    reason = "no_links"
+                elif not (override or self._target_subscribe_of(item)):
+                    reason = "no_subscribe"
+                elif len(accepted) >= MANUAL_TRANSFER_LIMIT:
+                    reason = "over_limit"
+                else:
+                    reason = ""
+                if reason:
+                    results[item_id] = {
+                        "id": item_id, "ok": False, "reason": reason,
+                        "status": status,
+                        "message": _REQUEUE_REJECT_MESSAGES[reason],
+                    }
+                    continue
+                snapshot = {
+                    key: item.get(key) for key in self._REQUEUE_SNAPSHOT_FIELDS
+                }
+                item.update({
+                    "status": "queued",
+                    "match_status": "queued",
+                    "failure_kind": "",
+                    "retry_count": 0,
+                    "auto_transfer_error": "",
+                })
+                if override:
+                    item["manual_subscribe_id"] = override
+                if manual:
+                    item["manual_transfer_at"] = now
+                accepted.append((dict(item), snapshot))
+            if accepted:
+                self._store.save(ITEMS_KEY, items)
+        submitted = 0
+        for item, snapshot in accepted:
+            item_id = str(item.get("id") or "")
+            # 失败/跳过条目理论上早已出队；防御性清掉占位，免得入队被
+            # 「同一 id 只入一次」挡住后误报成「队列已满」。
+            self._queued_ids.discard(item_id)
+            if self._enqueue_item(item):
+                submitted += 1
+                results[item_id] = {
+                    "id": item_id, "ok": True, "reason": "",
+                    "status": "queued", "message": "已加入转存队列",
+                }
+                continue
+            # 队列满：退回入队前的状态，别让它挂在 queued 里没人处理。
+            restore = dict(snapshot)
+            if str(snapshot.get("status") or "") == "failed":
+                restore["auto_transfer_error"] = "转存队列已满，稍后再试"
+            self.update_items([item_id], **restore)
+            results[item_id] = {
+                "id": item_id, "ok": False, "reason": "queue_full",
+                "status": str(snapshot.get("status") or ""),
+                "message": _REQUEUE_REJECT_MESSAGES["queue_full"],
+            }
+        if submitted:
+            logger.info(
+                f"TG 频道{'手动转存' if manual else '失败重试'}已入队 {submitted} 条"
+                + (f"（指定订阅 {override}）" if override else "")
+            )
+        return {
+            "submitted": submitted,
+            "results": [results[item_id] for item_id in ordered if item_id in results],
+        }
+
+    @staticmethod
+    def _subscribe_id_value(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def manual_transfer_items(
+            self, item_ids: Iterable[str], subscribe_id: int = 0,
+    ) -> Dict[str, Any]:
+        """频道监控「转存」按钮（v1.28.0）：错过的条目手动补转。
+
+        可转存：未转存 / 失败 / 已忽略 / 待处理（new、pending）；目标订阅取
+        用户所选 > 扫描匹配 > 上次转存的订阅，三者都没有时返回明确原因。
+        """
+        return self._requeue_items(
+            item_ids,
+            allowed_statuses=MANUAL_TRANSFER_STATUSES,
+            subscribe_id=subscribe_id,
+            manual=True,
+        )
+
     def retry_failed_items(self, limit: int = RETRY_BATCH_LIMIT) -> Dict[str, Any]:
         """把失败条目重新排队（1.7.114）：存量清理 + 手动兜底。
 
         只收「有可用订阅」的条目：没匹配到订阅的失败条目重排进去也只会再
         失败一次。重排会清零 ``retry_count``，等于给这批条目重新开始计数。
+        v1.28.0 起与手动转存共用 ``_requeue_items``（同一状态机与入队逻辑）。
         """
         try:
             limit = max(1, min(int(limit or RETRY_BATCH_LIMIT), RETRY_BATCH_LIMIT))
         except (TypeError, ValueError):
             limit = RETRY_BATCH_LIMIT
-        candidates: List[Dict[str, Any]] = []
+        candidates: List[str] = []
         skipped_no_subscribe = 0
         for item in sorted(
                 self._load_items(), key=lambda row: row.get("created_at") or 0,
         ):
             if str(item.get("status") or "") != "failed":
                 continue
-            try:
-                subscribe_id = int(
-                    item.get("matched_subscribe_id") or item.get("subscribe_id") or 0
-                )
-            except (TypeError, ValueError):
-                subscribe_id = 0
-            if subscribe_id <= 0:
+            if self._target_subscribe_of(item) <= 0:
                 skipped_no_subscribe += 1
                 continue
             if len(candidates) >= limit:
                 continue
-            candidates.append(item)
+            candidates.append(str(item.get("id") or ""))
         if not candidates:
             return {
                 "submitted": 0,
@@ -2131,35 +2305,13 @@ class TgChannelMonitor:
                 "skipped_queue_full": 0,
                 "limit": limit,
             }
-        ids = [str(item.get("id") or "") for item in candidates]
-        self._mark_items(
-            ids, "queued",
-            match_status="queued",
-            failure_kind="",
-            retry_count=0,
-            auto_transfer_error="",
-        )
-        submitted = 0
-        skipped_queue_full = 0
-        for item in candidates:
-            # 失败条目理论上早已出队；这里防御性清掉占位，免得入队被
-            # 「同一 id 只入一次」挡住后误报成「队列已满」。
-            self._queued_ids.discard(str(item.get("id") or ""))
-            if self._enqueue_item({**item, "status": "queued"}):
-                submitted += 1
-                continue
-            # 队列满：状态退回失败，别让它挂在 queued 里没人处理。
-            skipped_queue_full += 1
-            self._mark_items(
-                [str(item.get("id") or "")], "failed",
-                match_status="failed",
-                failure_kind="permanent",
-                auto_transfer_error="转存队列已满，稍后再试",
-            )
+        outcome = self._requeue_items(candidates, allowed_statuses=("failed",))
         return {
-            "submitted": submitted,
+            "submitted": int(outcome["submitted"]),
             "skipped_no_subscribe": skipped_no_subscribe,
-            "skipped_queue_full": skipped_queue_full,
+            "skipped_queue_full": sum(
+                1 for row in outcome["results"] if row["reason"] == "queue_full"
+            ),
             "limit": limit,
         }
 

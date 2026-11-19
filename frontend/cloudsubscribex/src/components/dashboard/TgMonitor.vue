@@ -85,6 +85,23 @@
     <!-- v1.25.0 Issue B3：“失败”是“待处理”的子集（待处理含 failed），数字会被重复计，这里注明口径 -->
     <div v-if="!initialLoading" class="text-caption text-medium-emphasis mt-1">失败已计入待处理</div>
 
+    <!-- v1.28.0：多选批量转存（错过的条目补转） -->
+    <div v-if="selectedCount && !initialLoading" class="tg-batch-bar mt-2">
+      <span class="text-body-2">已选 {{ selectedCount }} 条</span>
+      <span class="flex-grow-1" />
+      <v-btn size="small" variant="text" @click="clearSelection">取消选择</v-btn>
+      <v-btn
+        class="tg-batch-transfer"
+        size="small"
+        color="primary"
+        variant="flat"
+        prepend-icon="mdi-cloud-download-outline"
+        :loading="batchTransferring"
+        @click="transferSelected">
+        转存所选
+      </v-btn>
+    </div>
+
     <!-- 未转存：先按原因分类，再按订阅折叠，避免 50+ 条重复分享铺屏 -->
     <div v-if="statusFilter === 'skipped' && !initialLoading" class="mt-3">
       <div v-if="skipReasonStats.length" class="tg-reasons">
@@ -114,18 +131,58 @@
             <v-icon :icon="expandedGroup === group.key ? 'mdi-chevron-up' : 'mdi-chevron-down'" size="18" />
           </button>
           <div v-if="expandedGroup === group.key" class="tg-group-body">
-            <div v-for="item in group.items" :key="item.id" class="tg-group-row">
-              <span class="tg-group-row-title text-truncate">{{ item.title }}</span>
-              <v-chip
-                size="x-small"
-                variant="tonal"
-                :color="reasonTone(item)"
-                class="flex-shrink-0">
-                {{ reasonLabel(item) }}
-              </v-chip>
-              <span class="text-caption text-medium-emphasis flex-shrink-0">
-                {{ formatRelative(item.published_at || item.created_at) }}
-              </span>
+            <div class="tg-group-tools">
+              <v-btn size="x-small" variant="text" prepend-icon="mdi-checkbox-multiple-marked-outline" @click="selectGroup(group)">
+                选择本组可转存
+              </v-btn>
+            </div>
+            <div v-for="item in group.items" :key="item.id" class="tg-group-item">
+              <div class="tg-group-row" @click="toggleDetail(item.id)">
+                <v-checkbox-btn
+                  v-if="canTransfer(item)"
+                  class="tg-select flex-shrink-0"
+                  density="compact"
+                  :model-value="isSelected(item)"
+                  @click.stop
+                  @update:model-value="toggleSelect(item)" />
+                <span class="tg-group-row-title text-truncate">{{ item.title }}</span>
+                <v-chip
+                  size="x-small"
+                  variant="tonal"
+                  :color="reasonTone(item)"
+                  class="flex-shrink-0 d-none d-sm-inline-flex">
+                  {{ reasonLabel(item) }}
+                </v-chip>
+                <span class="text-caption text-medium-emphasis flex-shrink-0 d-none d-sm-inline">
+                  {{ formatRelative(item.published_at || item.created_at) }}
+                </span>
+                <v-btn
+                  v-if="canTransfer(item)"
+                  class="tg-transfer-btn flex-shrink-0"
+                  size="x-small"
+                  color="primary"
+                  variant="tonal"
+                  :loading="isBusy(item)"
+                  @click.stop="openTransfer(item)">
+                  转存
+                </v-btn>
+                <v-icon
+                  :icon="expandedItem === item.id ? 'mdi-chevron-up' : 'mdi-chevron-down'"
+                  size="16"
+                  class="text-medium-emphasis flex-shrink-0" />
+              </div>
+              <TgItemDetail
+                v-if="expandedItem === item.id"
+                :item="item"
+                :subscribe-name="subscribeLabel(item)"
+                :can-transfer="canTransfer(item)"
+                :transfer-hint="transferBlockReason(item)"
+                :busy="isBusy(item)"
+                :format-time="formatTime"
+                @transfer="openTransfer"
+                @ignore="ignore"
+                @remove="remove"
+                @copy="copyLink" />
             </div>
           </div>
         </div>
@@ -139,6 +196,13 @@
     <div v-else-if="filteredItems.length && !initialLoading" class="tg-radar-stream mt-3">
       <div v-for="item in pagedItems" :key="item.id" class="tg-row-wrap">
         <div class="tg-row d-flex align-center ga-2 px-3 rounded border" @click="toggleDetail(item.id)">
+          <v-checkbox-btn
+            v-if="canTransfer(item)"
+            class="tg-select flex-shrink-0"
+            density="compact"
+            :model-value="isSelected(item)"
+            @click.stop
+            @update:model-value="toggleSelect(item)" />
           <span :class="['tg-dot', `tg-dot-${item.status}`]" />
           <span class="tg-row-title text-body-2 font-weight-bold text-truncate">{{ item.title || "（无标题）" }}</span>
           <v-chip v-if="qualityLabel(item)" size="x-small" variant="tonal" color="deep-purple" class="flex-shrink-0">
@@ -159,70 +223,36 @@
             size="x-small"
             color="primary"
             variant="flat"
-            class="flex-shrink-0"
+            class="tg-transfer-btn flex-shrink-0"
+            :loading="isBusy(item)"
             @click.stop="openTransfer(item)">
             转存
           </v-btn>
           <v-icon v-else-if="item.status === 'transferred'" icon="mdi-check-circle" color="success" size="18" />
+          <v-progress-circular
+            v-else-if="IN_PROGRESS.includes(item.status)"
+            indeterminate
+            size="16"
+            width="2"
+            color="primary"
+            class="flex-shrink-0" />
           <v-icon
             :icon="expandedItem === item.id ? 'mdi-chevron-up' : 'mdi-chevron-down'"
             size="18"
             class="text-medium-emphasis" />
         </div>
-        <div v-if="expandedItem === item.id" class="tg-detail">
-          <div class="tg-detail-line text-medium-emphasis">{{ item.title }}</div>
-          <div v-if="item.match_reason" class="tg-detail-line text-primary">
-            <v-icon icon="mdi-target" size="13" class="mr-1" />
-            {{ item.match_reason }}
-          </div>
-          <div v-if="item.auto_transfer_error" :class="['tg-detail-line', errorClass(item)]">
-            <v-icon icon="mdi-alert-circle-outline" size="13" class="mr-1" />
-            {{ item.auto_transfer_error }}
-          </div>
-          <div class="tg-detail-links">
-            <v-btn
-              v-for="link in item.links"
-              :key="link"
-              size="x-small"
-              variant="tonal"
-              color="secondary"
-              :href="link"
-              target="_blank"
-              class="mr-1 mb-1">
-              {{ shortLink(link) }}
-            </v-btn>
-            <v-btn
-              v-if="item.message_url"
-              size="x-small"
-              variant="text"
-              :href="item.message_url"
-              target="_blank"
-              prepend-icon="mdi-send-outline">
-              TG 原消息
-            </v-btn>
-          </div>
-          <div class="tg-detail-actions">
-            <v-btn
-              v-if="canTransfer(item)"
-              size="x-small"
-              color="primary"
-              variant="flat"
-              @click.stop="openTransfer(item)">
-              转存
-            </v-btn>
-            <v-btn size="x-small" variant="text" prepend-icon="mdi-eye-off-outline" @click.stop="ignore(item)">
-              忽略
-            </v-btn>
-            <v-btn
-              size="x-small"
-              variant="text"
-              color="error"
-              prepend-icon="mdi-delete-outline"
-              @click.stop="remove(item)">
-              删除
-            </v-btn>
-          </div>
-        </div>
+        <TgItemDetail
+          v-if="expandedItem === item.id"
+          :item="item"
+          :subscribe-name="subscribeLabel(item)"
+          :can-transfer="canTransfer(item)"
+          :transfer-hint="transferBlockReason(item)"
+          :busy="isBusy(item)"
+          :format-time="formatTime"
+          @transfer="openTransfer"
+          @ignore="ignore"
+          @remove="remove"
+          @copy="copyLink" />
       </div>
       <div v-if="pageCount > 1" class="tg-pager">
         <v-pagination v-model="page" :length="pageCount" :total-visible="5" density="compact" size="small" />
@@ -252,7 +282,7 @@
             hide-details
             :loading="loadingSubscribes" />
           <v-alert type="info" variant="tonal" density="compact" class="mt-3">
-            转存会复用「手动添加」流程：按该订阅的季集规则识别、转存、整理。
+            转存会放回频道监控转存队列，按该订阅的季集规则识别、转存、整理；结果和原因会写回这条记录。
           </v-alert>
         </v-card-text>
         <v-card-actions>
@@ -303,6 +333,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from "vue"
+import TgItemDetail from "./TgItemDetail.vue"
 
 const props = defineProps({
   api: { type: Object, required: true },
@@ -348,6 +379,18 @@ const code = ref("")
 const password = ref("")
 const loginLoading = ref(false)
 let timer = null
+// v1.28.0 手动转存：选中项、提交中的条目、提交后快速轮询跟踪的条目。
+const selectedIds = ref([])
+const busyIds = ref([])
+const batchTransferring = ref(false)
+const watchedIds = ref([])
+let watchTimer = null
+let watchStartedAt = 0
+const WATCH_INTERVAL_MS = 5000
+const WATCH_MAX_MS = 15 * 60 * 1000
+// 与后端 MANUAL_TRANSFER_STATUSES 同口径：这些状态可以手动（再）转存。
+const MANUAL_TRANSFER_STATUSES = ["new", "pending", "skipped", "failed", "ignored"]
+const IN_PROGRESS = ["queued", "transferring", "processing"]
 
 const hasApi = computed(() => Boolean(status.value.has_api))
 
@@ -554,8 +597,87 @@ function toggleGroup(key) {
   expandedGroup.value = expandedGroup.value === key ? "" : key
 }
 
+// v1.28.0：未转存 / 失败 / 已忽略 / 待处理都能手动转存（错过的条目补转）；
+// 排队中、转存中、已转存不行——transferBlockReason 给出不可转存的原因。
 function canTransfer(item) {
-  return !["transferred", "skipped", "ignored"].includes(item?.status)
+  return MANUAL_TRANSFER_STATUSES.includes(item?.status) && (item?.links || []).length > 0
+}
+
+function transferBlockReason(item) {
+  if (canTransfer(item)) return ""
+  if (item?.status === "transferred") return "已转存"
+  if (item?.status === "queued") return "已在转存队列中"
+  if (["transferring", "processing"].includes(item?.status)) return "正在转存，请稍候"
+  if (!(item?.links || []).length) return "该消息没有网盘链接，无法转存"
+  return "当前状态不支持转存"
+}
+
+function subscribeLabel(item) {
+  const id = Number(item?.manual_subscribe_id || item?.matched_subscribe_id || item?.subscribe_id || 0)
+  const sub = subscribeNameById.value.get(id)
+  if (!sub) return ""
+  return `${sub.name}${sub.season ? ` S${String(sub.season).padStart(2, "0")}` : ""}`
+}
+
+const selectedCount = computed(() => selectedIds.value.length)
+
+function isSelected(item) {
+  return selectedIds.value.includes(item?.id)
+}
+
+function toggleSelect(item) {
+  const id = item?.id
+  if (!id) return
+  selectedIds.value = isSelected(item)
+    ? selectedIds.value.filter((value) => value !== id)
+    : [...selectedIds.value, id]
+}
+
+function selectGroup(group) {
+  const ids = new Set(selectedIds.value)
+  for (const item of group.items) {
+    if (canTransfer(item)) ids.add(item.id)
+  }
+  selectedIds.value = [...ids]
+}
+
+function clearSelection() {
+  selectedIds.value = []
+}
+
+function isBusy(item) {
+  return busyIds.value.includes(item?.id)
+}
+
+async function copyLink(link) {
+  const text = String(link || "")
+  if (!text) return
+  try {
+    let copied = false
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text)
+        copied = true
+      } catch (_) {
+        // 局域网 HTTP 页面可能暴露 API 但拒绝调用，继续使用兼容方式。
+      }
+    }
+    if (!copied) {
+      const input = document.createElement("textarea")
+      input.value = text
+      input.setAttribute("readonly", "")
+      input.style.position = "fixed"
+      input.style.opacity = "0"
+      document.body.appendChild(input)
+      input.select()
+      const ok = document.execCommand("copy")
+      document.body.removeChild(input)
+      if (!ok) throw new Error("浏览器拒绝访问剪贴板")
+    }
+    props.notify("链接已复制", "success")
+  } catch (error) {
+    props.notify(`复制失败：${error.message || error}`, "error")
+  }
 }
 
 const restartDroppedText = computed(() => {
@@ -623,25 +745,9 @@ function formatRelative(timestamp) {
   return formatTime(timestamp)
 }
 
-function shortLink(link) {
-  try {
-    const url = new URL(link)
-    return `${url.hostname}${url.pathname}`.slice(0, 48)
-  } catch {
-    return String(link).slice(0, 48)
-  }
-}
-
 function qualityLabel(item) {
   const label = item?.quality?.label
   return label && label !== "未知" ? label : ""
-}
-
-function errorClass(item) {
-  if (item.status === "skipped" || item.failure_kind === "interrupted") {
-    return "text-medium-emphasis"
-  }
-  return "text-error"
 }
 
 async function loadStatus() {
@@ -712,15 +818,19 @@ async function ensureSubscribes() {
 }
 
 async function openTransfer(item) {
+  if (!canTransfer(item)) {
+    props.notify(transferBlockReason(item) || "当前状态不支持转存", "warning")
+    return
+  }
   currentItem.value = item
   await ensureSubscribes()
-  const matchedId = Number(item?.matched_subscribe_id || item?.subscribe_id || 0)
+  const matchedId = Number(item?.manual_subscribe_id || item?.matched_subscribe_id || item?.subscribe_id || 0)
   // 1.7.113：扫描阶段已经把订阅匹配好（matched_subscribe_id），订阅还在就
   // 直接用匹配结果转存，不再让人重新挑一遍；订阅被删/没匹配才弹窗手选。
   const matchedExists = matchedId > 0 && subscribes.value.some((row) => Number(row.id) === matchedId)
   targetSubscribeId.value = matchedExists ? matchedId : null
   if (matchedExists) {
-    await submitTransfer()
+    await postTransfer([item.id], 0)
     return
   }
   transferVisible.value = true
@@ -733,20 +843,110 @@ async function submitTransfer() {
   }
   transferring.value = true
   try {
-    const result = await props.api.post(`plugin/${props.pluginId}/tg/transfer`, {
-      id: currentItem.value?.id,
-      subscribe_id: targetSubscribeId.value,
-    })
-    if (result?.success) {
-      props.notify(result.message || "已提交转存", "success")
-      transferVisible.value = false
-      await refreshAll()
-    } else {
-      props.notify(result?.message || "转存失败", "error")
-    }
+    const ok = await postTransfer([currentItem.value?.id], targetSubscribeId.value)
+    if (ok) transferVisible.value = false
   } finally {
     transferring.value = false
   }
+}
+
+async function transferSelected() {
+  const ids = selectedIds.value.filter((id) => {
+    const item = (items.value || []).find((row) => row.id === id)
+    return item && canTransfer(item)
+  })
+  if (!ids.length) {
+    props.notify("所选条目都不能转存", "warning")
+    clearSelection()
+    return
+  }
+  batchTransferring.value = true
+  try {
+    const ok = await postTransfer(ids, 0)
+    if (ok) clearSelection()
+  } finally {
+    batchTransferring.value = false
+  }
+}
+
+// v1.28.0：/tg/transfer 只负责把条目放回转存队列；真正转存由后端 worker
+// 完成并把结果写回条目，这里提交后快速轮询，跟踪到终态再提示结果。
+async function postTransfer(ids, subscribeId) {
+  const wanted = ids.filter(Boolean)
+  if (!wanted.length) return false
+  busyIds.value = [...new Set([...busyIds.value, ...wanted])]
+  try {
+    const payload = wanted.length === 1 ? { id: wanted[0] } : { ids: wanted }
+    if (subscribeId) payload.subscribe_id = subscribeId
+    const result = await props.api.post(`plugin/${props.pluginId}/tg/transfer`, payload)
+    if (result?.success) {
+      props.notify(result.message || "已加入转存队列", "success")
+      const accepted = (result.data?.results || []).filter((row) => row.ok).map((row) => row.id)
+      startWatching(accepted.length ? accepted : wanted)
+      await refreshAll()
+      return true
+    }
+    if (wanted.length === 1 && result?.message === "请选择要转存到的订阅") {
+      currentItem.value = (items.value || []).find((row) => row.id === wanted[0]) || currentItem.value
+      targetSubscribeId.value = null
+      await ensureSubscribes()
+      transferVisible.value = true
+      return false
+    }
+    props.notify(result?.message || "转存提交失败", "error")
+    return false
+  } catch (error) {
+    props.notify(`转存提交失败：${error?.message || error}`, "error")
+    return false
+  } finally {
+    busyIds.value = busyIds.value.filter((id) => !wanted.includes(id))
+  }
+}
+
+function startWatching(ids) {
+  watchedIds.value = [...new Set([...watchedIds.value, ...ids])]
+  watchStartedAt = Date.now()
+  if (watchTimer !== null) return
+  watchTimer = window.setInterval(() => void pollWatched(), WATCH_INTERVAL_MS)
+}
+
+function stopWatching() {
+  if (watchTimer !== null) window.clearInterval(watchTimer)
+  watchTimer = null
+  watchedIds.value = []
+}
+
+async function pollWatched() {
+  if (!watchedIds.value.length) {
+    stopWatching()
+    return
+  }
+  await refreshAll()
+  const rows = (items.value || []).filter((row) => watchedIds.value.includes(row.id))
+  const done = rows.filter((row) => !IN_PROGRESS.includes(row.status))
+  // 记录被删掉的也算结束跟踪。
+  const finishedIds = new Set([
+    ...done.map((row) => row.id),
+    ...watchedIds.value.filter((id) => !rows.some((row) => row.id === id)),
+  ])
+  if (done.length) announceOutcome(done)
+  watchedIds.value = watchedIds.value.filter((id) => !finishedIds.has(id))
+  if (!watchedIds.value.length || Date.now() - watchStartedAt > WATCH_MAX_MS) stopWatching()
+}
+
+function announceOutcome(rows) {
+  const transferred = rows.filter((row) => row.status === "transferred")
+  const failed = rows.filter((row) => row.status === "failed")
+  const skipped = rows.filter((row) => !["transferred", "failed"].includes(row.status))
+  const parts = []
+  if (transferred.length) parts.push(`已转存 ${transferred.length} 条`)
+  if (skipped.length) parts.push(`未转存 ${skipped.length} 条（${reasonLabel(skipped[0])}）`)
+  if (failed.length) {
+    const reason = String(failed[0].auto_transfer_error || "转存失败").slice(0, 40)
+    parts.push(`失败 ${failed.length} 条（${reason}）`)
+  }
+  const tone = failed.length ? "error" : transferred.length ? "success" : "warning"
+  props.notify(`转存完成：${parts.join("，")}`, tone)
 }
 
 async function ignore(item) {
@@ -822,6 +1022,7 @@ onMounted(async () => {
 })
 onUnmounted(() => {
   if (timer !== null) window.clearInterval(timer)
+  stopWatching()
 })
 </script>
 
@@ -918,27 +1119,6 @@ onUnmounted(() => {
 }
 .tg-dot-ignored {
   background: rgba(var(--v-theme-on-surface), 0.18);
-}
-
-.tg-detail {
-  margin: 2px 0 6px;
-  padding: 8px 12px;
-  border-left: 2px solid rgba(var(--v-theme-primary), 0.35);
-  background: rgba(var(--v-theme-surface-variant), 0.18);
-  border-radius: 0 6px 6px 0;
-}
-.tg-detail-line {
-  font-size: 12px;
-  line-height: 1.5;
-  word-break: break-all;
-}
-.tg-detail-links {
-  margin-top: 6px;
-}
-.tg-detail-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: 6px;
 }
 
 .tg-reasons {
@@ -1184,6 +1364,38 @@ onUnmounted(() => {
   background: rgba(var(--v-theme-warning), 0.1);
   color: rgb(var(--v-theme-warning));
   border-left: 3px solid rgb(var(--v-theme-warning));
+}
+
+.tg-batch-bar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--v-theme-primary), 0.35);
+  background: rgb(var(--v-theme-surface));
+}
+.tg-group-tools {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 2px;
+}
+.tg-group-item {
+  min-width: 0;
+}
+.tg-group-row {
+  cursor: pointer;
+  border-radius: 6px;
+}
+.tg-group-row:hover {
+  background: rgba(var(--v-theme-on-surface), 0.04);
+}
+.tg-select {
+  flex: 0 0 auto;
 }
 
 @media (max-width: 600px) {

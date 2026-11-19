@@ -6,7 +6,6 @@ from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 
 from ..delegation import OwnerDelegator
-from .sync import SyncApi
 
 
 class TgMonitorApi(OwnerDelegator):
@@ -86,38 +85,49 @@ class TgMonitorApi(OwnerDelegator):
             return 0
 
     def api_vue_tg_transfer(self, payload: Dict[str, Any]) -> dict:
+        """频道监控「转存」按钮：单条（id）或多条（ids）补转错过的资源。
+
+        v1.28.0：不再直接调手动同步并立刻把条目标成「已转存」（那会把只是
+        提交成功、实际 0 转存的条目也算成已转存，且不带 TG 来源与目标集）。
+        改为把条目放回频道监控转存队列，由 worker 走与自动转存同一条路
+        （_transfer_group → submit_candidate → _apply_group_outcome），
+        结果与真实原因写回条目，前端轮询刷新。
+        """
         payload = payload or {}
-        item_id = str(payload.get("id") or "")
-        subscribe_id = self._subscribe_id_of(payload.get("subscribe_id"))
-        if not item_id:
+        item_ids = self._ids(payload)
+        if not item_ids:
             return {"success": False, "message": "缺少资源 ID"}
-        monitor = self._monitor()
-        item = next(
-            (row for row in monitor.list_items() if str(row.get("id")) == item_id),
-            None,
-        )
-        if not item:
-            return {"success": False, "message": "资源不存在，可能已被清理"}
-        # 1.7.113：扫描阶段已经把匹配结果写在条目上（matched_subscribe_id），
-        # 手动转存没传订阅时直接沿用，不再让用户重选一遍。
-        if subscribe_id <= 0:
-            subscribe_id = self._subscribe_id_of(item.get("matched_subscribe_id"))
-        if subscribe_id <= 0:
-            return {"success": False, "message": "请选择要转存到的订阅"}
-        links = list(item.get("links") or [])
-        if not links:
-            return {"success": False, "message": "该消息没有可转存的网盘链接"}
-        payload = {
-            "subscribe_id": subscribe_id,
-            "resource_links": links,
-        }
-        title = str(item.get("title") or "").strip()
-        if title:
-            payload["resource_titles"] = {link: title for link in links}
-        result = SyncApi(self._owner).api_vue_start_manual_sync(payload)
-        if result.get("success"):
-            monitor.update_items([item_id], status="transferred", subscribe_id=subscribe_id)
-        return result
+        subscribe_id = self._subscribe_id_of(payload.get("subscribe_id"))
+        try:
+            outcome = self._monitor().manual_transfer_items(
+                item_ids, subscribe_id=subscribe_id,
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"TG 频道手动转存提交失败：{error}")
+            return {"success": False, "message": f"提交转存失败：{error}"}
+        results = list(outcome.get("results") or [])
+        submitted = int(outcome.get("submitted") or 0)
+        rejected = [row for row in results if not row.get("ok")]
+        if not submitted:
+            first = rejected[0] if rejected else {}
+            if len(item_ids) == 1 and first.get("reason") == "no_subscribe":
+                # 前端据此弹出订阅选择框。
+                message = "请选择要转存到的订阅"
+            else:
+                message = str(first.get("message") or "没有可转存的条目")
+                if len(rejected) > 1:
+                    message = f"{len(rejected)} 条都未提交：{message}"
+            return {"success": False, "message": message, "data": outcome}
+        message = f"已加入转存队列 {submitted} 条，完成后状态会自动更新"
+        if rejected:
+            reasons: Dict[str, int] = {}
+            for row in rejected:
+                text = str(row.get("message") or "")
+                reasons[text] = reasons.get(text, 0) + 1
+            message += "；未提交 " + "、".join(
+                f"{count} 条{text}" for text, count in reasons.items()
+            )
+        return {"success": True, "message": message, "data": outcome}
 
     def api_vue_tg_retry_failed(self, payload: Dict[str, Any] = None) -> dict:
         """1.7.114：把失败条目重新排队（优先沿用扫描匹配到的订阅）。"""
