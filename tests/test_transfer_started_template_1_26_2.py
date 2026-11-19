@@ -11,8 +11,14 @@ MP 自己的 MessageTemplateHelper.render 渲用户模板，只有渲出非空
 标题正文已给出就短路、没配模板原样返回、模板用 Jinja2 逐字段渲染。
 并用他 MP 里那条真实模板（资源下载 Jinja2 JSON，2026-11-19 从
 设定 → 通知抄回）跑一遍端到端，断言剧集与电影两种形态。
+
+v1.26.3 补充：TG 路站点名不再解析频道名，直接写死“TG频道”
+（私密频道存的是邀请链接 https://t.me/+...，旧解析按 "/" 切出
+"https:"）；渲染补 pubdate（转存开始时间），模板里的时间行才出得来。
 """
+_PUBDATE_RE = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
 import ast
+import re
 import sys
 import unittest
 from types import SimpleNamespace
@@ -277,6 +283,7 @@ class TemplateNotificationTests(unittest.TestCase):
         self.assertIn("📦季集：S01 E24, E25", kwargs["text"])
         self.assertIn("🎭类别：国产剧", kwargs["text"])
         self.assertIn("💾大小：2.0 KB", kwargs["text"])
+        self.assertRegex(kwargs["text"], "🕒时间：" + _PUBDATE_RE)
         self.assertNotIn("🌱做种", kwargs["text"])
         self.assertNotIn("📛名称", kwargs["text"])
         self.assertNotIn("🌐站点", kwargs["text"])
@@ -287,6 +294,7 @@ class TemplateNotificationTests(unittest.TestCase):
         self.assertEqual(call_kwargs["season_fmt"], "S01")
         self.assertEqual(call_kwargs["season_episode"], "S01E24")
         self.assertEqual(call_kwargs["size"], "2.0 KB")
+        self.assertRegex(call_kwargs["pubdate"], "^" + _PUBDATE_RE + "$")
         self.assertNotIn("site_name", call_kwargs)
         self.assertIs(call_kwargs["mediainfo"].title, "玫瑰战争")
 
@@ -318,16 +326,30 @@ class TemplateNotificationTests(unittest.TestCase):
         self.assertNotIn("📦季集", kwargs["text"])
         self.assertIn("🎭类别：华语电影", kwargs["text"])
         self.assertIn("💾大小：14.1 GB", kwargs["text"])
+        self.assertRegex(kwargs["text"], "🕒时间：" + _PUBDATE_RE)
         self.assertNotIn("🌱做种", kwargs["text"])
 
     def test_tg_site_name_passed_to_template(self):
-        """TG 路：频道名进模板的 site_name，站点行正常出。"""
+        """v1.26.3：TG 路站点名直接写死“TG频道”，不再解析频道名。"""
         _FakeTemplateHelper.template = USER_DOWNLOAD_TEMPLATE
         service, post_message = _real_notify_service()
         self._send_tv(service, source="tg", via="tg:@Channel/12345")
         self.assertEqual(post_message.call_count, 1)
-        self.assertIn("🌐站点：@Channel", post_message.call_args.kwargs["text"])
-        self.assertEqual(_FakeTemplateHelper.calls[0]["site_name"], "@Channel")
+        self.assertIn("🌐站点：TG频道", post_message.call_args.kwargs["text"])
+        self.assertEqual(_FakeTemplateHelper.calls[0]["site_name"], "TG频道")
+
+    def test_tg_invite_link_via_shows_tg_channel(self):
+        """v1.26.3：私密频道邀请链接 via 不再切出 "https:"。"""
+        _FakeTemplateHelper.template = USER_DOWNLOAD_TEMPLATE
+        service, post_message = _real_notify_service()
+        self._send_tv(
+            service, source="tg", via="tg:https://t.me/+AbCdEfGh/12345"
+        )
+        self.assertEqual(post_message.call_count, 1)
+        text = post_message.call_args.kwargs["text"]
+        self.assertIn("🌐站点：TG频道", text)
+        self.assertNotIn("https:", text)
+        self.assertEqual(_FakeTemplateHelper.calls[0]["site_name"], "TG频道")
 
     def test_no_template_falls_back_to_hardcoded(self):
         """没配模板：渲染原样返回，退回写死格式。"""

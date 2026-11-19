@@ -35,6 +35,11 @@ def _render_started_notification_template(
 
     任何一步失败（没配模板、模板改坏了、MP 内部接口变了、测试桩环境）
     都只返回 None，绝不抛、绝不发空通知。
+
+    v1.26.3：补 ``pubdate``（转存开始时间，``YYYY-MM-DD HH:MM:SS``），
+    否则用户模板里 ``{% if pubdate %}🕒时间：...`` 那行永远出不来
+    （MP 自身通知里的时间就是这么来的：种子发布时间；云盘转存没有
+    种子，就填转存开始时间）。
     """
     if not str(getattr(mediainfo, "title", "") or "").strip():
         return None
@@ -49,9 +54,11 @@ def _render_started_notification_template(
             ctype=ContentType.DownloadAdded,
             image=image,
         )
+        started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         render_kwargs: Dict[str, Any] = {
             "mediainfo": mediainfo,
-            "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "current_time": started_at,
+            "pubdate": started_at,
         }
         if size_text:
             render_kwargs["size"] = size_text
@@ -153,7 +160,8 @@ class SyncNotificationService(OwnerDelegator):
           标题正文才用模板结果，否则退回插件写死格式（标题固定
           「【网盘订阅助手】开始下载」）。种子才有的变量（做种数、原名
           链接、站点、质量词）云盘转存没有，模板里有 ``{% if %}`` 守卫，
-          那几行直接跳过；站点名只在 TG 路填频道名。
+          那几行直接跳过；站点名只在 TG 路填固定值“TG频道”（v1.26.3，
+        不再解析频道名）；pubdate 填转存开始时间，模板里的时间行才出得来。
 
         只在转存真正开始时由调用方调一次；链接解析失败、查库命中跳过、
         判重拦下的都不进这里。通知开关 ``_notify`` 关了就不发；发送
@@ -204,15 +212,13 @@ class SyncNotificationService(OwnerDelegator):
                 "manual": "手动",
                 "subscribe": "订阅",
             }.get(str(source or "").strip().lower(), "订阅")
-            site_name = ""
-            if str(source or "").strip().lower() == "tg":
-                channel = str(via or "").strip()
-                if channel.startswith("tg:"):
-                    channel = channel[3:]
-                channel = channel.split("/")[0].strip()
-                if channel:
-                    source_label = f"TG 频道 {channel}"
-                    site_name = channel
+            # v1.26.3：TG 路站点名不再解析频道名，直接写死“TG频道”。
+            # 之前按 "/" 切 via 取第一段：私密频道存的是邀请链接
+            # https://t.me/+...，切出来是 "https:"，通知里成了“站点：https:”。
+            # 写死格式的来源标签本来就是“TG 频道”，这里也不再拼频道名。
+            site_name = (
+                "TG频道" if str(source or "").strip().lower() == "tg" else ""
+            )
             meta = []
             if size > 0:
                 meta.append(format_size(size))

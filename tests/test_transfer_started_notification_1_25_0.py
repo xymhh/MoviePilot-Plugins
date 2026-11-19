@@ -268,12 +268,14 @@ class TransferStartedNotificationTests(unittest.TestCase):
         self.assertEqual(kwargs["image"], "https://image.tmdb.org/poster.jpg")
 
     def test_tg_source_labels_channel(self):
-        """TG 监控：来源标 TG 频道 + 频道名（via 里的 tg: 前缀与消息 id 去掉）。"""
+        """v1.26.3：TG 监控来源标只写“TG 频道”，不再拼频道名。"""
         service, post_message = _real_notify_service()
         pipeline = _PipelineService(notify_service=service)
         _run_tv(pipeline, source="tg", via="tg:@Channel/12345")
         self.assertEqual(post_message.call_count, 1)
-        self.assertIn("TG 频道 @Channel", post_message.call_args.kwargs["text"])
+        text = post_message.call_args.kwargs["text"]
+        self.assertIn("TG 频道", text)
+        self.assertNotIn("@Channel", text)
 
     def test_manual_source_labels_manual(self):
         """手动转存：来源标 手动。"""
