@@ -613,9 +613,14 @@ class SyncHandler:
 
     # -- 对外 API：显式转发（Phase 5，v1.19.0）--
     # 插件宿主（__init__.py）与 core/api、core/hook 经 self._sync_handler
-    # 调用的 28 个组件方法：过去靠 SyncHandler.__getattr__ 隐式解析，
+    # 调用的 35 个组件方法：过去靠 SyncHandler.__getattr__ 隐式解析，
     # 现在是 SyncHandler 上的真实方法，内部转发到具名服务字段；
     # 调用方与测试一律不用改。签名与组件方法一致。
+    # v1.26.1 教训：v1.19.0 只补了 28 个，漏了 get_due_offline_task_groups
+    # 与 6 个 STRM/媒体方法——前者无守卫，每轮监控直接崩（下载页 95% 卡
+    # 自此攒起）；后者有 hasattr 守卫，悄悄返回“同步服务未就绪”（STRM
+    # 增量/全量补齐自此停摆）。新增转发务必同步补测试
+    # test_sync_handler_forwarder_coverage_1_26_1.py 的调用点扫描。
 
     def _build_episode_baseline(self, subscribe, mediainfo: MediaInfo, season: int, include_saved: bool=True, score_cache: Optional[Dict[tuple, int]]=None) -> Dict[int, Dict[str, Any]]:
         return self.upgrade_baseline._build_episode_baseline(subscribe, mediainfo, season, include_saved, score_cache)
@@ -641,6 +646,9 @@ class SyncHandler:
     def build_transient_media_target(self, media: Dict[str, Any], target_id: int=-1, episodes: Optional[Set[int]]=None, manual_upgrade: bool=False, manual_baseline: Optional[Dict[str, Any]]=None) -> Any:
         return self.media_targets.build_transient_media_target(media, target_id, episodes, manual_upgrade, manual_baseline)
 
+    def clean_share_strm(self, share_url: str, save_path: str = "") -> Dict[str, Any]:
+        return self.strm_ops.clean_share_strm(share_url, save_path=save_path)
+
     def delete_by_media_server_paths(self, paths: List[str]) -> Dict[str, int]:
         return self.history_cleanup.delete_by_media_server_paths(paths)
 
@@ -649,6 +657,12 @@ class SyncHandler:
 
     def finish_notification_batch(self) -> bool:
         return self.media_refresh.finish_notification_batch()
+
+    def generate_share_strm(self, share_url: str, save_path: str = "", overwrite: bool = False) -> Dict[str, Any]:
+        return self.strm_ops.generate_share_strm(share_url, save_path=save_path, overwrite=overwrite)
+
+    def get_due_offline_task_groups(self, force: bool = False, pending_keys: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
+        return self.postprocess.get_due_offline_task_groups(force=force, pending_keys=pending_keys)
 
     def get_pending_finalize_tasks(self) -> List[Dict[str, Any]]:
         return self.postprocess.get_pending_finalize_tasks()
@@ -661,6 +675,9 @@ class SyncHandler:
 
     def list_media_server_content(self, server: str='', keyword: str='', tmdb_id: Any=None, media_type: str='', limit: int=500) -> Dict[str, Any]:
         return self.media_targets.list_media_server_content(server, keyword, tmdb_id, media_type, limit)
+
+    def migrate_legacy_strm(self, root: str = "", dry_run: bool = False) -> Dict[str, Any]:
+        return self.strm_ops.migrate_legacy_strm(root=root, dry_run=dry_run)
 
     def monitor_offline_strm_tasks(self, force: bool=False, pending_keys: Optional[Set[str]]=None, offline_tasks: Optional[List[Dict[str, Any]]]=None, offline_tasks_valid: Optional[bool]=None) -> Dict[str, int]:
         return self.postprocess.monitor_offline_strm_tasks(force, pending_keys, offline_tasks, offline_tasks_valid)
@@ -676,6 +693,15 @@ class SyncHandler:
 
     def process_tv_subscribe(self, subscribe, history: List[dict], transfer_details: List[Dict[str, Any]], transferred_count: int, manual_resources: Optional[List[Dict[str, Any]]]=None, allow_upgrade: bool=True, manual_upgrade: bool=False, target_episodes: Optional[Set[int]]=None, transient_target: bool=False) -> int:
         return self.television.process_tv_subscribe(subscribe, history, transfer_details, transferred_count, manual_resources, allow_upgrade, manual_upgrade, target_episodes, transient_target)
+
+    def rebuild_strm_files(self, overwrite: bool = False, time_budget_seconds: float = 0.0, state_store: Any = None) -> Dict[str, int]:
+        return self.strm_ops.rebuild_strm_files(overwrite=overwrite, time_budget_seconds=time_budget_seconds, state_store=state_store)
+
+    def rebuild_strm_increment_by_tree(self, timeout_seconds: float = 600.0) -> Dict[str, int]:
+        return self.strm_ops.rebuild_strm_increment_by_tree(timeout_seconds=timeout_seconds)
+
+    def refresh_media_servers(self) -> Dict[str, Any]:
+        return self.media_refresh.refresh_media_servers()
 
     def remove_platform_transfer_history_mirror(self) -> int:
         return self.platform_history.remove_platform_transfer_history_mirror()

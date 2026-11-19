@@ -3,7 +3,7 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.26.0",
+    "version": "1.26.1",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -388,7 +388,8 @@
       "v1.23.0": "Phase 5 第 4 项（v1.23.0）：前端收敛——删总览页 overview 模式；砍 MediaDrawer 资源搜索与 ManualResourceDialog 选片；删 MediaHub 订阅模式死分支与 aired_counts 后端；历史双层合并（服务层去 apikey 手动比对）；废弃 GET /qrcode/check；硬编码插件名改走 pluginId prop；补 get_api() 回归测试。孤儿文件 MediaHub/MediaDrawer/StatsGrid 一并删除。全量 pytest 2235 / unittest 2123 通过。",
       "v1.24.0": "Phase 5 第 4 项（v1.24.0，最后一版）：服务层拆分——runtime.py 离线部分拆 offline.py；platform.py 拆三 mixin + 媒体识别收敛 media_resolve.py；三份 _is_cloud_upgrade_subscribe 合一（respect_manual_upgrade 显式参数）；归一化收敛；services/__init__ 补导出；钩子安装启动记汇总日志。Config.vue 3427→1911 行、ChannelManager.vue 1056→864 行。全量 pytest 2267 / unittest 2155 通过。",
       "v1.25.0": "Issue A + B 批（v1.25.0）：转存开始时补发 MP 原生形态开始下载通知（mtype=Download / ctype=DownloadAdded，三路：订阅/TG/手动，离线提交被网盘接受后也发）；频道监控首次加载显示加载中骨架，不放全零占位；渠道卡片摘要只取标量（布尔/对象/正则跳过，在线文档显示个数）；统计卡补“已忽略”“进行中”两张并注明“失败已计入待处理”。全量 pytest 2291 / unittest 2179 通过。",
-      "v1.26.0": "下载页 95% 残留卡修复（v1.26.0）：MP 整理已成功但 dest 精确查找不到文件时不再无限复查——先在 dest 父目录递归模糊定位（精确名/哈希/前后缀/季集），命中走正常流程，仍找不到以 MP 历史成功为准直接结算（STRM 尽量生成，生成不了记 WARNING 由增量补齐）；待后处理记录自首次出现起超 6 小时未结算强制进失败记录（first_seen_at 重登记不重置）；监控每轮记 INFO 心跳（完成/失败数>0 或待处理数变化时），启动/停止提为 INFO；分享类待处理记录进离线任务快照，在离线任务对话框可见；单项/批次异常隔离，异常不拖垮同组与批次收尾。全量 pytest 2312 / unittest 2200 通过。"
+      "v1.26.0": "下载页 95% 残留卡修复（v1.26.0）：MP 整理已成功但 dest 精确查找不到文件时不再无限复查——先在 dest 父目录递归模糊定位（精确名/哈希/前后缀/季集），命中走正常流程，仍找不到以 MP 历史成功为准直接结算（STRM 尽量生成，生成不了记 WARNING 由增量补齐）；待后处理记录自首次出现起超 6 小时未结算强制进失败记录（first_seen_at 重登记不重置）；监控每轮记 INFO 心跳（完成/失败数>0 或待处理数变化时），启动/停止提为 INFO；分享类待处理记录进离线任务快照，在离线任务对话框可见；单项/批次异常隔离，异常不拖垮同组与批次收尾。全量 pytest 2312 / unittest 2200 通过。",
+      "v1.26.1": "v1.26.0 修复未生效的真因修复（v1.26.1）：v1.19.0 删 SyncHandler.__getattr__ 隐式委托时只补了 28 个显式转发，漏了 7 个——get_due_offline_task_groups（离线监控每轮取分组，无守卫直接抛 AttributeError，监控自 2026-11-18 19:31 起每轮崩，95% 卡自此攒起；v1.26.0 的 try/except 把崩溃写进插件日志才暴露）与 6 个 STRM/媒体方法（generate/clean_share_strm、refresh_media_servers、migrate_legacy_strm、rebuild_strm_files、rebuild_strm_increment_by_tree；__init__.py 有 hasattr 守卫，缺转发时悄悄返回“同步服务未就绪”，STRM 增量/全量补齐自此停摆）。本版补齐 7 个转发（28→35 个），新增调用点扫描回归测试（静态扫全部 sync_handler.<方法>( 调用，逐个断言真实类上有该属性）与逐个委托断言。全量 pytest 2314 / unittest 2202 通过。"
     }
   },
   "version": "1.9.85",

@@ -2,7 +2,7 @@
 
 删掉 ``SyncHandler.__getattr__`` + ``resolve_component`` 的隐式解析后：
 - 25 个职责组件以 COMPONENT_FIELDS 的具名服务字段持有；
-- 插件宿主与 core/api、core/hook 经 ``self._sync_handler`` 调用的 28 个
+- 插件宿主与 core/api、core/hook 经 ``self._sync_handler`` 调用的 35 个
   组件方法，由 SyncHandler 上的显式转发方法承接（调用方不用改）；
 - 组件间调用走 ``self.<字段>.<方法>``（组件内走 ``self._owner.<字段>.<方法>``）；
 - ``_effective_mediainfo`` 的重名按调用点分流：MpOrganizeMixin 内用本类版本，

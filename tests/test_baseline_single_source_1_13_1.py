@@ -484,7 +484,7 @@ def _make_parity_handler(*, old, scan_files, mp_candidates, plugin_history,
     handler._baseline_key = UpgradeBaselineService._baseline_key
     handler._int_or_zero = UpgradeBaselineService._int_or_zero
     handler._copy_episode_items = UpgradeBaselineService._copy_episode_items
-    # _read_ep_priority 是 28 个对外转发方法之一：组件内调 self._read_ep_priority
+    # _read_ep_priority 是 35 个对外转发方法之一：组件内调 self._read_ep_priority
     # 走宿主转发，桩留在 handler/store 上（不搬到字段实例）。
     handler._read_ep_priority = lambda *a, **k: {}
     handler._chain = None
