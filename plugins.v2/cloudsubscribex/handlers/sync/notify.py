@@ -2,13 +2,86 @@
 
 import copy
 import threading
-from typing import Any, Dict, List, Optional
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 from app.log import logger
 from app.schemas.types import ContentType, MessageType, NotificationType
 
 from ...core import OwnerDelegator, render_template, resolve_template
 from ...drive.common import format_size
+
+
+def _render_started_notification_template(
+        *,
+        mediainfo: Any,
+        is_movie: bool,
+        season_no: int,
+        ep_str: str,
+        has_episodes: bool,
+        first_episode: Optional[int],
+        size_text: str,
+        site_name: str,
+        image: Optional[str],
+) -> Optional[Tuple[str, str, Optional[str]]]:
+    """用 MP 自己的模板渲染器渲一条开始下载通知（v1.26.2）。
+
+    MP 只在标题正文都空时才渲染用户配的 DownloadAdded 模板
+    （``MessageTemplateHelper.render`` 的 ``is_instance_valid`` 短路），
+    所以这里先建一条不带标题正文的裸 Message，带上 mediainfo 与季集/
+    大小等上下文去渲；只有渲出非空标题正文才返回，否则返回 None 让
+    调用方退回写死格式。种子才有的变量（做种数、原名链接、站点、质量词）
+    云盘转存没有，模板里有 ``{% if %}`` 守卫，那几行直接跳过。
+
+    任何一步失败（没配模板、模板改坏了、MP 内部接口变了、测试桩环境）
+    都只返回 None，绝不抛、绝不发空通知。
+    """
+    if not str(getattr(mediainfo, "title", "") or "").strip():
+        return None
+    try:
+        from app.application.messaging.message import MessageTemplateHelper
+        from app.schemas.message import Message
+    except Exception:  # noqa: BLE001 - MP 模板接口不可用时退回写死格式
+        return None
+    try:
+        message = Message(
+            mtype=MessageType.Download,
+            ctype=ContentType.DownloadAdded,
+            image=image,
+        )
+        render_kwargs: Dict[str, Any] = {
+            "mediainfo": mediainfo,
+            "current_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        if size_text:
+            render_kwargs["size"] = size_text
+        if site_name:
+            render_kwargs["site_name"] = site_name
+        if not is_movie:
+            render_kwargs["season_fmt"] = f"S{season_no:02d}"
+            if has_episodes:
+                render_kwargs["download_episodes"] = ep_str
+            if first_episode:
+                render_kwargs["season_episode"] = (
+                    f"S{season_no:02d}E{first_episode:02d}"
+                )
+            else:
+                render_kwargs["season_episode"] = f"S{season_no:02d}"
+        rendered = MessageTemplateHelper.render(message, **render_kwargs)
+        if rendered is None:
+            return None
+        title = getattr(rendered, "title", None)
+        text = getattr(rendered, "text", None)
+        if not (isinstance(title, str) and title.strip()):
+            return None
+        if not (isinstance(text, str) and text.strip()):
+            return None
+        rendered_image = getattr(rendered, "image", None)
+        if not (isinstance(rendered_image, str) and rendered_image.strip()):
+            rendered_image = image
+        return title, text, rendered_image
+    except Exception:  # noqa: BLE001 - 渲染失败退回写死格式
+        return None
 
 
 class SyncNotificationService(OwnerDelegator):
@@ -62,7 +135,7 @@ class SyncNotificationService(OwnerDelegator):
             episodes: Optional[List[int]] = None,
             total_size: Optional[int] = None,
     ) -> None:
-        """转存真正开始时补一条 MP 原生形态的开始下载通知（v1.25.0 Issue A）。
+        """转存真正开始时补一条 MP 原生形态的开始下载通知（v1.25.0 Issue A，v1.26.2 走用户模板）。
 
         MP 自己的开始下载通知是 ``Message(mtype=Download,
         ctype=DownloadAdded)``，由用户配的 DownloadAdded 模板渲染；插件的
@@ -73,11 +146,14 @@ class SyncNotificationService(OwnerDelegator):
         * ``mtype=MessageType.Download``：与原生通知走同一路由开关
           （``get_notification_switch(mtype)``），同一渠道投递；
         * ``ctype=ContentType.DownloadAdded``：消息上带原生内容类型标识；
-        * 标题/正文由插件直接给出（不走用户模板渲染——模板渲染要求
-          title/text 为空且带齐 meta/mediainfo/torrentinfo 上下文，云盘
-          转存入口没有真实 TorrentInfo，渲染失败会留下一条空通知；
-          见 ``MessageTemplateHelper.render`` 的 ``is_instance_valid``
-          短路）。形态差异：标题固定为「开始下载」，不随用户模板变。
+        * 标题/正文优先走用户模板：先建一条不带标题正文的裸 Message，
+          带 mediainfo 与季集/大小等上下文调
+          ``MessageTemplateHelper.render`` 渲用户配的 DownloadAdded 模板
+          （见 ``_render_started_notification_template``）；只有渲出非空
+          标题正文才用模板结果，否则退回插件写死格式（标题固定
+          「【网盘订阅助手】开始下载」）。种子才有的变量（做种数、原名
+          链接、站点、质量词）云盘转存没有，模板里有 ``{% if %}`` 守卫，
+          那几行直接跳过；站点名只在 TG 路填频道名。
 
         只在转存真正开始时由调用方调一次；链接解析失败、查库命中跳过、
         判重拦下的都不进这里。通知开关 ``_notify`` 关了就不发；发送
@@ -91,29 +167,32 @@ class SyncNotificationService(OwnerDelegator):
             if not title:
                 title = str(getattr(subscribe, "name", "") or "").strip() or "未知媒体"
             year = getattr(mediainfo, "year", None) or ""
-            if str(media_type or "").strip().lower() == "movie":
-                headline = f"{title} ({year})".replace(" ()", "")
-            else:
-                season_no = max(1, int(season or 1))
-                eps = sorted({
-                    int(value) for value in (
-                        list(episodes or [])
-                        or [
-                            int((item or {}).get("episode") or 0)
-                            for item in (items or [])
-                        ]
-                    ) if int(value or 0) > 0
-                })
-                if eps:
-                    if len(eps) <= 5:
-                        ep_str = ", ".join(f"E{value:02d}" for value in eps)
-                    else:
-                        ep_str = (
-                            f"E{eps[0]:02d}-E{eps[-1]:02d} 共{len(eps)}集"
-                        )
-                    headline = f"{title} S{season_no:02d} {ep_str}".strip()
+            is_movie = str(media_type or "").strip().lower() == "movie"
+            season_no = max(1, int(season or 1))
+            eps = sorted({
+                int(value) for value in (
+                    list(episodes or [])
+                    or [
+                        int((item or {}).get("episode") or 0)
+                        for item in (items or [])
+                    ]
+                ) if int(value or 0) > 0
+            })
+            if eps:
+                if len(eps) <= 5:
+                    ep_str = ", ".join(f"E{value:02d}" for value in eps)
                 else:
-                    headline = f"{title} S{season_no:02d}".strip()
+                    ep_str = (
+                        f"E{eps[0]:02d}-E{eps[-1]:02d} 共{len(eps)}集"
+                    )
+            else:
+                ep_str = ""
+            if is_movie:
+                headline = f"{title} ({year})".replace(" ()", "")
+            elif eps:
+                headline = f"{title} S{season_no:02d} {ep_str}".strip()
+            else:
+                headline = f"{title} S{season_no:02d}".strip()
             size = int(total_size or 0)
             if size <= 0 and items:
                 size = sum(
@@ -125,6 +204,7 @@ class SyncNotificationService(OwnerDelegator):
                 "manual": "手动",
                 "subscribe": "订阅",
             }.get(str(source or "").strip().lower(), "订阅")
+            site_name = ""
             if str(source or "").strip().lower() == "tg":
                 channel = str(via or "").strip()
                 if channel.startswith("tg:"):
@@ -132,12 +212,13 @@ class SyncNotificationService(OwnerDelegator):
                 channel = channel.split("/")[0].strip()
                 if channel:
                     source_label = f"TG 频道 {channel}"
+                    site_name = channel
             meta = []
             if size > 0:
                 meta.append(format_size(size))
             meta.append(source_label)
             icon = self._media_type_icon(
-                "电影" if str(media_type or "").strip().lower() == "movie" else "电视剧"
+                "电影" if is_movie else "电视剧"
             )
             text = f"{icon} {headline}" + (f" · {' · '.join(meta)}" if meta else "")
             image = None
@@ -147,14 +228,38 @@ class SyncNotificationService(OwnerDelegator):
                     image = getter() or None
                 except Exception:  # noqa: BLE001 - 海报取不到不影响通知
                     image = None
-            post_message(
-                mtype=MessageType.Download,
-                ctype=ContentType.DownloadAdded,
-                title="【网盘订阅助手】开始下载",
-                text=text,
+            rendered = _render_started_notification_template(
+                mediainfo=mediainfo,
+                is_movie=is_movie,
+                season_no=season_no,
+                ep_str=ep_str,
+                has_episodes=bool(eps),
+                first_episode=eps[0] if eps else None,
+                size_text=format_size(size) if size > 0 else "",
+                site_name=site_name,
                 image=image,
             )
-            logger.info(f"开始下载通知已发送：{headline}（{source_label}）")
+            if rendered is not None:
+                template_title, template_text, template_image = rendered
+                post_message(
+                    mtype=MessageType.Download,
+                    ctype=ContentType.DownloadAdded,
+                    title=template_title,
+                    text=template_text,
+                    image=template_image,
+                )
+                logger.info(
+                    f"开始下载通知已发送（MP 模板）：{headline}（{source_label}）"
+                )
+            else:
+                post_message(
+                    mtype=MessageType.Download,
+                    ctype=ContentType.DownloadAdded,
+                    title="【网盘订阅助手】开始下载",
+                    text=text,
+                    image=image,
+                )
+                logger.info(f"开始下载通知已发送：{headline}（{source_label}）")
         except Exception as error:  # noqa: BLE001 - 通知失败绝不能打断转存
             logger.warning(f"开始下载通知发送失败：{error}")
 
