@@ -901,6 +901,8 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         batch_detail_source: Dict[str, str] = {}
                         batch_detail_file_names: Dict[str, Dict[int, str]] = {}
                         batch_detail_episode_sizes: Dict[str, Dict[int, int]] = {}
+                        # v1.26.4：按集的终态分支标记（与上面几组按集字典对齐）。
+                        batch_detail_organized: Dict[str, Dict[int, bool]] = {}
                         completed_missing_episodes = set()
 
                         # 1.6.52 落盘自检：Phase 3a 第 1 项已收进管线 confirm
@@ -1048,6 +1050,14 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                         batch_detail_source[notification_kind] = (
                                             self._owner.transfer_details._detail_source_text(history_item)
                                         )
+                                    # v1.26.4：按集的终态分支标记——MP 整理
+                                    # 身份只在触发成功时才挂在处理项上。
+                                    batch_detail_organized.setdefault(
+                                        notification_kind, {}
+                                    )[episode] = bool(
+                                        item.get("mp_organize")
+                                        or (item.get("file") or {}).get("mp_organize")
+                                    )
 
                                 batch_success_episodes.append(episode)
                             else:
@@ -1081,6 +1091,9 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                         for episode in ordered_episodes
                                     ],
                                     episode_sizes=batch_detail_episode_sizes.get(
+                                        notification_kind
+                                    ),
+                                    organized_via_mp_episodes=batch_detail_organized.get(
                                         notification_kind
                                     ),
                                 )

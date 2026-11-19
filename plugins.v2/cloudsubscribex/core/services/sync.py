@@ -984,6 +984,13 @@ class SyncExecutionService(OwnerDelegator):
                         if self._notify:
                             # v1.13.3 第 6 步：转存完成通知只留洗版；普通转存
                             # 不再发完成通知（MP 的入库通知仍在）。
+                            # v1.26.4：普通转存的完成通知在终态门恢复——
+                            # “MP 的入库通知仍在”只在 MP 整理分支成立，
+                            # strm 直出分支没有 MP 事件；与
+                            # _send_finalized_batch 共用
+                            # send_transfer_completed_notification，
+                            # 发送器内部按分支分流（MP 整理分支跳过、
+                            # strm 分支发 OrganizeSuccess）。
                             upgrade_details = [
                                 detail for detail in completed_details
                                 if str(detail.get("notification_kind") or "") == "upgrade"
@@ -991,6 +998,24 @@ class SyncExecutionService(OwnerDelegator):
                             if upgrade_details:
                                 self._sync_handler.send_transfer_notification(
                                     upgrade_details, completed_count
+                                )
+                            ordinary_details = [
+                                detail for detail in completed_details
+                                if str(detail.get("notification_kind") or "")
+                                in {"transfer", "cross_transfer"}
+                            ]
+                            if ordinary_details:
+                                try:
+                                    aggregated = self._sync_handler.transfer_details._aggregate_transfer_details(
+                                        ordinary_details
+                                    )
+                                except Exception as aggregate_err:
+                                    logger.debug(
+                                        f"完成通知详情聚合失败，用原始详情发送：{aggregate_err}"
+                                    )
+                                    aggregated = ordinary_details
+                                self._sync_handler.send_transfer_completed_notification(
+                                    aggregated, completed_count
                                 )
                         if self._webhook_handler:
                             self._webhook_handler.send_transfer_complete(

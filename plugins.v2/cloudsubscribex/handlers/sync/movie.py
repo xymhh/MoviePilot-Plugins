@@ -700,6 +700,15 @@ class MovieSyncProcessor(OwnerDelegator):
                                     "size": movie_size,
                                     "size_unknown": movie_size <= 0,
                                     "source": self._owner.transfer_details._detail_source_text(history_item),
+                                    # v1.26.4：终态分支标记（MP 整理身份只在
+                                    # 触发成功时才挂在处理项上）+ 完成通知
+                                    # 模板要的类别 / 详情链接。
+                                    "organized_via_mp": bool(
+                                        (pipeline_result.get("item") or {}).get("mp_organize")
+                                        or ((pipeline_result.get("item") or {}).get("file") or {}).get("mp_organize")
+                                    ),
+                                    "category": str(getattr(mediainfo, "category", "") or ""),
+                                    "detail_link": str(getattr(mediainfo, "detail_link", "") or ""),
                                 })
 
                             self._owner.transfer_details._record_download_history(

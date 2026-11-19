@@ -715,6 +715,9 @@ class SyncHandler:
     def send_transfer_notification(self, transfer_details: List[Dict[str, Any]], total_count: int) -> None:
         return self.notifications.send_transfer_notification(transfer_details, total_count)
 
+    def send_transfer_completed_notification(self, transfer_details: List[Dict[str, Any]], total_count: int = 0) -> None:
+        return self.notifications.send_transfer_completed_notification(transfer_details, total_count)
+
     def stop_pending_finalize_tasks(self, pending_keys: Set[str]) -> int:
         return self.postprocess.stop_pending_finalize_tasks(pending_keys)
 

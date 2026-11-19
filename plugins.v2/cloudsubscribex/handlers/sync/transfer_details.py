@@ -145,12 +145,22 @@ class TransferDetailsService(OwnerDelegator):
             source_text: str = "",
             file_names: Optional[List[str]] = None,
             episode_sizes: Optional[Dict[int, int]] = None,
+            organized_via_mp: bool = False,
+            organized_via_mp_episodes: Optional[Dict[int, bool]] = None,
     ) -> None:
         """按媒体季批量合并通知详情，避免逐集重复扫描列表。
 
         size_bytes 是本批集数的实际总字节（从转存结果累加）；传了
         episode_sizes 时以它为准重新计算，并按集对齐 file_names；
         任一集大小未知（<=0）时记 size_unknown=True，卡片不显示数字。
+
+        v1.26.4：``organized_via_mp`` / ``organized_via_mp_episodes``
+        是终态分支标记——MP 整理触发且被接受的集为真，MP 自己会发
+        入库通知，插件的完成通知要跳过这些集。同一批里可能混着两
+        个分支（某集触发 MP 整理成功、另一集因本地挂载未见文件而
+        没触发），所以标记按集存（与 episode_sizes 同套路），
+        ``organized_via_mp`` 只是“本批全是 MP 分支”的派生值。
+        类别与 detail_link 随详情走，供完成通知模板渲染用。
         """
         normalized = sorted({
             int(episode) for episode in episodes if int(episode) > 0
@@ -170,6 +180,15 @@ class TransferDetailsService(OwnerDelegator):
             any(sizes.get(episode, 0) <= 0 for episode in normalized)
             if sizes else batch_size <= 0
         )
+        # v1.26.4：按集的分支标记（没给逐集表时整批同值）。
+        organized_map = {
+            int(episode): bool(
+                (organized_via_mp_episodes or {}).get(
+                    int(episode), organized_via_mp
+                )
+            )
+            for episode in normalized
+        }
         names = [str(name).strip() for name in (file_names or []) if str(name).strip()]
         detail = next(
             (
@@ -219,6 +238,22 @@ class TransferDetailsService(OwnerDelegator):
                 )
             if source_text and not detail.get("source"):
                 detail["source"] = source_text
+            merged_organized = {
+                int(episode): bool(value)
+                for episode, value in (
+                    detail.get("organized_via_mp_episodes") or {}
+                ).items()
+                if int(episode or 0) > 0
+            }
+            merged_organized.update(organized_map)
+            detail["organized_via_mp_episodes"] = merged_organized
+            detail["organized_via_mp"] = bool(
+                detail.get("episodes")
+                and all(
+                    merged_organized.get(int(episode), False)
+                    for episode in detail["episodes"]
+                )
+            )
             return
         transfer_details.append({
             "type": MediaType.TV.value,
@@ -233,6 +268,14 @@ class TransferDetailsService(OwnerDelegator):
             "source": source_text,
             "file_names": names,
             "episode_sizes": dict(sizes),
+            # v1.26.4：终态分支标记（按集）+ 完成通知模板要的类别 /
+            # 详情链接；organized_via_mp 是“本批全是 MP 分支”派生值。
+            "organized_via_mp": bool(
+                organized_map and all(organized_map.values())
+            ),
+            "organized_via_mp_episodes": dict(organized_map),
+            "category": str(getattr(mediainfo, "category", "") or ""),
+            "detail_link": str(getattr(mediainfo, "detail_link", "") or ""),
         })
 
     @staticmethod
@@ -420,6 +463,12 @@ class TransferDetailsService(OwnerDelegator):
                 or self._is_cross_share(share_url)
                 else "transfer"
             ),
+            # v1.26.4：终态分支标记（MP 整理身份在 pending 项上时为真，
+            # MP 自己会发入库通知，插件的完成通知要跳过这一支）+ 完成
+            # 通知模板要的类别 / 详情链接。
+            "organized_via_mp": bool(item.get("mp_organize")),
+            "category": str(getattr(mediainfo, "category", "") or ""),
+            "detail_link": str(getattr(mediainfo, "detail_link", "") or ""),
         }
         episodes = []
         episode_values = (
@@ -449,6 +498,11 @@ class TransferDetailsService(OwnerDelegator):
                 ),
             )
             detail["episodes"] = episodes
+            # v1.26.4：按集的分支标记（本项各集同属一个分支）。
+            detail["organized_via_mp_episodes"] = {
+                int(episode): bool(item.get("mp_organize"))
+                for episode in episodes
+            }
         return detail
 
     def _fallback_finalized_detail(
@@ -499,6 +553,11 @@ class TransferDetailsService(OwnerDelegator):
                 or self._is_cross_share(share_url)
                 else "transfer"
             ),
+            # v1.26.4：与主路径同一份详情结构（分支标记 + 类别 /
+            # 详情链接；媒体信息缺失时类别与链接为空）。
+            "organized_via_mp": bool(item.get("mp_organize")),
+            "category": "",
+            "detail_link": "",
         }
         if is_tv:
             episodes = []
@@ -526,6 +585,11 @@ class TransferDetailsService(OwnerDelegator):
                 season = 1
             detail["season"] = max(1, season)
             detail["episodes"] = sorted(set(episodes))
+            # v1.26.4：按集的分支标记（本项各集同属一个分支）。
+            detail["organized_via_mp_episodes"] = {
+                int(episode): bool(item.get("mp_organize"))
+                for episode in detail["episodes"]
+            }
         return detail
 
     @staticmethod
@@ -599,6 +663,34 @@ class TransferDetailsService(OwnerDelegator):
                     if int(episode) > 0
                 })
                 current["episode_sizes"] = merged_sizes
+            # v1.26.4：按集的分支标记随聚合合并；organized_via_mp
+            # 重算为“合并后全部集都是 MP 分支”。
+            if (
+                    detail.get("organized_via_mp_episodes")
+                    or current.get("organized_via_mp_episodes")
+            ):
+                merged_organized = {
+                    int(episode): bool(value)
+                    for episode, value in (
+                        current.get("organized_via_mp_episodes") or {}
+                    ).items()
+                    if int(episode or 0) > 0
+                }
+                merged_organized.update({
+                    int(episode): bool(value)
+                    for episode, value in (
+                        detail.get("organized_via_mp_episodes") or {}
+                    ).items()
+                    if int(episode or 0) > 0
+                })
+                current["organized_via_mp_episodes"] = merged_organized
+                current["organized_via_mp"] = bool(
+                    episode_sets[key]
+                    and all(
+                        merged_organized.get(int(episode), False)
+                        for episode in episode_sets[key]
+                    )
+                )
             if not current.get("image") and detail.get("image"):
                 current["image"] = detail["image"]
             current["size"] = int(current.get("size") or 0) + int(
@@ -640,6 +732,10 @@ class TransferDetailsService(OwnerDelegator):
         if self._notify:
             # v1.13.3 第 6 步：转存完成通知只留洗版；普通转存不再发完成通知
             # （MP 的入库通知仍在）。没有洗版详情时直接跳过，不发空通知。
+            # v1.26.4：普通转存的完成通知在终态门恢复——“MP 的入库通知
+            # 仍在”只在 MP 整理分支成立，strm 直出分支没有 MP 事件；
+            # 与同步完成块共用 send_transfer_completed_notification，
+            # 发送器内部按分支分流（MP 整理分支跳过、strm 分支发）。
             upgrade_details = [
                 detail for detail in aggregated
                 if str(detail.get("notification_kind") or "") == "upgrade"
@@ -649,6 +745,18 @@ class TransferDetailsService(OwnerDelegator):
                     self.send_transfer_notification(upgrade_details, total_count)
                 except Exception as error:
                     logger.warning(f"文件完成通知入队失败：{error}")
+            ordinary_details = [
+                detail for detail in aggregated
+                if str(detail.get("notification_kind") or "")
+                in {"transfer", "cross_transfer"}
+            ]
+            if ordinary_details:
+                try:
+                    self.send_transfer_completed_notification(
+                        ordinary_details, total_count
+                    )
+                except Exception as error:
+                    logger.warning(f"转存完成通知发送失败：{error}")
         if self._file_finalized:
             try:
                 self._file_finalized(aggregated, total_count)

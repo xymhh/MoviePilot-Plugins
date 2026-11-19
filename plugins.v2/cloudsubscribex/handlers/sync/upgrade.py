@@ -617,6 +617,9 @@ class UpgradeService(OwnerDelegator):
                     batch_detail_source = ""
                     batch_detail_file_names: Dict[int, str] = {}
                     batch_detail_episode_sizes: Dict[int, int] = {}
+                    # v1.26.4：按集的终态分支标记（洗版详情不进完成通知，
+                    # 这里只为详情结构与其它流一致）。
+                    batch_detail_organized: Dict[int, bool] = {}
                     batch_success_episodes = []
                     for transfer_result in transfer_results:
                         item = transfer_result["item"]
@@ -684,6 +687,11 @@ class UpgradeService(OwnerDelegator):
                                 batch_detail_file_names[episode] = str(
                                     item.get("target_name") or file_name or ""
                                 ).strip()
+                                # v1.26.4：按集的终态分支标记。
+                                batch_detail_organized[episode] = bool(
+                                    item.get("mp_organize")
+                                    or (item.get("file") or {}).get("mp_organize")
+                                )
                                 batch_detail_size += int(
                                     item.get("candidate_size") or 0
                                 )
@@ -719,6 +727,7 @@ class UpgradeService(OwnerDelegator):
                                 for episode in ordered_episodes
                             ],
                             episode_sizes=batch_detail_episode_sizes,
+                            organized_via_mp_episodes=batch_detail_organized,
                         )
                     except TypeError as error:
                         # 插件热更新时新旧模块签名可能不一致（线上 1.7.84 报

@@ -2,7 +2,9 @@
 
 import copy
 import threading
+import time
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.log import logger
@@ -91,11 +93,176 @@ def _render_started_notification_template(
         return None
 
 
+def _format_completed_episodes(season: int, episodes: List[int]) -> str:
+    """完成通知的季集文本：≤5 集全列，>5 集只给首尾 + 集数。"""
+    eps = sorted({int(episode) for episode in episodes if int(episode or 0) > 0})
+    if not eps:
+        return f"S{season:02d}"
+    if len(eps) <= 5:
+        return f"S{season:02d}" + ", ".join(f"E{episode:02d}" for episode in eps)
+    return f"S{season:02d}E{eps[0]:02d}-E{eps[-1]:02d} 共{len(eps)}集"
+
+
+def _completed_notification_context(detail: Dict[str, Any]) -> Dict[str, Any]:
+    """从终态详情算完成通知的展示字段（模板变量与写死兜底共用）。
+
+    电影没有集数行；剧集没给集数时只给季号；大小未知时给“未知”
+    （资源入库模板的大小行是无条件的，不能空着）。
+    """
+    title = str(detail.get("title") or "").strip()
+    year = detail.get("year") or ""
+    title_year = f"{title} ({year})" if title and year else title
+    is_movie = str(detail.get("type") or "").strip() == "电影"
+    season = max(1, int(detail.get("season") or 1))
+    episodes = sorted({
+        int(episode) for episode in (detail.get("episodes") or [])
+        if int(episode or 0) > 0
+    })
+    file_count = 1 if (is_movie or not episodes) else len(episodes)
+    if is_movie:
+        season_episode = ""
+    elif episodes:
+        season_episode = _format_completed_episodes(season, episodes)
+    else:
+        season_episode = f"S{season:02d}"
+    size = int(detail.get("size") or 0)
+    return {
+        "title": title,
+        "title_year": title_year,
+        "is_movie": is_movie,
+        "season": season,
+        "episodes": episodes,
+        "file_count": file_count,
+        "season_episode": season_episode,
+        "total_size": format_size(size) if size > 0 else "未知",
+        "category": str(detail.get("category") or "").strip(),
+        "image": detail.get("image") or None,
+    }
+
+
+def _completed_mediainfo_stub(detail: Dict[str, Any]) -> Any:
+    """给完成通知模板渲染用的最小 MediaInfo 替身。
+
+    终态详情流里没有 MediaInfo 对象（只有标题/年份/类别等纯字段），
+    但 MP 的 TemplateContextBuilder 只有拿到 mediainfo 才会把
+    ``__mediainfo__``（模板标题里的 detail_link 就靠它）放进上下文，
+    且 _add_media_info 会读一串属性。按 MP v3.2.6 实际读到的字段
+    逐个给安全缺省值：缺了哪个都会在渲染里抛错、整条模板路失效。
+    type 用带 .value 的字符串替身：真实 builder 读 .value，测试
+    替身读原值，两边都拿到中文类型名。
+    """
+    context = _completed_notification_context(detail)
+
+    class _MediaTypeValue(str):
+        """str 替身：真实 builder 读 .value，测试替身读原值。"""
+
+        @property
+        def value(self):
+            return str(self)
+
+    stub = SimpleNamespace(
+        title=context["title"],
+        en_title="",
+        original_title="",
+        season=context["season"] if not context["is_movie"] else None,
+        year=detail.get("year") or "",
+        title_year=context["title_year"],
+        type=_MediaTypeValue(str(detail.get("type") or "").strip()),
+        category=context["category"],
+        vote_average=None,
+        season_years={},
+        actors=[],
+        overview="",
+        tmdb_id=None,
+        imdb_id=None,
+        douban_id=None,
+        bangumi_id=None,
+        anilist_id=None,
+        media_source="",
+        media_id="",
+        detail_link=str(detail.get("detail_link") or ""),
+    )
+    stub.get_poster_image = lambda: context["image"]
+    stub.get_backdrop_image = lambda: None
+    return stub
+
+
+def _render_completed_notification_template(
+        *,
+        detail: Dict[str, Any],
+) -> Optional[Tuple[str, str, Optional[str]]]:
+    """用 MP 自己的模板渲染器渲一条转存完成通知（v1.26.4）。
+
+    与开始通知同套路：先建一条不带标题正文的裸 Message
+    （mtype=Organize、ctype=OrganizeSuccess），带上下文调
+    ``MessageTemplateHelper.render`` 渲用户配的资源入库模板；只有
+    渲出非空标题正文才返回，否则返回 None 让调用方退回写死格式。
+    模板要的变量：file_count（标题里的文件数）、title_year、
+    type、category、season_episode、total_size；detail_link 靠
+    mediainfo 替身挂进 ``__mediainfo__``（见
+    ``_completed_mediainfo_stub``）。种子才有的变量（小组、质量词）
+    云盘转存没有，模板里有 ``{% if %}`` 守卫，那几行直接跳过。
+
+    任何一步失败（没配模板、模板改坏了、MP 内部接口变了、测试桩环境）
+    都只返回 None，绝不抛、绝不发空通知。
+    """
+    context = _completed_notification_context(detail)
+    if not context["title"]:
+        return None
+    try:
+        from app.application.messaging.message import MessageTemplateHelper
+        from app.schemas.message import Message
+    except Exception:  # noqa: BLE001 - MP 模板接口不可用时退回写死格式
+        return None
+    try:
+        message = Message(
+            mtype=MessageType.Organize,
+            ctype=ContentType.OrganizeSuccess,
+            image=context["image"],
+        )
+        rendered = MessageTemplateHelper.render(
+            message,
+            mediainfo=_completed_mediainfo_stub(detail),
+            file_count=context["file_count"],
+            title_year=context["title_year"],
+            type=str(detail.get("type") or "").strip(),
+            category=context["category"],
+            season_episode=context["season_episode"],
+            total_size=context["total_size"],
+        )
+        if rendered is None:
+            return None
+        title = getattr(rendered, "title", None)
+        text = getattr(rendered, "text", None)
+        if not (isinstance(title, str) and title.strip()):
+            return None
+        if not (isinstance(text, str) and text.strip()):
+            return None
+        rendered_image = getattr(rendered, "image", None)
+        if not (isinstance(rendered_image, str) and rendered_image.strip()):
+            rendered_image = context["image"]
+        return title, text, rendered_image
+    except Exception:  # noqa: BLE001 - 渲染失败退回写死格式
+        return None
+
+
 class SyncNotificationService(OwnerDelegator):
     """负责洗版完成后的通知合并、静默窗口等待与聚合发送（v1.13.3：
-    转存完成通知已收敛掉，入库通知由 MP 自己发）。"""
+    转存完成通知已收敛掉，入库通知由 MP 自己发）。
+
+    v1.26.4：普通转存的完成通知在终态门恢复——两处调用点（同步完成块、
+    ``_send_finalized_batch``）共用 ``send_transfer_completed_notification``，
+    按分支分流：MP 整理分支跳过（MP 已发），strm 直出分支发
+    OrganizeSuccess（走用户资源入库模板，模板优先、写死兜底）。
+    """
 
     _NOTIFICATION_BATCH_WINDOW_SECONDS = 3.0
+
+    # 完成通知去重窗口：同一转存的两处门（同步完成块、
+    # ``_send_finalized_batch``）按 pending_key 互斥、正常不会重叠；
+    # 这里是最后一道保险——窗口内同一详情只发一条，窗口后重传
+    # 同一集正常通知（秒数级远大于两处门的间隔）。
+    _COMPLETED_NOTIFICATION_DEDUP_TTL_SECONDS = 600.0
 
     def __init__(self, owner=None):
         super().__init__(owner)
@@ -268,6 +435,202 @@ class SyncNotificationService(OwnerDelegator):
                 logger.info(f"开始下载通知已发送：{headline}（{source_label}）")
         except Exception as error:  # noqa: BLE001 - 通知失败绝不能打断转存
             logger.warning(f"开始下载通知发送失败：{error}")
+
+    @staticmethod
+    def _completed_notification_signature(detail: Dict[str, Any]) -> str:
+        """完成通知去重签名：同一转存的详情在两处门各出现一次时只发一条。
+
+        剧集按标题 + 年份 + 季 + 集 + kind；电影按标题 + 年份 + 文件名
+        + kind。分支不进签名——MP 整理分支在签名之前就被跳过。
+        """
+        type_text = str(detail.get("type") or "").strip()
+        if type_text == "电影":
+            episodes_key = str(detail.get("file_name") or "")
+        else:
+            episodes = sorted({
+                int(episode) for episode in (detail.get("episodes") or [])
+                if int(episode or 0) > 0
+            })
+            episodes_key = ",".join(str(episode) for episode in episodes)
+        return "|".join([
+            type_text,
+            str(detail.get("title") or "").strip(),
+            str(detail.get("year") or ""),
+            str(detail.get("season") or ""),
+            episodes_key,
+            str(detail.get("notification_kind") or ""),
+        ])
+
+    def send_transfer_completed_notification(
+            self, transfer_details: List[Dict[str, Any]], total_count: int = 0
+    ) -> None:
+        """终态门恢复的普通转存完成通知（v1.26.4），两处调用点共用。
+
+        调用方传进来的已是按媒体聚合好的详情（同步完成块与
+        ``_send_finalized_batch`` 都先过 ``_aggregate_transfer_details``）。
+        只处理普通转存（transfer / cross_transfer）：洗版详情不在
+        这里发（仍走原 ``send_transfer_notification``）；MP 整理分支
+        跳过——MP 自己的 OrganizeSuccess 已发，插件再发就重复；其余
+        strm 直出分支逐条发 OrganizeSuccess（模板优先、写死兜底，
+        见 ``_send_single_completed_notification``）。剧集按集切分
+        （见 ``_strm_branch_detail``）：同一批里 MP 分支的集跳过、
+        strm 分支的集照常发。同一个详情在窗口内重复进门时只发一条
+        （去重状态记在服务实例自己的 ``__dict__`` 里，不经过
+        OwnerDelegator 转发）。通知开关 ``_notify`` 关了就不发；
+        发送本身失败只记日志，绝不能打断转存。
+        """
+        post_message = getattr(self, "_post_message", None)
+        if not transfer_details or not post_message:
+            return
+        if not getattr(self, "_notify", False):
+            return
+        now = time.monotonic()
+        seen = self.__dict__.get("_completed_notified")
+        if seen is None:
+            seen = self.__dict__["_completed_notified"] = {}
+        expired = [
+            key for key, at in seen.items()
+            if now - at > self._COMPLETED_NOTIFICATION_DEDUP_TTL_SECONDS
+        ]
+        for key in expired:
+            seen.pop(key, None)
+        for detail in transfer_details:
+            try:
+                kind = str(detail.get("notification_kind") or "")
+                if kind not in {"transfer", "cross_transfer"}:
+                    logger.warning(
+                        f"丢弃非普通转存完成通知详情：kind={kind}，"
+                        f"title={detail.get('title')}"
+                    )
+                    continue
+                effective_detail = self._strm_branch_detail(detail)
+                if effective_detail is None:
+                    logger.debug(
+                        f"跳过 MP 整理分支的完成通知（MP 已发）："
+                        f"{detail.get('title')}"
+                    )
+                    continue
+                signature = self._completed_notification_signature(
+                    effective_detail
+                )
+                if signature in seen:
+                    logger.debug(
+                        f"转存完成通知已发过，跳过重复：{detail.get('title')}"
+                    )
+                    continue
+                self._send_single_completed_notification(effective_detail)
+                # 发送成功后才记去重：发送失败时不占位，下一轮还能重发。
+                seen[signature] = now
+            except Exception as error:  # noqa: BLE001 - 通知失败绝不能打断转存
+                logger.warning(f"转存完成通知发送失败：{error}")
+
+    @staticmethod
+    def _strm_branch_detail(detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """取详情里 strm 直出分支的部分（MP 整理分支由 MP 自己通知）。
+
+        电影：整条详情要么是 MP 分支（返回 None）、要么是 strm 分支
+        （原样返回）。剧集：按集的分支标记切分——只有 strm 分支的集
+        才进通知；全是 MP 分支时返回 None。返回的详情只含 strm 分支
+        的集（集数 / 文件数按这部分算；有逐集体积时按这部分重算，
+        没有时大小记未知，不拿整批的和冒充）。
+        """
+        type_text = str(detail.get("type") or "").strip()
+        if type_text == "电影":
+            if detail.get("organized_via_mp"):
+                return None
+            return detail
+        episodes = sorted({
+            int(episode) for episode in (detail.get("episodes") or [])
+            if int(episode or 0) > 0
+        })
+        organized_map = {
+            int(episode): bool(value)
+            for episode, value in (
+                detail.get("organized_via_mp_episodes") or {}
+            ).items()
+            if int(episode or 0) > 0
+        }
+        if organized_map:
+            strm_episodes = [
+                episode for episode in episodes
+                if not organized_map.get(episode, False)
+            ]
+        elif detail.get("organized_via_mp"):
+            strm_episodes = []
+        else:
+            strm_episodes = list(episodes)
+        if not strm_episodes:
+            return None
+        if strm_episodes == episodes:
+            return detail
+        effective = dict(detail)
+        effective["episodes"] = strm_episodes
+        sizes = detail.get("episode_sizes") or {}
+        if sizes:
+            effective["size"] = sum(
+                max(0, int(sizes.get(episode, 0) or 0))
+                for episode in strm_episodes
+            )
+            effective["size_unknown"] = any(
+                int(sizes.get(episode, 0) or 0) <= 0
+                for episode in strm_episodes
+            )
+            effective["episode_sizes"] = {
+                episode: sizes.get(episode, 0) for episode in strm_episodes
+            }
+        else:
+            # 没有逐集体积时整批的和不能按集拆，大小记未知。
+            effective["size"] = 0
+            effective["size_unknown"] = True
+        return effective
+
+    def _send_single_completed_notification(
+            self, detail: Dict[str, Any]
+    ) -> None:
+        """发一条普通转存的完成通知：模板优先、写死兜底。
+
+        模板路：裸 Message（mtype=Organize、ctype=OrganizeSuccess，
+        不填标题正文）走用户资源入库模板；兜底路：标题仿照模板形状
+        （“📂 已入库N个文件”+ 标题年份），正文给集数 / 类别 / 大小行。
+        """
+        post_message = getattr(self, "_post_message", None)
+        if not post_message:
+            return
+        context = _completed_notification_context(detail)
+        headline = (
+            context["title_year"]
+            if context["is_movie"]
+            else f"{context['title_year']} {context['season_episode']}".strip()
+        )
+        rendered = _render_completed_notification_template(detail=detail)
+        if rendered is not None:
+            template_title, template_text, template_image = rendered
+            post_message(
+                mtype=MessageType.Organize,
+                ctype=ContentType.OrganizeSuccess,
+                title=template_title,
+                text=template_text,
+                image=template_image,
+            )
+            logger.info(f"转存完成通知已发送（MP 模板）：{headline}")
+            return
+        text_lines = []
+        if context["season_episode"]:
+            text_lines.append(f"📺 集数：{context['season_episode']}")
+        if context["category"]:
+            text_lines.append(f"🎭 类别：{context['category']}")
+        text_lines.append(f"💾 大小：{context['total_size']}")
+        post_message(
+            mtype=MessageType.Organize,
+            ctype=ContentType.OrganizeSuccess,
+            title=(
+                f"📂 已入库{context['file_count']}个文件\n"
+                f"{context['title_year']}"
+            ),
+            text="\n".join(text_lines),
+            image=context["image"],
+        )
+        logger.info(f"转存完成通知已发送：{headline}")
 
     @staticmethod
     def _media_type_icon(type_text: str) -> str:
