@@ -6,12 +6,21 @@
 （1.9.98 之前）。这里只保留一个调度器，任务按 id 注册，启停一次管全部。
 
 MP 自身的定时服务（get_service 声明的榜单自动订阅、签到等）仍由 MP 的
-调度器管理，不在这里登记。
+调度器管理，不在这里登记。v1.27.0 起 STRM 全量/增量、115 整理定时、重试
+索引维护这几个固定周期任务也交给了 MP 调度；这里只剩按需出现的动态任务
+（离线监控：有待处理文件才存在、20 秒一轮）和启动时的一次性任务。
+
+v1.27.0：``ensure_job`` 是本注册表唯一的登记处，登记时统一给任务函数套一层
+观测：任务抛异常时先在插件日志记 ERROR（带任务 id 与堆栈），再原样抛回
+APScheduler。此前异常只进 APScheduler 自己的日志通道——离线监控自 v1.19.0
+起每轮崩、插件日志里一行都没有，就是这么漏掉的。
 """
 
 from __future__ import annotations
 
+import functools
 import threading
+import traceback
 from typing import TYPE_CHECKING, Any, Callable, List, Optional
 
 from app.core.config import settings
@@ -20,6 +29,26 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 if TYPE_CHECKING:
     from apscheduler.job import Job
+
+
+def observed_job(job_id: str, func: Callable[..., Any]) -> Callable[..., Any]:
+    """包装任务函数：异常写进插件日志（ERROR + 堆栈）后原样抛出。
+
+    只加日志、不改语义：返回值、异常类型与 APScheduler 的错误事件都不变。
+    """
+
+    @functools.wraps(func)
+    def _run(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return func(*args, **kwargs)
+        except Exception as error:
+            logger.error(
+                f"插件定时任务执行异常（{job_id}）：{error}\n{traceback.format_exc()}"
+            )
+            raise
+
+    _run.__observed_job__ = job_id  # type: ignore[attr-defined]
+    return _run
 
 
 class SchedulerRegistry:
@@ -50,7 +79,7 @@ class SchedulerRegistry:
             try:
                 scheduler = self._ensure_scheduler()
                 scheduler.add_job(
-                    func=func,
+                    func=observed_job(job_id, func),
                     trigger=trigger,
                     id=job_id,
                     replace_existing=True,

@@ -94,10 +94,11 @@ class TestOrganizeSettingsStayInConfig(unittest.TestCase):
             self.assertNotIn(f'"{path}"', registration)
 
     def test_organize_service_still_scheduled(self):
-        # 整理服务本身仍在：定时任务仍由插件启动时注册。
+        # 整理服务本身仍在；v1.27.0 起定时任务改由 MP 调度（get_service 声明）。
         plugin_init = _read("plugins.v2/cloudsubscribex/__init__.py")
-        self.assertIn("def _start_organize_schedule", plugin_init)
-        self.assertIn("self._start_organize_schedule()", plugin_init)
+        registration = _read("plugins.v2/cloudsubscribex/core/api/registration.py")
+        self.assertIn('"organize": lambda: self.start_scan(', plugin_init)
+        self.assertIn('"CloudSubscribe_Organize"', registration)
         self.assertIn("OrganizeService", plugin_init)
 
 

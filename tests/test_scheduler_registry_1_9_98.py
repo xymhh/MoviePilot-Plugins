@@ -598,11 +598,8 @@ class PluginWiringTests(unittest.TestCase):
         return plugin
 
     def _start_all(self, plugin):
-        plugin._start_strm_full_scan()
-        plugin._start_strm_increment()
-        # v1.13.3：第 5 步删清扫器，历史状态维护任务由重试索引留存清理接替。
-        plugin._start_retry_index_maintenance()
-        plugin._start_organize_schedule()
+        # v1.27.0：STRM 全量/增量、重试索引维护、115 整理定时改由 MP 调度
+        # （get_service），插件注册表上只剩启动一次性清理与离线监控。
         plugin._start_residue_cleanup()
 
     def test_start_methods_register_all_jobs_on_one_registry(self):
@@ -613,43 +610,39 @@ class PluginWiringTests(unittest.TestCase):
         self.assertTrue(registry.running)
         self.assertEqual(
             set(registry.job_ids()),
-            {
-                "cloudsubscribe_strm_full_scan",
-                "cloudsubscribe_strm_increment",
-                "cloudsubscribe_retry_index_maintenance",
-                "cloudsubscribe_organize",
-                "cloudsubscribe_residue_cleanup_startup",
-            },
+            {"cloudsubscribe_residue_cleanup_startup"},
         )
 
     def test_stop_service_shuts_down_all_jobs_including_formerly_leaked(self):
         plugin = self._enabled_plugin()
         self._start_all(plugin)
         registry = plugin._scheduler_registry()
-        # 1.9.98 之前重试索引维护与 115 整理两个调度器不在 stop_service 里，
-        # 停用/卸载后继续跑；现在它们与其它任务共用一个注册表。
-        self.assertIn(
-            "cloudsubscribe_retry_index_maintenance", registry.job_ids()
-        )
-        self.assertIn("cloudsubscribe_organize", registry.job_ids())
+        self.assertIn("cloudsubscribe_residue_cleanup_startup", registry.job_ids())
         plugin.stop_service()
         self.assertIsNone(plugin.__dict__.get("_job_registry"))
         self.assertFalse(registry.running)
         self.assertEqual(registry.job_ids(), [])
 
-    def test_disabled_switch_removes_job(self):
+    def test_migrated_tasks_never_land_on_plugin_registry(self):
+        """迁到 MP 的四个任务不得再出现在插件注册表上（避免两边各跑一份）。"""
         plugin = self._enabled_plugin()
         self._start_all(plugin)
         registry = plugin._scheduler_registry()
         self.addCleanup(registry.shutdown)
-        plugin._strm_full_scan_enabled = False
-        plugin._start_strm_full_scan()
-        self.assertNotIn(
-            "cloudsubscribe_strm_full_scan", registry.job_ids()
-        )
-        self.assertIn(
-            "cloudsubscribe_strm_increment", registry.job_ids()
-        )
+        for job_id in (
+            "cloudsubscribe_strm_full_scan",
+            "cloudsubscribe_strm_increment",
+            "cloudsubscribe_retry_index_maintenance",
+            "cloudsubscribe_organize",
+        ):
+            self.assertNotIn(job_id, registry.job_ids())
+        for name in (
+            "_start_strm_full_scan",
+            "_start_strm_increment",
+            "_start_retry_index_maintenance",
+            "_start_organize_schedule",
+        ):
+            self.assertNotIn(name, type(plugin).__dict__)
 
 
 class OfflineMonitorWiringTests(unittest.TestCase):

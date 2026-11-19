@@ -156,9 +156,6 @@ def _plugin():
         "_refresh_platform_services",
         "_install_subscribe_search_takeover",
         "_start_residue_cleanup",
-        "_start_strm_full_scan",
-        "_start_strm_increment",
-        "_start_organize_schedule",
         "_start_history_state_maintenance",
     ):
         setattr(plugin, name, lambda *args, **kwargs: None)

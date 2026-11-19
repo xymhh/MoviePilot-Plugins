@@ -68,6 +68,8 @@ class StrmOpsMixin(OwnerDelegator):
         target_root = Path(root)
         created = updated = 0
         sample = []
+        created_paths: List[Path] = []
+        updated_paths: List[Path] = []
         for target, content in planned:
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -82,12 +84,23 @@ class StrmOpsMixin(OwnerDelegator):
                 continue
             if existed:
                 updated += 1
+                updated_paths.append(target)
             else:
                 created += 1
+                created_paths.append(target)
             if len(sample) < 3:
                 sample.append({"path": str(target), "content": content})
 
-        refreshed = self._owner.media_refresh.refresh_media_servers() if (created or updated) else {}
+        # v1.27.0：按路径通知媒体服务器（新建 Created、改写 Modified），不再全库刷新。
+        refreshed = {}
+        if created_paths:
+            refreshed = self._owner.media_refresh.refresh_media_servers(
+                paths=created_paths, update_type="Created",
+            )
+        if updated_paths:
+            refreshed = self._owner.media_refresh.refresh_media_servers(
+                paths=updated_paths, update_type="Modified",
+            ) or refreshed
         logger.info(
             f"分享 STRM 生成完成：{share_code} 新增 {created} / 更新 {updated} "
             f"/ 跳过 {skipped}，目录={root}，媒体库刷新={refreshed or '未触发'}"
@@ -130,17 +143,21 @@ class StrmOpsMixin(OwnerDelegator):
             root, files, "http://placeholder.invalid", share_code, receive_code,
         )
         removed = missing = 0
+        removed_paths: List[Path] = []
         for target, _content in planned:
             try:
                 if target.exists():
                     target.unlink()
                     removed += 1
+                    removed_paths.append(target)
                 else:
                     missing += 1
             except OSError as error:
                 logger.warning(f"分享 STRM 删除失败：{target}（{error}）")
 
-        refreshed = self._owner.media_refresh.refresh_media_servers() if removed else {}
+        refreshed = self._owner.media_refresh.refresh_media_servers(
+            paths=removed_paths, update_type="Deleted",
+        ) if removed_paths else {}
         logger.info(
             f"分享 STRM 清理完成：{share_code} 删除 {removed} / 不存在 {missing}，"
             f"目录={root}，媒体库刷新={refreshed or '未触发'}"
@@ -161,6 +178,7 @@ class StrmOpsMixin(OwnerDelegator):
         if not target_root:
             raise ValueError("未配置本地资源目录，请指定 root")
         scanned = migrated = skipped = failed = 0
+        migrated_paths: List[Path] = []
         for path in iter_strm_files(target_root):
             scanned += 1
             try:
@@ -181,7 +199,13 @@ class StrmOpsMixin(OwnerDelegator):
                     logger.warning(f"改写 STRM 失败：{path}（{error}）")
                     continue
             migrated += 1
-        refreshed = {} if dry_run else self._owner.media_refresh.refresh_media_servers()
+            migrated_paths.append(path)
+        # v1.27.0：只通知改写过的 STRM（Modified）；超过上限时由刷新方改走全库刷新。
+        refreshed = {} if (dry_run or not migrated_paths) else (
+            self._owner.media_refresh.refresh_media_servers(
+                paths=migrated_paths, update_type="Modified",
+            )
+        )
         logger.info(
             f"旧 STRM 迁移完成：{'预演' if dry_run else '执行'} 扫描 {scanned} / "
             f"改写 {migrated} / 跳过 {skipped} / 失败 {failed}，目录={target_root}"

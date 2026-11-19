@@ -7,6 +7,7 @@ import copy
 import datetime
 import json
 import re
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event as ThreadEvent, Lock, RLock, local, Thread
 from typing import Optional, Any, List, Dict, Tuple, Callable, Union
@@ -26,7 +27,6 @@ from app.schemas.types import (
     TorrentQueryStatus,
 )
 from apscheduler.triggers.cron import CronTrigger
-from apscheduler.triggers.interval import IntervalTrigger
 
 from .utils.notify_template import (
     DEFAULT_TEMPLATES,
@@ -197,7 +197,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.26.4"
+    plugin_version = "1.27.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -894,6 +894,11 @@ class CloudSubscribeX(_PluginBase):
             "block_start_time", "block_end_time", "block_system_subscribe",
             "platform_download_policy", "block_platform_downloads",
             "takeover_platform_downloads",
+            # v1.27.0：交给 MP 调度的插件维护任务
+            "strm_generate_enabled", "strm_full_scan_enabled",
+            "strm_increment_enabled", "strm_increment_minutes",
+            "organize_schedule_enabled", "organize_schedule_cron",
+            "organize_source_path", "organize_schedule_auto_execute",
         }
         try:
             from .core.checkin_manager import get_checkin_definitions
@@ -922,10 +927,9 @@ class CloudSubscribeX(_PluginBase):
             f"洗版范围={'指定订阅' if self._upgrade_subscribe_ids else '全部'}, "
             f"当前接管态={self._is_takeover_active()}")
         self._start_residue_cleanup()
-        self._start_strm_full_scan()
-        self._start_strm_increment()
-        self._start_organize_schedule()
-        self._start_retry_index_maintenance()
+        # v1.27.0：STRM 全量/增量、115 整理定时、重试索引维护四个固定周期任务
+        # 改由 MP 调度（get_service → _run_scheduled_task），不再挂插件自建调度器；
+        # 开关/周期变化通过上面的 _refresh_platform_services 让 MP 重建服务。
         # 配置保存可能改了开关/端口：apply 末尾同步一次代理运行态
         # （stop_service 在重载开头已经停过，这里按新配置重新决定起不起）。
         try:
@@ -960,13 +964,37 @@ class CloudSubscribeX(_PluginBase):
         except (TypeError, ValueError):
             return 0
 
+    def _require_sync_handler(
+            self, *method_names: str,
+    ) -> Tuple[Any, Optional[Dict[str, Any]]]:
+        """取同步服务并确认它有要调用的方法；返回 ``(handler, None)`` 或 ``(None, 失败结果)``。
+
+        v1.27.0：区分两种“用不了”——
+        * 同步服务还没初始化（插件启动中 / 未启用）：照旧返回“同步服务未就绪”；
+        * 同步服务在、但缺方法：这是插件内部错误（v1.19.0 漏转发那类，会让功能
+          悄悄停摆），记 ERROR 并返回带 ``internal_error`` 的明确报错；
+          走 MP 调度时由 ``_run_scheduled_task`` 转成异常交给 MP 报出。
+        """
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler:
+            return None, {"success": False, "message": "同步服务未就绪"}
+        missing = [name for name in method_names if not hasattr(sync_handler, name)]
+        if missing:
+            message = (
+                f"同步服务缺少方法：{'、'.join(missing)}（插件内部错误，相关功能已停用，"
+                f"请升级或反馈）"
+            )
+            logger.error(f"{message}——{type(sync_handler).__name__} 上找不到这些方法")
+            return None, {"success": False, "message": message, "internal_error": True}
+        return sync_handler, None
+
     def generate_share_strm(
             self, share_url: str, save_path: str = "", overwrite: bool = False,
     ) -> dict:
         """为 115 分享直接生成 STRM（不转存）。"""
-        sync_handler = getattr(self, "_sync_handler", None)
-        if not sync_handler or not hasattr(sync_handler, "generate_share_strm"):
-            return {"success": False, "message": "同步服务未就绪"}
+        sync_handler, unavailable = self._require_sync_handler("generate_share_strm",)
+        if unavailable:
+            return unavailable
         try:
             data = sync_handler.generate_share_strm(
                 share_url, save_path=save_path, overwrite=overwrite,
@@ -985,9 +1013,9 @@ class CloudSubscribeX(_PluginBase):
 
     def clean_share_strm(self, share_url: str, save_path: str = "") -> dict:
         """删除某个分享链接生成的 STRM。"""
-        sync_handler = getattr(self, "_sync_handler", None)
-        if not sync_handler or not hasattr(sync_handler, "clean_share_strm"):
-            return {"success": False, "message": "同步服务未就绪"}
+        sync_handler, unavailable = self._require_sync_handler("clean_share_strm",)
+        if unavailable:
+            return unavailable
         try:
             data = sync_handler.clean_share_strm(share_url, save_path=save_path)
         except Exception as error:  # noqa: BLE001
@@ -1004,9 +1032,9 @@ class CloudSubscribeX(_PluginBase):
 
     def refresh_media_servers(self) -> dict:
         """手动触发媒体库刷新。"""
-        sync_handler = getattr(self, "_sync_handler", None)
-        if not sync_handler or not hasattr(sync_handler, "refresh_media_servers"):
-            return {"success": False, "message": "同步服务未就绪"}
+        sync_handler, unavailable = self._require_sync_handler("refresh_media_servers",)
+        if unavailable:
+            return unavailable
         try:
             data = sync_handler.refresh_media_servers()
         except Exception as error:  # noqa: BLE001
@@ -1019,9 +1047,9 @@ class CloudSubscribeX(_PluginBase):
 
     def migrate_legacy_strm(self, root: str = "", dry_run: bool = False) -> dict:
         """把 P115StrmHelper 生成的 STRM 改写成本插件端点。"""
-        sync_handler = getattr(self, "_sync_handler", None)
-        if not sync_handler or not hasattr(sync_handler, "migrate_legacy_strm"):
-            return {"success": False, "message": "同步服务未就绪"}
+        sync_handler, unavailable = self._require_sync_handler("migrate_legacy_strm",)
+        if unavailable:
+            return unavailable
         try:
             data = sync_handler.migrate_legacy_strm(root=root, dry_run=dry_run)
         except Exception as error:  # noqa: BLE001
@@ -1086,9 +1114,9 @@ class CloudSubscribeX(_PluginBase):
 
     def run_strm_full_scan(self, reason: str = "手动") -> dict:
         """后台按目录 CID 全量遍历媒体库，补齐/校准 STRM。"""
-        sync_handler = getattr(self, "_sync_handler", None)
-        if not sync_handler or not hasattr(sync_handler, "rebuild_strm_files"):
-            return {"success": False, "message": "同步服务未就绪"}
+        sync_handler, unavailable = self._require_sync_handler("rebuild_strm_files")
+        if unavailable:
+            return unavailable
         lock = self.__dict__.get("_strm_scan_lock")
         if lock is None:
             lock = Lock()
@@ -1131,27 +1159,17 @@ class CloudSubscribeX(_PluginBase):
         Thread(target=_run, daemon=True).start()
         return {"success": True, "message": "已开始后台全量校准，完成后写入日志"}
 
-    def _start_strm_full_scan(self) -> None:
-        """每天 04:20 分批校准（可在设置页关闭），避开 04:30 的其它定时任务。"""
-        registry = self._scheduler_registry()
-        if not (self._strm_full_scan_enabled and self._strm_generate_enabled):
-            registry.remove_job("cloudsubscribe_strm_full_scan")
-            return
-        registry.ensure_job(
-            "cloudsubscribe_strm_full_scan",
-            func=lambda: self.run_strm_full_scan("定时"),
-            trigger=CronTrigger(hour=4, minute=20),
-        )
-
     def run_strm_increment(self, reason: str = "增量") -> dict:
         """轻量增量补齐：只补缺失的 STRM，不改写已有文件。
 
         与全量共用同一把扫描锁，避免两条链路同时写同一目录；
         不写断点文件，保证不会污染全量校准的续扫进度。
         """
-        sync_handler = getattr(self, "_sync_handler", None)
-        if not sync_handler or not hasattr(sync_handler, "rebuild_strm_files"):
-            return {"success": False, "message": "同步服务未就绪"}
+        sync_handler, unavailable = self._require_sync_handler(
+            "rebuild_strm_files", "rebuild_strm_increment_by_tree",
+        )
+        if unavailable:
+            return unavailable
         lock = self.__dict__.get("_strm_scan_lock")
         if lock is None:
             lock = Lock()
@@ -1201,27 +1219,39 @@ class CloudSubscribeX(_PluginBase):
         Thread(target=_run, daemon=True).start()
         return {"success": True, "message": "已开始后台增量补齐"}
 
-    def _start_strm_increment(self) -> None:
-        """每 N 分钟补一次缺失 STRM（可在设置页关闭）。"""
-        registry = self._scheduler_registry()
-        if not (self._strm_increment_enabled and self._strm_generate_enabled):
-            registry.remove_job("cloudsubscribe_strm_increment")
-            return
-        registry.ensure_job(
-            "cloudsubscribe_strm_increment",
-            func=lambda: self.run_strm_increment("定时"),
-            trigger=IntervalTrigger(
-                minutes=max(1, int(self._strm_increment_minutes or 10))
-            ),
-        )
+    def _run_scheduled_task(self, task: str) -> Any:
+        """MP 调度的插件维护任务唯一入口（get_service 声明的 func）。
 
-    def _start_retry_index_maintenance(self) -> None:
-        """每天清理一次过期的重试索引行（失败 90 天、待修复 30 天）。"""
-        self._scheduler_registry().ensure_job(
-            "cloudsubscribe_retry_index_maintenance",
-            func=lambda: self._run_retry_index_maintenance(),
-            trigger=IntervalTrigger(hours=24),
-        )
+        v1.27.0：这几项原来挂在插件自建调度器上，异常只进 APScheduler 自己的
+        日志，95% 卡那次监控崩了一整晚没人看见。改由 MP 调度后，任务抛出的
+        异常由 MP 记 ERROR、发系统消息与 SystemError 事件（MP v3.2.6
+        app/scheduler/execution.py ``_handle_job_error``），「定时服务」页也能看到；
+        这里另在插件日志记一条带堆栈的 ERROR。同步服务缺方法这类插件内部错误
+        （``internal_error``）也转成异常抛给 MP，不再静默返回。
+        """
+        runners: Dict[str, Callable[[], Any]] = {
+            "strm_full_scan": lambda: self.run_strm_full_scan("定时"),
+            "strm_increment": lambda: self.run_strm_increment("定时"),
+            "retry_index_maintenance": self._run_retry_index_maintenance,
+            "organize": lambda: self.start_scan(
+                source_path=self._organize_source_path,
+                auto_execute=self._organize_schedule_auto_execute,
+                trigger="定时",
+            ),
+        }
+        runner = runners.get(task)
+        if runner is None:
+            raise ValueError(f"未知的插件定时任务：{task}")
+        try:
+            result = runner()
+        except Exception as error:
+            logger.error(
+                f"插件定时任务执行异常（{task}）：{error}\n{traceback.format_exc()}"
+            )
+            raise
+        if isinstance(result, dict) and result.get("internal_error"):
+            raise RuntimeError(str(result.get("message") or f"插件定时任务内部错误：{task}"))
+        return result
 
     def _run_retry_index_maintenance(self) -> None:
         try:
@@ -1231,30 +1261,6 @@ class CloudSubscribeX(_PluginBase):
             return
         if purged:
             logger.info(f"重试索引过期清理完成：删除 {purged} 条")
-
-    def _start_organize_schedule(self) -> None:
-        """按 Cron 定时扫描 115 整理源目录；默认关闭。"""
-        registry = self._scheduler_registry()
-        if not self._organize_schedule_enabled:
-            registry.remove_job("cloudsubscribe_organize")
-            return
-        if not self._organize_source_path:
-            logger.warning("整理台定时任务已开启，但未配置 organize_source_path")
-            registry.remove_job("cloudsubscribe_organize")
-            return
-        registry.ensure_job(
-            "cloudsubscribe_organize",
-            func=lambda: self.start_scan(
-                source_path=self._organize_source_path,
-                auto_execute=self._organize_schedule_auto_execute,
-                trigger="定时",
-            ),
-            trigger=CronTrigger.from_crontab(self._organize_schedule_cron),
-        )
-        logger.info(
-            f"115 网盘整理定时任务启动：{self._organize_schedule_cron}，"
-            f"自动执行={'是' if self._organize_schedule_auto_execute else '否'}"
-        )
 
     def _start_residue_cleanup(self) -> None:
         """启动时跑一次孤儿清理（崩溃 / 异常退出留下的临时文件）。

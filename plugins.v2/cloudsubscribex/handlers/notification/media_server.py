@@ -19,6 +19,7 @@ from app.schemas.types import MediaType
 from app.utils.http import RequestUtils
 
 from ...utils.path_map import map_local_to_server_path
+from .emby_path_update import emby_path_updater
 
 try:
     from ...core.media_scope import is_ignored_media_path
@@ -788,8 +789,35 @@ class MediaServerNotifier:
         success_count = 0
         total_targets = 0
 
+        # v1.27.0：新增文件先按路径报给 Emby（Media/Updated），只让 Emby 发现
+        # 这些文件，不刷新整部剧的元数据；接口不支持 / 路径不在 Emby 媒体库下 /
+        # 请求失败时，这批条目退回下面原来的单项刷新逻辑。
+        created_entries = [entry for entry in entries if not entry.get("deleted_paths")]
+        path_updated = False
+        if created_entries:
+            updates = [
+                (path.as_posix() if isinstance(path, Path) else str(path), "Created")
+                for entry in created_entries
+                for path in sorted(entry.get("paths") or (), key=str)
+            ]
+            outcome = self.submit_emby_path_updates(name, service, updates)
+            if outcome in ("ok", "fallback_ok"):
+                path_updated = True
+                total_targets += len(created_entries)
+                success_count += len(created_entries)
+                logger.info(
+                    f"已请求 Emby ({name}) 按路径发现新文件：{len(updates)} 个"
+                    f"（{len(created_entries)} 个媒体目录）"
+                )
+            else:
+                logger.info(
+                    f"Emby ({name}) 按路径发现不可用（{outcome}），改用单项刷新"
+                )
+
         for entry in entries:
             is_deleted = bool(entry.get("deleted_paths"))
+            if not is_deleted and path_updated:
+                continue
             tmdb_id = entry.get("tmdb_id")
             title = entry.get("title") or getattr(entry.get("item"), "title", "")
             folder = Path(entry["folder"])
@@ -852,6 +880,63 @@ class MediaServerNotifier:
 
         logger.info(f"Emby ({name}) 媒体处理完成：成功 {success_count}/{max(total_targets, 1)}")
         return True
+
+    @staticmethod
+    def _post_emby_media_updated(
+            host: str, api_key: str, updates: List[Dict[str, str]],
+    ) -> Optional[int]:
+        """POST ``/emby/Library/Media/Updated``，返回状态码（无响应返回 None）。"""
+        response = RequestUtils(timeout=15).post_res(
+            url=f"{host}/emby/Library/Media/Updated",
+            params={"api_key": api_key},
+            json={"Updates": updates},
+        )
+        return getattr(response, "status_code", None) if response is not None else None
+
+    @staticmethod
+    def _emby_library_roots(service: Any) -> List[str]:
+        """Emby 全部媒体库目录（MP 的 ``get_emby_virtual_folders``）；取不到返回空。"""
+        getter = getattr(getattr(service, "instance", None), "get_emby_virtual_folders", None)
+        if not callable(getter):
+            return []
+        folders = getter()
+        if not isinstance(folders, list):
+            return []
+        roots: List[str] = []
+        for folder in folders:
+            if not isinstance(folder, dict):
+                continue
+            paths = folder.get("Path")
+            if isinstance(paths, str):
+                paths = [paths]
+            if isinstance(paths, list):
+                roots.extend(str(path) for path in paths if isinstance(path, str) and path)
+        return roots
+
+    @classmethod
+    def submit_emby_path_updates(
+            cls,
+            name: str,
+            service: Any,
+            updates: List[Tuple[str, str]],
+            fallback: Optional[Any] = None,
+    ) -> str:
+        """把 Emby 视角的文件路径报给 Emby（合并批次，见 emby_path_update）。
+
+        插件里所有“按路径通知 Emby”都走这里：入库通知器与 STRM/分享刷新。
+        返回 ok / unsupported / failed（给了 fallback 时为 fallback_ok / fallback_failed）。
+        """
+        connection = cls._emby_refresh_connection(service)
+        if not connection:
+            return "unsupported"
+        host, api_key = connection
+        return emby_path_updater.submit(
+            (name, host, api_key),
+            updates,
+            send=lambda payload: cls._post_emby_media_updated(host, api_key, payload),
+            library_roots=lambda: cls._emby_library_roots(service),
+            fallback=fallback,
+        )
 
     def _schedule_emby_mediainfo(
             self, name: str, path: Path, attempt: int

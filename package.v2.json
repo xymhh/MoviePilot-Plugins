@@ -3,7 +3,7 @@
     "name": "网盘订阅助手",
     "description": "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。",
     "labels": "订阅,网盘,转存,搜索,通知,刮削,签到,ed2k,magnet",
-    "version": "1.26.4",
+    "version": "1.27.0",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -392,7 +392,8 @@
       "v1.26.1": "v1.26.0 修复未生效的真因修复（v1.26.1）：v1.19.0 删 SyncHandler.__getattr__ 隐式委托时只补了 28 个显式转发，漏了 7 个——get_due_offline_task_groups（离线监控每轮取分组，无守卫直接抛 AttributeError，监控自 2026-11-18 19:31 起每轮崩，95% 卡自此攒起；v1.26.0 的 try/except 把崩溃写进插件日志才暴露）与 6 个 STRM/媒体方法（generate/clean_share_strm、refresh_media_servers、migrate_legacy_strm、rebuild_strm_files、rebuild_strm_increment_by_tree；__init__.py 有 hasattr 守卫，缺转发时悄悄返回“同步服务未就绪”，STRM 增量/全量补齐自此停摆）。本版补齐 7 个转发（28→35 个），新增调用点扫描回归测试（静态扫全部 sync_handler.<方法>( 调用，逐个断言真实类上有该属性）与逐个委托断言。全量 pytest 2314 / unittest 2202 通过。",
       "v1.26.2": "开始下载通知走用户模板（v1.26.2）：v1.25.0 故意写死标题正文（怕模板渲染失败留空通知），结果通知形态永远是「【网盘订阅助手】开始下载」，跟用户在 MP 里设的 DownloadAdded 模板不一样。本版改成模板优先、写死兜底：先建一条不带标题正文的裸 Message，带 mediainfo 与季集/大小等上下文调 MP 自己的 MessageTemplateHelper.render 渲用户模板，只有渲出非空标题正文才用模板结果，否则退回写死格式；种子才有的变量（做种数、原名链接、站点、质量词）云盘转存没有，模板里的 {% if %} 守卫会跳过那几行；站点名只在 TG 路填频道名。回归测试用他 MP 里那条真实模板（资源下载 Jinja2 JSON）跑端到端，断言剧集与电影两种形态。全量 pytest 2322 / unittest 2210 通过。",
       "v1.26.3": "开始下载通知两处小修（v1.26.3）：① TG 路站点名不再解析频道名，直接写死“TG频道”——私密频道存的是邀请链接 https://t.me/+...，v1.26.2 的解析按 \"/\" 切 via 取第一段，切出 \"https:\"，通知里成了“站点：https:”（2026-11-19 12:19《十万狂花入梦来》S01E12, E13 实测）；写死格式的来源标签也一样错，修解析一处两路都好。② 渲染补 pubdate（转存开始时间，YYYY-MM-DD HH:MM:SS），否则用户模板里 {% if pubdate %}🕒时间 那行永远出不来（MP 自身通知里的时间就是这么来的）。回归测试：TG 两种 via（@频道与邀请链接）都出“TG频道”、剧集与电影都带时间行。全量 pytest 2323 / unittest 2211 通过。",
-      "v1.26.4": "转存完成通知按终态门架构恢复（v1.26.4）：终态只有一处门（同步完成块与 _send_finalized_batch），v1.13.3 只放洗版过、“MP 的入库通知仍在”的前提只在 MP 整理分支成立，strm 直出分支无人发通知；两处调用点共用一个发送器，按分支分流——MP 整理分支跳过（MP 自己发 OrganizeSuccess）、strm 分支插件发 OrganizeSuccess（裸 Message 走用户资源入库模板，模板优先、写死兜底）；多集聚合一条、600 秒去重，每转存只发一条。回归测试 17 条：真实资源入库模板渲染（TV E09+E10、电影）、分支分流、混批切分、恰好一次、洗版不受影响。全量 pytest 2340 / unittest 2228 通过。"
+      "v1.26.4": "转存完成通知按终态门架构恢复（v1.26.4）：终态只有一处门（同步完成块与 _send_finalized_batch），v1.13.3 只放洗版过、“MP 的入库通知仍在”的前提只在 MP 整理分支成立，strm 直出分支无人发通知；两处调用点共用一个发送器，按分支分流——MP 整理分支跳过（MP 自己发 OrganizeSuccess）、strm 分支插件发 OrganizeSuccess（裸 Message 走用户资源入库模板，模板优先、写死兜底）；多集聚合一条、600 秒去重，每转存只发一条。回归测试 17 条：真实资源入库模板渲染（TV E09+E10、电影）、分支分流、混批切分、恰好一次、洗版不受影响。全量 pytest 2340 / unittest 2228 通过。",
+      "v1.27.0": "定时任务可观测 + Emby 按路径刷新（v1.27.0）：STRM 全量校准、STRM 增量补齐、定时整理、失败记录过期清理 4 个固定周期任务从插件自建调度器迁到 MP 调度（get_service 声明，统一入口 _run_scheduled_task），异常由 MP 记错误日志、发系统消息并在定时服务页可见，插件日志另记带堆栈的 ERROR；留在插件调度器的离线监控等动态任务在唯一登记处统一包装，异常写进插件日志；同步服务缺方法时明确报错，不再静默返回未就绪。Emby 刷新改为按文件路径通知（Library/Media/Updated，路径按媒体服务器路径映射换算并核对在 Emby 媒体库内），1 秒内的请求合并成一批，不支持或失败时自动回退原刷新方式；超过 500 个文件直接全库刷新。"
     }
   },
   "version": "1.9.85",

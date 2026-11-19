@@ -1,10 +1,12 @@
 """媒体库刷新与消息通知（旁路能力）。
 
-从 handlers/sync/service.py 拆出，纯搬家：方法体逐字未改。
-校验：scripts/verify_split_equivalence.py --before <拆分前> --after HEAD
+从 handlers/sync/service.py 拆出（拆分时方法体逐字未改，
+校验：scripts/verify_split_equivalence.py --before <拆分前> --after HEAD）。
+v1.27.0：refresh_media_servers 支持按路径通知 Emby（Media/Updated）。
 """
 
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
 from app.log import logger
 from app.schemas.types import NotificationType
@@ -62,17 +64,50 @@ class MediaRefreshMixin(OwnerDelegator):
             fallback=False,
         ))
 
-    def refresh_media_servers(self) -> Dict[str, Any]:
-        """让媒体服务器重新扫描库（旁路：失败只丢掉刷新，不影响转存结果）。"""
+    #: 一次按路径通知的文件数上限；超过就直接全库刷新（一次全库扫描比逐个报更省）。
+    _PATH_UPDATE_LIMIT = 500
+
+    def refresh_media_servers(
+            self,
+            paths: Optional[Iterable[Any]] = None,
+            update_type: str = "Created",
+    ) -> Dict[str, Any]:
+        """让媒体服务器感知 STRM 变动（旁路：失败只丢掉刷新，不影响转存结果）。
+
+        v1.27.0：给了 ``paths``（MP 侧本地路径）时，Emby 改为按文件路径通知
+        （``Media/Updated``，路径先按“媒体服务器路径映射”换成 Emby 视角），
+        不支持或失败才回退全库刷新；不给 ``paths``（设置页手动刷新）仍是全库刷新。
+        """
         return bypass_guard.call(
             "media_server",
             self._refresh_media_servers_impl,
+            paths=list(paths) if paths is not None else None,
+            update_type=update_type,
             fallback={},
         )
 
-    def _refresh_media_servers_impl(self) -> Dict[str, Any]:
+    def _emby_server_paths(self, paths: List[Any]) -> List[str]:
+        """MP 侧路径 → Emby 侧路径（复用入库通知器的路径映射，唯一实现）。"""
+        notifier = getattr(self, "_media_server_notifier", None)
+        mapper = getattr(notifier, "media_server_path", None)
+        server_paths: List[str] = []
+        for path in paths:
+            try:
+                mapped = mapper(Path(path)) if callable(mapper) else Path(path)
+            except Exception:  # noqa: BLE001 - 映射失败按原路径
+                mapped = Path(path)
+            server_paths.append(Path(mapped).as_posix())
+        return list(dict.fromkeys(server_paths))
+
+    def _refresh_media_servers_impl(
+            self,
+            paths: Optional[List[Any]] = None,
+            update_type: str = "Created",
+    ) -> Dict[str, Any]:
         """媒体服务器刷新实现：逐台独立 try/except，全挂也不会外抛。"""
         results: Dict[str, Any] = {}
+        server_paths = self._emby_server_paths(paths) if paths else []
+        by_path = bool(server_paths) and len(server_paths) <= self._PATH_UPDATE_LIMIT
         try:
             services = MediaServerResolver._services() or {}
         except Exception as error:  # noqa: BLE001 - 媒体服务器不可用不该阻断主流程
@@ -82,6 +117,26 @@ class MediaRefreshMixin(OwnerDelegator):
             try:
                 instance = getattr(service, "instance", None)
                 if service.type == "emby":
+                    if by_path:
+                        outcome = MediaServerNotifier.submit_emby_path_updates(
+                            name,
+                            service,
+                            [(path, update_type) for path in server_paths],
+                            fallback=lambda instance=instance: self._refresh_emby(instance),
+                        )
+                        if outcome == "ok":
+                            results[name] = "ok"
+                            logger.info(
+                                f"媒体库按路径通知已提交：{name}（{update_type} "
+                                f"{len(server_paths)} 个文件）"
+                            )
+                        elif outcome == "fallback_ok":
+                            results[name] = "ok"
+                            logger.info(f"媒体库按路径通知不可用，已改为全库刷新：{name}")
+                        else:
+                            results[name] = "failed"
+                            logger.warning(f"媒体库刷新失败：{name}（按路径与全库刷新都未成功）")
+                        continue
                     if not self._refresh_emby(instance):
                         results[name] = "unsupported"
                         continue

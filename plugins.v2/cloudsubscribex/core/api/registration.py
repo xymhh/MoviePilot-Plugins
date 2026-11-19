@@ -12,6 +12,7 @@ from app.utils.timer import TimerUtils
 from apscheduler.triggers.combining import OrTrigger
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from fastapi import Depends
 
 from ..delegation import OwnerDelegator
@@ -841,6 +842,8 @@ class MoviePilotRegistration(OwnerDelegator):
             "kwargs": {}
         })
 
+        services.extend(self._maintenance_services())
+
         # 与运行时使用同一套凭据判定，避免注册了必然失败的签到渠道。
         checkin_providers = [
             provider
@@ -878,6 +881,65 @@ class MoviePilotRegistration(OwnerDelegator):
                 "kwargs": {},
             })
 
+        return services
+
+    def _maintenance_services(self) -> List[Dict[str, Any]]:
+        """插件自身的固定周期维护任务，交给 MP 调度（v1.27.0）。
+
+        原来挂在插件自建调度器（core/scheduler.py）上，异常只进 APScheduler
+        日志、「定时服务」页也看不到。现在随 get_service 声明，统一从
+        ``_run_scheduled_task`` 进入：MP 会记 ERROR、发系统消息并防止同一任务
+        重叠执行。触发器、周期与开关和迁移前一致；只在插件启用时声明。
+        """
+        services: List[Dict[str, Any]] = []
+        strm_enabled = bool(getattr(self, "_strm_generate_enabled", False))
+        if strm_enabled and bool(getattr(self, "_strm_full_scan_enabled", False)):
+            # 每天 04:20 分批校准，避开 04:30 的其它定时任务。
+            services.append({
+                "id": "CloudSubscribe_StrmFullScan",
+                "name": "STRM 全量校准",
+                "trigger": CronTrigger(hour=4, minute=20),
+                "func": self._run_scheduled_task,
+                "func_kwargs": {"task": "strm_full_scan"},
+                "kwargs": {},
+            })
+        if strm_enabled and bool(getattr(self, "_strm_increment_enabled", False)):
+            try:
+                minutes = max(1, int(getattr(self, "_strm_increment_minutes", 10) or 10))
+            except (TypeError, ValueError):
+                minutes = 10
+            services.append({
+                "id": "CloudSubscribe_StrmIncrement",
+                "name": "STRM 增量补齐",
+                "trigger": IntervalTrigger(minutes=minutes),
+                "func": self._run_scheduled_task,
+                "func_kwargs": {"task": "strm_increment"},
+                "kwargs": {},
+            })
+        if bool(getattr(self, "_organize_schedule_enabled", False)):
+            cron = str(getattr(self, "_organize_schedule_cron", "") or "")
+            if not getattr(self, "_organize_source_path", ""):
+                logger.warning("整理台定时任务已开启，但未配置 organize_source_path")
+            elif not self._cron_is_valid(cron):
+                logger.warning(f"整理台定时任务 Cron 无效：{cron}，未注册")
+            else:
+                services.append({
+                    "id": "CloudSubscribe_Organize",
+                    "name": "115 网盘整理",
+                    "trigger": CronTrigger.from_crontab(cron),
+                    "func": self._run_scheduled_task,
+                    "func_kwargs": {"task": "organize"},
+                    "kwargs": {},
+                })
+        # 每天清理一次过期的重试索引行（失败 90 天、待修复 30 天）。
+        services.append({
+            "id": "CloudSubscribe_RetryIndexMaintenance",
+            "name": "失败记录过期清理",
+            "trigger": IntervalTrigger(hours=24),
+            "func": self._run_scheduled_task,
+            "func_kwargs": {"task": "retry_index_maintenance"},
+            "kwargs": {},
+        })
         return services
 
     def _refresh_platform_services(self) -> None:
