@@ -18,7 +18,6 @@ v1.26.3 补充：TG 路站点名不再解析频道名，直接写死“TG频道�
 """
 _PUBDATE_RE = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
 import ast
-import re
 import sys
 import unittest
 from types import SimpleNamespace
