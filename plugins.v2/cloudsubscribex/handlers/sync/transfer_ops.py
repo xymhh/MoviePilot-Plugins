@@ -782,6 +782,23 @@ class TransferOpsMixin(OwnerDelegator):
                 return [
                     skipped_results[index] for index in sorted(skipped_results)
                 ]
+        # v1.25.0 Issue A：转存真正开始（判重门已过、确有文件要转）才补一
+        # 条开始下载通知。链接解析失败、查库命中跳过、判重拦下的到不了
+        # 这里；每调一次管线只发一条（同一批多个文件共一条）。
+        notifications = getattr(self._owner, "notifications", None)
+        send_started = getattr(
+            notifications, "send_transfer_started_notification", None
+        )
+        if callable(send_started):
+            send_started(
+                mediainfo=mediainfo,
+                subscribe=subscribe,
+                source=str(getattr(subscribe, "_transfer_source", "") or "subscribe"),
+                via=str(getattr(subscribe, "_discovered_via", "") or ""),
+                items=items,
+                media_type=media_type,
+                season=season,
+            )
         batch_size = self._transfer_task_batch_size
         batch_count = (len(items) + batch_size - 1) // batch_size
         if batch_count > 1:

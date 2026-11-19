@@ -742,6 +742,16 @@ class SyncExecutionService(OwnerDelegator):
             for subscribe in subscribes:
                 setattr(subscribe, "_discovered_via", discovered_via)
 
+        # 开始下载通知的来源（v1.25.0 Issue A）：TG 发现 / 手动提交 /
+        # 订阅自动跑，同样随订阅对象下沉，转存管线与离线提交处统一读取。
+        transfer_source = (
+            "tg" if discovered_via.startswith("tg:") or discovered_via == "push"
+            else "manual" if manual_resources
+            else "subscribe"
+        )
+        for subscribe in subscribes:
+            setattr(subscribe, "_transfer_source", transfer_source)
+
         tv_subscribes = []
         movie_subscribes = []
         for subscribe in subscribes:

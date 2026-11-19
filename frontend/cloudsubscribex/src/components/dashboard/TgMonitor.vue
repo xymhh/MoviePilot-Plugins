@@ -2,11 +2,11 @@
   <div class="tg-monitor">
     <div class="tg-toolbar d-flex align-center justify-space-between flex-wrap ga-2">
       <div class="tg-status d-flex align-center ga-2">
-        <span :class="['status-badge', status.enabled ? 'status-badge-active' : 'status-badge-idle']">
+        <span :class="['status-badge', initialLoading ? 'status-badge-loading' : status.enabled ? 'status-badge-active' : 'status-badge-idle']">
           <span class="status-dot"></span>
-          {{ status.enabled ? "正在监控" : "未启用" }}
+          {{ initialLoading ? "加载中" : status.enabled ? "正在监控" : "未启用" }}
         </span>
-        <span class="tg-meta text-caption text-medium-emphasis">
+        <span v-if="!initialLoading" class="tg-meta text-caption text-medium-emphasis">
           {{ status.channel_count || 0 }} 个频道 · {{ status.item_count || 0 }} 条抓取
           <template v-if="status.last_scan_at">· {{ formatTime(status.last_scan_at) }}</template>
         </span>
@@ -56,12 +56,15 @@
     <v-alert v-if="status.last_error" type="warning" variant="tonal" density="compact" class="mt-2">
       {{ status.last_error }}
     </v-alert>
-    <v-alert v-if="!status.enabled" type="info" variant="tonal" density="compact" class="mt-2">
+    <v-alert v-if="!status.enabled && !initialLoading" type="info" variant="tonal" density="compact" class="mt-2">
       频道监控未启用：到「配置 → 频道监控」填写 TG api_id / api_hash、登录，并添加频道后启用。
     </v-alert>
 
+    <!-- v1.25.0 Issue B1：首次加载只显示骨架，不放全零占位与未启用提示 -->
+    <v-skeleton-loader v-if="initialLoading" type="card, list-item@3" class="mt-3" />
+
     <!-- 摘要：数字即筛选入口 -->
-    <div class="tg-stats mt-3">
+    <div v-if="!initialLoading" class="tg-stats mt-3">
       <button
         v-for="stat in summaryStats"
         :key="stat.value"
@@ -79,9 +82,11 @@
         <span class="tg-stat-label">全部</span>
       </button>
     </div>
+    <!-- v1.25.0 Issue B3：“失败”是“待处理”的子集（待处理含 failed），数字会被重复计，这里注明口径 -->
+    <div v-if="!initialLoading" class="text-caption text-medium-emphasis mt-1">失败已计入待处理</div>
 
     <!-- 未转存：先按原因分类，再按订阅折叠，避免 50+ 条重复分享铺屏 -->
-    <div v-if="statusFilter === 'skipped'" class="mt-3">
+    <div v-if="statusFilter === 'skipped' && !initialLoading" class="mt-3">
       <div v-if="skipReasonStats.length" class="tg-reasons">
         <button
           type="button"
@@ -131,7 +136,7 @@
     </div>
 
     <!-- 条目：默认只显示待处理 + 失败，一行一个重点 -->
-    <div v-else-if="filteredItems.length" class="tg-radar-stream mt-3">
+    <div v-else-if="filteredItems.length && !initialLoading" class="tg-radar-stream mt-3">
       <div v-for="item in pagedItems" :key="item.id" class="tg-row-wrap">
         <div class="tg-row d-flex align-center ga-2 px-3 rounded border" @click="toggleDetail(item.id)">
           <span :class="['tg-dot', `tg-dot-${item.status}`]" />
@@ -224,7 +229,7 @@
         <span class="tg-pager-meta">第 {{ page }}/{{ pageCount }} 页 · 共 {{ filteredItems.length }} 条</span>
       </div>
     </div>
-    <div v-else class="tg-empty">
+    <div v-else-if="!initialLoading" class="tg-empty">
       {{
         items.length
           ? "当前筛选下没有记录，换个状态看看。"
@@ -319,6 +324,10 @@ const status = ref({
 })
 const items = ref([])
 const statusFilter = ref("todo")
+// v1.25.0 Issue B1：首次加载状态。status 默认 enabled:false，数据回来前
+// 不能当成“未启用”来展示（否则全零统计卡 + 未启用提示先闪一下）。
+// 只覆盖首次加载，之后每 60 秒的轮询刷新不触发。
+const initialLoading = ref(true)
 const expandedItem = ref("")
 const expandedGroup = ref("")
 const reasonFilter = ref("")
@@ -347,6 +356,8 @@ const hasApi = computed(() => Boolean(status.value.has_api))
 // 「待处理」把失败也收进来：这两类才需要人动手，其余只做历史。
 const FILTERS = [
   { value: "todo", title: "待处理", test: (item) => ["queued", "new", "failed"].includes(item.status) },
+  // v1.25.0 Issue B3：进行中（transferring/processing）既无卡也无筛选，这里补上。
+  { value: "in-flight", title: "进行中", test: (item) => ["transferring", "processing"].includes(item.status) },
   { value: "failed", title: "失败", test: (item) => item.status === "failed" },
   // Phase 4 第 7 项：失败分阶段筛选。老数据没有 failure_stage 字段，
   // 默认按订阅失败算（历史上唯一的失败写入方是 _apply_group_outcome）。
@@ -365,7 +376,8 @@ function failureStageLabel(item) {
   return "失败"
 }
 
-// 顶部四张卡：待处理 / 已转存 / 未转存 / 失败。数字本身就是筛选按钮。
+// 顶部统计卡：待处理 / 进行中 / 已转存 / 未转存 / 已忽略 / 失败。数字本身就是筛选按钮。
+// “失败”是“待处理”的子集（待处理含 failed），卡下方已注明口径。
 const summaryStats = computed(() => {
   const rows = items.value || []
   return [
@@ -376,12 +388,20 @@ const summaryStats = computed(() => {
       count: rows.filter((i) => ["queued", "new", "failed"].includes(i.status)).length,
     },
     {
+      value: "in-flight",
+      title: "进行中",
+      tone: "primary",
+      count: rows.filter((i) => ["transferring", "processing"].includes(i.status)).length,
+    },
+    {
       value: "transferred",
       title: "已转存",
       tone: "success",
       count: rows.filter((i) => i.status === "transferred").length,
     },
     { value: "skipped", title: "未转存", tone: "muted", count: rows.filter((i) => i.status === "skipped").length },
+    // v1.25.0 Issue B3：FILTERS 里早有“已忽略”筛选，这里补上对应的统计卡。
+    { value: "ignored", title: "已忽略", tone: "muted", count: rows.filter((i) => i.status === "ignored").length },
     { value: "failed", title: "失败", tone: "error", count: rows.filter((i) => i.status === "failed").length },
     // Phase 4 第 7 项：失败按阶段拆两张卡（与 FILTERS 的分阶段筛选对应）。
     {
@@ -638,7 +658,13 @@ async function loadItems() {
 }
 
 async function refreshAll() {
-  await Promise.all([loadStatus(), loadItems()])
+  // 首次加载失败也不抛：onMounted 的 finally 会退出加载态，页面按真实
+  // 状态（未启用/旧数据）显示，不可一直转圈。
+  try {
+    await Promise.all([loadStatus(), loadItems()])
+  } catch (error) {
+    console.warn("[TgMonitor] 刷新失败：", error)
+  }
 }
 
 async function scan() {
@@ -781,7 +807,13 @@ async function logout() {
 }
 
 onMounted(async () => {
-  await refreshAll()
+  // v1.25.0 Issue B1：首次加载完成前保持加载态；失败也退出加载态
+  // （refreshAll 内部已吞异常），不让页面一直转圈。
+  try {
+    await refreshAll()
+  } finally {
+    initialLoading.value = false
+  }
   // 「未转存」折叠分组要显示订阅名，进页面时顺带取一次。
   void ensureSubscribes()
   timer = window.setInterval(() => {
@@ -1095,6 +1127,12 @@ onUnmounted(() => {
 .status-badge-idle {
   background: rgba(var(--v-theme-on-surface), 0.08);
   color: rgba(var(--v-theme-on-surface), 0.6);
+}
+
+.status-badge-loading {
+  background: rgba(var(--v-theme-primary), 0.12);
+  color: rgb(var(--v-theme-primary));
+  border: 1px solid rgba(var(--v-theme-primary), 0.25);
 }
 
 .status-dot {

@@ -1543,6 +1543,10 @@ class SyncHandler:
                         item["task_id"] = res
                     self._complete_offline_submission(item)
                     successful_keys.add(str(item["pending_key"]))
+                    # v1.25.0 Issue A：网盘已接受离线下载，转存真正开始，
+                    # 补一条开始下载通知（磁力/ED2K 不走入库管线，这里是
+                    # 唯一入口；提交失败或回滚的不发）。
+                    self._notify_offline_transfer_started(item)
                 else:
                     self._rollback_offline_submission(item)
             except Exception as error:
@@ -1550,6 +1554,31 @@ class SyncHandler:
                 self._rollback_offline_submission(item)
 
         return successful_keys
+
+    def _notify_offline_transfer_started(self, item: Dict[str, Any]) -> None:
+        """离线任务被网盘接受后补开始下载通知（v1.25.0 Issue A）。
+
+        磁力/ED2K 不走入库管线，``_submit_offline_packages`` 是唯一入口。
+        来源随订阅对象下沉（``_do_sync`` 挂的 ``_transfer_source``，
+        PT 洗版等非 _do_sync 流程默认按订阅算）。
+        """
+        notifications = getattr(self, "notifications", None)
+        send_started = getattr(
+            notifications, "send_transfer_started_notification", None
+        )
+        if not callable(send_started):
+            return
+        subscribe = item.get("subscribe")
+        season = item.get("season")
+        send_started(
+            mediainfo=item.get("mediainfo"),
+            subscribe=subscribe,
+            source=str(getattr(subscribe, "_transfer_source", "") or "subscribe"),
+            via=str(getattr(subscribe, "_discovered_via", "") or ""),
+            media_type="tv" if season is not None else "movie",
+            season=season,
+            episodes=list(item.get("target_episodes") or []),
+        )
 
     @staticmethod
     def _serialize_mediainfo(mediainfo: MediaInfo) -> Dict[str, Any]:

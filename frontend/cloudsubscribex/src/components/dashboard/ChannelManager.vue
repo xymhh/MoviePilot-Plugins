@@ -472,16 +472,84 @@ const formSection = computed(() => {
 
 const isSearchType = computed(() => form.type !== "tg_channel")
 
+// 渠道卡片一行摘要：只取标量展示（字符串/数字/字符串数组），跳过布尔、
+// 普通对象、正则、密码、开关、测试源、账号类字段；优先取有业务含义的字段
+// （地址 > 关键词/频道名/用户名/字幕组 > 其他标量），实在没有才显示
+// “未配置”。旧版取 config 第一个非空值直接 String() 化，布尔 false 会
+// 显示成 "false"（盘链）、普通对象显示成 "[object Object]"（在线文档）、
+// 正则显示成 "/.../"（AnimeGarden）、长过滤词串被截断 60 字（Mikan）。
+const _CHANNEL_LINE_SKIP_TYPES = new Set([
+  "password", "switch", "test-source", "account",
+])
+const _CHANNEL_LINE_REGEX_KEY = /(_re|regex|pattern)$/i
+
+// 形如 /…/ 或含正则元字符（| \ ( [ ^ $ * + ?）的串：过滤词/正则，不展示。
+function _isRegexLike(text) {
+  if (/^\/.+\/[a-z]*$/i.test(text) && /[|\\(\[^$*+?]/.test(text)) return true
+  return /[|\\]/.test(text) && /[()[\]{}*+?^$]/.test(text)
+}
+
+function _channelLineValue(value) {
+  if (typeof value === "string") {
+    const text = value.trim()
+    if (!text || _isRegexLike(text)) return ""
+    return text
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return String(value)
+  if (Array.isArray(value)) {
+    const parts = value.filter(
+      (entry) => typeof entry === "string" && entry.trim() && !_isRegexLike(entry.trim()),
+    )
+    if (!parts.length) return ""
+    return parts.join(", ")
+  }
+  return ""
+}
+
+function _channelLineScore(key) {
+  const lower = String(key || "").toLowerCase()
+  if (lower.includes("url") || lower.includes("address") || lower.includes("host")) return 3
+  if (
+    lower.includes("keyword") || lower.includes("channel")
+    || lower.includes("username") || lower.includes("fansub")
+    || lower.includes("name")
+  ) return 2
+  return 1
+}
+
 function channelLine(item) {
   if (item.type === "tg_channel") return item.config?.channel || "未设置频道"
   const config = item.config || {}
-  const first = Object.entries(config).find(
-    ([, value]) => value !== "" && value !== null && value !== undefined
-      && !(Array.isArray(value) && !value.length),
-  )
-  if (!first) return "未配置"
-  const value = Array.isArray(first[1]) ? first[1].join(", ") : String(first[1])
-  return value.length > 60 ? `${value.slice(0, 60)}…` : value
+  // 在线文档的配置本身就是文档对象数组，没有标量可取：显示文档数。
+  if (item.type === "online_docs") {
+    const docs = (config.online_docs || []).filter(
+      (entry) => entry && typeof entry === "object" && String(entry.url || "").trim(),
+    )
+    return docs.length ? `${docs.length} 个文档` : "未配置"
+  }
+  const schema = schemaFor(item.type)
+  const fields = (schema?.groups || []).flatMap((group) => group.fields || [])
+  let best = null
+  for (const field of fields) {
+    const key = field?.key
+    if (!key || _CHANNEL_LINE_SKIP_TYPES.has(field.type)) continue
+    if (_CHANNEL_LINE_REGEX_KEY.test(key)) continue
+    const text = _channelLineValue(config[key])
+    if (!text) continue
+    const score = _channelLineScore(key)
+    if (!best || score > best.score) best = { score, text }
+  }
+  if (!best) {
+    // 无 schema 的渠道：按 config 顺序取第一个可展示标量。
+    for (const [key, value] of Object.entries(config)) {
+      if (_CHANNEL_LINE_REGEX_KEY.test(key)) continue
+      const text = _channelLineValue(value)
+      if (text) { best = { score: 0, text }; break }
+    }
+  }
+  if (!best) return "未配置"
+  const text = best.text
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text
 }
 
 function relativeTime(value) {

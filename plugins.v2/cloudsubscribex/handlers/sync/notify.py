@@ -5,7 +5,7 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from app.log import logger
-from app.schemas.types import NotificationType
+from app.schemas.types import ContentType, MessageType, NotificationType
 
 from ...core import OwnerDelegator, render_template, resolve_template
 from ...drive.common import format_size
@@ -48,6 +48,115 @@ class SyncNotificationService(OwnerDelegator):
             f"完成通知已入队：{total_count} 个文件，"
             f"静默 {wait_seconds} 秒后合并发送"
         )
+
+    def send_transfer_started_notification(
+            self,
+            *,
+            mediainfo: Any = None,
+            subscribe: Any = None,
+            source: str = "subscribe",
+            via: str = "",
+            items: Optional[List[Dict[str, Any]]] = None,
+            media_type: str = "tv",
+            season: Optional[int] = None,
+            episodes: Optional[List[int]] = None,
+            total_size: Optional[int] = None,
+    ) -> None:
+        """转存真正开始时补一条 MP 原生形态的开始下载通知（v1.25.0 Issue A）。
+
+        MP 自己的开始下载通知是 ``Message(mtype=Download,
+        ctype=DownloadAdded)``，由用户配的 DownloadAdded 模板渲染；插件的
+        三条路（订阅自动跑 / TG 监控 / 手动转存）走内部云盘直传，从不经过
+        MP 下载链，所以一条都不会发。这里在转存入口（入库管线过判重门后、
+        离线提交被网盘接受后）补发一条：
+
+        * ``mtype=MessageType.Download``：与原生通知走同一路由开关
+          （``get_notification_switch(mtype)``），同一渠道投递；
+        * ``ctype=ContentType.DownloadAdded``：消息上带原生内容类型标识；
+        * 标题/正文由插件直接给出（不走用户模板渲染——模板渲染要求
+          title/text 为空且带齐 meta/mediainfo/torrentinfo 上下文，云盘
+          转存入口没有真实 TorrentInfo，渲染失败会留下一条空通知；
+          见 ``MessageTemplateHelper.render`` 的 ``is_instance_valid``
+          短路）。形态差异：标题固定为「开始下载」，不随用户模板变。
+
+        只在转存真正开始时由调用方调一次；链接解析失败、查库命中跳过、
+        判重拦下的都不进这里。通知开关 ``_notify`` 关了就不发；发送
+        本身失败只记日志，绝不能打断转存。
+        """
+        post_message = getattr(self, "_post_message", None)
+        if not getattr(self, "_notify", False) or not post_message:
+            return
+        try:
+            title = str(getattr(mediainfo, "title", "") or "").strip()
+            if not title:
+                title = str(getattr(subscribe, "name", "") or "").strip() or "未知媒体"
+            year = getattr(mediainfo, "year", None) or ""
+            if str(media_type or "").strip().lower() == "movie":
+                headline = f"{title} ({year})".replace(" ()", "")
+            else:
+                season_no = max(1, int(season or 1))
+                eps = sorted({
+                    int(value) for value in (
+                        list(episodes or [])
+                        or [
+                            int((item or {}).get("episode") or 0)
+                            for item in (items or [])
+                        ]
+                    ) if int(value or 0) > 0
+                })
+                if eps:
+                    if len(eps) <= 5:
+                        ep_str = ", ".join(f"E{value:02d}" for value in eps)
+                    else:
+                        ep_str = (
+                            f"E{eps[0]:02d}-E{eps[-1]:02d} 共{len(eps)}集"
+                        )
+                    headline = f"{title} S{season_no:02d} {ep_str}".strip()
+                else:
+                    headline = f"{title} S{season_no:02d}".strip()
+            size = int(total_size or 0)
+            if size <= 0 and items:
+                size = sum(
+                    max(0, int(((item or {}).get("file") or {}).get("size") or 0))
+                    for item in items
+                )
+            source_label = {
+                "tg": "TG 频道",
+                "manual": "手动",
+                "subscribe": "订阅",
+            }.get(str(source or "").strip().lower(), "订阅")
+            if str(source or "").strip().lower() == "tg":
+                channel = str(via or "").strip()
+                if channel.startswith("tg:"):
+                    channel = channel[3:]
+                channel = channel.split("/")[0].strip()
+                if channel:
+                    source_label = f"TG 频道 {channel}"
+            meta = []
+            if size > 0:
+                meta.append(format_size(size))
+            meta.append(source_label)
+            icon = self._media_type_icon(
+                "电影" if str(media_type or "").strip().lower() == "movie" else "电视剧"
+            )
+            text = f"{icon} {headline}" + (f" · {' · '.join(meta)}" if meta else "")
+            image = None
+            getter = getattr(mediainfo, "get_poster_image", None)
+            if callable(getter):
+                try:
+                    image = getter() or None
+                except Exception:  # noqa: BLE001 - 海报取不到不影响通知
+                    image = None
+            post_message(
+                mtype=MessageType.Download,
+                ctype=ContentType.DownloadAdded,
+                title="【网盘订阅助手】开始下载",
+                text=text,
+                image=image,
+            )
+            logger.info(f"开始下载通知已发送：{headline}（{source_label}）")
+        except Exception as error:  # noqa: BLE001 - 通知失败绝不能打断转存
+            logger.warning(f"开始下载通知发送失败：{error}")
 
     @staticmethod
     def _media_type_icon(type_text: str) -> str:
