@@ -1818,6 +1818,12 @@ class SyncHandler:
             upgrade_old_file_name: str = "",
             upgrade_old_file_id: str = "",
             upgrade_old_size: int = 0,
+            # v1.29.1：洗版额外旧版本（主旧版本之外）随记录走，删除在后
+            # 处理提交后；None 表示调用方没带（沿用旧记录），显式 [] 表示
+            # 本轮没有额外旧版本（清掉旧记录的残留）。
+            dedup_extra_old_versions: Optional[List[Dict[str, Any]]] = None,
+            dedup_new_score: Optional[int] = None,
+            dedup_new_size: Optional[int] = None,
             subtitles: Optional[List[Dict[str, Any]]] = None,
             skip_history: bool = False,
             mp_organize: Optional[Dict[str, Any]] = None,
@@ -1879,6 +1885,21 @@ class SyncHandler:
             ),
             "upgrade_old_size": int(
                 upgrade_old_size or current.get("upgrade_old_size") or 0
+            ),
+            "dedup_extra_old_versions": copy.deepcopy(
+                dedup_extra_old_versions
+                if dedup_extra_old_versions is not None
+                else current.get("dedup_extra_old_versions") or []
+            ),
+            "dedup_new_score": int(
+                dedup_new_score
+                if dedup_new_score is not None
+                else current.get("dedup_new_score") or 0
+            ),
+            "dedup_new_size": int(
+                dedup_new_size
+                if dedup_new_size is not None
+                else current.get("dedup_new_size") or 0
             ),
             "created_at": (
                 now if fresh_attempt else float(current.get("created_at") or now)
@@ -2081,6 +2102,9 @@ class SyncHandler:
                     upgrade_old_file_name=item.get("upgrade_old_file_name") or "",
                     upgrade_old_file_id=item.get("upgrade_old_file_id") or "",
                     upgrade_old_size=item.get("upgrade_old_size") or 0,
+                    dedup_extra_old_versions=item.get("dedup_extra_old_versions"),
+                    dedup_new_score=item.get("dedup_new_score"),
+                    dedup_new_size=item.get("dedup_new_size"),
                     subtitles=item.get("subtitles") or [],
                     transient_target=transient_target,
                     target_subscribe=target_subscribe,

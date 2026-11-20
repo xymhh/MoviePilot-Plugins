@@ -606,6 +606,11 @@ class TransferOpsMixin(OwnerDelegator):
                     "upgrade_old_file_name": item.get("upgrade_old_file_name"),
                     "upgrade_old_file_id": item.get("upgrade_old_file_id"),
                     "upgrade_old_size": item.get("upgrade_old_size") or 0,
+                    # v1.29.1：额外旧版本随管线项进 pending 记录，删除在
+                    # 后处理提交后（postprocess._apply_replacement_deletion）。
+                    "dedup_extra_old_versions": item.get("dedup_extra_old_versions") or [],
+                    "dedup_new_score": item.get("dedup_new_score") or 0,
+                    "dedup_new_size": item.get("dedup_new_size") or 0,
                     "subtitles": item.get("subtitles") or [],
                     # Phase 4 第 6 项：同盘批量触发的 MP 整理身份随项进
                     # pending 记录（_build_pending_record 原样收下），

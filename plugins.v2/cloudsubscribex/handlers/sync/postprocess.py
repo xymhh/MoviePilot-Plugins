@@ -611,6 +611,54 @@ class PostprocessService(OwnerDelegator):
         logger.debug(f"洗版新文件已就绪，旧文件删除待重试：{old_dir}/{backup_name}")
         return False
 
+    def _apply_replacement_deletion(
+            self,
+            item: Dict[str, Any],
+            pending_key: str,
+            media: Any,
+    ) -> List[Dict[str, Any]]:
+        """替换正式步骤（v1.29.1）：新版确认入库后才删旧版。
+
+        只在 ``_commit_single_item`` 里调用（终态已写之后）。返回实际删除
+        的旧版本（主旧版本 + 额外旧版本），每条只有真实字段（file_id /
+        cloud_dir / file_name / file_size），供详情 ``replaced_from`` 与通知
+        类型派生用。删失败只记 warning，不抛异常、不阻塞提交。
+
+        主旧版本沿用 finalize 门的删除结果（``upgrade_old_deleted`` 为真
+        才算删了）；额外旧版本在这里删——此前在 television/movie 转存成功
+        块里删（新文件刚落盘、甚至离线提交刚登记时就删），失败/超时会丢旧版。
+        """
+        replaced: List[Dict[str, Any]] = []
+        if item.get("upgrade_old_deleted"):
+            old_id = str(item.get("upgrade_old_file_id") or "").strip()
+            old_name = str(item.get("upgrade_old_file_name") or "").strip()
+            old_dir = str(item.get("upgrade_old_cloud_dir") or "").strip()
+            if old_id or old_name:
+                replaced.append({
+                    "file_id": old_id,
+                    "cloud_dir": old_dir,
+                    "file_name": old_name,
+                    "file_size": int(item.get("upgrade_old_size") or 0),
+                })
+        extra_versions = item.get("dedup_extra_old_versions") or []
+        if extra_versions:
+            try:
+                deleted = self._owner.episode_dedup._apply_episode_dedup(
+                    list(extra_versions),
+                    new_score=int(item.get("dedup_new_score") or 0),
+                    new_size=int(item.get("dedup_new_size") or 0),
+                    subscribe=None,
+                    mediainfo=media,
+                    season=int(item.get("season") or 0),
+                    episode=int(item.get("episode") or 0),
+                )
+                replaced.extend(deleted or [])
+            except Exception as error:  # noqa: BLE001 - 删旧失败不阻塞提交
+                logger.warning(
+                    f"洗版额外旧版本删除异常（已忽略）：{pending_key}，{error}"
+                )
+        return replaced
+
     def _prepare_postprocess_context(
             self,
             force: bool = False,
@@ -1266,6 +1314,16 @@ class PostprocessService(OwnerDelegator):
                 item, replacement_path=strm_path
             )
         self._write_terminal_state(item, pending_key, "成功")
+        # v1.29.1：替换正式步骤——终态已写（新版已确认入库）后才删旧版。
+        # 删失败只记 warning，不阻塞已入库的成功结果；replaced_from 供
+        # 详情与通知类型派生（_notify_pending_file_finalized 在后）。
+        try:
+            replaced_from = self._apply_replacement_deletion(item, pending_key, media)
+        except Exception as error:  # noqa: BLE001 - 删旧失败不阻塞提交
+            logger.warning(f"洗版旧版本删除异常（已忽略）：{pending_key}，{error}")
+            replaced_from = []
+        if replaced_from:
+            item["replaced_from"] = replaced_from
         self._queue_subscription_completion(item, media, media_data, ctx)
         detail = self._owner.transfer_details._notify_pending_file_finalized(
             item,
@@ -2832,6 +2890,7 @@ class PostprocessService(OwnerDelegator):
             if source_suffix and not target_name.endswith(source_suffix):
                 target_name = f"{Path(target_name).stem}{source_suffix}"
             mode = str(item.get("upgrade_mode") or self._upgrade_mode)
+            replace_item = None
             if is_upgrade and mode == "coexist":
                 target_name = self._owner.upgrade_rule_scoring._coexist_target_name(
                     target_name, source_name, source_size, source_file.get("sha1") or ""
@@ -2918,12 +2977,31 @@ class PostprocessService(OwnerDelegator):
                 **episode_fields,
             )
             history_records.append(record)
+            # v1.29.1：Magnet 洗版本来没有 notification_kind（下游默认按
+            # 普通转存通知），处置既是 replace 就按统一派生走洗版；主旧版
+            # 已删（upgrade_old_deleted）才记 replaced_from。Magnet 主旧版
+            # 的删除本就在 finalize 时（移入新文件 + 生成 STRM 后），时序不动。
+            replaced_from = []
+            if (
+                    is_upgrade and mode != "coexist"
+                    and replace_item and replace_item.get("upgrade_old_deleted")
+            ):
+                replaced_from = [{
+                    "file_id": str(replace_item.get("upgrade_old_file_id") or ""),
+                    "cloud_dir": str(replace_item.get("upgrade_old_cloud_dir") or ""),
+                    "file_name": str(replace_item.get("upgrade_old_file_name") or ""),
+                    "file_size": int(old_baseline.get("size") or 0),
+                }]
             detail = {
                 "type": record["type"],
                 "title": mediainfo.title,
                 "year": mediainfo.year,
                 "image": mediainfo.get_poster_image(),
                 "file_name": target_name,
+                "notification_kind": self._owner.transfer_details._derive_notification_kind(
+                    is_upgrade=is_upgrade, replaced_from=replaced_from,
+                ),
+                "replaced_from": replaced_from,
             }
             if episode:
                 detail.update({"season": int(season or 1), "episodes": [int(episode)]})

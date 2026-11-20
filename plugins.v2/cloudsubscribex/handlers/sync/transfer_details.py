@@ -285,6 +285,26 @@ class TransferDetailsService(OwnerDelegator):
             return value
         return str(value or "").strip().casefold() in {"1", "true", "yes", "on"}
 
+    def _derive_notification_kind(
+            self,
+            *,
+            is_upgrade: bool = False,
+            replaced_from: Optional[List[Dict[str, Any]]] = None,
+            index_record: Optional[Dict[str, Any]] = None,
+            cross: bool = False,
+    ) -> str:
+        """通知类型唯一派生点（v1.29.1）：已替换（``replaced_from`` 非空）
+        或处置是 replace（``is_upgrade`` / 历史 upgrade 标记）→
+        ``"upgrade"``，否则按原有规则派生 ``cross_transfer`` /
+        ``transfer``。此前五处各写一遍三元表达式（television / movie /
+        本文件两处详情构造 + upgrade.py 的字面量），现全部走这里。
+        """
+        if replaced_from or is_upgrade:
+            return "upgrade"
+        if index_record is not None and self._is_upgrade_history(index_record):
+            return "upgrade"
+        return "cross_transfer" if cross else "transfer"
+
     def _pending_index_record(self, pending_key: str) -> Optional[Dict[str, Any]]:
         """后处理项在重试索引里的对应行（按 finalize_key 查），拼成 history
         形状的 dict；没有行时返回 None（同盘成功行本来就不进索引）。"""
@@ -455,14 +475,18 @@ class TransferDetailsService(OwnerDelegator):
                 source_drive_name=source_name,
                 target_drive_name=target_name,
             ),
-            "notification_kind": (
-                "upgrade"
-                if item.get("upgrade") or self._is_upgrade_history(index_record)
-                else "cross_transfer"
-                if index_record.get("transfer_mode") == "cross"
-                or self._is_cross_share(share_url)
-                else "transfer"
+            "notification_kind": self._derive_notification_kind(
+                is_upgrade=bool(item.get("upgrade")),
+                replaced_from=item.get("replaced_from"),
+                index_record=index_record,
+                cross=bool(
+                    index_record.get("transfer_mode") == "cross"
+                    or self._is_cross_share(share_url)
+                ),
             ),
+            # v1.29.1：实际删除的旧版本（主旧版 + 额外旧版），提交后才有；
+            # 空列表表示本次没有删旧版（普通转存、或旧文件已不在）。
+            "replaced_from": list(item.get("replaced_from") or []),
             # v1.26.4：终态分支标记（MP 整理身份在 pending 项上时为真，
             # MP 自己会发入库通知，插件的完成通知要跳过这一支）+ 完成
             # 通知模板要的类别 / 详情链接。
@@ -561,14 +585,17 @@ class TransferDetailsService(OwnerDelegator):
                 source_drive_name=source_name,
                 target_drive_name=target_name,
             ),
-            "notification_kind": (
-                "upgrade"
-                if item.get("upgrade") or self._is_upgrade_history(index_record)
-                else "cross_transfer"
-                if index_record.get("transfer_mode") == "cross"
-                or self._is_cross_share(share_url)
-                else "transfer"
+            "notification_kind": self._derive_notification_kind(
+                is_upgrade=bool(item.get("upgrade")),
+                replaced_from=item.get("replaced_from"),
+                index_record=index_record,
+                cross=bool(
+                    index_record.get("transfer_mode") == "cross"
+                    or self._is_cross_share(share_url)
+                ),
             ),
+            # v1.29.1：同主路径（见上），媒体信息缺失时同样带上。
+            "replaced_from": list(item.get("replaced_from") or []),
             # v1.26.4：与主路径同一份详情结构（分支标记 + 类别 /
             # 详情链接；媒体信息缺失时类别与链接为空）。
             # v1.28.2：触发来源与主路径同口径（三态，见上）。

@@ -1017,26 +1017,19 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                 logger.debug(
                                     f"成功转存：{mediainfo.title} S{season:02d}E{episode:02d} {score_info}{upgrade_info}")
 
-                                # 1.6.48 判重替换：主旧版本由 postprocess 备份删除，其余旧版本此处批量删除
-                                extra_old = item.get("dedup_extra_old_versions") or []
-                                if extra_old:
-                                    self._owner.episode_dedup._apply_episode_dedup(
-                                        extra_old,
-                                        new_score=int(item.get("dedup_new_score") or current_score or 0),
-                                        new_size=int(item.get("dedup_new_size") or 0),
-                                        subscribe=subscribe,
-                                        mediainfo=mediainfo,
-                                        season=season,
-                                        episode=episode,
-                                    )
+                                # v1.29.1：额外旧版本不再这里删——转存成功只
+                                # 代表新文件已落盘，确认入库在后处理提交
+                                # （_commit_single_item）之后；删除走那里的
+                                # 替换正式步骤（_apply_replacement_deletion），
+                                # 失败/超时都保留旧版。
 
                                 if not pending_key:
-                                    notification_kind = (
-                                        "upgrade"
-                                        if is_upgrade
-                                        else "cross_transfer"
-                                        if history_item.get("transfer_mode") == "cross"
-                                        else "transfer"
+                                    # v1.29.1：通知类型走统一派生（处置是
+                                    # replace 即 upgrade；replaced_from 在
+                                    # 提交后才有，终态详情里补）。
+                                    notification_kind = self._owner.transfer_details._derive_notification_kind(
+                                        is_upgrade=is_upgrade,
+                                        cross=history_item.get("transfer_mode") == "cross",
                                     )
                                     batch_detail_episodes.setdefault(
                                         notification_kind, []

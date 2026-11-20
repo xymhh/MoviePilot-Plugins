@@ -585,6 +585,12 @@ class MovieSyncProcessor(OwnerDelegator):
                                 "upgrade_old_file_name": upgrade_old_file_name,
                                 "upgrade_old_file_id": upgrade_old_file_id,
                                 "upgrade_old_size": upgrade_old_size,
+                                # v1.29.1：额外旧版本随管线项进 pending 记录，
+                                # 删除在后处理提交后（见 postprocess
+                                # _apply_replacement_deletion）。
+                                "dedup_extra_old_versions": extra_old_versions,
+                                "dedup_new_score": current_score,
+                                "dedup_new_size": self._owner.upgrade_rule_scoring._resource_size_bytes(matched_file.get("size")),
                             }],
                             mediainfo=mediainfo,
                             subscribe=subscribe,
@@ -660,17 +666,12 @@ class MovieSyncProcessor(OwnerDelegator):
                                     reason="movie_pending_finalize",
                                     task_id=history_item.get("record_id") or "",
                                 )
-                            # 1.6.48 判重：额外旧版本在转存成功后批量删除
-                            if extra_old_versions:
-                                self._owner.episode_dedup._apply_episode_dedup(
-                                    extra_old_versions,
-                                    new_score=current_score,
-                                    new_size=self._owner.upgrade_rule_scoring._resource_size_bytes(matched_file.get("size")),
-                                    subscribe=subscribe,
-                                    mediainfo=mediainfo,
-                                    season=0,
-                                    episode=1,
-                                )
+                            # v1.29.1：额外旧版本不再这里删——转存成功只代表
+                            # 新文件已落盘，确认入库在后处理提交
+                            # （_commit_single_item）之后；删除走那里的替换
+                            # 正式步骤（_apply_replacement_deletion），失败/
+                            # 超时都保留旧版。额外旧版本随管线项进 pending
+                            # 记录（dedup_extra_old_versions）。
                             # 媒体库通知已在管线 confirm 阶段发出（strm_path
                             # 生成即通知），这里不再重复通知。
                             logger.info(
@@ -690,12 +691,9 @@ class MovieSyncProcessor(OwnerDelegator):
                                     "year": mediainfo.year,
                                     "image": mediainfo.get_poster_image(),
                                     "file_name": target_name,
-                                    "notification_kind": (
-                                        "upgrade"
-                                        if is_upgrade
-                                        else "cross_transfer"
-                                        if history_item.get("transfer_mode") == "cross"
-                                        else "transfer"
+                                    "notification_kind": self._owner.transfer_details._derive_notification_kind(
+                                        is_upgrade=is_upgrade,
+                                        cross=history_item.get("transfer_mode") == "cross",
                                     ),
                                     "size": movie_size,
                                     "size_unknown": movie_size <= 0,

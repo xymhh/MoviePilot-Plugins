@@ -326,7 +326,8 @@ class EpisodeDedupDeleteTests(unittest.TestCase):
             old_versions, new_score=8, new_size=100,
             subscribe=_SUB, mediainfo=_MEDIA, season=1, episode=1,
         )
-        self.assertEqual(deleted, 0)
+        # v1.29.1：返回实际删除的旧版本列表（不再是计数）。
+        self.assertEqual(deleted, [])
         self.assertEqual(mutations.deleted, [])
         # warning 日志应含 episode_dedup_miss
         warnings = [c for c in logger_ref.warning.call_args_list if "episode_dedup_miss" in str(c)]
@@ -344,7 +345,14 @@ class EpisodeDedupDeleteTests(unittest.TestCase):
             old_versions, new_score=8, new_size=100,
             subscribe=_SUB, mediainfo=_MEDIA, season=1, episode=1,
         )
-        self.assertEqual(deleted, 2)
+        # v1.29.1：返回实际删除的旧版本列表（不再是计数）。
+        self.assertEqual(
+            [entry["file_id"] for entry in deleted], ["f1", "f2"]
+        )
+        self.assertEqual(
+            [entry["file_name"] for entry in deleted],
+            ["old.mkv", "old2.mkv"],
+        )
         self.assertEqual(mutations.deleted, ["f1", "f2"])
         infos = [c for c in logger_ref.info.call_args_list if "按季集判重替换" in str(c)]
         self.assertEqual(len(infos), 2)
@@ -361,7 +369,8 @@ class EpisodeDedupDeleteTests(unittest.TestCase):
             old_versions, new_score=8, new_size=100,
             subscribe=_SUB, mediainfo=_MEDIA, season=1, episode=1,
         )
-        self.assertEqual(deleted, 0)
+        # v1.29.1：返回实际删除的旧版本列表（不再是计数）。
+        self.assertEqual(deleted, [])
         warnings = [c for c in logger_ref.warning.call_args_list if "episode_dedup_miss" in str(c)]
         self.assertTrue(warnings)
 
@@ -489,7 +498,8 @@ class EpisodeDedupScoreTests(unittest.TestCase):
             [{"file_id": "m1", "file_name": "old.mkv", "cloud_dir": "/电影", "file_size": 10, "score": 3}],
             new_score=8, new_size=100, subscribe=_SUB, mediainfo=_MEDIA, season=0, episode=1,
         )
-        self.assertEqual(deleted, 1)
+        # v1.29.1：返回实际删除的旧版本列表（不再是计数）。
+        self.assertEqual([entry["file_id"] for entry in deleted], ["m1"])
         infos = [str(c) for c in logger_ref.info.call_args_list if "按季集判重替换" in str(c)]
         self.assertTrue(infos)
         self.assertNotIn("S00E01", infos[-1])

@@ -437,9 +437,16 @@ class EpisodeDedupService(OwnerDelegator):
             mediainfo: Optional[MediaInfo] = None,
             season: int = 0,
             episode: int = 0,
-    ) -> int:
-        """删除旧版本并写日志；定位不到 file_id 时记 warning 不阻塞。返回删除数。"""
-        deleted = 0
+    ) -> List[Dict[str, Any]]:
+        """删除旧版本并写日志；定位不到 file_id 时记 warning 不阻塞。
+
+        v1.29.1：返回实际删除的旧版本（每条只有真实字段 file_id /
+        cloud_dir / file_name / file_size），供替换步骤记
+        ``replaced_from``。删除本身仍是唯一删除实现——新步骤
+        （postprocess._apply_replacement_deletion）只负责在确认入库后
+        调用它，不再另写删除逻辑。
+        """
+        deleted: List[Dict[str, Any]] = []
         cloud_mutations = getattr(self, "_cloud_mutations", None)
         title = str(
             getattr(mediainfo, "title_year", "") or getattr(subscribe, "name", "") or ""
@@ -477,7 +484,12 @@ class EpisodeDedupService(OwnerDelegator):
                 )
                 continue
             if ok:
-                deleted += 1
+                deleted.append({
+                    "file_id": file_id,
+                    "cloud_dir": cloud_dir,
+                    "file_name": file_name,
+                    "file_size": old_size,
+                })
                 logger.info(
                     f"按季集判重替换：{media_label} 已删除旧文件 {display}"
                     f"（旧评分 {old_score}/{old_size}B → 新评分 {new_score_text}/{new_size_text}B）"

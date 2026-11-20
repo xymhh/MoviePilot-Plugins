@@ -719,7 +719,10 @@ class UpgradeService(OwnerDelegator):
                         })
                         self._owner.transfer_details._append_tv_transfer_detail(
                             transfer_details, mediainfo, season, ordered_episodes,
-                            notification_kind="upgrade",
+                            # v1.29.1：洗版流整体即 replace 处置，走统一派生。
+                            notification_kind=self._owner.transfer_details._derive_notification_kind(
+                                is_upgrade=True
+                            ),
                             size_bytes=batch_detail_size,
                             source_text=batch_detail_source,
                             file_names=[
