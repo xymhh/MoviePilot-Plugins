@@ -347,10 +347,6 @@ class EpisodeDedupService(OwnerDelegator):
     # ------------------------------------------------------------------
     # 决策
     # ------------------------------------------------------------------
-    def _quality_prefer_active(self) -> bool:
-        """按体积/分辨率择优入库是否生效（默认关）。"""
-        return bool(getattr(self, "_quality_prefer_enabled", False)) and self._episode_dedup_active()
-
     def _episode_dedup_decision(
             self,
             subscribe,
@@ -368,10 +364,12 @@ class EpisodeDedupService(OwnerDelegator):
 
         v1.29.0：判定委托给统一判定器 ``decide_upgrade``（见
         ``handlers/sync/upgrade_decision.py``），本方法只负责取数（旧版本
-        最佳评分/体积、模板符合版本名、体积优先开关）与动作映射，不再
-        自带判定逻辑。注意：模板符合版本名在这里是前置查好的（旧
+        最佳评分/体积、模板符合版本名）与动作映射，不再自带判定逻辑。
+        注意：模板符合版本名在这里是前置查好的（旧
         ``_keep_template_version`` 只在 skip 时才查；渲染本身是纯本地
         计算，失败只记 debug 日志，查早查晚不影响动作与原因）。
+        v1.29.4：判定器统一为“评分优先，相等时走阈值”，体积/分辨率优先
+        分支已删，最佳旧评分/体积一律照算。
         """
         if not self._episode_dedup_active():
             return "proceed", [], "判重开关关闭或共存模式"
@@ -381,15 +379,10 @@ class EpisodeDedupService(OwnerDelegator):
         new_score = int(new_score or 0)
         new_size = max(0, int(new_size or 0))
 
-        quality_active = self._quality_prefer_active()
-        # 旧行为：体积/分辨率优先分支不看评分，根本不算最佳旧评分/体积
-        #（compare_quality 内部对体积做容错转换）；只在评分分支才算。
-        if quality_active:
-            best_old_score = 0
-            best_old_size = 0
-        else:
-            best_old_score = max(int(v.get("score") or 0) for v in versions)
-            best_old_size = max(int(v.get("file_size") or 0) for v in versions)
+        # 统一判定先看评分：最佳旧评分/体积一律照算（v1.29.4 以前体积优先
+        # 分支不看评分时不算，分支已删）。
+        best_old_score = max(int(v.get("score") or 0) for v in versions)
+        best_old_size = max(int(v.get("file_size") or 0) for v in versions)
         template_name = None
         template_version = self._owner.upgrade_rule_scoring._template_conformant_version(
             versions, subscribe, mediainfo, season, episode
@@ -414,7 +407,6 @@ class EpisodeDedupService(OwnerDelegator):
                 prefer_template_named_version=bool(
                     getattr(self, "_prefer_template_named_version", True)
                 ),
-                quality_prefer=bool(quality_active),
                 # v1.29.0：保留旧判重外层的 _keep_template_version 行为——
                 # 判重里任何不换的结果（包括评分降低）都先过模板保留；评分制
                 # 本体不走这条（见 decide_upgrade 第 3 步）。

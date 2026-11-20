@@ -419,7 +419,6 @@ class SyncHandler:
         self._prefer_template_named_version = bool(
             get_val("prefer_template_named_version", True)
         )
-        self._quality_prefer_enabled = bool(get_val("quality_prefer_enabled", False))
         self._quality_min_gain_percent = int(get_val("quality_min_gain_percent", 10) or 0)
         self._quality_min_gain_mb = int(get_val("quality_min_gain_mb", 200) or 0)
         self._local_resource_path = str(get_val("local_resource_path", "") or "").strip()

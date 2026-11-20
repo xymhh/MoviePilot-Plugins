@@ -299,17 +299,28 @@ class EpisodeDedupDecisionTests(unittest.TestCase):
         self.assertEqual(action, "proceed")
 
     def test_same_score_largest_requires_bigger(self):
-        """同分 + largest：新更大才 replace，否则 skip。"""
+        """同分 + largest：体积须过阈值（+10% 且 +200MB）才 replace，否则 skip。
+
+        v1.29.4 统一：旧“大 1 字节就换”作废，100→150（+50% 但 +50B）
+        不再换；1.5GB→4.8GB（+220% 且 +3.3GB）才换。
+        """
         handler = _make_handler(upgrade_mode="largest")
         existing = {1: [{"file_id": "f1", "file_name": "old.mkv", "cloud_dir": "/d", "file_size": 100, "score": 5}]}
-        action, _, _ = handler._episode_dedup_decision(
+        action, _, reason = handler._episode_dedup_decision(
             _SUB, _MEDIA, 1, 1, new_score=5, new_size=150, existing_versions=existing
         )
-        self.assertEqual(action, "replace")
+        self.assertEqual(action, "skip")
+        self.assertIn("体积增益不足", reason)
         action2, _, _ = handler._episode_dedup_decision(
             _SUB, _MEDIA, 1, 1, new_score=5, new_size=80, existing_versions=existing
         )
         self.assertEqual(action2, "skip")
+        big_existing = {1: [{"file_id": "f1", "file_name": "old.mkv", "cloud_dir": "/d", "file_size": 1_500_000_000, "score": 5}]}
+        action3, _, reason3 = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=5, new_size=4_800_000_000, existing_versions=big_existing
+        )
+        self.assertEqual(action3, "replace")
+        self.assertIn("同评分按体积择优", reason3)
 
 
 class EpisodeDedupDeleteTests(unittest.TestCase):
@@ -741,7 +752,7 @@ class TemplateNamedVersionTests(unittest.TestCase):
         )
         self.assertTrue(should_upgrade)
         self.assertIn("评分提升", reason)
-        # 同评分但体积更大 + 符合模板 → largest 模式仍然升级
+        # 同评分且体积过阈值 + 符合模板 → largest 模式仍然升级
         should_upgrade_size, reason_size = handler._owner.upgrade_rule_scoring._should_upgrade_candidate(
             99,
             99,
@@ -754,8 +765,8 @@ class TemplateNamedVersionTests(unittest.TestCase):
             episode=1,
         )
         self.assertTrue(should_upgrade_size)
-        self.assertIn("同评分保留更大文件", reason_size)
-        # 同评分且候选没更大 + 符合模板 → 才走模板保留
+        self.assertIn("同评分按体积择优", reason_size)
+        # 同评分且体积无收益 + 符合模板 → 才走模板保留
         blocked, blocked_reason = handler._owner.upgrade_rule_scoring._should_upgrade_candidate(
             99,
             99,
@@ -948,8 +959,13 @@ class SkipMergeDoesNotPoisonHistoryTests(unittest.TestCase):
         self.assertIn("def cross_success_needs_repair", source)
         self.assertIn('return True, "重新转存此记录"', source)
 
-class QualityPreferDecisionTests(unittest.TestCase):
-    """组8（1.7.88）：按体积择优入库 —— 分辨率 > 体积 + 阈值，可绕过命名模板拦截。"""
+class UnifiedTieDecisionTests(unittest.TestCase):
+    """组8（1.7.88 起）：评分相等时的阈值体积比较 —— v1.29.4 统一规则。
+
+    评分优先：评分升换、降不换；评分相等时才看分辨率/体积（分辨率 >
+    体积 + 阈值，可绕过命名模板拦截，但模板符合仍在无收益时保留）。
+    体积/分辨率优先开关（quality_prefer_enabled）已随分支删除。
+    """
 
     GB = 1024 * 1024 * 1024
     MB = 1024 * 1024
@@ -957,12 +973,8 @@ class QualityPreferDecisionTests(unittest.TestCase):
     def _handler(self, **overrides):
         overrides.setdefault("platform_rename_path", TemplateNamedVersionTests._template_aware_rename)
         handler = _make_handler(**overrides)
-        handler._quality_prefer_enabled = overrides.get("quality_prefer_enabled", True)
         handler._quality_min_gain_percent = overrides.get("quality_min_gain_percent", 10)
         handler._quality_min_gain_mb = overrides.get("quality_min_gain_mb", 200)
-        handler._quality_ignore_rename_template = overrides.get(
-            "quality_ignore_rename_template", True
-        )
         return handler
 
     def _existing(self, name, size):
@@ -1018,7 +1030,7 @@ class QualityPreferDecisionTests(unittest.TestCase):
         self.assertIn("+40%", reason)
 
     def test_template_named_old_version_still_replaced(self):
-        """择优开关要能绕过「已符合重命名模板就保留」，否则本插件转存的文件永远换不掉。"""
+        """模板符合不否决已判定的升级，否则本插件转存的文件永远换不掉。"""
         handler = self._handler(prefer_template_named_version=True)
         existing = self._existing("正相反的你与我 - S01E01.720p.mkv", 600 * self.MB)
         action, _, reason = handler._episode_dedup_decision(
@@ -1046,17 +1058,35 @@ class QualityPreferDecisionTests(unittest.TestCase):
         self.assertEqual(action, "replace")
         self.assertNotIn("已符合当前重命名模板", reason)
 
-    def test_switch_off_keeps_old_behaviour(self):
-        """开关关闭 → 完全回到 1.7.87：评分相同且体积更大时按 largest 兜底替换。"""
-        handler = self._handler(quality_prefer_enabled=False)
+    def test_small_gain_skips_under_unified_rule(self):
+        """v1.29.4 统一：评分相等且体积增益 +0.5%（+5MB）不过阈值 → 不换，
+        原因走阈值口径（旧评分制“大 1 字节就换”已作废）。"""
+        handler = self._handler()
         existing = self._existing("正相反的你与我 - S01E01.1080p.mkv", 1000 * self.MB)
         action, _, reason = handler._episode_dedup_decision(
             _SUB, _MEDIA, 1, 1, new_score=0, new_size=1005 * self.MB,
             existing_versions=existing, new_file_name="正相反的你与我.S01E01.1080p.mkv",
         )
-        self.assertIn(action, {"replace", "skip"})
-        self.assertNotIn("按体积择优", reason)
-        self.assertNotIn("现有版本更优", reason)
+        self.assertEqual(action, "skip")
+        self.assertIn("同评分现有版本更优", reason)
+        self.assertIn("体积增益不足", reason)
+
+    def test_score_down_beats_resolution_upgrade(self):
+        """v1.29.4 统一：评分 10→0 时分辨率 720p→1080p 也不换（评分优先）。"""
+        handler = self._handler()
+        action, _, reason = handler._episode_dedup_decision(
+            _SUB, _MEDIA, 1, 1, new_score=0, new_size=1500 * self.MB,
+            existing_versions={1: [{
+                "file_id": "f1",
+                "file_name": "正相反的你与我 - S01E01.720p.mkv",
+                "cloud_dir": "/d",
+                "file_size": 600 * self.MB,
+                "score": 10,
+            }]},
+            new_file_name="正相反的你与我.S01E01.1080p.mkv",
+        )
+        self.assertEqual(action, "skip")
+        self.assertEqual(reason, "评分降低 10→0")
 
     def test_no_resolution_uses_size_only(self):
         handler = self._handler()

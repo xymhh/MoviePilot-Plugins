@@ -226,6 +226,53 @@ class TestConfigWhitelist(unittest.TestCase):
         for key in PARAM_KEYS:
             self.assertEqual(plugin.__dict__[f"_{key}"], table[key]["default"])
 
+    def test_quality_prefer_enabled_retired_silently(self):
+        """v1.29.4：quality_prefer_enabled 随判定器统一删除。
+
+        旧值由 normalize_plugin_config 在白名单循环之前静默丢弃（不报
+        “忽略未知插件配置键”警告、不落实例属性）；默认配置与白名单里
+        不再有该键；后端不再读该键；前端 upgrade.js 里不再有该开关；
+        阈值键 quality_min_gain_percent / quality_min_gain_mb 仍保留
+        （现为评分相等时的阈值参数）。
+        """
+        plugin, module = _plugin()
+        config = {
+            "quality_prefer_enabled": True,
+            "quality_min_gain_percent": 10,
+            "quality_min_gain_mb": 200,
+        }
+        self.assertNotIn(
+            "quality_prefer_enabled",
+            module.normalize_plugin_config(dict(config)),
+        )
+        self.assertNotIn("quality_prefer_enabled", _default_keys())
+        self.assertFalse(module.is_plugin_config_key("quality_prefer_enabled"))
+        self.assertTrue(module.is_plugin_config_key("quality_min_gain_percent"))
+        self.assertTrue(module.is_plugin_config_key("quality_min_gain_mb"))
+        plugin._apply_plugin_config(dict(config), reset_runtime=True)
+        self.assertNotIn("_quality_prefer_enabled", plugin.__dict__)
+        for root, _dirs, files in os.walk(PLUGIN_DIR):
+            for name in files:
+                if not name.endswith(".py"):
+                    continue
+                source = open(
+                    os.path.join(root, name), encoding="utf-8"
+                ).read()
+                self.assertNotIn(
+                    'config.get("quality_prefer_enabled"', source
+                )
+                self.assertNotIn(
+                    'get_val("quality_prefer_enabled"', source
+                )
+        with open(
+            os.path.join(
+                REPO_ROOT,
+                "frontend/cloudsubscribex/src/config/fields/upgrade.js",
+            ),
+            encoding="utf-8",
+        ) as handle:
+            self.assertNotIn("quality_prefer_enabled", handle.read())
+
     def test_param_table_values_unchanged(self):
         """参数表九个值与 kind 一个都不许变（只收拢定义位置）。"""
         _, module = _plugin()

@@ -611,6 +611,9 @@ def _run_skip_branch(case, source: str, test_source: str, **namespace):
         "resource_title": "",
         "remember_episode_miss": MagicMock(),
         "remember_mismatch": MagicMock(),
+        # v1.29.4 第 3 步：剧集「未匹配」分支在洗版范围时只记 debug
+        # 不写 6h 缺集缓存；本 harness 抽的是普通流程行为，取 False。
+        "upgrade_scope": False,
     }
     scope.update(namespace)
     loop_source = (

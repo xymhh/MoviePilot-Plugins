@@ -57,7 +57,7 @@ plan_upgrade_episode_order = _upgrade.plan_upgrade_episode_order
 class UpgradeEpisodeOrderTests(unittest.TestCase):
     def test_missing_episodes_come_first(self):
         """已入库 1-34、订阅跑到 36 集：先补 35/36，再洗 1-34。"""
-        ordered, missing, postponed = plan_upgrade_episode_order(
+        ordered, missing, postponed, ceiling_skipped = plan_upgrade_episode_order(
             local_episodes=range(1, 35),
             all_expected_episodes=set(range(1, 37)),
             target_episodes=None,
@@ -66,10 +66,11 @@ class UpgradeEpisodeOrderTests(unittest.TestCase):
         self.assertEqual(sorted(ordered[2:]), list(range(1, 35)))
         self.assertEqual(missing, {35, 36})
         self.assertEqual(postponed, [])
+        self.assertEqual(ceiling_skipped, set())
 
     def test_limit_only_caps_upgrade_part(self):
         """上限只截断洗版，缺集永远全额处理。"""
-        ordered, missing, postponed = plan_upgrade_episode_order(
+        ordered, missing, postponed, ceiling_skipped = plan_upgrade_episode_order(
             local_episodes=range(1, 35),
             all_expected_episodes=set(range(1, 37)),
             target_episodes=None,
@@ -80,10 +81,11 @@ class UpgradeEpisodeOrderTests(unittest.TestCase):
         self.assertEqual(ordered[2:], [1, 2, 3])
         self.assertEqual(postponed[:3], [4, 5, 6])
         self.assertEqual(len(postponed), 31)
+        self.assertEqual(ceiling_skipped, set())
 
     def test_manual_target_episodes_not_capped(self):
         """手动指定集数（多为补集请求）全部优先，且不受上限约束。"""
-        ordered, missing, postponed = plan_upgrade_episode_order(
+        ordered, missing, postponed, ceiling_skipped = plan_upgrade_episode_order(
             local_episodes=range(1, 11),
             all_expected_episodes=set(range(1, 11)),
             target_episodes={3, 4, 5},
@@ -92,10 +94,11 @@ class UpgradeEpisodeOrderTests(unittest.TestCase):
         self.assertEqual(ordered, [3, 4, 5])
         self.assertEqual(missing, {3, 4, 5})
         self.assertEqual(postponed, [])
+        self.assertEqual(ceiling_skipped, set())
 
     def test_unknown_total_still_sorted(self):
         """总集数未知（连载未标 total）：没有缺集概念，按集号排序且受上限约束。"""
-        ordered, missing, _ = plan_upgrade_episode_order(
+        ordered, missing, _, ceiling_skipped = plan_upgrade_episode_order(
             local_episodes=[5, 3, 9],
             all_expected_episodes=set(),
             target_episodes=None,
@@ -103,6 +106,7 @@ class UpgradeEpisodeOrderTests(unittest.TestCase):
         )
         self.assertEqual(ordered, [3, 5])
         self.assertEqual(missing, set())
+        self.assertEqual(ceiling_skipped, set())
 
 
 if __name__ == "__main__":

@@ -37,9 +37,10 @@ class UpgradeRuleScoringService(OwnerDelegator):
         """按评分和洗版模式判断候选是否应进入原有转存流程。
 
         v1.29.0：本方法只做薄包装，判定委托给统一判定器
-        ``handlers.sync.upgrade_decision.decide_upgrade``（评分分支，
-        ``quality_prefer=False``）；模板是否符合仍在这里算（需要命名服务
-        渲染，与旧行为一致：无旧版时不算，文件名为空时不算）。
+        ``handlers.sync.upgrade_decision.decide_upgrade``；模板是否符合仍
+        在这里算（需要命名服务渲染，与旧行为一致：无旧版时不算，文件名
+        为空时不算）。v1.29.4：判定器统一为“评分优先，相等时走阈值”
+        （体积/分辨率优先分支已删）。
         """
         old_file_name = str(old_file_name or "").strip()
         template_name = None
@@ -68,7 +69,6 @@ class UpgradeRuleScoringService(OwnerDelegator):
                 prefer_template_named_version=bool(
                     getattr(self, "_prefer_template_named_version", True)
                 ),
-                quality_prefer=False,
             ),
         )
         return action == "replace", reason

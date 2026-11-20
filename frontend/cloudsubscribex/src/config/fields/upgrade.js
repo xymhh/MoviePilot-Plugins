@@ -33,7 +33,7 @@ export function createUpgradeSection(options) {
               {title: "直接替换", value: "replace"},
               {title: "新旧共存", value: "coexist"},
             ],
-            hint: "评分更高时执行洗版；同评分时最大/最小模式按文件大小决定，默认保留最大文件。",
+            hint: "评分更高时执行洗版，评分更低时不换；评分相等时最大/最小模式按体积阈值决定（见下方「入库择优」），默认保留最大文件。",
             cols: 4,
           },
           {
@@ -63,24 +63,14 @@ export function createUpgradeSection(options) {
       {
         title: "入库择优（按体积）",
         icon: "mdi-scale-balance",
-        hint: "只影响「新入库」：转存某集时若库里已有同集文件，按「分辨率 > 体积」判断要不要换掉旧的；不做存量全量洗版。",
+        hint: "评分相等时按体积判断要不要换掉旧的：分辨率更高（体积不低于旧版 60%）或同分辨率体积多出下方阈值才换；评分更高/更低时直接按评分判定。",
         fields: [
-          {
-            key: "quality_prefer_enabled",
-            label: "入库时按体积择优",
-            type: "switch",
-            hint: "打开后：新候选分辨率更高（体积不低于旧版 60%）或同分辨率体积多出阈值，就删旧写新；否则跳过并记「现有版本更优」。洗版模式为「新旧共存」或关闭「按季集判重替换」时本项不生效。",
-            disabled: (config) =>
-              (config.upgrade_mode === "coexist") ||
-              (config.episode_dedup_enabled === false),
-            cols: 4,
-          },
           {
             key: "quality_min_gain_percent",
             label: "体积增益阈值（%）",
             type: "number",
             min: 0,
-            hint: "同分辨率时，新文件体积至少比旧文件多这个百分比才算更好，默认 10。",
+            hint: "评分相等且同分辨率时，新文件体积至少比旧文件多这个百分比才算更好，默认 10；保留最小文件模式为反向阈值。",
             cols: 4,
           },
           {
@@ -88,7 +78,7 @@ export function createUpgradeSection(options) {
             label: "体积增益阈值（MB）",
             type: "number",
             min: 0,
-            hint: "同分辨率时，新文件至少比旧文件多这么多 MB（与百分比同时满足），默认 200。",
+            hint: "评分相等且同分辨率时，新文件至少比旧文件多这么多 MB（与百分比同时满足），默认 200；保留最小文件模式为反向阈值。",
             cols: 4,
           },
         ],

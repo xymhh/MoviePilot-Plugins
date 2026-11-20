@@ -100,7 +100,11 @@ def normalize_plugin_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             else "allow"
         )
     for deprecated_key in (
-            *legacy_download_keys, "unblock_start_time", "unblock_end_time"
+            *legacy_download_keys, "unblock_start_time", "unblock_end_time",
+            # v1.29.4：体积/分辨率优先分支随判定器统一删除，旧值静默丢弃
+            #（不再读该键；若留在配置里会在 _apply_plugin_config 的白名单
+            # 循环里报“忽略未知插件配置键”警告）。
+            "quality_prefer_enabled",
     ):
         config.pop(deprecated_key, None)
     if "platform_download_policy" in config:

@@ -389,7 +389,6 @@ class UIConfig:
             "episode_dedup_enabled": True,
             "verify_landed_enabled": True,
             "prefer_template_named_version": True,
-            "quality_prefer_enabled": False,
             "quality_min_gain_percent": 10,
             # 每轮订阅任务最多洗版多少集（0=不限）；缺集永远排在这些之前
             "upgrade_episode_limit": 0,

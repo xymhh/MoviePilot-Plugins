@@ -6,16 +6,18 @@ from app.db import SessionFactory
 from app.log import logger
 from app.schemas import MediaInfo
 from app.schemas.types import MediaType
-from app.utils.string import StringUtils
 
 from ...core import OwnerDelegator
-from ...core.failure import apply_failure
-from ...core.state import (
-    STAGE_TRANSFERRING,
-    STATUS_DOWNLOADING,
-    STATUS_PROCESSING,
-    transition,
-)
+
+
+#: 质量上限（MP 过滤规则的评分标尺）：MP v3.2.6
+#: ``app/modules/filter/__init__.py`` 的 ``FilterModule.__get_order`` 规定
+#: “首层优先级为 100，后续每层减 1；数值越大越优先”，规则串按 ``>`` 分层、
+#: 首个命中的层决定评分，因此规则评分最高只能到 100（这也是
+#: ``rule_scoring`` 评分比较的标尺）。基线里评分已达 100 的集在评分上
+#: 不可能被超越，洗版搜索前直接跳过、省请求（同分体积更大的理论替换
+#: 也被一并跳过，这是为省请求付出的代价）。
+QUALITY_CEILING_SCORE = 100
 
 
 def plan_upgrade_episode_order(
@@ -23,7 +25,9 @@ def plan_upgrade_episode_order(
         all_expected_episodes: Set[int],
         target_episodes: Optional[Set[int]],
         limit: int = 0,
-) -> Tuple[List[int], Set[int], List[int]]:
+        scores: Optional[Dict[int, int]] = None,
+        ceiling: int = 0,
+) -> Tuple[List[int], Set[int], List[int], Set[int]]:
     """按「缺集优先」排本轮待搜索集数。
 
     补集是功能缺失，洗版只是画质优化：更新中的剧（已入库 30+ 集、缺最新几集）
@@ -33,7 +37,12 @@ def plan_upgrade_episode_order(
     :param all_expected_episodes: 订阅应覆盖的全部集数；为空表示集数未知
     :param target_episodes: 手动指定的集数（多为补集请求）；非空时全部按优先处理
     :param limit: 每轮最多洗版多少集，0 表示不限；只限制洗版部分，不限制缺集
-    :return: (本轮待搜索集数, 缺集集合, 因上限推迟到下一轮的集数)
+    :param scores: 基线评分（集号 → 规则评分），供质量上限筛掉不搜
+    :param ceiling: 质量上限，大于 0 时启用；已达上限的洗版候选直接跳过
+        （不进搜索、不进 postponed——不是“本轮放后”，而是“本轮不搜”）；
+        缺集与手动目标集不受上限影响（手动目标集在上面已全部划进 missing）
+    :return: (本轮待搜索集数, 缺集集合, 因上限推迟到下一轮的集数,
+        已达质量上限本轮不搜的集数)
     """
     searched = {int(episode) for episode in local_episodes}
     missing: Set[int] = set()
@@ -46,6 +55,15 @@ def plan_upgrade_episode_order(
         searched |= missing
 
     upgrade_only = searched - missing
+    # 质量上限筛掉不搜（v1.29.4）：只筛洗版候选，缺集与手动目标集不动。
+    ceiling_skipped: Set[int] = set()
+    if ceiling and scores:
+        ceiling = int(ceiling)
+        ceiling_skipped = {
+            episode for episode in upgrade_only
+            if int(scores.get(episode) or 0) >= ceiling
+        }
+        upgrade_only -= ceiling_skipped
     postponed: List[int] = []
     if limit and limit > 0 and len(upgrade_only) > limit:
         ordered_upgrade = sorted(upgrade_only)
@@ -53,7 +71,7 @@ def plan_upgrade_episode_order(
         upgrade_only = set(ordered_upgrade[:limit])
 
     ordered = sorted(missing) + sorted(upgrade_only)
-    return ordered, missing, postponed
+    return ordered, missing, postponed, ceiling_skipped
 
 
 class UpgradeService(OwnerDelegator):
@@ -72,14 +90,15 @@ class UpgradeService(OwnerDelegator):
             manual_upgrade: bool = False,
             manual_resources: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
-        """
-        洗版模式专用转存逻辑（独立于普通转存）
+        """洗版入口：建基线 → 排期（含质量上限）→ 组装洗版计划 → 调统一流水线。
 
-        流程：
-        1. 合并整理历史、插件转存历史和 Emby 路径建立基线
-        2. 搜索全部集数（含已存在的）
-        3. 仅转存画质提升达到层级的集数
-        4. 不调用 check_and_finish_subscribe，保持订阅活跃
+        v1.29.4 第 3 步：流程本身在
+        ``TelevisionSyncProcessor.process_tv_subscribe``
+        （handlers/sync/television.py），这里只做参数组装，不再自有流程。
+        三种处置（缺集→转存、已有+更优→替换、已有+不更优→跳过）与
+        洗版结算（不结算订阅、只更新进度与单集评分）都在统一流水线里按
+        plan 分支处理。手动洗版三个入口（订阅手动升级、媒体服务器内容
+        升级、无绑定手动提交）都经这里进统一流水线，行为不变。
 
         :param subscribe: 订阅对象
         :param history: 历史记录列表
@@ -87,8 +106,6 @@ class UpgradeService(OwnerDelegator):
         :param transferred_count: 当前已转存数量
         :return: 更新后的转存数量
         """
-        from app.db.subscribe_oper import SubscribeOper
-
         try:
             transient_target = bool(getattr(subscribe, "_transient_target", False))
             season = subscribe.season or 1
@@ -105,11 +122,9 @@ class UpgradeService(OwnerDelegator):
                 return transferred_count
 
             # 读取已有评分，并以整季整理历史、插件历史和 Emby 构建统一基线。
-            # Phase 3a 第 4 项：基线 + 真实网盘扫描 + 合并三合一（见
-            # _build_episode_baseline），这里只调合并后的查询，不再两次查询
-            # 再手动合并。注意行为变化：季目录列不出来时旧版直接跳过本轮洗版，
-            # 新版按整理历史/媒体服务器基线继续（实测拿不到时判重校验 fail-open，
-            # 不会把已有集误判成缺集）。
+            # （基线 + 真实网盘扫描 + 合并三合一，见 _build_episode_baseline；
+            # 季目录列不出来时按整理历史/媒体服务器基线继续，判重校验
+            # fail-open，不会把已有集误判成缺集。）
             self._set_upgrade_phase(subscribe, "建立洗版基线", 20)
             existing_ep_pri = self._read_ep_priority(subscribe)
             baseline = self._build_episode_baseline(
@@ -157,14 +172,18 @@ class UpgradeService(OwnerDelegator):
             start_ep = subscribe.start_episode or 1
             all_expected_episodes = set(range(start_ep, total_ep + 1)) if total_ep > 0 else set()
 
-            # pri_order 没有固定满分；所有已有版本均通过候选比较决定是否升级。
-            # 顺序：缺集优先，其次洗版（可按每轮上限截断），见 plan_upgrade_episode_order。
-            episodes_to_search, missing_episode_set, postponed_upgrade = (
+            # 质量上限（v1.29.4）：规则评分满分 100（MP FilterModule 首层
+            # 优先级，见 QUALITY_CEILING_SCORE），基线评分已达上限的集不
+            # 可能被超越，本轮不搜索、省请求。顺序：缺集优先，其次洗版
+            #（可按每轮上限截断），见 plan_upgrade_episode_order。
+            episodes_to_search, missing_episode_set, postponed_upgrade, ceiling_skipped = (
                 plan_upgrade_episode_order(
                     local_episodes=local_scores.keys(),
                     all_expected_episodes=all_expected_episodes,
                     target_episodes=target_episodes,
                     limit=int(getattr(self, "_upgrade_episode_limit", 0) or 0),
+                    scores=local_scores,
+                    ceiling=QUALITY_CEILING_SCORE,
                 )
             )
             if missing_episode_set:
@@ -180,610 +199,45 @@ class UpgradeService(OwnerDelegator):
                     f"本轮暂不洗版 {len(postponed_upgrade)} 集："
                     f"{postponed_upgrade[:20]}"
                 )
+            if ceiling_skipped:
+                logger.info(
+                    f"{upgrade_log_prefix} 已达质量上限（评分≥"
+                    f"{QUALITY_CEILING_SCORE}），本轮不搜索 "
+                    f"{len(ceiling_skipped)} 集：{sorted(ceiling_skipped)[:20]}"
+                )
 
-            target_episode_air_dates: Dict[int, str] = {}
             if not episodes_to_search:
                 logger.info(f"{upgrade_log_prefix} 无可搜索的集数")
                 return transferred_count
 
             logger.debug(f"{upgrade_log_prefix} 待搜索 {len(episodes_to_search)} 集：{episodes_to_search}")
 
-            # 搜索并转存匹配资源
-            enabled_sources = (
-                ["manual"]
-                if manual_resources
-                else self._search_handler.get_enabled_sources()
+            plan = {
+                "mediainfo": mediainfo,
+                "season": season,
+                "sub_key": sub_key,
+                "baseline": baseline,
+                "local_scores": local_scores,
+                "episodes_to_search": list(episodes_to_search),
+                "missing_episode_set": set(missing_episode_set),
+                "existing_ep_pri": existing_ep_pri,
+                "all_expected_episodes": set(all_expected_episodes),
+            }
+            return self.process_tv_subscribe(
+                subscribe=subscribe, history=history,
+                transfer_details=transfer_details,
+                transferred_count=transferred_count,
+                allow_upgrade=False,
+                manual_resources=manual_resources,
+                manual_upgrade=manual_upgrade,
+                target_episodes=target_episodes,
+                transient_target=transient_target,
+                _upgrade_plan=plan,
             )
-            if not enabled_sources:
-                logger.warning(f"{upgrade_log_prefix} 没有可用的搜索源")
-                return transferred_count
-
-            self._set_upgrade_phase(
-                subscribe,
-                "处理手动洗版资源" if manual_resources else "搜索候选资源",
-                40,
-            )
-            prefetched_results = (
-                {"manual": [dict(resource) for resource in manual_resources]}
-                if manual_resources else {}
-            )
-            if not manual_resources:
-                def on_upgrade_search_progress(data: Dict[str, Any]) -> None:
-                    completed = data.get("completed", 0)
-                    total = max(1, data.get("total", 1))
-                    current_prog = 40 + int((completed / total) * 20)  # 40% -> 60%
-                    self._set_upgrade_phase(
-                        subscribe,
-                        data.get("summary") or "搜索候选资源",
-                        current_prog,
-                        search_active=data.get("active", False),
-                        search_channels=data.get("channels", []),
-                        search_total_results=data.get("total_results", 0),
-                    )
-
-                prefetched_results = self._search_handler.search_sources(
-                    sources=enabled_sources,
-                    mediainfo=mediainfo,
-                    media_type=MediaType.TV,
-                    season=season,
-                    target_episodes=episodes_to_search,
-                    target_episode_air_dates=target_episode_air_dates,
-                    subscribe=subscribe,
-                    progress_callback=on_upgrade_search_progress,
-                )
-            resource_batches = self._owner.resource_transfer._build_transfer_resource_batches(
-                enabled_sources, prefetched_results
-            )
-            new_priority = dict(existing_ep_pri)
-            upgrade_downloaded = 0
-            upgrade_episodes = set()  # 记录已升级的集号，用于更新 note
-
-            for source, candidate_resources, is_cross_batch in resource_batches:
-                if self._stop_requested():
-                    break
-                if not episodes_to_search:
-                    break
-                logger.debug(
-                    f"{upgrade_log_prefix} 使用 {source.upper()} 处理"
-                    f"{'跨盘' if is_cross_batch else '目标网盘'}候选"
-                )
-
-                for resource_index, resource in enumerate(candidate_resources):
-                    if self._stop_requested():
-                        break
-                    if not episodes_to_search:
-                        break
-                    share_url = resource.get("url", "")
-                    resource_title = resource.get("title", "")
-                    pending_episodes = tuple(episodes_to_search)
-
-                    if (resource.get("need_unlock") or resource.get("need_access")) and not share_url:
-                        resource_ref = resource.get("resource_ref")
-                        if resource_ref:
-                            preview_files = resource.get("preview_files") or []
-                            preview_matches = self._owner.file_matching._match_episode_files(
-                                preview_files,
-                                mediainfo,
-                                subscribe,
-                                season,
-                                pending_episodes,
-                                require_media_match=is_cross_batch,
-                            ) if preview_files else {}
-                            preview_candidates = [
-                                (episode, file_item, score)
-                                for episode, (file_item, score) in preview_matches.items()
-                                if file_item
-                            ]
-                            if preview_candidates:
-                                preview_worthwhile = any(
-                                    self._owner.upgrade_rule_scoring._should_upgrade_candidate(
-                                        local_scores.get(episode, 0),
-                                        score,
-                                        int(baseline.get(episode, {}).get("file_size") or 0),
-                                        self._owner.upgrade_rule_scoring._resource_size_bytes(file_item.get("size")),
-                                        has_existing=episode in baseline,
-                                        old_file_name=str(
-                                            baseline.get(episode, {}).get("target_file_name")
-                                            or baseline.get(episode, {}).get("file_name") or ""
-                                        ),
-                                        subscribe=subscribe,
-                                        mediainfo=mediainfo,
-                                        season=season,
-                                        episode=episode,
-                                    )[0]
-                                    for episode, file_item, score in preview_candidates
-                                )
-                                if not preview_worthwhile:
-                                    logger.info(
-                                        f"{upgrade_log_prefix} 预览中的目标集均不满足"
-                                        f"{self._upgrade_mode}洗版条件，解锁前跳过：{resource_title}"
-                                    )
-                                    continue
-                    share_url = self._owner.resource_transfer._resolve_candidate_resource_url(
-                        candidate_resources,
-                        resource_index,
-                        resource,
-                        self._search_handler._search_label(
-                            mediainfo, MediaType.TV, season
-                        ),
-                        log_prefix=upgrade_log_prefix,
-                    )
-                    if self._stop_requested():
-                        break
-
-                    if not share_url:
-                        continue
-
-                    if not self._owner.resource_transfer._is_supported_resource(resource, share_url):
-                        logger.warning(
-                            f"跳过当前同步链不支持的资源类型 "
-                            f"{self._owner.resource_transfer._supported_resource_type(resource, share_url)}：{resource_title}"
-                        )
-                        continue
-
-                    is_offline_resource = self._is_offline_url(share_url) or self._is_magnet_url(share_url)
-                    if is_offline_resource:
-                        if self._is_offline_blacklisted(resource, share_url):
-                            logger.debug(
-                                f"洗版离线资源命中黑名单跳过：{resource_title}"
-                            )
-                            continue
-
-                    if is_offline_resource:
-                        provider_name = self._owner.resource_transfer._prepare_magnet_resource(
-                            resource, share_url
-                        )
-                        if not self._owner.resource_transfer._validate_resource_url(
-                                share_url,
-                                resource_label="Magnet 链接",
-                                log_prefix=upgrade_log_prefix,
-                                resource_title=resource_title,
-                        ):
-                            continue
-                        provider_name = provider_name or resource_title
-                        title_seasons = self._owner.resource_transfer._magnet_title_seasons(resource)
-                        if title_seasons and season not in title_seasons:
-                            logger.debug(
-                                f"{upgrade_log_prefix} Magnet 标题预过滤排除："
-                                f"标题季数={','.join(f'S{value:02d}' for value in sorted(title_seasons))}，"
-                                f"目标季数=S{season:02d}，标题={provider_name}"
-                            )
-                            continue
-                        target_episodes = []
-                        title_episodes = self._owner.resource_transfer._magnet_title_episodes(resource, season)
-                        if title_episodes:
-                            target_episodes = sorted(
-                                set(episodes_to_search) & title_episodes
-                            )
-                            if not target_episodes:
-                                logger.debug(
-                                    f"{upgrade_log_prefix} Magnet 标题预过滤排除："
-                                    f"标题集数={self._format_episode_ranges(title_episodes)}，"
-                                    f"目标集数={self._format_episode_ranges(set(episodes_to_search))}，"
-                                    f"标题={provider_name}"
-                                )
-                                continue
-                        _, provider_score = self._search_handler.select_file_candidate(
-                            [{"name": provider_name, "size": 0}],
-                            mediainfo,
-                            subscribe,
-                        )
-                        target_episodes = target_episodes or sorted(
-                            set(episodes_to_search)
-                            & self._owner.resource_transfer._resource_preview_episodes(resource, season)
-                        ) or sorted(episodes_to_search)
-                        target_episode_set = set(target_episodes)
-                        upgrade_baseline = {}
-                        worthwhile = False
-                        for episode in target_episodes:
-                            baseline_item = baseline.get(episode, {})
-                            old_score = local_scores.get(episode, 0)
-                            episode_worthwhile = False
-                            if episode not in baseline:
-                                episode_worthwhile = True
-                            elif provider_score > old_score:
-                                episode_worthwhile = True
-                            elif provider_score == old_score and self._upgrade_mode in {"largest", "smallest"}:
-                                # Magnet 元数据通常只有整包大小，逐集大小留到下载完成后判断。
-                                episode_worthwhile = True
-                            worthwhile = worthwhile or episode_worthwhile
-                            if episode_worthwhile and episode in baseline:
-                                upgrade_baseline[str(episode)] = {
-                                    "score": old_score,
-                                    "size": int(baseline_item.get("file_size") or 0),
-                                    "cloud_dir": baseline_item.get("cloud_dir") or "",
-                                    "file_name": baseline_item.get("target_file_name")
-                                                 or baseline_item.get("file_name") or "",
-                                    "file_id": baseline_item.get("cloud_file_id") or "",
-                                }
-                        if not worthwhile:
-                            continue
-                        pending_key = self._queue_magnet_package(
-                            resource,
-                            share_url,
-                            subscribe,
-                            mediainfo,
-                            season=season,
-                            target_episodes=target_episodes,
-                            sub_key=sub_key,
-                            upgrade=bool(upgrade_baseline),
-                            upgrade_mode=self._upgrade_mode,
-                            upgrade_baseline=upgrade_baseline,
-                            transient_target=transient_target,
-                        )
-                        if not pending_key:
-                            continue
-                        self._owner.metadata._clear_task_search_state(subscribe)
-                        self._owner.resource_transfer._append_magnet_pending_history(
-                            history=history,
-                            mediainfo=mediainfo,
-                            subscribe=subscribe,
-                            share_url=share_url,
-                            cloud_dir=self._cloud_transfer_path.rstrip("/") or "/",
-                            resource=resource,
-                            season=season,
-                            target_episodes=target_episodes,
-                            upgrade=bool(upgrade_baseline),
-                            finalize_key=pending_key,
-                        )
-                        episodes_to_search = [
-                            episode for episode in episodes_to_search
-                            if episode not in target_episode_set
-                        ]
-                        continue
-
-                    selected_file_ids, selected_file_names = (
-                        self._owner.resource_transfer._explicit_selection_values(resource)
-                    )
-                    share_files = self._owner.resource_transfer._validated_resource_files(
-                        share_url,
-                        resource_title=resource_title,
-                        target_season=(season if self._skip_other_season_dirs else None),
-                        log_prefix=upgrade_log_prefix,
-                        target_file_ids=selected_file_ids,
-                        target_file_names=selected_file_names,
-                    )
-                    if not share_files:
-                        logger.info(
-                            f"{upgrade_log_prefix} 候选分享无可用文件，跳过："
-                            f"{resource_title or self._resource_log_reference(share_url)}"
-                        )
-                        continue
-
-                    if manual_resources:
-                        # 手动提交的分享以实际包含的集数为准：已存在集数按洗版规则比较后替换或跳过，
-                        # 新增集数正常转存，避免只处理已有基线集数而漏掉新集。
-                        _, share_episodes = self._owner.naming._summarize_share_episodes(
-                            share_files,
-                            season,
-                            mediainfo if is_cross_batch else None,
-                        )
-                        pending_episodes = tuple(
-                            sorted(set(pending_episodes) | share_episodes)
-                        )
-
-                    # 匹配需要升级的集数
-                    self._set_upgrade_phase(subscribe, "比较版本", 65)
-                    matched_items = []
-                    skip_reasons: List[str] = []
-                    matched_files = self._owner.file_matching._match_episode_files(
-                        share_files,
-                        mediainfo,
-                        subscribe,
-                        season,
-                        pending_episodes,
-                        require_media_match=is_cross_batch,
-                    )
-                    if not matched_files:
-                        logger.info(
-                            f"{upgrade_log_prefix} 候选未匹配到目标集数："
-                            f"分享文件 {len(share_files)} 个，目标集数 "
-                            f"{self._format_episode_ranges(set(pending_episodes))}，"
-                            f"资源={resource_title or self._resource_log_reference(share_url)}"
-                        )
-                    for episode in pending_episodes:
-                        matched_file, cand_pri = matched_files.get(
-                            episode, (None, 0)
-                        )
-                        if not matched_file:
-                            continue
-
-                        file_name = matched_file.get('name', '')
-                        # 候选文件大小（搜索接口已自带元数据）
-                        candidate_size = self._owner.upgrade_rule_scoring._resource_size_bytes(matched_file.get("size"))
-
-                        # 现有文件信息（MoviePilot 规则优先级）
-                        old_score = local_scores.get(episode, 0)
-
-                        new_score = cand_pri
-
-                        score_gap = new_score - old_score
-
-                        should_upgrade, reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
-                            old_score,
-                            new_score,
-                            int(baseline.get(episode, {}).get("file_size") or 0),
-                            candidate_size,
-                            has_existing=episode in baseline,
-                            old_file_name=str(
-                                baseline.get(episode, {}).get("target_file_name")
-                                or baseline.get(episode, {}).get("file_name") or ""
-                            ),
-                            subscribe=subscribe,
-                            mediainfo=mediainfo,
-                            season=season,
-                            episode=episode,
-                        )
-                        if not should_upgrade:
-                            logger.debug(
-                                f"{upgrade_log_prefix} E{episode:02d} 洗版候选跳过：{reason}"
-                            )
-                            skip_reasons.append(f"E{episode:02d}:{reason}")
-                            continue
-
-                        logger.debug(
-                            f"{upgrade_log_prefix} E{episode:02d}：{reason}"
-                        )
-
-                        target_dir, target_name = self._owner.naming._platform_target(
-                            self._CLOUD_MEDIA_ROOT, subscribe, mediainfo,
-                            file_name, season, episode
-                        )
-                        if episode in baseline and self._upgrade_mode == "coexist":
-                            target_name = self._owner.upgrade_rule_scoring._coexist_target_name(
-                                target_name,
-                                file_name,
-                                candidate_size,
-                                matched_file.get("sha1") or "",
-                            )
-                        baseline_item = baseline.get(episode, {})
-                        old_dir = str(baseline_item.get("cloud_dir") or "").strip()
-                        old_name = str(
-                            baseline_item.get("target_file_name")
-                            or baseline_item.get("file_name") or ""
-                        ).strip()
-                        old_file_id = str(baseline_item.get("cloud_file_id") or "")
-                        if episode in baseline and self._upgrade_mode != "coexist" and not old_file_id:
-                            if not old_dir or not old_name:
-                                old_dir, old_name = self._owner.naming._platform_target(
-                                    self._CLOUD_MEDIA_ROOT,
-                                    subscribe,
-                                    mediainfo,
-                                    old_name or file_name,
-                                    season,
-                                    episode,
-                                )
-                            old_file = self._cloud_query.get_cached_file(old_dir, old_name)
-                            if old_file:
-                                old_file_id = str(getattr(old_file, "id", "") or "")
-                                old_name = str(getattr(old_file, "name", "") or old_name)
-                        matched_items.append({
-                            "file": matched_file,
-                            "resource": resource,
-                            "episode": episode,
-                            "new_score": new_score,
-                            "old_score": old_score,
-                            "score_gap": score_gap,
-                            "file_name": file_name,
-                            "candidate_size": candidate_size,
-                            "target_dir": target_dir,
-                            "target_name": target_name,
-                            "is_upgrade": bool(episode in baseline),
-                            "success_episodes": [],
-                            "upgrade_old_cloud_dir": str(
-                                old_dir
-                            ),
-                            "upgrade_old_file_name": str(
-                                old_name
-                            ),
-                            "upgrade_old_file_id": str(
-                                old_file_id
-                            ),
-                            "upgrade_old_size": int(
-                                baseline.get(episode, {}).get("file_size") or 0
-                            ),
-                            "subtitle_files": self._owner.subtitles._companion_subtitle_files(
-                                share_files,
-                                matched_file,
-                                season=season,
-                                episode=episode,
-                            ),
-                        })
-
-                    if not matched_items:
-                        if skip_reasons:
-                            logger.info(
-                                f"{upgrade_log_prefix} 候选匹配 {len(matched_files)} 集但均未达升级条件："
-                                f"{'; '.join(skip_reasons[:12])}，资源="
-                                f"{resource_title or self._resource_log_reference(share_url)}"
-                            )
-                        continue
-
-                    self._set_upgrade_phase(subscribe, "提交替换", 80, clear_search=True)
-                    transfer_results = self._owner.transfer_ops._transfer_episode_items(
-                        matched_items,
-                        share_url,
-                        mediainfo,
-                        subscribe,
-                        season,
-                        sub_key,
-                        track_subscription=not manual_upgrade and not transient_target,
-                        transient_target=transient_target,
-                    )
-                    if not transfer_results:
-                        break
-                    batch_detail_episodes = []
-                    batch_detail_size = 0
-                    batch_detail_source = ""
-                    batch_detail_file_names: Dict[int, str] = {}
-                    batch_detail_episode_sizes: Dict[int, int] = {}
-                    # v1.26.4：按集的终态分支标记（洗版详情不进完成通知，
-                    # 这里只为详情结构与其它流一致）。
-                    batch_detail_organized: Dict[int, bool] = {}
-                    batch_success_episodes = []
-                    for transfer_result in transfer_results:
-                        item = transfer_result["item"]
-                        episode = item["episode"]
-                        new_score = item["new_score"]
-                        old_score = item["old_score"]
-                        file_name = item["file_name"]
-                        success = transfer_result["success"]
-                        pending_key = transfer_result["pending_key"]
-
-                        history_item = self._owner.transfer_details._build_transfer_history_item(
-                            mediainfo=mediainfo,
-                            subscribe=subscribe,
-                            status=self._owner.resource_transfer._transfer_history_status(success, share_url),
-                            share_url=share_url,
-                            file_name=item["target_name"],
-                            source_file_name=file_name,
-                            cloud_dir=item["target_dir"],
-                            resource=item["resource"],
-                            season=season,
-                            episode=episode,
-                            file_size=int(item.get("candidate_size") or 0),
-                            source_sha1=item["file"].get("sha1") or "",
-                            source_md5=item["file"].get("md5") or "",
-                            rule_score=new_score,
-                            upgrade=item.get("is_upgrade", False),
-                        )
-                        if history_item.get("status") == "失败":
-                            failure_reason = str(
-                                transfer_result.get("failure_reason") or ""
-                            ).strip()
-                            if failure_reason:
-                                apply_failure(history_item, failure_reason)
-                        history.append(history_item)
-
-                        if success:
-                            if transfer_result.get("skip_history"):
-                                # Phase 3a 第 2 项：入口判重已跳过——云盘
-                                # 已有更优版本，不下载不转存。只记一条
-                                # 成功历史；不计入洗版成功集数与通知，
-                                # 下一资源仍可尝试更好的版本。
-                                continue
-                            transferred_count += 1
-                            upgrade_downloaded += 1
-                            upgrade_episodes.add(episode)
-                            new_priority[str(episode)] = new_score
-
-                            if pending_key:
-                                history_item["finalize_key"] = pending_key
-                                transition(
-                                    history_item,
-                                    STATUS_DOWNLOADING
-                                    if self._is_ed2k_url(share_url)
-                                    else STATUS_PROCESSING,
-                                    stage=STAGE_TRANSFERRING,
-                                    reason="upgrade_pending_finalize",
-                                    task_id=history_item.get("record_id") or "",
-                                )
-                            if not pending_key:
-                                batch_detail_episodes.append(episode)
-                                # 体积与文件名直接取转存结果，不从 history 里补。
-                                batch_detail_episode_sizes[episode] = int(
-                                    item.get("candidate_size") or 0
-                                )
-                                batch_detail_file_names[episode] = str(
-                                    item.get("target_name") or file_name or ""
-                                ).strip()
-                                # v1.26.4：按集的终态分支标记。
-                                batch_detail_organized[episode] = bool(
-                                    item.get("mp_organize")
-                                    or (item.get("file") or {}).get("mp_organize")
-                                )
-                                batch_detail_size += int(
-                                    item.get("candidate_size") or 0
-                                )
-                                if not batch_detail_source:
-                                    batch_detail_source = self._owner.transfer_details._detail_source_text(
-                                        history_item
-                                    )
-                            batch_success_episodes.append(episode)
-
-                            logger.debug(
-                                f"{upgrade_log_prefix} 转存成功 E{episode:02d}"
-                                f" {old_score}→{new_score}（{file_name}）"
-                            )
-
-                    if batch_success_episodes:
-                        completed_episode_set = set(batch_success_episodes)
-                        episodes_to_search = [
-                            episode for episode in episodes_to_search
-                            if episode not in completed_episode_set
-                        ]
-                    try:
-                        ordered_episodes = sorted({
-                            int(episode) for episode in batch_detail_episodes
-                            if int(episode) > 0
-                        })
-                        self._owner.transfer_details._append_tv_transfer_detail(
-                            transfer_details, mediainfo, season, ordered_episodes,
-                            # v1.29.1：洗版流整体即 replace 处置，走统一派生。
-                            notification_kind=self._owner.transfer_details._derive_notification_kind(
-                                is_upgrade=True
-                            ),
-                            size_bytes=batch_detail_size,
-                            source_text=batch_detail_source,
-                            file_names=[
-                                batch_detail_file_names.get(episode, "")
-                                for episode in ordered_episodes
-                            ],
-                            episode_sizes=batch_detail_episode_sizes,
-                            organized_via_mp_episodes=batch_detail_organized,
-                        )
-                    except TypeError as error:
-                        # 插件热更新时新旧模块签名可能不一致（线上 1.7.84 报
-                        # 「got multiple values for argument 'notification_kind'」）。
-                        # 通知详情缺一条不该中断整条洗版流程。
-                        logger.debug(f"洗版通知详情写入失败（已忽略）：{error}", exc_info=True)
-                    if batch_success_episodes:
-                        self._owner.transfer_details._record_download_history(
-                            mediainfo=mediainfo,
-                            subscribe=subscribe,
-                            path=transfer_results[0]["item"]["target_dir"],
-                            download_hash=share_url,
-                            torrent_name=resource_title,
-                            share_url=share_url,
-                            seasons=f"S{season:02d}",
-                            episodes=StringUtils.format_ep(batch_success_episodes),
-                        )
-
-            # 洗版转存的集数同样计入已入库进度。
-            if upgrade_episodes and not manual_upgrade and not transient_target:
-                remaining_lack = self._subscribe_handler.update_subscribe_progress(
-                    subscribe=subscribe,
-                    mediainfo=mediainfo,
-                    success_episodes=sorted(upgrade_episodes),
-                )
-                if remaining_lack is not None:
-                    logger.debug(f"{upgrade_log_prefix} 已更新订阅进度（{len(upgrade_episodes)} 集）")
-                else:
-                    logger.warning(f"{upgrade_log_prefix} 更新订阅进度失败")
-
-            # 更新单集优先级
-            if (
-                    new_priority != existing_ep_pri
-                    and not manual_upgrade
-                    and not transient_target
-            ):
-                try:
-                    SubscribeOper().update(subscribe.id, {"episode_priority": new_priority})
-                    logger.debug(f"{upgrade_log_prefix} 已更新 {len(new_priority)} 集评分")
-                except Exception as e:
-                    logger.warning(f"{upgrade_log_prefix} 更新 episode_priority 失败：{e}")
-
-            # 不调用 check_and_finish_subscribe——保持订阅活跃以持续搜索更优资源
-            if upgrade_downloaded:
-                self._set_upgrade_phase(subscribe, "洗版完成", 100)
-                logger.info(f"{upgrade_log_prefix} 洗版转存完成，共升级 {upgrade_downloaded} 集")
-            else:
-                self._set_upgrade_phase(subscribe, "无需替换", 100)
-                logger.info(f"{upgrade_log_prefix} 洗版转存完成，未发现可升级资源")
-
         except Exception as e:
             logger.error(f"洗版失败：{subscribe.name}，{e}")
         return transferred_count
+
 
     def auto_upgrade_scan(self):
         """网盘转存后刷新已开启洗版订阅的整季评分。"""

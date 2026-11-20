@@ -194,6 +194,22 @@ class FakeOwner:
             subscribe, mediainfo, media_type, **kwargs
         )
 
+    # v1.29.4 第 3 步：洗版入口变薄后经统一流水线回流，UpgradeService
+    # 的 self.process_tv_subscribe 经 OwnerDelegator 落到宿主这里（线上
+    # 宿主是 SyncHandler，它的同名方法再转发给 TelevisionSyncProcessor）；
+    # 这里同样是薄壳。没有它时 __getattr__ 会给一个 MagicMock 把调用吞掉。
+    def process_tv_subscribe(self, subscribe, history, transfer_details,
+                             transferred_count, manual_resources=None,
+                             allow_upgrade=True, manual_upgrade=False,
+                             target_episodes=None, transient_target=False,
+                             _upgrade_plan=None):
+        return TelevisionSyncProcessor(self).process_tv_subscribe(
+            subscribe, history, transfer_details, transferred_count,
+            manual_resources=manual_resources, allow_upgrade=allow_upgrade,
+            manual_upgrade=manual_upgrade, target_episodes=target_episodes,
+            transient_target=transient_target, _upgrade_plan=_upgrade_plan,
+        )
+
     def _episode_dedup_active(self):
         # 显式关闭判重门：__getattr__ 的 MagicMock 默认为真，会污染转存路径。
         return False
@@ -398,8 +414,9 @@ class ManualUpgradeScopeTest(unittest.TestCase):
                 return 20
 
             def _validated_resource_files(self, url, resource_title="",
-                                          target_season=None, log_prefix="",
-                                          target_file_ids=None, target_file_names=None):
+                    target_season=None, log_prefix="",
+                    target_file_ids=None, target_file_names=None,
+                    recognition_work_id=None, recognition_season=None):
                 return [
                     {"id": "5", "name": "兰香如故.S01E05.mkv", "size": 5_100_000_000},
                     {"id": "6", "name": "兰香如故.S01E06.mkv", "size": 5_100_000_000},
