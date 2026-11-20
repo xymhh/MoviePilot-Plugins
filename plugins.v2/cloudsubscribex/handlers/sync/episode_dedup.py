@@ -15,7 +15,7 @@ from ...core import OwnerDelegator
 from ...core.episode_parse import parse_season_episode
 from ...utils.cache import normalize_platform_cache_key
 from ...utils.file_parser import MediaFileParser
-from ...utils.quality_compare import compare_quality
+from .upgrade_decision import UpgradeDecisionPolicy, decide_upgrade
 
 
 class EpisodeDedupService(OwnerDelegator):
@@ -365,6 +365,13 @@ class EpisodeDedupService(OwnerDelegator):
         """返回 (action, old_versions, reason)。
 
         action: proceed=无现有版本可写；replace=删旧写新；skip=已有更优版本。
+
+        v1.29.0：判定委托给统一判定器 ``decide_upgrade``（见
+        ``handlers/sync/upgrade_decision.py``），本方法只负责取数（旧版本
+        最佳评分/体积、模板符合版本名、体积优先开关）与动作映射，不再
+        自带判定逻辑。注意：模板符合版本名在这里是前置查好的（旧
+        ``_keep_template_version`` 只在 skip 时才查；渲染本身是纯本地
+        计算，失败只记 debug 日志，查早查晚不影响动作与原因）。
         """
         if not self._episode_dedup_active():
             return "proceed", [], "判重开关关闭或共存模式"
@@ -375,50 +382,48 @@ class EpisodeDedupService(OwnerDelegator):
         new_size = max(0, int(new_size or 0))
 
         quality_active = self._quality_prefer_active()
-        prefer_template = bool(
-            getattr(self, "_prefer_template_named_version", True)
-        )
-
-        def _keep_template_version(reason: str) -> Tuple[str, List[Dict[str, Any]], str]:
-            """无增益时按模板命名保留旧版本（与洗版判定同一优先级）。"""
-            if not prefer_template:
-                return "skip", list(versions), reason
-            template_version = self._owner.upgrade_rule_scoring._template_conformant_version(
-                versions, subscribe, mediainfo, season, episode
-            )
-            if not template_version:
-                return "skip", list(versions), reason
-            template_name = str(template_version.get("file_name") or "").strip()
-            return (
-                "skip",
-                list(versions),
-                f"现有版本已符合当前重命名模板，保留 {template_name}",
-            )
-
+        # 旧行为：体积/分辨率优先分支不看评分，根本不算最佳旧评分/体积
+        #（compare_quality 内部对体积做容错转换）；只在评分分支才算。
         if quality_active:
-            action, reason = compare_quality(
-                new_file_name,
-                new_size,
-                versions,
-                min_gain_percent=int(getattr(self, "_quality_min_gain_percent", 10) or 0),
-                min_gain_mb=int(getattr(self, "_quality_min_gain_mb", 200) or 0),
-            )
-            if action == "upgrade":
-                return "replace", list(versions), f"按体积择优：{reason}"
-            return _keep_template_version(f"现有版本更优：{reason}")
-
-        best_old_score = max(int(v.get("score") or 0) for v in versions)
-        best_old_size = max(int(v.get("file_size") or 0) for v in versions)
-        should_upgrade, reason = self._owner.upgrade_rule_scoring._should_upgrade_candidate(
-            best_old_score,
-            new_score,
-            best_old_size,
-            new_size,
-            has_existing=True,
+            best_old_score = 0
+            best_old_size = 0
+        else:
+            best_old_score = max(int(v.get("score") or 0) for v in versions)
+            best_old_size = max(int(v.get("file_size") or 0) for v in versions)
+        template_name = None
+        template_version = self._owner.upgrade_rule_scoring._template_conformant_version(
+            versions, subscribe, mediainfo, season, episode
         )
-        if should_upgrade:
+        if template_version is not None:
+            template_name = str(template_version.get("file_name") or "").strip()
+        action, reason = decide_upgrade(
+            has_existing=True,
+            old_score=best_old_score,
+            new_score=new_score,
+            old_size=best_old_size,
+            new_size=new_size,
+            new_file_name=str(new_file_name or ""),
+            old_versions=list(versions),
+            template_conformant_name=template_name,
+            policy=UpgradeDecisionPolicy(
+                mode=str(getattr(self, "_upgrade_mode", "largest") or "largest"),
+                min_gain_percent=int(
+                    getattr(self, "_quality_min_gain_percent", 10) or 0
+                ),
+                min_gain_mb=int(getattr(self, "_quality_min_gain_mb", 200) or 0),
+                prefer_template_named_version=bool(
+                    getattr(self, "_prefer_template_named_version", True)
+                ),
+                quality_prefer=bool(quality_active),
+                # v1.29.0：保留旧判重外层的 _keep_template_version 行为——
+                # 判重里任何不换的结果（包括评分降低）都先过模板保留；评分制
+                # 本体不走这条（见 decide_upgrade 第 3 步）。
+                template_fallback_for_any_skip=True,
+            ),
+        )
+        if action == "replace":
             return "replace", list(versions), reason
-        return _keep_template_version(reason)
+        return "skip", list(versions), reason
 
     # ------------------------------------------------------------------
     # 删除
