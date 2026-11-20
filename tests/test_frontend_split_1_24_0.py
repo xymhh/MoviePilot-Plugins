@@ -2,7 +2,6 @@
 
 Config.vue（3427 行）拆成：
 - components/config/ConfigSidebar.vue（侧栏导航 + 品牌 + 状态看板）
-- components/config/ConfigWizard.vue（配置向导面板）
 - components/config/ConfigSourceTestDialog.vue（搜索渠道测试弹窗）
 - components/config/ConfigAutoSubscribeTestDialog.vue（榜单测试弹窗）
 - components/config/ConfigResourcePreviewDialog.vue（资源内容预览弹窗）
@@ -73,7 +72,6 @@ class ConfigSplitTest(unittest.TestCase):
         config = _read(CONFIG)
         for name, tag in (
             ("ConfigSidebar.vue", "<ConfigSidebar"),
-            ("ConfigWizard.vue", "<ConfigWizard"),
             ("ConfigSourceTestDialog.vue", "<ConfigSourceTestDialog"),
             ("ConfigAutoSubscribeTestDialog.vue", "<ConfigAutoSubscribeTestDialog"),
             ("ConfigResourcePreviewDialog.vue", "<ConfigResourcePreviewDialog"),
@@ -92,7 +90,6 @@ class ConfigSplitTest(unittest.TestCase):
         config = _read(CONFIG)
         for marker in (
             '<aside class="config-sidebar">',
-            'class="config-window-section wizard-panel"',
             '<v-dialog v-model="sourceTestVisible"',
             '<v-dialog v-model="autoSubscribeTestVisible"',
             '<v-dialog v-model="previewVisible"',
@@ -108,22 +105,6 @@ class ConfigSplitTest(unittest.TestCase):
         self.assertIn("sidebar-status-panel", sidebar)
         self.assertIn('@click="emit(\'nav-click\'', sidebar)
         self.assertIn("update:showAdvanced", sidebar)
-
-    def test_wizard_child_owns_panel_and_forwards_section_events(self):
-        wizard = _config_child("ConfigWizard.vue")
-        self.assertIn('class="config-window-section wizard-panel"', wizard)
-        self.assertIn("<ConfigSection", wizard)
-        for event in (
-            "@scan=",
-            "@test-source=",
-            "@refresh-account=",
-            "@load-options=",
-            "@refresh-options=",
-            "@notify=",
-        ):
-            self.assertIn(event, wizard, f"向导未转发 ConfigSection 事件 {event}")
-        self.assertIn('@click="emit(\'next-step\')"', wizard)
-        self.assertIn('@click="emit(\'finish\')"', wizard)
 
     def test_dialog_children_own_their_dialogs(self):
         source_test = _config_child("ConfigSourceTestDialog.vue")

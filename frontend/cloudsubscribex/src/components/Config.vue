@@ -9,7 +9,6 @@
       :is-mobile="isMobile"
       :mobile-group-name="mobileGroupName"
       :mobile-group-items="mobileGroupItems"
-      :wizard-mode="wizardMode"
       v-model:show-advanced="showAdvanced"
       :plugin-version="pluginVersion"
       :plugin-author="pluginAuthor"
@@ -19,7 +18,6 @@
       :show-switch="showSwitch"
       @nav-click="onNavClick"
       @mobile-group-click="onMobileGroupClick"
-      @toggle-wizard="toggleWizard"
       @switch="emit('switch')"
       @close="emit('close')" />
 
@@ -37,13 +35,6 @@
               <span>{{ currentSectionTitle }}</span>
             </div>
             <div class="config-header-actions">
-              <v-btn
-                class="config-header-btn"
-                variant="text"
-                size="small"
-                :prepend-icon="wizardMode ? 'mdi-cog-outline' : 'mdi-wand'"
-                :title="wizardMode ? '切回专家配置（全部字段）' : '打开配置向导（只配必填 3 步）'"
-                @click="toggleWizard">{{ wizardMode ? '专家模式' : '配置向导' }}</v-btn>
               <v-btn
                 v-if="showSwitch"
                 class="config-header-btn"
@@ -69,45 +60,7 @@
           <!-- 内容展示容器：带丝滑淡入过渡动画，仅渲染当前激活的 section -->
           <div class="config-main-body">
             <transition name="fade-slide" mode="out-in">
-              <!-- 配置向导：只配必填三步，字段渲染完全复用 ConfigSection -->
-              <ConfigWizard
-                v-if="wizardMode"
-                :key="`wizard-${wizardStep}`"
-                :wizard-step="wizardStep"
-                :wizard-steps="wizardSteps"
-                :current-wizard-step="currentWizardStep"
-                :config="config"
-                :options="options"
-                :api="api"
-                :refreshing-accounts="refreshingAccounts"
-                :testing-source="testingSource"
-                :testing-auto-subscribe="testingAutoSubscribe"
-                :testing-proxy="testingProxy"
-                :testing-auto-subscribe-proxy="testingAutoSubscribeProxy"
-                :hdhive-oauth-action="hdhiveOauthAction"
-                :wizard-doctor="wizardDoctor"
-                :wizard-doctor-loading="wizardDoctorLoading"
-                :saving="saving"
-                :wizard-step-valid="wizardStepValid"
-                @prev-step="prevWizardStep"
-                @next-step="nextWizardStep"
-                @run-doctor="runWizardDoctor"
-                @finish="finishWizard"
-                @scan="openQrCode"
-                @browse-directory="openDirectoryPicker"
-                @test-source="openSourceTest"
-                @test-auto-subscribe="testAutoSubscribe"
-                @test-proxy="testSearchProxy"
-                @test-auto-subscribe-proxy="testAutoSubscribeProxy"
-                @refresh-account="refreshAccount"
-                @hdhive-oauth-start="startHdhiveOAuth"
-                @hdhive-oauth-exchange="exchangeHdhiveOAuth"
-                @checkin-result="handleCheckinResult"
-                @copy-text="copyText"
-                @load-options="loadDynamicOptions"
-                @refresh-options="refreshDynamicOptions"
-                @notify="notify" />
-              <div v-else :key="activeTab" class="config-window-section">
+              <div :key="activeTab" class="config-window-section">
                 <ConfigSection
                   v-if="currentSection"
                   :section="currentSection"
@@ -233,7 +186,6 @@ import {computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, re
 import {useDisplay} from "vuetify";
 import ConfigSection from "./config/ConfigSection.vue";
 import ConfigSidebar from "./config/ConfigSidebar.vue";
-import ConfigWizard from "./config/ConfigWizard.vue";
 import ConfigSourceTestDialog from "./config/ConfigSourceTestDialog.vue";
 import ConfigAutoSubscribeTestDialog from "./config/ConfigAutoSubscribeTestDialog.vue";
 import ConfigResourcePreviewDialog from "./config/ConfigResourcePreviewDialog.vue";
@@ -378,9 +330,9 @@ try {
 }
 const isMobile = computed(() => (display?.smAndDown?.value ?? false) || (typeof window !== "undefined" && window.innerWidth <= 768));
 const config = reactive(JSON.parse(JSON.stringify(props.initialConfig || {})))
-const activeTab = ref("basic")
+const activeTab = ref("common")
 
-// 1.10.3：高级设置默认折叠（本地记忆开关）；只影响导航展示，不影响保存与向导取字段。
+// 1.10.3：高级设置默认折叠（本地记忆开关）；只影响导航展示，不影响保存与常用设置取字段。
 const SHOW_ADVANCED_KEY = "csx-config-show-advanced";
 const showAdvanced = ref(false);
 try {
@@ -403,6 +355,7 @@ function onNavClick(val, event) {
   }
 }
 const optionScopeByTab = Object.freeze({
+  common: "base",
   basic: "base",
   transfer: "subscriptions",
   upgrade: "subscriptions",
@@ -487,22 +440,33 @@ const options = reactive({
   rsshubInstances: [],
   rsshubLoading: false,
 })
-const allSections = computed(() => createConfigSections(options, config))
+const baseSections = computed(() => createConfigSections(options, config))
+const commonSection = computed(() => buildCommonSection(baseSections.value))
+const allSections = computed(() => [commonSection.value, ...(baseSections.value || [])])
 const sections = computed(() => (allSections.value || []).filter((s) => showAdvanced.value || !s.advanced))
 
-// ---------------------------------------------------------------- 配置向导
-// 只做「必填三件事」：选网盘并登录 → 落地目录 → 保存并体检。
+// ---------------------------------------------------------------- 常用设置
+// v1.29.3：向导已删，取而代之的是常驻的“常用设置”section：
 // 字段按 key 从既有 sections 里挑，不复制定义，避免两处漂移。
-const wizardMode = ref(false)
-const wizardStep = ref(0)
-const wizardDoctor = ref(null)
-const wizardDoctorLoading = ref(false)
+// 取字段时读 baseSections（全部 13 个 section，未按高级折叠过滤），
+// 否则取不到 organize_source_path（网盘整理，高级）与
+// enable_cloud_upgrade（洗版设置，高级）。
+const COMMON_FIELD_KEYS = Object.freeze([
+  "enabled",
+  "cloud_drive",
+  "organize_source_path",
+  "organize_after_transfer",
+  "cron",
+  "platform_download_policy",
+  "cross_transfer_enabled",
+  "enable_cloud_upgrade",
+])
 
 /** 从全部 section 里按 key 取字段定义（取不到就跳过，不报错） */
 function pickFields(keys) {
   const wanted = new Set(keys)
   const picked = []
-  for (const section of allSections.value || []) {
+  for (const section of baseSections.value || []) {
     for (const group of section.groups || []) {
       for (const field of group.fields || []) {
         if (field?.key && wanted.has(field.key)) picked.push(field)
@@ -512,87 +476,37 @@ function pickFields(keys) {
   return picked
 }
 
-/** 当前选中网盘的动态凭据 schema（后端下发） */
-const activeDriveSchema = computed(() => {
-  const id = String(config.cloud_drive || "")
-  const list = Array.isArray(options.driverSchemas) ? options.driverSchemas : []
-  return list.find((item) => item.id === id) || null
-})
-
-const wizardSteps = computed(() => {
-  const baseFields = pickFields(["enabled", "cloud_drive"])
-  const driveGroups = activeDriveSchema.value?.groups || []
-  const organizeFields = pickFields(["organize_source_path", "organize_after_transfer"])
-  return [
-    {
-      value: "wizard-drive",
-      title: "连网盘",
-      icon: "mdi-cloud-lock-outline",
-      hint: "选一个网盘并完成登录，插件才有地方转存",
-      groups: [
-        ...(baseFields.length ? [{title: "基础", icon: "mdi-cog-outline", fields: baseFields}] : []),
-        ...driveGroups,
-      ],
-    },
-    {
-      value: "wizard-landing",
-      title: "落地位置",
-      icon: "mdi-folder-check-outline",
-      hint: "转存后的文件整理到哪里（不需要整理可跳过）",
-      groups: organizeFields.length
-        ? [{title: "目录", icon: "mdi-folder-outline", fields: organizeFields}]
-        : [],
-    },
-    {
-      value: "wizard-done",
-      title: "完成",
-      icon: "mdi-check-decagram-outline",
-      hint: "保存配置并自动体检，确认每一环都通",
-      groups: [],
-    },
-  ]
-})
-
-const currentWizardStep = computed(
-  () => wizardSteps.value[wizardStep.value] || wizardSteps.value[0],
-)
-
-const wizardStepValid = computed(() => {
-  if (wizardStep.value === 0) return Boolean(String(config.cloud_drive || "").trim())
-  return true
-})
-
-function toggleWizard() {
-  wizardMode.value = !wizardMode.value
-  if (wizardMode.value) wizardStep.value = 0
-}
-
-function nextWizardStep() {
-  if (wizardStep.value >= wizardSteps.value.length - 1) return
-  wizardStep.value += 1
-  if (wizardStep.value === wizardSteps.value.length - 1) runWizardDoctor()
-}
-
-function prevWizardStep() {
-  if (wizardStep.value > 0) wizardStep.value -= 1
-}
-
-async function runWizardDoctor() {
-  if (wizardDoctorLoading.value) return
-  wizardDoctorLoading.value = true
-  try {
-    const response = await api.get("plugin/CloudSubscribeX/doctor")
-    wizardDoctor.value = response?.data || null
-  } catch (error) {
-    wizardDoctor.value = null
-  } finally {
-    wizardDoctorLoading.value = false
+/** 按 key 分组拼出“常用设置”section：字段对象直接复用原定义 */
+function buildCommonSection(list) {
+  const byKey = new Map()
+  for (const section of list || []) {
+    for (const group of section.groups || []) {
+      for (const field of group.fields || []) {
+        if (field?.key) byKey.set(field.key, field)
+      }
+    }
   }
-}
-
-async function finishWizard() {
-  const ok = await save()
-  if (ok) await runWizardDoctor()
+  const pick = (keys) => keys.map((key) => byKey.get(key)).filter(Boolean)
+  const groups = []
+  const baseFields = pick(["enabled", "cloud_drive", "cron", "platform_download_policy"])
+  if (baseFields.length) {
+    groups.push({title: "基础", icon: "mdi-cog-outline", fields: baseFields})
+  }
+  const transferFields = pick([
+    "organize_source_path",
+    "organize_after_transfer",
+    "cross_transfer_enabled",
+    "enable_cloud_upgrade",
+  ])
+  if (transferFields.length) {
+    groups.push({title: "转存与洗版", icon: "mdi-cloud-download-outline", fields: transferFields})
+  }
+  return {
+    value: "common",
+    title: "常用设置",
+    icon: "mdi-star-outline",
+    groups,
+  }
 }
 
 const navGroups = computed(() => {
@@ -601,7 +515,7 @@ const navGroups = computed(() => {
   const groups = [
     {
       name: "核心配置",
-      items: ["basic", "transfer", "organize", "subscribe", "subsources", "upgrade"]
+      items: ["common", "basic", "transfer", "organize", "subscribe", "subsources", "upgrade"]
         .map((v) => map.get(v)).filter(Boolean),
     },
     {
@@ -1528,8 +1442,6 @@ onMounted(async () => {
   } catch (e) {
     notify(`加载配置选项失败：${e.message || e}`, "warning")
   }
-  // 首次运行（还没选网盘）直接进向导；老用户保持专家模式零感知
-  if (!String(config.cloud_drive || "").trim()) wizardMode.value = true
 })
 
 watch(activeTab, (tab) => {

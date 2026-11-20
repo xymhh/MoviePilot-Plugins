@@ -13,14 +13,6 @@
             <!-- 手机端顶部右侧操作栏（位置正确且直接置顶） -->
             <div class="sidebar-mobile-actions d-md-none">
               <v-btn
-                class="mobile-header-btn"
-                variant="text"
-                size="small"
-                density="compact"
-                :prepend-icon="wizardMode ? 'mdi-cog-outline' : 'mdi-wand'"
-                :title="wizardMode ? '专家配置' : '配置向导'"
-                @click="emit('toggle-wizard')">{{ wizardMode ? '专家' : '向导' }}</v-btn>
-              <v-btn
                 v-if="showSwitch"
                 class="mobile-header-btn"
                 variant="text"
@@ -41,7 +33,7 @@
                 @click="emit('close')" />
             </div>
           </div>
-          <nav v-show="!wizardMode" class="sidebar-nav" aria-label="配置导航">
+          <nav class="sidebar-nav" aria-label="配置导航">
             <!-- 电脑端：带精美分组层级 -->
             <template v-if="!isMobile">
               <div
@@ -75,7 +67,7 @@
                   {{ group.name }}
                 </button>
               </div>
-              <div class="mobile-nav-items">
+              <div ref="mobileNavItemsRef" class="mobile-nav-items">
                 <button
                   v-for="section in mobileGroupItems"
                   :key="section.value"
@@ -161,13 +153,14 @@
 </template>
 
 <script setup>
+import {nextTick, onMounted, ref, watch} from "vue";
+
 const props = defineProps({
   navGroups: { type: Array, default: () => [] },
   activeTab: { type: String, default: "" },
   isMobile: { type: Boolean, default: false },
   mobileGroupName: { type: String, default: "" },
   mobileGroupItems: { type: Array, default: () => [] },
-  wizardMode: { type: Boolean, default: false },
   showAdvanced: { type: Boolean, default: false },
   pluginVersion: { type: String, default: "" },
   pluginAuthor: { type: String, default: "" },
@@ -176,7 +169,25 @@ const props = defineProps({
   authorUrl: { type: String, default: "" },
   showSwitch: { type: Boolean, default: false },
 })
-const emit = defineEmits(["update:showAdvanced", "nav-click", "mobile-group-click", "toggle-wizard", "switch", "close"])
+const emit = defineEmits(["update:showAdvanced", "nav-click", "mobile-group-click", "switch", "close"])
+
+const mobileNavItemsRef = ref(null)
+
+/** v1.29.3：手机端第二行子项是横向滚动行。分组切换后 scrollLeft
+    会残留（上一分组滚过的位置），首项会被截掉一半；激活项变化后
+    把它滚到可见位置（inline nearest：已可见就不动）。 */
+function scrollActiveNavItemIntoView() {
+  const container = mobileNavItemsRef.value
+  if (!container) return
+  const active = container.querySelector(".sidebar-nav-item--active")
+  if (active) active.scrollIntoView({behavior: "smooth", inline: "nearest", block: "nearest"})
+}
+
+watch(
+  [() => props.activeTab, () => props.mobileGroupItems],
+  () => nextTick(scrollActiveNavItemIntoView),
+)
+onMounted(() => nextTick(scrollActiveNavItemIntoView))
 </script>
 
 <style scoped>
@@ -571,11 +582,13 @@ const emit = defineEmits(["update:showAdvanced", "nav-click", "mobile-group-clic
   }
   /* 1.7.108：两行导航。第一行 4 个分组（互斥高亮），第二行只渲染当前分组的 1~5 个子项，
      总高度固定 ≈ 88px，把横向滑不到、标题被截断、层级丢失三个问题一起解掉。 */
+  /* v1.29.3：两行 chip 导航收紧间距/高度，省纵向空间；子项行加
+     scroll-padding，激活项滚到可见时两端各留 10px，不贴边截断。 */
   .sidebar-nav {
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    padding: 2px 10px 8px;
+    gap: 4px;
+    padding: 2px 10px 6px;
     overflow: visible;
     white-space: normal;
   }
@@ -584,17 +597,18 @@ const emit = defineEmits(["update:showAdvanced", "nav-click", "mobile-group-clic
   }
   .mobile-nav-groups {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     overflow-x: auto;
     scrollbar-width: none;
+    scroll-padding-inline: 10px;
   }
   .mobile-nav-groups::-webkit-scrollbar {
     display: none;
   }
   .mobile-group-tab {
     flex: 0 0 auto;
-    height: 34px;
-    padding: 0 14px;
+    height: 30px;
+    padding: 0 12px;
     border-radius: 999px;
     border: 1px solid rgba(var(--v-border-color), 0.16);
     background: transparent;
@@ -612,9 +626,10 @@ const emit = defineEmits(["update:showAdvanced", "nav-click", "mobile-group-clic
   }
   .mobile-nav-items {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     overflow-x: auto;
     scrollbar-width: none;
+    scroll-padding-inline: 10px;
   }
   .mobile-nav-items::-webkit-scrollbar {
     display: none;
@@ -634,6 +649,7 @@ const emit = defineEmits(["update:showAdvanced", "nav-click", "mobile-group-clic
     width: auto;
     min-width: 76px;
     max-width: 46vw;
+    height: 40px;
     white-space: nowrap;
   }
   .sidebar-nav-title {

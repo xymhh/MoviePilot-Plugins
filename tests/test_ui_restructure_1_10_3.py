@@ -216,7 +216,7 @@ class TestConfigAdvancedFolding(unittest.TestCase):
         for value in ("basic", "transfer", "subscribe", "search", "tg", "notify"):
             self.assertNotIn(f'"{value}"', source.split("ADVANCED_SECTIONS")[1])
 
-    def test_config_filters_advanced_and_wizard_reads_all(self):
+    def test_config_filters_advanced_and_common_reads_all(self):
         source = _read("frontend/cloudsubscribex/src/components/Config.vue")
         self.assertIn("allSections", source)
         self.assertIn("showAdvanced", source)
@@ -227,14 +227,17 @@ class TestConfigAdvancedFolding(unittest.TestCase):
             "frontend/cloudsubscribex/src/components/config/ConfigSidebar.vue"
         )
         self.assertIn("显示高级设置", sidebar)
-        # 向导按 key 取字段必须读全量，否则落地位置那步取不到 organize 字段。
+        # v1.29.3：向导已删，读全量的语义由“常用设置”继承——
+        # pickFields 按 key 取字段必须读未折叠的 baseSections（全部 13 个
+        # section），否则取不到 organize_source_path（网盘整理，高级）与
+        # enable_cloud_upgrade（洗版设置，高级）。
         pick = re.search(
             r"function pickFields\(keys\) \{.*?for \(const section of (\w+)\.value",
             source,
             re.S,
         )
         self.assertIsNotNone(pick)
-        self.assertEqual(pick.group(1), "allSections")
+        self.assertEqual(pick.group(1), "baseSections")
 
 
 if __name__ == "__main__":

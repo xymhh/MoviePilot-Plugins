@@ -20,10 +20,13 @@ v1.23.0（§11 前端收敛第 1 项）：总览模式已删——插件主页�
 一种模式；总览统计卡片（StatsGrid）与转存动态（MediaHub）不再挂载，
 MP 首页 Dashboard widget 是唯一总览；Page 只做转发。
 v1.24.0：Config.vue（3427 行）与 ChannelManager.vue（1056 行）拆分子组件——
-配置页挂载 ConfigSidebar / ConfigWizard / 四个测试·预览·解锁弹窗，
+配置页挂载 ConfigSidebar / 四个测试·预览·解锁弹窗，
 渠道管理挂载 ChannelCard / ChannelDetailDrawer / ChannelEditDialog；
 PanSou 动态选项绑定随编辑弹窗搬到 ChannelEditDialog.vue，加载器仍在
 ChannelManager.vue（见 tests/test_channel_dynamic_options_1_18_4.py）。
+v1.29.3：配置向导已删（ConfigWizard.vue 删除，Config.vue/ConfigSidebar
+不再有向导引用），取而代之的是常驻的“常用设置”section（value common，
+核心配置分组第一位，默认打开）。
 
 用法：python3 scripts/check_frontend_entry.py [项目根]
 """
@@ -113,7 +116,6 @@ def main(root: Path) -> int:
         config_text = config_path.read_text(encoding="utf-8")
         for component in (
             "ConfigSidebar",
-            "ConfigWizard",
             "ConfigSourceTestDialog",
             "ConfigAutoSubscribeTestDialog",
             "ConfigResourcePreviewDialog",
