@@ -4,6 +4,12 @@
 账本）；本模块只剩一件事：启动时删除 1.12.14 之前插件写进 MP 历史的
 托管行（幂等）。海报恢复（restore_history_posters）随插件 history 表
 一起删除——转存记录页已不存在，没有页面再需要它。
+
+v1.28.1 例外（用户 2026-11-20 定方向 A）：直出 strm 时插件在
+handlers/sync/history_backfill.py 经 MP 官方外部登记映射补写一行
+（origin="external"、downloader 为空、src 为真实 115 路径）；清理
+的两个条件（src 以 cloudsubscribe:// 开头、downloader 为
+「网盘订阅助手」）匹配不到补写行，补写行不受影响。
 """
 
 from app.db import SessionFactory

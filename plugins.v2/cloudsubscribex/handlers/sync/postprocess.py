@@ -1278,6 +1278,20 @@ class PostprocessService(OwnerDelegator):
         if detail:
             ctx.finalized_details.append(detail)
             ctx.notification_contexts.append((item, pending_key))
+            # v1.28.1：直出 strm 时补写一条 MP 整理历史（用户 2026-11-20
+            # 定方向 A）。守卫在 backfill 内部：MP 整理分支（item 带
+            # mp_organize 身份，MP 自己已写）与 skip_history 项不写；
+            # 写失败不阻断转存（backfill 内部全程 try/except）。
+            try:
+                self._owner.history_backfill.backfill_strm_history(
+                    item=item,
+                    strm_path=strm_path,
+                    media=media,
+                    media_data=media_data,
+                    detail=detail,
+                )
+            except Exception as error:
+                logger.debug(f"补写 MP 整理历史异常：{error}", exc_info=True)
         if not strm_path:
             logger.debug(f"文件后处理完成：{item.get('file_name') or pending_key}")
         ctx.pending.pop(pending_key, None)

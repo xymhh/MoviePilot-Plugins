@@ -4,7 +4,6 @@ import copy
 import threading
 import time
 from datetime import datetime
-from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.log import logger
@@ -140,6 +139,61 @@ def _completed_notification_context(detail: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+class _MediaTypeValue(str):
+    """str 替身：真实 builder 读 .value，测试替身读原值。
+
+    v1.28.1：移到模块级——此前它是 _completed_mediainfo_stub 里的
+    局部类，MP 的通知模板缓存（TTLCache region="notification"，set_cache_context
+    会把整个渲染上下文 pickle 进 redis）序列化它时报
+    ``Can't pickle local object``，入库完成通知发出瞬间 redis 写缓存失败。
+    通知本身已发出，修法只动可 pickle 性，不改通知内容。
+    """
+
+    @property
+    def value(self):
+        return str(self)
+
+
+class _CompletedMediaInfoStub:
+    """给完成通知模板渲染用的最小 MediaInfo 替身（可 pickle 版）。
+
+    v1.28.1：此前用 SimpleNamespace + 局部类 + lambda 拼装——局部类与
+    lambda 都不能 pickle，MP 模板缓存写 redis 时失败。改成模块级普通类
+    + 真方法，属性与 v1.26.4 的 SimpleNamespace 版逐个一致，模板渲染
+    行为不变。
+    """
+
+    def __init__(self, detail: Dict[str, Any]) -> None:
+        context = _completed_notification_context(detail)
+        self.title = context["title"]
+        self.en_title = ""
+        self.original_title = ""
+        self.season = context["season"] if not context["is_movie"] else None
+        self.year = detail.get("year") or ""
+        self.title_year = context["title_year"]
+        self.type = _MediaTypeValue(str(detail.get("type") or "").strip())
+        self.category = context["category"]
+        self.vote_average = None
+        self.season_years = {}
+        self.actors = []
+        self.overview = ""
+        self.tmdb_id = None
+        self.imdb_id = None
+        self.douban_id = None
+        self.bangumi_id = None
+        self.anilist_id = None
+        self.media_source = ""
+        self.media_id = ""
+        self.detail_link = str(detail.get("detail_link") or "")
+        self._poster_image = context["image"]
+
+    def get_poster_image(self):
+        return self._poster_image
+
+    def get_backdrop_image(self):
+        return None
+
+
 def _completed_mediainfo_stub(detail: Dict[str, Any]) -> Any:
     """给完成通知模板渲染用的最小 MediaInfo 替身。
 
@@ -151,40 +205,7 @@ def _completed_mediainfo_stub(detail: Dict[str, Any]) -> Any:
     type 用带 .value 的字符串替身：真实 builder 读 .value，测试
     替身读原值，两边都拿到中文类型名。
     """
-    context = _completed_notification_context(detail)
-
-    class _MediaTypeValue(str):
-        """str 替身：真实 builder 读 .value，测试替身读原值。"""
-
-        @property
-        def value(self):
-            return str(self)
-
-    stub = SimpleNamespace(
-        title=context["title"],
-        en_title="",
-        original_title="",
-        season=context["season"] if not context["is_movie"] else None,
-        year=detail.get("year") or "",
-        title_year=context["title_year"],
-        type=_MediaTypeValue(str(detail.get("type") or "").strip()),
-        category=context["category"],
-        vote_average=None,
-        season_years={},
-        actors=[],
-        overview="",
-        tmdb_id=None,
-        imdb_id=None,
-        douban_id=None,
-        bangumi_id=None,
-        anilist_id=None,
-        media_source="",
-        media_id="",
-        detail_link=str(detail.get("detail_link") or ""),
-    )
-    stub.get_poster_image = lambda: context["image"]
-    stub.get_backdrop_image = lambda: None
-    return stub
+    return _CompletedMediaInfoStub(detail)
 
 
 def _render_completed_notification_template(

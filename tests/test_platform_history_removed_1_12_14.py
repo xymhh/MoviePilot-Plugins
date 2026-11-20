@@ -13,6 +13,12 @@
    （1.12.15：1.12.14 用的 platform_history_mirror_removed 未在
    CloudSubscribeDataStore 声明，写入时抛 ValueError 导致插件
    加载失败、更新回滚到 1.12.11）。
+
+v1.28.1 例外（用户 2026-11-20 定方向 A）：直出 strm 时插件在
+handlers/sync/history_backfill.py 经 MP 官方外部登记映射补写一行
+（origin="external"、downloader 为空、src 为真实 115 路径）；它是
+唯一的写入口，且清理的两个条件匹配不到补写行——本文件末尾的测试
+钉死这一点。
 """
 
 import os
@@ -352,6 +358,30 @@ class TestPlatformHistoryRemoved(unittest.TestCase):
         service = _Service(session)
         self.assertEqual(service.remove_platform_transfer_history_mirror(), 1)
         self.assertEqual(session.added, [])
+
+    def test_backfill_rows_survive_cleanup(self):
+        """v1.28.1：直出 strm 补写行（真实 115 路径 + downloader 为空）
+        不匹配清理的两个条件，启动清理删不到它。
+
+        （_FakeQuery.delete 只改自己的行副本，断言用返回值 + 单独
+        只有补写行的会话：删 0 条、不提交。）"""
+        backfill = _FakeTransferHistory(
+            src="/Alist/影视/moviepilot/媒体库/剧集/国产剧/多喜一家人 (2026)/Season 1/多喜一家人 - S01E09.mkv",
+            downloader=None,
+        )
+        managed = _FakeTransferHistory(
+            src="cloudsubscribe://abc", downloader="网盘订阅助手"
+        )
+        session = _FakeSession(rows=[backfill, managed])
+        _install_session(session)
+        service = _Service(session)
+        # 两行里只删托管行。
+        self.assertEqual(service.remove_platform_transfer_history_mirror(), 1)
+        # 只有补写行时：删 0 条、不提交。
+        session2 = _FakeSession(rows=[backfill])
+        _install_session(session2)
+        self.assertEqual(service.remove_platform_transfer_history_mirror(), 0)
+        self.assertFalse(session2.committed)
 
 
 if __name__ == "__main__":

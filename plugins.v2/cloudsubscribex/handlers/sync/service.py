@@ -38,6 +38,7 @@ except Exception:
 from .baseline import UpgradeBaselineService
 from .cleanup import HistoryCleanupService
 from .episode_dedup import EpisodeDedupService
+from .history_backfill import HistoryBackfillService
 from .landed import LandedVerifyService
 from .matching import FileMatchingService
 from .media_refresh import MediaRefreshMixin
@@ -93,7 +94,7 @@ from ...utils import (
 )
 from ...utils.cache import create_platform_ttl_cache
 
-# Phase 5（v1.19.0）：显式组合——25 个职责组件以具名服务字段持有。
+# Phase 5（v1.19.0）：显式组合——26 个职责组件以具名服务字段持有。
 # 构造顺序沿用旧 _COMPONENT_TYPES（顺序本身不再有解析语义，删掉
 # SyncHandler.__getattr__ + resolve_component 的隐式解析后，调用关系
 # 在代码里可见）。每个字段与 _handler_components 缓存指向同一实例
@@ -125,6 +126,7 @@ COMPONENT_FIELDS = (
     ("mp_organize", MpOrganizeMixin),
     ("strm_ops", StrmOpsMixin),
     ("transfer_ops", TransferOpsMixin),
+    ("history_backfill", HistoryBackfillService),
 )
 
 
