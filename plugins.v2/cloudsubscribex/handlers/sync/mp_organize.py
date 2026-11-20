@@ -33,6 +33,18 @@ from app.log import logger
 
 from ...core import OwnerDelegator
 
+# v1.28.2：插件触发 MP 整理时传给 do_transfer 的 downloader 标记。
+# MP 结算时把 task.downloader 原样写进整理历史行（MP v3.2.6
+# app/application/transfer/history.py 的 success_fields 无条件写
+# download_hash 与 downloader），终态轮询时读回该行的 downloader
+# 就能区分“这次成功是不是插件这次触发的”：是则 MP 一定会发入库
+# 通知（插件传 background=True），不是则成功来自外部提交（MP
+# 前台手动整理等，MP 按设计静默），插件要补发。值必须是固定常量，
+# 不能是每次不同的 UUID：聚合器按 (downloader, download_hash) 分
+# 组，固定值才不拆散同季多集的合并；MP 不校验 downloader 是不是
+# 真实下载器（无 download_hash 时不碰任何下载器状态）。
+PLUGIN_TRIGGER_DOWNLOADER = "CloudSubscribeX"
+
 
 class MpOrganizeMixin(OwnerDelegator):
     """同盘直存后交 MP 整理的触发器。"""
@@ -380,6 +392,8 @@ class MpOrganizeMixin(OwnerDelegator):
                 "mtype": mtype,
                 "manual": True,
                 "background": True,
+                # v1.28.2：触发标记（见模块顶部的 PLUGIN_TRIGGER_DOWNLOADER）。
+                "downloader": PLUGIN_TRIGGER_DOWNLOADER,
                 "target_directory": conf,
                 "target_storage": getattr(conf, "library_storage", None),
             }
@@ -412,6 +426,9 @@ class MpOrganizeMixin(OwnerDelegator):
                 "src_path": local_path,
                 "src_storage": "local",
                 "triggered_at": time.time(),
+                # v1.28.2：这次触发用的 downloader 标记（与传给
+                # do_transfer 的值一致，供日志与终态判定核对）。
+                "trigger_downloader": PLUGIN_TRIGGER_DOWNLOADER,
                 "target_dir": str(getattr(conf, "library_path", "") or ""),
                 "target_storage": str(getattr(conf, "library_storage", "") or ""),
                 "target_name": str(getattr(conf, "name", "") or ""),

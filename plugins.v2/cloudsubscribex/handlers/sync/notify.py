@@ -462,7 +462,8 @@ class SyncNotificationService(OwnerDelegator):
         """完成通知去重签名：同一转存的详情在两处门各出现一次时只发一条。
 
         剧集按标题 + 年份 + 季 + 集 + kind；电影按标题 + 年份 + 文件名
-        + kind。分支不进签名——MP 整理分支在签名之前就被跳过。
+        + kind。分支不进签名——strm 部分与补发部分按集切分后集号集合
+        不重叠（电影两者互斥），签名自然不同，不会互相占位。
         """
         type_text = str(detail.get("type") or "").strip()
         if type_text == "电影":
@@ -491,13 +492,16 @@ class SyncNotificationService(OwnerDelegator):
         ``_send_finalized_batch`` 都先过 ``_aggregate_transfer_details``）。
         只处理普通转存（transfer / cross_transfer）：洗版详情不在
         这里发（仍走原 ``send_transfer_notification``）；MP 整理分支
-        跳过——MP 自己的 OrganizeSuccess 已发，插件再发就重复；其余
-        strm 直出分支逐条发 OrganizeSuccess（模板优先、写死兜底，
+        默认跳过——MP 自己的 OrganizeSuccess 已发，插件再发就重复；
+        其余 strm 直出分支逐条发 OrganizeSuccess（模板优先、写死兜底，
         见 ``_send_single_completed_notification``）。剧集按集切分
         （见 ``_strm_branch_detail``）：同一批里 MP 分支的集跳过、
-        strm 分支的集照常发。同一个详情在窗口内重复进门时只发一条
-        （去重状态记在服务实例自己的 ``__dict__`` 里，不经过
-        OwnerDelegator 转发）。通知开关 ``_notify`` 关了就不发；
+        strm 分支的集照常发。v1.28.2 补发：MP 整理分支里能证明是外部
+        提交的集（见 ``_mp_backstop_detail``，MP 按设计不会发通知）
+        由插件补发一条，与 strm 分支同一发送器、同一文案、同一
+        600 秒去重；触发来源未知时保守跳过。同一个详情在窗口内重复
+        进门时只发一条（去重状态记在服务实例自己的 ``__dict__`` 里，
+        不经过 OwnerDelegator 转发）。通知开关 ``_notify`` 关了就不发；
         发送本身失败只记日志，绝不能打断转存。
         """
         post_message = getattr(self, "_post_message", None)
@@ -524,26 +528,44 @@ class SyncNotificationService(OwnerDelegator):
                         f"title={detail.get('title')}"
                     )
                     continue
-                effective_detail = self._strm_branch_detail(detail)
-                if effective_detail is None:
+                parts = []
+                strm_detail = self._strm_branch_detail(detail)
+                if strm_detail is not None:
+                    parts.append(strm_detail)
+                backstop_detail = self._mp_backstop_detail(detail)
+                if backstop_detail is not None:
+                    parts.append(backstop_detail)
+                if not parts:
                     logger.debug(
-                        f"跳过 MP 整理分支的完成通知（MP 已发）："
+                        f"跳过 MP 整理分支的完成通知"
+                        f"（MP 已发或触发来源未知）："
                         f"{detail.get('title')}"
                     )
                     continue
-                signature = self._completed_notification_signature(
-                    effective_detail
-                )
-                if signature in seen:
-                    logger.debug(
-                        f"转存完成通知已发过，跳过重复：{detail.get('title')}"
-                    )
-                    continue
-                self._send_single_completed_notification(effective_detail)
-                # 发送成功后才记去重：发送失败时不占位，下一轮还能重发。
-                seen[signature] = now
+                # 两部分各走一次去重 + 发送；一部分失败不拦另一部分。
+                for part in parts:
+                    try:
+                        self._send_completed_detail_once(part, seen, now)
+                    except Exception as error:  # noqa: BLE001 - 通知失败绝不能打断转存
+                        logger.warning(f"转存完成通知发送失败：{error}")
             except Exception as error:  # noqa: BLE001 - 通知失败绝不能打断转存
                 logger.warning(f"转存完成通知发送失败：{error}")
+
+    def _send_completed_detail_once(
+            self, effective_detail: Dict[str, Any],
+            seen: Dict[str, float], now: float,
+    ) -> bool:
+        """对切分后的一份详情做 600 秒去重并发送；已发过返回 False。"""
+        signature = self._completed_notification_signature(effective_detail)
+        if signature in seen:
+            logger.debug(
+                f"转存完成通知已发过，跳过重复：{effective_detail.get('title')}"
+            )
+            return False
+        self._send_single_completed_notification(effective_detail)
+        # 发送成功后才记去重：发送失败时不占位，下一轮还能重发。
+        seen[signature] = now
+        return True
 
     @staticmethod
     def _strm_branch_detail(detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -598,6 +620,86 @@ class SyncNotificationService(OwnerDelegator):
             )
             effective["episode_sizes"] = {
                 episode: sizes.get(episode, 0) for episode in strm_episodes
+            }
+        else:
+            # 没有逐集体积时整批的和不能按集拆，大小记未知。
+            effective["size"] = 0
+            effective["size_unknown"] = True
+        return effective
+
+    @staticmethod
+    def _mp_backstop_detail(detail: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """取详情里 MP 整理分支、且能证明不是插件触发的部分（插件补发）。
+
+        v1.28.2：MP 整理分支默认仍由 MP 通知（插件跳过）；只有当终态
+        轮询读到的 MP 历史成功行 downloader 不是插件触发标记时，才
+        证明这次成功来自外部提交（MP 前台手动整理等，MP 按设计静默），
+        插件补发一条。触发来源未知（None）时保守跳过——宁可漏发，不
+        可重复。电影：整条详情要么是 MP 分支且外部触发（原样返回）、
+        要么跳过。剧集：按集的触发来源标记切分——只有 MP 分支且触发
+        来源为 False 的集才进通知；没有这样的集时返回 None。返回的
+        详情只含补发部分（集数 / 文件数按这部分算；有逐集体积时按这
+        部分重算，没有时大小记未知，不拿整批的和冒充）。
+        """
+        type_text = str(detail.get("type") or "").strip()
+        if type_text == "电影":
+            if detail.get("organized_via_mp") and (
+                    detail.get("organized_via_mp_triggered") is False
+            ):
+                return detail
+            return None
+        episodes = sorted({
+            int(episode) for episode in (detail.get("episodes") or [])
+            if int(episode or 0) > 0
+        })
+        organized_map = {
+            int(episode): bool(value)
+            for episode, value in (
+                detail.get("organized_via_mp_episodes") or {}
+            ).items()
+            if int(episode or 0) > 0
+        }
+        triggered_map = {
+            int(episode): value
+            for episode, value in (
+                detail.get("organized_via_mp_triggered_episodes") or {}
+            ).items()
+            if int(episode or 0) > 0
+        }
+        if organized_map:
+            backstop_episodes = [
+                episode for episode in episodes
+                if organized_map.get(episode, False)
+                and triggered_map.get(episode) is False
+            ]
+        elif detail.get("organized_via_mp"):
+            # 旧口径详情（没有按集的分支标记）：整批都是 MP 分支，
+            # 只取触发来源确认是外部的集。
+            backstop_episodes = [
+                episode for episode in episodes
+                if triggered_map.get(episode) is False
+            ]
+        else:
+            backstop_episodes = []
+        if not backstop_episodes:
+            return None
+        if backstop_episodes == episodes:
+            return detail
+        effective = dict(detail)
+        effective["episodes"] = backstop_episodes
+        sizes = detail.get("episode_sizes") or {}
+        if sizes:
+            effective["size"] = sum(
+                max(0, int(sizes.get(episode, 0) or 0))
+                for episode in backstop_episodes
+            )
+            effective["size_unknown"] = any(
+                int(sizes.get(episode, 0) or 0) <= 0
+                for episode in backstop_episodes
+            )
+            effective["episode_sizes"] = {
+                episode: sizes.get(episode, 0)
+                for episode in backstop_episodes
             }
         else:
             # 没有逐集体积时整批的和不能按集拆，大小记未知。

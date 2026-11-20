@@ -466,7 +466,14 @@ class TransferDetailsService(OwnerDelegator):
             # v1.26.4：终态分支标记（MP 整理身份在 pending 项上时为真，
             # MP 自己会发入库通知，插件的完成通知要跳过这一支）+ 完成
             # 通知模板要的类别 / 详情链接。
+            # v1.28.2：触发来源（三态：True=插件这次触发、MP 会发；
+            # False=外部提交、MP 不发、插件补发；None=未知、保守不补发）。
+            # 只在 organized_via_mp 为真时有意义。
             "organized_via_mp": bool(item.get("mp_organize")),
+            "organized_via_mp_triggered": (
+                item.get("mp_organize_success_from_plugin_trigger")
+                if item.get("mp_organize") else None
+            ),
             "category": str(getattr(mediainfo, "category", "") or ""),
             "detail_link": str(getattr(mediainfo, "detail_link", "") or ""),
         }
@@ -501,6 +508,15 @@ class TransferDetailsService(OwnerDelegator):
             # v1.26.4：按集的分支标记（本项各集同属一个分支）。
             detail["organized_via_mp_episodes"] = {
                 int(episode): bool(item.get("mp_organize"))
+                for episode in episodes
+            }
+            # v1.28.2：按集的触发来源标记（本项各集同属一个触发来源；
+            # 三态不坍缩，None=未知）。
+            detail["organized_via_mp_triggered_episodes"] = {
+                int(episode): (
+                    item.get("mp_organize_success_from_plugin_trigger")
+                    if item.get("mp_organize") else None
+                )
                 for episode in episodes
             }
         return detail
@@ -555,7 +571,12 @@ class TransferDetailsService(OwnerDelegator):
             ),
             # v1.26.4：与主路径同一份详情结构（分支标记 + 类别 /
             # 详情链接；媒体信息缺失时类别与链接为空）。
+            # v1.28.2：触发来源与主路径同口径（三态，见上）。
             "organized_via_mp": bool(item.get("mp_organize")),
+            "organized_via_mp_triggered": (
+                item.get("mp_organize_success_from_plugin_trigger")
+                if item.get("mp_organize") else None
+            ),
             "category": "",
             "detail_link": "",
         }
@@ -588,6 +609,14 @@ class TransferDetailsService(OwnerDelegator):
             # v1.26.4：按集的分支标记（本项各集同属一个分支）。
             detail["organized_via_mp_episodes"] = {
                 int(episode): bool(item.get("mp_organize"))
+                for episode in detail["episodes"]
+            }
+            # v1.28.2：按集的触发来源标记（与主路径同口径）。
+            detail["organized_via_mp_triggered_episodes"] = {
+                int(episode): (
+                    item.get("mp_organize_success_from_plugin_trigger")
+                    if item.get("mp_organize") else None
+                )
                 for episode in detail["episodes"]
             }
         return detail
@@ -691,6 +720,44 @@ class TransferDetailsService(OwnerDelegator):
                         for episode in episode_sets[key]
                     )
                 )
+            # v1.28.2：触发来源标记随聚合合并（三态不坍缩：None=未知，
+            # 不能 bool() 成 False，否则未知会被误判成“外部提交”而
+            # 补发）。后到的详情覆盖先到的；标量按合并后的集重算：
+            # 合并后全部集都确认是插件触发才算 True，任一集确认是
+            # 外部提交即 False，其余（缺标记或全未知）为 None。
+            if (
+                    detail.get("organized_via_mp_triggered_episodes")
+                    or current.get("organized_via_mp_triggered_episodes")
+            ):
+                merged_triggered = {
+                    int(episode): value
+                    for episode, value in (
+                        current.get("organized_via_mp_triggered_episodes")
+                        or {}
+                    ).items()
+                    if int(episode or 0) > 0
+                }
+                merged_triggered.update({
+                    int(episode): value
+                    for episode, value in (
+                        detail.get("organized_via_mp_triggered_episodes")
+                        or {}
+                    ).items()
+                    if int(episode or 0) > 0
+                })
+                current["organized_via_mp_triggered_episodes"] = merged_triggered
+                if episode_sets[key] and all(
+                        merged_triggered.get(int(episode)) is True
+                        for episode in episode_sets[key]
+                ):
+                    current["organized_via_mp_triggered"] = True
+                elif any(
+                        merged_triggered.get(int(episode)) is False
+                        for episode in episode_sets[key]
+                ):
+                    current["organized_via_mp_triggered"] = False
+                else:
+                    current["organized_via_mp_triggered"] = None
             if not current.get("image") and detail.get("image"):
                 current["image"] = detail["image"]
             current["size"] = int(current.get("size") or 0) + int(
@@ -736,6 +803,8 @@ class TransferDetailsService(OwnerDelegator):
             # 仍在”只在 MP 整理分支成立，strm 直出分支没有 MP 事件；
             # 与同步完成块共用 send_transfer_completed_notification，
             # 发送器内部按分支分流（MP 整理分支跳过、strm 分支发）。
+            # v1.28.2：MP 整理分支里能证明是外部提交的（MP 不会发）
+            # 由插件补发一条，见 notify.py 的 _mp_backstop_detail。
             upgrade_details = [
                 detail for detail in aggregated
                 if str(detail.get("notification_kind") or "") == "upgrade"

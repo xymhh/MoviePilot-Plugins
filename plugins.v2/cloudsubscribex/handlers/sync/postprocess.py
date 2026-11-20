@@ -13,6 +13,7 @@ from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 from app.schemas.types import MediaType
 
+from .mp_organize import PLUGIN_TRIGGER_DOWNLOADER
 from .utils import extract_ed2k_filename, normalize_season
 from ...core import CloudDriveCapability, OwnerDelegator
 from ...core.failure import apply_failure, failure_retryable_of
@@ -1880,6 +1881,27 @@ class PostprocessService(OwnerDelegator):
             self._abort_single_item(item, pending_key, "MP 整理未受理", ctx)
             return ("abort", None, "")
         if state == "succeeded":
+            # v1.28.2：记下这次成功是不是插件自己触发的（终态补发
+            # 通知的判定信号）。读 MP 整理历史最新成功行的 downloader：
+            # 等于触发标记 → 插件这次触发（background=True），MP 一定
+            # 会发入库通知，插件不补发；不等于 → 外部提交（MP 前台
+            # 手动整理等），MP 不会发，插件补发；读不到 / 读失败 → 未
+            # 知，保守跳过（不补发）。读失败绝不能打断 finalize。
+            # 注意：此后两条返回路径（located / dest_missed）都走到
+            # _commit_single_item，标记要记在它们之前。
+            try:
+                row_found, row_downloader = tracker.get_success_downloader(
+                    mp_organize
+                )
+                if not row_found:
+                    item["mp_organize_success_from_plugin_trigger"] = None
+                else:
+                    item["mp_organize_success_from_plugin_trigger"] = bool(
+                        row_downloader == PLUGIN_TRIGGER_DOWNLOADER
+                    )
+            except Exception as error:
+                logger.debug(f"记录 MP 整理触发来源失败：{error}")
+                item["mp_organize_success_from_plugin_trigger"] = None
             found = None
             if dest_path:
                 found = self._locate_cloud_file_by_dest(dest_path, ctx)

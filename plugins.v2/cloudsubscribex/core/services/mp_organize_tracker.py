@@ -129,6 +129,36 @@ class MpOrganizeTracker:
             logger.debug(f"MP 整理轮询失败：{error}", exc_info=True)
             return ("unavailable", "MP 整理链不可用", None)
 
+    def get_success_downloader(
+            self, mp_organize: Dict[str, object]
+    ) -> Tuple[bool, Optional[str]]:
+        """读 MP 整理历史最新成功行的 downloader（v1.28.2 补发信号）。
+
+        与 :meth:`poll` 查的是同一行（``get_success_by_src`` 按 id
+        倒序取最新成功行），两次查询之间行被顶掉的窗口可忽略。
+        :return: (found, downloader)；found=False 表示没找到成功行
+            （或读失败）——此时无法判断，调用方按未知处理、绝不补发；
+            found=True 时 downloader 是该行的原始值：插件这次触发的
+            为 ``PLUGIN_TRIGGER_DOWNLOADER``（见 mp_organize.py），
+            MP 前台手动整理等外部提交为 None 或其他下载器名。
+        """
+        src_path = str((mp_organize or {}).get("src_path") or "").strip()
+        src_storage = (
+            str((mp_organize or {}).get("src_storage") or "local").strip()
+            or "local"
+        )
+        if not src_path:
+            return False, None
+        try:
+            with self._history_oper_context() as history_oper:
+                found = history_oper.get_success_by_src(src_path, src_storage)
+                if found is None:
+                    return False, None
+                return True, getattr(found, "downloader", None)
+        except Exception as error:
+            logger.debug(f"读取 MP 整理历史成功行失败：{error}")
+            return False, None
+
     def _poll_backends(
             self, src_path: str, src_storage: str
     ) -> Tuple[str, str, Optional[str]]:
