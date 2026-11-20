@@ -213,6 +213,10 @@
           </v-chip>
         </template>
 
+        <template #item.file_size="{ item }">
+          <span class="text-no-wrap">{{ formatSize(item.file_size) }}</span>
+        </template>
+
         <template #item.status="{ item }">
           <v-chip :color="statusColor(item)" size="x-small" variant="tonal">
             {{ statusLabel(item) }}
@@ -298,7 +302,7 @@
                       {{ displayTitle(record) }}
                       <span v-if="record.year" class="text-medium-emphasis">({{ record.year }})</span>
                     </span>
-                    <v-chip :color="statusColor(record)" size="x-small" variant="tonal">
+                    <v-chip :color="statusColor(record)" size="x-small" variant="tonal" class="flex-shrink-0">
                       {{ statusLabel(record) }}
                     </v-chip>
                     <v-spacer />
@@ -593,7 +597,13 @@ function sourceIcon(value) {
 
 function resourceType(record) {
   if (typeof record === "string") return record.trim().toLowerCase();
-  const configured = String(record?.resource_type || "")
+  // v1.29.2：重试索引行没有 resource_type 字段（后端 index_row_to_history_dict
+  // 不下发），但有等价的 source_drive_key（分享链接的网盘提供方键，如 115 /
+  // quark / magnet，与资源类型目录的键同一词表）；读错字段会让类型列永远
+  // 显示“未知”。resource_type 优先，缺失时用 source_drive_key 兜底。
+  const configured = String(
+    record?.resource_type || record?.source_drive_key || "",
+  )
     .trim()
     .toLowerCase()
   return configured || "unknown";
@@ -784,6 +794,7 @@ function deleteTitle(record) {
 .history-toolbar-head {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   min-width: 0;
   gap: 4px;
   padding: 6px 8px;
@@ -929,6 +940,8 @@ function deleteTitle(record) {
 }
 
 .history-mobile-media-title {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

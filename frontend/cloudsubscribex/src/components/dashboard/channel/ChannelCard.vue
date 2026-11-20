@@ -42,7 +42,7 @@
               </v-chip>
             </div>
           </v-card-text>
-          <v-card-actions class="pt-0">
+          <v-card-actions class="pt-0 channel-actions">
             <v-switch
               :model-value="item.enabled"
               density="compact"
@@ -115,6 +115,13 @@ const emit = defineEmits(["toggle-select", "set-enabled", "test", "scan", "edit"
 
 .channel-switch {
   flex: 0 0 auto;
+}
+
+/* v1.29.2：底部图标按钮默认只有 28px 左右，手机上难准确点中；触摸目标
+   放到 44px（v-btn 的 height 由尺寸类定，用 min-height/min-width 兜底）。 */
+.channel-actions :deep(.v-btn) {
+  min-width: 44px;
+  min-height: 44px;
 }
 
 </style>

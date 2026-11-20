@@ -369,12 +369,19 @@ const emit = defineEmits(["update:showAdvanced", "nav-click", "mobile-group-clic
 /* 左下角全高状态看板卡片（占满下方空白，排版饱满高级） */
 .sidebar-advanced-toggle {
   flex: 0 0 auto;
-  padding: 4px 16px 8px;
+  padding: 4px 12px 8px;
   border-top: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
 
 .sidebar-advanced-toggle :deep(.v-switch) {
   font-size: 0.85rem;
+}
+
+/* v1.29.2：侧栏只有 162px 宽，开关标签“显示高级设置”此前会折成两行
+   （“显示高级设/置”）。标签不换行 + 字号略降，保证一行内放得下。 */
+.sidebar-advanced-toggle :deep(.v-label) {
+  font-size: 0.8125rem;
+  white-space: nowrap;
 }
 
 .sidebar-footer {

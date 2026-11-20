@@ -1187,8 +1187,13 @@ onUnmounted(() => {
   text-align: left;
 }
 .tg-group-title {
+  flex: 1 1 auto;
+  min-width: 0;
   font-weight: 600;
   font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tg-group-meta {
   margin-left: auto;
