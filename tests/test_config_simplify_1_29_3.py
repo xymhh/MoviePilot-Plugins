@@ -1,7 +1,9 @@
 """v1.29.3：配置向导删除 + “常用设置”简化配置 + 设置页手机布局优化。
+v1.29.5：常用设置从 8 项扩到 20 项（分组表 GROUPING.md 开头所列），
+取字段逻辑不变（从全量 6 个任务 section 取）。
 
 静态接线测试：向导引用全清、常用设置 section 存在且排第一、含指定
-8 个 key、手机导航滚动逻辑存在；不拼 UI 行为，行为由 vite 构建 +
+20 个 key、手机导航滚动逻辑存在；不拼 UI 行为，行为由 vite 构建 +
 全量套件保证。
 """
 
@@ -26,12 +28,24 @@ ENTRY_CHECK = "scripts/check_frontend_entry.py"
 COMMON_KEYS = (
     "enabled",
     "cloud_drive",
-    "organize_source_path",
-    "organize_after_transfer",
     "cron",
     "platform_download_policy",
     "cross_transfer_enabled",
+    "organize_after_transfer",
+    "organize_source_path",
     "enable_cloud_upgrade",
+    "tg_monitor_enabled",
+    "strm_generate_enabled",
+    "notify",
+    "auto_subscribe_enabled",
+    "media_server_refresh_enabled",
+    "emby_proxy_enabled",
+    "search_concurrency",
+    "cross_transfer_daily_upload_limit_gb",
+    "transfer_risk_cooldown",
+    "upgrade_episode_limit",
+    "checkin_auto_retry",
+    "batch_size",
 )
 
 
@@ -73,8 +87,9 @@ class CommonSectionTest(unittest.TestCase):
         config = _read(CONFIG)
         self.assertIn('value: "common"', config)
         self.assertIn('title: "常用设置"', config)
-        # 导航最前面：核心配置分组第一位是 common，默认打开它。
-        self.assertIn('"common", "basic"', config)
+        # 导航最前面：常用设置单独成组排第一，默认打开它。
+        self.assertIn('name: "常用设置"', config)
+        self.assertIn('items: ["common"]', config)
         self.assertIn('const activeTab = ref("common")', config)
         # 常用设置不是高级 section，默认可见（buildCommonSection 返回体里无 advanced）。
         body = re.search(
@@ -88,7 +103,7 @@ class CommonSectionTest(unittest.TestCase):
             "[commonSection.value, ...(baseSections.value || [])]", config
         )
 
-    def test_common_section_has_exactly_the_8_keys(self):
+    def test_common_section_has_exactly_the_20_keys(self):
         config = _read(CONFIG)
         keys_block = re.search(
             r"const COMMON_FIELD_KEYS = Object\.freeze\(\[(.*?)\]\)",
@@ -100,7 +115,7 @@ class CommonSectionTest(unittest.TestCase):
         self.assertEqual(list(COMMON_KEYS), found)
 
     def test_common_keys_all_exist_in_field_definitions(self):
-        # 8 个 key 必须在既有 sections 的字段定义里找得到（不复制定义）。
+        # 20 个 key 必须在既有 sections 的字段定义里找得到（不复制定义）。
         field_sources = ""
         for path in glob.glob(
             os.path.join(
@@ -114,8 +129,8 @@ class CommonSectionTest(unittest.TestCase):
             self.assertIn(f'key: "{key}"', field_sources, f"字段定义里找不到 {key}")
 
     def test_common_picks_from_unfiltered_base_sections(self):
-        # 常用设置按 key 取字段必须读未折叠的 baseSections（全部 13 个
-        # section），否则取不到高级 section 里的 organize_source_path
+        # 常用设置按 key 取字段必须读未折叠的 baseSections（全部 6 个任务
+        # section），否则取不到高级字段 organize_source_path
         # 与 enable_cloud_upgrade。
         config = _read(CONFIG)
         pick = re.search(
@@ -131,14 +146,23 @@ class CommonSectionTest(unittest.TestCase):
         )
 
     def test_common_section_groups_cover_all_keys(self):
-        # 两组分栏：基础组 4 个 + 转存与洗版组 4 个，8 个 key 全覆盖。
+        # 四组分栏：基础 4 个 + 转存与洗版 8 个 + 监控与播放 4 个 +
+        # 订阅与通知 4 个，20 个 key 全覆盖。
         config = _read(CONFIG)
         self.assertIn(
             'pick(["enabled", "cloud_drive", "cron", "platform_download_policy"])',
             config,
         )
         self.assertIn(
-            'pick([\n    "organize_source_path",\n    "organize_after_transfer",\n    "cross_transfer_enabled",\n    "enable_cloud_upgrade",\n  ])',
+            'pick([\n    "organize_source_path",\n    "organize_after_transfer",\n    "cross_transfer_enabled",\n    "enable_cloud_upgrade",\n    "upgrade_episode_limit",\n    "cross_transfer_daily_upload_limit_gb",\n    "transfer_risk_cooldown",\n    "batch_size",\n  ])',
+            config,
+        )
+        self.assertIn(
+            'pick([\n    "tg_monitor_enabled",\n    "strm_generate_enabled",\n    "media_server_refresh_enabled",\n    "emby_proxy_enabled",\n  ])',
+            config,
+        )
+        self.assertIn(
+            'pick([\n    "auto_subscribe_enabled",\n    "notify",\n    "search_concurrency",\n    "checkin_auto_retry",\n  ])',
             config,
         )
 

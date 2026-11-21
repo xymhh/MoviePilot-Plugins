@@ -631,7 +631,7 @@ const emit = defineEmits([
 const hasText = (value) => Boolean(String(value || "").trim())
 
 const resetDialogVisible = ref(false);
-const isSearchSection = computed(() => props.section?.value === "search");
+const isSearchSection = computed(() => props.section?.value === "channels");
 const currentSubtabTitle = computed(() => {
   const current = (props.section?.subtabs || []).find((t) => t.value === activeSubtab.value);
   return current?.title || activeSubtab.value || "该项";

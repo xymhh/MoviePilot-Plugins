@@ -154,11 +154,15 @@ class ConfigSplitTest(unittest.TestCase):
 
     def test_config_keeps_pinned_wiring(self):
         # 1.10.3 / 1.10.5 钉在 Config.vue 的逻辑不得随拆分搬走。
+        # v1.29.5：导航白名单已由 6 个任务组直出替代，旧白名单片段
+        # '"subscribe", "subsources", "upgrade"' 不再存在；提供方名
+        # 改从任务组“追更”的 subtabs 取，逻辑本身仍钉在 Config.vue。
         config = _read(CONFIG)
         self.assertIn("allSections", config)
         self.assertIn("showAdvanced", config)
         self.assertIn("csx-config-show-advanced", config)
-        self.assertIn('"subscribe", "subsources", "upgrade"', config)
+        self.assertIn('items: ["tracking"]', config)
+        self.assertIn('s.value === "tracking"', config)
         self.assertIn("const autoSubscribeProviderNames = computed(() => {", config)
         self.assertIn("defaults: {},", config)
         self.assertIn("options.defaults = data.defaults", config)

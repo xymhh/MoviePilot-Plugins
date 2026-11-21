@@ -11,6 +11,10 @@
   options.defaults 从没赋值过，文本框会被错恢复成空串）。
 
 运行：``cd <repo> && python -m pytest tests/test_config_settings_ui_1_10_5.py -q``
+
+v1.29.5：13 个技术分组按任务重排为 6 组——订阅源 subtabs 随 subsources
+并入任务组“追更”，订阅运行设置同组；本文件的拆分断言（订阅 13 项 /
+订阅源 67 项、key 无重叠）仍按源文件校验，组装断言改为 6 组 227 项。
 """
 
 import json
@@ -94,13 +98,37 @@ class TestSubsourcesSplit(unittest.TestCase):
             source.index("createCheckinSection(options),"),
         )
         advanced = re.search(
-            r"ADVANCED_SECTIONS = new Set\(\[(.*?)\]\)", source, re.S
+            r"ADVANCED_FIELD_ORIGINS = new Set\(\[(.*?)\]\)", source, re.S
         ).group(1)
         self.assertNotIn("subsources", advanced)
 
     def test_config_nav_and_provider_names_follow_split(self):
         source = _read("frontend/cloudsubscribex/src/components/Config.vue")
-        self.assertIn('"subscribe", "subsources", "upgrade"', source)
+        # v1.29.5：导航是常用设置 + 6 个任务组直出，不再有 13 个技术分组。
+        for value in (
+            "common",
+            "tracking",
+            "transfer",
+            "playback",
+            "notify",
+            "channels",
+            "drive",
+        ):
+            self.assertIn(f'"{value}"', source)
+        # 旧 13 个技术分组的 section value 不再出现在导航/取数逻辑里
+        #（"search"/"checkin" 仍是后端 ui_options scope 名，见
+        # optionScopeByTab 与 onMounted 的 loadOptions("search")，不在此列）。
+        for value in (
+            '"basic"',
+            '"organize"',
+            '"subscribe"',
+            '"subsources"',
+            '"upgrade"',
+            '"tg"',
+            '"strm"',
+            '"emby"',
+        ):
+            self.assertNotIn(value, source)
         provider_names = re.search(
             r"const autoSubscribeProviderNames = computed\(\(\) => \{(.*?)\n\}\);",
             source,
@@ -108,8 +136,9 @@ class TestSubsourcesSplit(unittest.TestCase):
         )
         self.assertIsNotNone(provider_names)
         body = provider_names.group(1)
-        self.assertIn('s.value === "subsources"', body)
-        self.assertIn('s.value === "subscribe"', body)
+        self.assertIn('s.value === "tracking"', body)
+        self.assertNotIn('s.value === "subsources"', body)
+        self.assertNotIn('s.value === "subscribe"', body)
 
     def test_config_stores_backend_defaults(self):
         source = _read("frontend/cloudsubscribex/src/components/Config.vue")
@@ -119,7 +148,7 @@ class TestSubsourcesSplit(unittest.TestCase):
 
 @unittest.skipIf(shutil.which("node") is None, "node 不可用")
 class TestSectionAssemblyRuntime(unittest.TestCase):
-    """真实跑一遍 createConfigSections：13 个分组、key 无重叠。"""
+    """真实跑一遍 createConfigSections：6 个任务分组、227 项、key 无重叠。"""
 
     def test_sections_assemble(self):
         script = (
@@ -127,19 +156,22 @@ class TestSectionAssemblyRuntime(unittest.TestCase):
             "const options = new Proxy({cloud_drive: \"\"}, "
             "{ get: (t, k) => (k in t ? t[k] : []) });\n"
             "const sections = createConfigSections(options, {});\n"
-            "const sub = sections.find((s) => s.value === \"subscribe\");\n"
-            "const src = sections.find((s) => s.value === \"subsources\");\n"
+            "const byValue = Object.fromEntries(sections.map((s) => [s.value, s]));\n"
             "const allKeys = sections.flatMap((s) => (s.groups || [])"
             ".flatMap((g) => (g.fields || []).map((f) => f.key))).filter(Boolean);\n"
+            "const advancedKeys = sections.flatMap((s) => (s.groups || [])"
+            ".flatMap((g) => (g.fields || []).filter((f) => f.advanced).map((f) => f.key)));\n"
             "console.log(JSON.stringify({\n"
             "  sections: sections.length,\n"
+            "  values: sections.map((s) => s.value),\n"
             "  valuesUnique: new Set(sections.map((s) => s.value)).size === sections.length,\n"
-            "  subscribeGroups: sub.groups.length,\n"
-            "  subscribeSubtabs: (sub.subtabs || []).length,\n"
-            "  subsourcesGroups: src.groups.length,\n"
-            "  subsourcesSubtabs: (src.subtabs || []).map((t) => t.value),\n"
+            "  counts: Object.fromEntries(sections.map((s) => [s.value, "
+            "(s.groups || []).flatMap((g) => g.fields || []).length])),\n"
+            "  trackingSubtabs: (byValue.tracking.subtabs || []).map((t) => t.value),\n"
+            "  channelsSubtabs: (byValue.channels.subtabs || []).map((t) => t.value),\n"
             "  totalKeys: allKeys.length,\n"
             "  uniqueKeys: new Set(allKeys).size,\n"
+            "  advancedKeys: advancedKeys.length,\n"
             "}));\n"
             % (
                 os.path.join(
@@ -165,16 +197,32 @@ class TestSectionAssemblyRuntime(unittest.TestCase):
             os.unlink(tmp_path)
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout.strip().splitlines()[-1])
-        self.assertEqual(data["sections"], 13)
-        self.assertTrue(data["valuesUnique"])
-        self.assertEqual(data["subscribeGroups"], 2)
-        self.assertEqual(data["subscribeSubtabs"], 0)
-        self.assertEqual(data["subsourcesGroups"], 21)
+        self.assertEqual(data["sections"], 6)
         self.assertEqual(
-            data["subsourcesSubtabs"],
+            data["values"],
+            ["tracking", "transfer", "playback", "notify", "channels", "drive"],
+        )
+        self.assertTrue(data["valuesUnique"])
+        self.assertEqual(
+            data["counts"],
+            {
+                "tracking": 91,
+                "transfer": 66,
+                "playback": 18,
+                "notify": 21,
+                "channels": 24,
+                "drive": 7,
+            },
+        )
+        self.assertEqual(
+            data["trackingSubtabs"],
             ["douban", "maoyan", "tmdb", "mikan", "bangumi", "anilist", "netflix"],
         )
-        self.assertEqual(data["totalKeys"], data["uniqueKeys"])
+        self.assertEqual(data["channelsSubtabs"], ["common"])
+        self.assertEqual(data["totalKeys"], 227)
+        self.assertEqual(data["uniqueKeys"], 227)
+        # 静态高级字段：organize 9 + upgrade 11 + strm 9 + emby 4 + checkin 4。
+        self.assertEqual(data["advancedKeys"], 37)
 
 
 class TestGroupFolding(unittest.TestCase):

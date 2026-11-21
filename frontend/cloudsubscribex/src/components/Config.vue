@@ -57,9 +57,59 @@
             </div>
           </header>
 
+          <!-- v1.29.5：设置搜索（仅搜静态 227 项，按 label / key / hint 匹配；有查询时替代下方分组视图） -->
+          <div class="config-search-bar">
+            <v-text-field
+              v-model="searchQuery"
+              density="compact"
+              variant="outlined"
+              prepend-inner-icon="mdi-magnify"
+              placeholder="搜索设置：名称 / 键名 / 说明，如 洗版、cron、strm"
+              clearable
+              hide-details
+              @click:clear="searchQuery = ''" />
+          </div>
+
           <!-- 内容展示容器：带丝滑淡入过渡动画，仅渲染当前激活的 section -->
           <div class="config-main-body">
-            <transition name="fade-slide" mode="out-in">
+            <div v-if="isSearching" class="config-search-results">
+              <div v-if="searchResultSection" class="config-search-meta text-caption text-medium-emphasis">
+                找到 {{ searchResultSection.matchCount }} 项设置 · 分布在 {{ searchResultSection.matchGroupCount }} 个任务组
+              </div>
+              <div v-if="searchResultSection" class="config-search-body">
+                <ConfigSection
+                  :section="searchResultSection"
+                  :config="config"
+                  :options="options"
+                  :api="api"
+                  :refreshing-accounts="refreshingAccounts"
+                  :testing-source="testingSource"
+                  :testing-auto-subscribe="testingAutoSubscribe"
+                  :testing-proxy="testingProxy"
+                  :testing-auto-subscribe-proxy="testingAutoSubscribeProxy"
+                  :hdhive-oauth-action="hdhiveOauthAction"
+                  @scan="openQrCode"
+                  @browse-directory="openDirectoryPicker"
+                  @test-source="openSourceTest"
+                  @test-auto-subscribe="testAutoSubscribe"
+                  @test-proxy="testSearchProxy"
+                  @test-auto-subscribe-proxy="testAutoSubscribeProxy"
+                  @refresh-account="refreshAccount"
+                  @hdhive-oauth-start="startHdhiveOAuth"
+                  @hdhive-oauth-exchange="exchangeHdhiveOAuth"
+                  @checkin-result="handleCheckinResult"
+                  @copy-text="copyText"
+                  @load-options="loadDynamicOptions"
+                  @refresh-options="refreshDynamicOptions"
+                  @notify="notify" />
+              </div>
+              <div v-else class="config-search-empty">
+                <v-icon icon="mdi-magnify" size="28" class="mb-2" />
+                <div>没有找到与「{{ (searchQuery || "").trim() }}」相关的设置</div>
+                <div class="text-caption text-medium-emphasis mt-1">仅搜索静态设置项；网盘驱动与搜索渠道的后端动态项暂不支持搜索</div>
+              </div>
+            </div>
+            <transition v-else name="fade-slide" mode="out-in">
               <div :key="activeTab" class="config-window-section">
                 <ConfigSection
                   v-if="currentSection"
@@ -192,6 +242,7 @@ import ConfigResourcePreviewDialog from "./config/ConfigResourcePreviewDialog.vu
 import ConfigUnlockDialog from "./config/ConfigUnlockDialog.vue";
 import { canPreviewResource, previewResourceKey } from "../utils/sourceTestHelpers.js";
 import {createConfigSections} from "../config/fields.js";
+import {buildSearchResultSection} from "../config/search.js";
 
 const QrCodeDialog = defineAsyncComponent(() => import("./dialogs/QrCodeDialog.vue"))
 const DirectoryDialog = defineAsyncComponent(() => import("./dialogs/DirectoryDialog.vue"));
@@ -332,7 +383,8 @@ const isMobile = computed(() => (display?.smAndDown?.value ?? false) || (typeof 
 const config = reactive(JSON.parse(JSON.stringify(props.initialConfig || {})))
 const activeTab = ref("common")
 
-// 1.10.3：高级设置默认折叠（本地记忆开关）；只影响导航展示，不影响保存与常用设置取字段。
+// v1.29.5：高级折叠改为字段级（本地记忆开关）；只影响分组浏览视图的
+// 字段展示，不影响保存、常用设置取字段与搜索。
 const SHOW_ADVANCED_KEY = "csx-config-show-advanced";
 const showAdvanced = ref(false);
 try {
@@ -354,15 +406,16 @@ function onNavClick(val, event) {
     event.currentTarget.scrollIntoView({behavior: "smooth", inline: "center", block: "nearest"});
   }
 }
+// v1.29.5：6 个任务组与 ui_options scope 的映射；一个页签可能要多个
+// scope（通知与签到同时要 notify 与 checkin）。
 const optionScopeByTab = Object.freeze({
-  common: "base",
-  basic: "base",
-  transfer: "subscriptions",
-  upgrade: "subscriptions",
-  drive: "drive",
-  search: "search",
-  checkin: "checkin",
-  notify: "notify",
+  common: ["base"],
+  tracking: ["base"],
+  transfer: ["subscriptions"],
+  playback: ["base"],
+  notify: ["notify", "checkin"],
+  channels: ["search"],
+  drive: ["drive"],
 })
 const loadedOptionScopes = new Set()
 const optionScopeRequests = new Map()
@@ -443,23 +496,61 @@ const options = reactive({
 const baseSections = computed(() => createConfigSections(options, config))
 const commonSection = computed(() => buildCommonSection(baseSections.value))
 const allSections = computed(() => [commonSection.value, ...(baseSections.value || [])])
-const sections = computed(() => (allSections.value || []).filter((s) => showAdvanced.value || !s.advanced))
+// v1.29.5：高级折叠改为字段级——origin 属于旧高级分组的字段（field.advanced）
+// 默认收起，仅当“显示高级设置”打开才显示；只作用于分组浏览视图，
+// 常用设置（common）与搜索结果不受影响。
+function filterAdvancedFields(section) {
+  if (showAdvanced.value) return section;
+  const groups = (section.groups || [])
+    .map((group) => ({
+      ...group,
+      fields: (group.fields || []).filter((field) => !field?.advanced),
+    }))
+    .filter((group) => (group.fields || []).length > 0);
+  return {...section, groups};
+}
+const sections = computed(() =>
+  (allSections.value || []).map((section) =>
+    section.value === "common" ? section : filterAdvancedFields(section),
+  ),
+)
+
+// v1.29.5：设置搜索（Config 页顶部输入框；仅搜静态 227 项，按 label /
+// key / hint 匹配，命中字段按所属任务组展示；搜索时替代当前分组视图）。
+const searchQuery = ref("")
+const isSearching = computed(() => Boolean(String(searchQuery.value || "").trim()))
+const searchResultSection = computed(() =>
+  isSearching.value ? buildSearchResultSection(baseSections.value, searchQuery.value) : null,
+)
 
 // ---------------------------------------------------------------- 常用设置
 // v1.29.3：向导已删，取而代之的是常驻的“常用设置”section：
 // 字段按 key 从既有 sections 里挑，不复制定义，避免两处漂移。
-// 取字段时读 baseSections（全部 13 个 section，未按高级折叠过滤），
+// v1.29.5：常用设置从 8 项扩到 20 项（分组表 GROUPING.md 开头所列）。
+// 取字段时读 baseSections（全部 6 个任务 section，未按高级折叠过滤），
 // 否则取不到 organize_source_path（网盘整理，高级）与
 // enable_cloud_upgrade（洗版设置，高级）。
 const COMMON_FIELD_KEYS = Object.freeze([
   "enabled",
   "cloud_drive",
-  "organize_source_path",
-  "organize_after_transfer",
   "cron",
   "platform_download_policy",
   "cross_transfer_enabled",
+  "organize_after_transfer",
+  "organize_source_path",
   "enable_cloud_upgrade",
+  "tg_monitor_enabled",
+  "strm_generate_enabled",
+  "notify",
+  "auto_subscribe_enabled",
+  "media_server_refresh_enabled",
+  "emby_proxy_enabled",
+  "search_concurrency",
+  "cross_transfer_daily_upload_limit_gb",
+  "transfer_risk_cooldown",
+  "upgrade_episode_limit",
+  "checkin_auto_retry",
+  "batch_size",
 ])
 
 /** 从全部 section 里按 key 取字段定义（取不到就跳过，不报错） */
@@ -497,9 +588,31 @@ function buildCommonSection(list) {
     "organize_after_transfer",
     "cross_transfer_enabled",
     "enable_cloud_upgrade",
+    "upgrade_episode_limit",
+    "cross_transfer_daily_upload_limit_gb",
+    "transfer_risk_cooldown",
+    "batch_size",
   ])
   if (transferFields.length) {
     groups.push({title: "转存与洗版", icon: "mdi-cloud-download-outline", fields: transferFields})
+  }
+  const playbackFields = pick([
+    "tg_monitor_enabled",
+    "strm_generate_enabled",
+    "media_server_refresh_enabled",
+    "emby_proxy_enabled",
+  ])
+  if (playbackFields.length) {
+    groups.push({title: "监控与播放", icon: "mdi-file-video-outline", fields: playbackFields})
+  }
+  const subscribeFields = pick([
+    "auto_subscribe_enabled",
+    "notify",
+    "search_concurrency",
+    "checkin_auto_retry",
+  ])
+  if (subscribeFields.length) {
+    groups.push({title: "订阅与通知", icon: "mdi-bell-outline", fields: subscribeFields})
   }
   return {
     value: "common",
@@ -512,24 +625,36 @@ function buildCommonSection(list) {
 const navGroups = computed(() => {
   const all = sections.value || [];
   const map = new Map(all.map((s) => [s.value, s]));
+  // v1.29.5：导航不再用 4 组白名单，6 个任务组直出；常用设置是默认页签，
+  // 单独成组排第一（v1.29.3 起默认打开）。
   const groups = [
     {
-      name: "核心配置",
-      items: ["common", "basic", "transfer", "organize", "subscribe", "subsources", "upgrade"]
-        .map((v) => map.get(v)).filter(Boolean),
+      name: "常用设置",
+      items: ["common"].map((v) => map.get(v)).filter(Boolean),
     },
     {
-      name: "渠道配置",
-      items: ["tg", "drive", "search"].map((v) => map.get(v)).filter(Boolean),
+      name: "追更",
+      items: ["tracking"].map((v) => map.get(v)).filter(Boolean),
     },
     {
-      // 1.7.43：navGroups 是白名单，新增 section 必须登记，否则导航不渲染
-      name: "播放与媒体",
-      items: ["strm", "emby"].map((v) => map.get(v)).filter(Boolean),
+      name: "转存",
+      items: ["transfer"].map((v) => map.get(v)).filter(Boolean),
     },
     {
-      name: "服务通知",
-      items: ["checkin", "notify"].map((v) => map.get(v)).filter(Boolean),
+      name: "播放",
+      items: ["playback"].map((v) => map.get(v)).filter(Boolean),
+    },
+    {
+      name: "通知与签到",
+      items: ["notify"].map((v) => map.get(v)).filter(Boolean),
+    },
+    {
+      name: "渠道",
+      items: ["channels"].map((v) => map.get(v)).filter(Boolean),
+    },
+    {
+      name: "网盘与基础",
+      items: ["drive"].map((v) => map.get(v)).filter(Boolean),
     },
   ];
   return groups.filter((g) => g.items.length > 0);
@@ -634,7 +759,8 @@ const filteredTestItems = computed(() => {
 })
 
 const sourceNames = computed(() => {
-  const searchSec = allSections.value.find((s) => s.value === "search");
+  // v1.29.5：搜索渠道 subtabs 随 search 并入任务组“渠道”。
+  const searchSec = allSections.value.find((s) => s.value === "channels");
   const result = {}
   ;(searchSec?.subtabs || []).forEach((t) => {
     if (t.value && t.value !== "common") result[t.value] = t.title;
@@ -643,10 +769,8 @@ const sourceNames = computed(() => {
 });
 
 const autoSubscribeProviderNames = computed(() => {
-  // 1.10.5：榜单源已从“榜单订阅”拆到独立分组“订阅源”。
-  const subSec =
-    allSections.value.find((s) => s.value === "subsources") ||
-    allSections.value.find((s) => s.value === "subscribe");
+  // v1.29.5：榜单源 subtabs 随“订阅源”并入任务组“追更”。
+  const subSec = allSections.value.find((s) => s.value === "tracking");
   const result = {}
   ;(subSec?.subtabs || []).forEach((t) => {
     if (t.value && t.value !== "global") result[t.value] = `${t.title}榜单`;
@@ -1088,8 +1212,8 @@ function selectDirectory(path) {
   directoryVisible.value = false
 }
 
-function optionScopeForTab(tab = activeTab.value) {
-  return optionScopeByTab[String(tab || "basic")] || "base"
+function optionScopesForTab(tab = activeTab.value) {
+  return optionScopeByTab[String(tab || "tracking")] || ["base"]
 }
 
 async function loadOptions(scope = "base", {force = false, refresh = false} = {}) {
@@ -1142,8 +1266,7 @@ function refreshDynamicOptions(descriptor) {
 
 async function reloadVisibleOptionScopes() {
   loadedOptionScopes.clear()
-  const visibleScope = optionScopeForTab();
-  const scopes = [...new Set(["base", visibleScope])];
+  const scopes = [...new Set(["base", ...optionScopesForTab()])];
   await Promise.all(scopes.map((scope) => loadOptions(scope, { force: true })))
 }
 
@@ -1445,10 +1568,13 @@ onMounted(async () => {
 })
 
 watch(activeTab, (tab) => {
-  const scope = optionScopeForTab(tab);
-  loadOptions(scope).catch((error) => {
-    notify(`加载配置选项失败：${error.message || error}`, "warning")
-  })
+  Promise.all(
+    optionScopesForTab(tab).map((scope) =>
+      loadOptions(scope).catch((error) => {
+        notify(`加载配置选项失败：${error.message || error}`, "warning")
+      }),
+    ),
+  )
 })
 
 onBeforeUnmount(() => {
@@ -1670,6 +1796,45 @@ watch(
   position: relative;
 }
 
+/* v1.29.5：设置搜索框与搜索结果区 */
+.config-search-bar {
+  flex: 0 0 auto;
+  padding: 10px 24px 0;
+}
+
+.config-search-results {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 6px 24px 14px;
+}
+
+.config-search-meta {
+  flex: 0 0 auto;
+  padding: 4px 0 8px;
+}
+
+.config-search-body {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.config-search-empty {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px 0;
+}
+
 .config-window-section {
   box-sizing: border-box;
   width: 100%;
@@ -1813,6 +1978,12 @@ watch(
     display: none !important;
   }
   .config-window-section {
+    padding: 8px 12px 16px;
+  }
+  .config-search-bar {
+    padding: 8px 12px 0;
+  }
+  .config-search-results {
     padding: 8px 12px 16px;
   }
   .config-actions {

@@ -14,6 +14,9 @@
 - 网盘资源页与 resource/ 组件、useMediaData/useMediaDetail/
   useResourcePreview 一并删除；
 - 配置页默认只露常用 6 组，其余 6 组折叠进高级设置（本地记忆开关）。
+- v1.29.5：13 个技术分组按任务重排为 6 组（追更/转存/播放/通知与签到/
+  渠道/网盘与基础）+ 常用设置 20 项 + 顶部搜索框；高级折叠改为字段级
+  （origin 属于旧高级分组的字段默认收起）。
 """
 
 from __future__ import annotations
@@ -208,19 +211,29 @@ class TestWorkbenchThinShells(unittest.TestCase):
 
 
 class TestConfigAdvancedFolding(unittest.TestCase):
-    def test_advanced_sections_flagged_in_fields(self):
+    def test_advanced_field_origins_flagged_in_fields(self):
+        # v1.29.5：高级折叠改为字段级——origin 属于旧高级分组的字段打上
+        # advanced: true；其余 origin 的字段不带该标记。
         source = _read("frontend/cloudsubscribex/src/config/fields.js")
-        self.assertIn("ADVANCED_SECTIONS", source)
+        advanced = re.search(
+            r"ADVANCED_FIELD_ORIGINS = new Set\(\[(.*?)\]\)", source, re.S
+        ).group(1)
         for value in ("organize", "checkin", "strm", "emby", "drive", "upgrade"):
-            self.assertIn(f'"{value}"', source)
+            self.assertIn(f'"{value}"', advanced)
         for value in ("basic", "transfer", "subscribe", "search", "tg", "notify"):
-            self.assertNotIn(f'"{value}"', source.split("ADVANCED_SECTIONS")[1])
+            self.assertNotIn(f'"{value}"', advanced)
+        self.assertIn("advanced: true", source)
 
-    def test_config_filters_advanced_and_common_reads_all(self):
+    def test_config_filters_advanced_fields_and_common_reads_all(self):
         source = _read("frontend/cloudsubscribex/src/components/Config.vue")
         self.assertIn("allSections", source)
         self.assertIn("showAdvanced", source)
         self.assertIn("csx-config-show-advanced", source)
+        # v1.29.5：字段级折叠由 filterAdvancedFields 在 sections computed
+        # 里做；常用设置不受影响（仍读未折叠的 baseSections）。
+        self.assertIn("function filterAdvancedFields(section)", source)
+        self.assertIn("filterAdvancedFields(section)", source)
+        self.assertIn("!field?.advanced", source)
         # v1.24.0：高级开关的 v-switch 随侧栏搬到 ConfigSidebar.vue，
         # 开关状态仍由 Config.vue 的 showAdvanced 持有（v-model:show-advanced）。
         sidebar = _read(
@@ -228,8 +241,8 @@ class TestConfigAdvancedFolding(unittest.TestCase):
         )
         self.assertIn("显示高级设置", sidebar)
         # v1.29.3：向导已删，读全量的语义由“常用设置”继承——
-        # pickFields 按 key 取字段必须读未折叠的 baseSections（全部 13 个
-        # section），否则取不到 organize_source_path（网盘整理，高级）与
+        # pickFields 按 key 取字段必须读未折叠的 baseSections（全部 6 个
+        # 任务 section），否则取不到 organize_source_path（网盘整理，高级）与
         # enable_cloud_upgrade（洗版设置，高级）。
         pick = re.search(
             r"function pickFields\(keys\) \{.*?for \(const section of (\w+)\.value",
