@@ -14,7 +14,7 @@
 
 v1.29.5：13 个技术分组按任务重排为 6 组——订阅源 subtabs 随 subsources
 并入任务组“追更”，订阅运行设置同组；本文件的拆分断言（订阅 13 项 /
-订阅源 67 项、key 无重叠）仍按源文件校验，组装断言改为 6 组 227 项。
+订阅源 67 项、key 无重叠）仍按源文件校验，组装断言改为 6 组 233 项。
 """
 
 import json
@@ -148,7 +148,7 @@ class TestSubsourcesSplit(unittest.TestCase):
 
 @unittest.skipIf(shutil.which("node") is None, "node 不可用")
 class TestSectionAssemblyRuntime(unittest.TestCase):
-    """真实跑一遍 createConfigSections：6 个任务分组、227 项、key 无重叠。"""
+    """真实跑一遍 createConfigSections：6 个任务分组、233 项、key 无重叠。"""
 
     def test_sections_assemble(self):
         script = (
@@ -207,7 +207,7 @@ class TestSectionAssemblyRuntime(unittest.TestCase):
             data["counts"],
             {
                 "tracking": 91,
-                "transfer": 66,
+                "transfer": 72,
                 "playback": 18,
                 "notify": 21,
                 "channels": 24,
@@ -219,8 +219,8 @@ class TestSectionAssemblyRuntime(unittest.TestCase):
             ["douban", "maoyan", "tmdb", "mikan", "bangumi", "anilist", "netflix"],
         )
         self.assertEqual(data["channelsSubtabs"], ["common"])
-        self.assertEqual(data["totalKeys"], 227)
-        self.assertEqual(data["uniqueKeys"], 227)
+        self.assertEqual(data["totalKeys"], 233)
+        self.assertEqual(data["uniqueKeys"], 233)
         # 静态高级字段：organize 9 + upgrade 11 + strm 9 + emby 4 + checkin 4。
         self.assertEqual(data["advancedKeys"], 37)
 

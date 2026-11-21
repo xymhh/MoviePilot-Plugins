@@ -559,6 +559,7 @@ class SyncExecutionService(OwnerDelegator):
             manual_upgrade: bool = False,
             discovered_via: str = "",
             target_episodes: Optional[List[int]] = None,
+            funnel_route: bool = False,
     ) -> bool:
         if self._stop_requested():
             logger.info("同步任务已收到停止请求，取消执行")
@@ -751,6 +752,13 @@ class SyncExecutionService(OwnerDelegator):
         )
         for subscribe in subscribes:
             setattr(subscribe, "_transfer_source", transfer_source)
+
+        # v1.29.7 阶段 1：漏斗归属随订阅对象下沉，转存管线在
+        # _ingest_stage_confirm 里读它盖到每项上（与 _discovered_via /
+        # _transfer_source 同一形态）。
+        if funnel_route:
+            for subscribe in subscribes:
+                setattr(subscribe, "_funnel_route", True)
 
         tv_subscribes = []
         movie_subscribes = []
@@ -1332,6 +1340,9 @@ class SyncExecutionService(OwnerDelegator):
             queue_revision: Optional[int] = None,
             result: Optional[Dict[str, Any]] = None,
             lock_acquired: bool = False,
+            # v1.29.7 阶段 1：手动提交走整理漏斗（只由手动转存入口与
+            # 媒体服务器洗版入口置位；TG/订阅轮次不置位，走旧流水线）。
+            funnel_route: bool = False,
     ) -> bool:
         is_full_sync = (
                 subscribe_id is None
@@ -1406,6 +1417,7 @@ class SyncExecutionService(OwnerDelegator):
                     upgrade_request=upgrade_request,
                     discovered_via=discovered_via,
                     target_episodes=target_episodes,
+                    funnel_route=funnel_route,
                 )
             except Exception as e:
                 logger.error(f"同步任务异常：{e}")

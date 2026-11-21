@@ -31,6 +31,7 @@ export default defineConfig({
                 "./AppPageHistory": "./src/components/AppPageHistory.vue",
                 "./AppPageChannels": "./src/components/AppPageChannels.vue",
                 "./AppPageTgMonitor": "./src/components/AppPageTgMonitor.vue",
+                "./AppPageFunnel": "./src/components/AppPageFunnel.vue",
             },
             shared: {
                 vue: {requiredVersion: false, generate: false},

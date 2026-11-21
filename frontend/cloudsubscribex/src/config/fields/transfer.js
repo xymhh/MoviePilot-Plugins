@@ -453,6 +453,61 @@ export function createTransferSection(options) {
           },
         ],
       },
+      {
+        title: "整理队列",
+        icon: "mdi-filter-check-outline",
+        fields: [
+          {
+            key: "funnel_phase1_enabled",
+            label: "整理队列（阶段 1）",
+            type: "switch",
+            hint: "手动提交进入整理队列、由漏斗逐行整理；关闭后手动提交回旧流水线，队列里未处理行保留、开关再开时继续处理",
+            cols: 4,
+          },
+          {
+            key: "funnel_target_dir",
+            label: "整理目标目录",
+            type: "text",
+            hint: "漏斗整理的目标目录，默认即现有资源目录（/Alist/影视/moviepilot/转存/）",
+            cols: 8,
+          },
+          {
+            key: "funnel_trigger",
+            label: "触发方式",
+            type: "select",
+            items: [
+              { title: "立即（入队后 10 秒内起轮）", value: "immediate" },
+            ],
+            hint: "阶段 1 只支持立即触发",
+            cols: 4,
+          },
+          {
+            key: "funnel_inflight_lease_seconds",
+            label: "在途租约（秒）",
+            type: "number",
+            min: 60,
+            max: 86400,
+            hint: "worker 认领后租约时长，过期未终态则回收重跑，默认 7200 秒（2 小时）",
+            cols: 4,
+          },
+          {
+            key: "funnel_max_attempts",
+            label: "单行最多尝试次数",
+            type: "number",
+            min: 1,
+            max: 20,
+            hint: "耗尽后挂起待人工复核，默认 5 次",
+            cols: 4,
+          },
+          {
+            key: "funnel_dedup_strict",
+            label: "落盘前双名实查",
+            type: "switch",
+            hint: "打开时带/不带 {tmdb-} 的两个名字都算重复；关闭只查规范名，仅排障用",
+            cols: 4,
+          },
+        ],
+      },
     ],
   }
 }

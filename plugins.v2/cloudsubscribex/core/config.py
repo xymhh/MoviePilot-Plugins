@@ -385,6 +385,19 @@ class UIConfig:
             "cross_season_path_guard": True,
             "enable_cloud_upgrade": False,
             "enable_pt_upgrade": False,
+            # v1.29.7 阶段 1：网盘整理漏斗（手动提交入队 + worker 逐行整理）。
+            # 关 = 手动提交回旧流水线，队列里未处理行保留、开关再开时继续处理。
+            "funnel_phase1_enabled": False,
+            # 漏斗目标目录：默认即现有资源目录，零迁移（设计 §14 推荐值）。
+            "funnel_target_dir": "/Alist/影视/moviepilot/转存/",
+            # 触发方式：immediate=入队后 10 秒内起轮（阶段 1 只支持 immediate）。
+            "funnel_trigger": "immediate",
+            # 在途登记租约（秒）：worker 认领后 lease_until=now+该值，过期回收重跑。
+            "funnel_inflight_lease_seconds": 7200,
+            # 单行最多尝试次数，耗尽后挂起待人工复核。
+            "funnel_max_attempts": 5,
+            # True=落盘前实查双名（带/不带 {tmdb-} 都算）；False=只查规范名，仅排障用。
+            "funnel_dedup_strict": True,
             "upgrade_mode": "largest",
             "episode_dedup_enabled": True,
             "verify_landed_enabled": True,

@@ -27,6 +27,9 @@ ChannelManager.vue（见 tests/test_channel_dynamic_options_1_18_4.py）。
 v1.29.3：配置向导已删（ConfigWizard.vue 删除，Config.vue/ConfigSidebar
 不再有向导引用），取而代之的是常驻的“常用设置”section（value common，
 核心配置分组第一位，默认打开）。
+v1.29.7 阶段 1：整理队列（网盘整理漏斗）独立成主侧栏导航
+（AppPageFunnel 薄壳挂载 FunnelQueue）；1.10.4 撤掉的 AppPageOrganize /
+OrganizePanel 仍禁复活（新页用了不同名字）。
 
 用法：python3 scripts/check_frontend_entry.py [项目根]
 """
@@ -45,10 +48,11 @@ def main(root: Path) -> int:
     app_history = components / "AppPageHistory.vue"
     app_channels = components / "AppPageChannels.vue"
     app_tg_monitor = components / "AppPageTgMonitor.vue"
+    app_funnel = components / "AppPageFunnel.vue"
     page = components / "Page.vue"
     errors: list[str] = []
 
-    for path in (workbench, app_page, app_history, app_channels, app_tg_monitor, page):
+    for path in (workbench, app_page, app_history, app_channels, app_tg_monitor, app_funnel, page):
         if not path.exists():
             errors.append(f"缺少文件：{path}")
     if errors:
@@ -72,6 +76,7 @@ def main(root: Path) -> int:
     history_text = app_history.read_text(encoding="utf-8")
     channels_text = app_channels.read_text(encoding="utf-8")
     tg_monitor_text = app_tg_monitor.read_text(encoding="utf-8")
+    funnel_text = app_funnel.read_text(encoding="utf-8")
     page_text = page.read_text(encoding="utf-8")
 
     # 薄壳：不含页签，只转发 PluginWorkbench；v1.23.0 起 mode prop 已删，
@@ -102,6 +107,12 @@ def main(root: Path) -> int:
             errors.append(f"AppPageTgMonitor 不应挂载 {component}")
     if re.search(r"<v-tab\b", tg_monitor_text):
         errors.append("AppPageTgMonitor 不应有页签")
+
+    # v1.29.7 阶段 1：整理队列页是薄壳，只挂载 FunnelQueue，不含页签。
+    if "FunnelQueue" not in funnel_text:
+        errors.append("AppPageFunnel 未挂载 FunnelQueue")
+    if re.search(r"<v-tab\b", funnel_text):
+        errors.append("AppPageFunnel 不应有页签")
 
     # v1.24.0：Config.vue 与 ChannelManager.vue 拆分子组件后的页面组成。
     config_path = components / "Config.vue"
@@ -167,6 +178,8 @@ def main(root: Path) -> int:
         errors.append("vite 联邦缺少暴露：./AppPageHistory")
     if '"./AppPageTgMonitor": "./src/components/AppPageTgMonitor.vue"' not in vite:
         errors.append("vite 联邦缺少暴露：./AppPageTgMonitor（1.13.2 频道监控导航）")
+    if '"./AppPageFunnel": "./src/components/AppPageFunnel.vue"' not in vite:
+        errors.append("vite 联邦缺少暴露：./AppPageFunnel（v1.29.7 整理队列导航）")
     if "AppPageOrganize" in vite:
         errors.append("vite 联邦不应再暴露 ./AppPageOrganize（1.10.4 已删除）")
     if "AppPageResource" in vite:

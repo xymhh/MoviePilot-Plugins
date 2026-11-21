@@ -35,11 +35,14 @@ KIND_OFFLINE_SUBMIT = "offline_submit"
 KIND_POSTPROCESS = "postprocess"
 #: 上传到目标网盘失败。
 KIND_UPLOAD = "upload"
+#: 提交前复查拦截的重复文件（v1.29.7 阶段 1 修补 3）：同一集/同一部电影
+#: 已有另一份在库，重试只会再次拦截、再写一条失败记录，属永久性失败。
+KIND_DUPLICATE = "duplicate"
 #: 未能归类。
 KIND_UNKNOWN = "unknown"
 
 #: 永久性失败：同一条链接重试不可能成功，只能换源或删除记录。
-PERMANENT_KINDS = frozenset({KIND_SHARE_INVALID, KIND_FILE_MISSING})
+PERMANENT_KINDS = frozenset({KIND_SHARE_INVALID, KIND_FILE_MISSING, KIND_DUPLICATE})
 
 #: 类型 -> 中文展示名（历史页 tooltip、日志统一口径）。
 KIND_LABELS: Dict[str, str] = {
@@ -53,12 +56,16 @@ KIND_LABELS: Dict[str, str] = {
     KIND_OFFLINE_SUBMIT: "离线下载失败",
     KIND_POSTPROCESS: "后处理失败",
     KIND_UPLOAD: "上传失败",
+    KIND_DUPLICATE: "重复拦截",
     KIND_UNKNOWN: "未分类失败",
 }
 
 #: 文本 -> 类型的关键词表。**顺序即优先级**：越靠前越具体，
 #: 例如「分享链接无效：已过期」必须先命中 share_invalid，而不是 network。
 _KEYWORD_RULES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    (KIND_DUPLICATE, (
+        "提交前复查发现重复",
+    )),
     (KIND_SHARE_INVALID, (
         "分享链接无效", "分享链接失效", "分享已失效", "分享失效",
         "分享已取消", "分享取消", "已取消分享", "取消分享",

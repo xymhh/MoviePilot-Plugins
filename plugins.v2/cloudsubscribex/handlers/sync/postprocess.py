@@ -1284,14 +1284,14 @@ class PostprocessService(OwnerDelegator):
                    in normalized_task_ids
             }
             if not removed_keys:
-                return set(), len(pending), {}
+                return set(), self._count_offline_monitor_pending(pending), {}
             removed_items = {
                 key: copy.deepcopy(pending[key]) for key in removed_keys
             }
             for key in removed_keys:
                 pending.pop(key, None)
             self._save_offline_pending(pending)
-            return removed_keys, len(pending), removed_items
+            return removed_keys, self._count_offline_monitor_pending(pending), removed_items
 
 
     def _commit_single_item(
@@ -1304,6 +1304,30 @@ class PostprocessService(OwnerDelegator):
             ctx: PostprocessBatchContext,
     ) -> None:
         """单项后处理完成后立即结算终态并将通知入队，避免中途停止丢失已完成项。"""
+        # v1.29.7 阶段 1：提交前复查——MP 整理成功后、写终态/STRM/历史/
+        # 通知之前，再做一次落盘前实查 + 在途登记校验；发现目标路径已有
+        # 另一份同集文件时拦截：不写第二份终态，本份标记待人工复核（held），
+        # 绝不自动删除任何一份。复查放在共享入口，TG/订阅旧流水线也受益。
+        try:
+            intercepted, intercept_reason = self._owner.funnel.precommit_recheck(
+                item, pending_key, media, ctx
+            )
+        except Exception as error:  # noqa: BLE001 - 复查异常 fail-open
+            logger.debug(f"提交前复查异常（fail-open）：{error}", exc_info=True)
+            intercepted, intercept_reason = False, ""
+        if intercepted:
+            logger.warning(
+                f"提交前复查发现重复，已拦截：{item.get('file_name') or pending_key}，"
+                f"{intercept_reason}"
+            )
+            try:
+                self._owner.funnel_mark_held_by_pending_key(
+                    str(pending_key or ""), intercept_reason
+                )
+            except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
+                logger.debug(f"提交前复查挂起漏斗行失败：{error}", exc_info=True)
+            self._abort_single_item(item, pending_key, intercept_reason, ctx, notify=False)
+            return
         self._update_postprocess_progress(
             item, pending_key, "commit", "更新终态和订阅进度"
         )
@@ -1719,6 +1743,37 @@ class PostprocessService(OwnerDelegator):
                 ctx.moved_files[pending_key] = target_file
                 ctx.sync_move(item.get("staging_dir") or "/", final_dir, target_file)
 
+    def _funnel_phase1_active(self) -> bool:
+        """漏斗阶段 1 开关是否打开（经宿主读插件配置，未初始化时默认关）。"""
+        return bool(getattr(self, "_funnel_phase1_enabled", False))
+
+    def _count_offline_monitor_pending(self, pending) -> int:
+        """离线监控服务的待终态行数（v1.29.7 阶段 1 修补 4）。
+
+        口径与 ``SyncHandler.count_offline_monitor_pending`` 一致：
+        漏斗归属行在阶段 1 开关开启时由漏斗 worker 驱动，不占离线监控；
+        开关关闭时回旧流水线，仍计入。``pending`` 可为待终态映射
+        （key → item）或待终态行列表。
+        """
+        try:
+            active = self._funnel_phase1_active()
+        except Exception:  # noqa: BLE001 - 判定异常按开关关闭处理
+            active = False
+        if isinstance(pending, dict):
+            items = pending.values()
+        else:
+            items = pending or []
+        count = 0
+        for item in items:
+            if (
+                    isinstance(item, dict)
+                    and item.get("funnel_route")
+                    and active
+            ):
+                continue
+            count += 1
+        return count
+
     def _should_skip_for_stop(
             self, item: Dict[str, Any], pending_key: str, ctx: PostprocessBatchContext
     ) -> bool:
@@ -2049,6 +2104,31 @@ class PostprocessService(OwnerDelegator):
         media, media_data = self._owner.transfer_details._restore_pending_media_context(
             item, pending_key
         )
+        # v1.29.7 阶段 1 复核修补 2（第二轮）：dest_missed 路径也在
+        # _finalize_ready_item 之前生成 STRM，前置复查同样要盖住这里——
+        # 与 _organize_and_finalize_single_item 的 STRM 前复查同口径。
+        # MP 整理已落盘的 .mkv 本体拦不住（落盘即既成事实），拦截只保
+        # STRM/历史/通知/订阅结算/替换删除，本份挂起待人工清理。
+        try:
+            intercepted, intercept_reason = self._owner.funnel.precommit_recheck(
+                item, pending_key, media, ctx
+            )
+        except Exception as error:  # noqa: BLE001 - 复查异常 fail-open
+            logger.debug(f"提交前复查异常（fail-open）：{error}", exc_info=True)
+            intercepted, intercept_reason = False, ""
+        if intercepted:
+            logger.warning(
+                f"提交前复查发现重复，已拦截：{item.get('file_name') or pending_key}，"
+                f"{intercept_reason}"
+            )
+            try:
+                self._owner.funnel_mark_held_by_pending_key(
+                    str(pending_key or ""), intercept_reason
+                )
+            except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
+                logger.debug(f"提交前复查挂起漏斗行失败：{error}", exc_info=True)
+            self._abort_single_item(item, pending_key, intercept_reason, ctx, notify=False)
+            return
         strm_path = None
         if (
                 self._strm_generate_enabled
@@ -2427,6 +2507,33 @@ class PostprocessService(OwnerDelegator):
             )
             return
 
+        # v1.29.7 阶段 1 修补 2：提交前复查提到 STRM 生成之前——
+        # _commit_single_item 入口的复查只能拦第二条历史/通知，拦不住
+        # 已写好的第二份 STRM；媒体信息恢复后、STRM 生成前再查一次，
+        # 拦截时直接 abort（notify=False），不写 STRM。
+        # 注意：MP 整理已落盘的 .mkv 本体拦不住（落盘即既成事实），
+        # 拦截只保 STRM/历史/通知/订阅结算/替换删除，本份挂起待人工清理。
+        try:
+            intercepted, intercept_reason = self._owner.funnel.precommit_recheck(
+                item, pending_key, media, ctx
+            )
+        except Exception as error:  # noqa: BLE001 - 复查异常 fail-open
+            logger.debug(f"提交前复查异常（fail-open）：{error}", exc_info=True)
+            intercepted, intercept_reason = False, ""
+        if intercepted:
+            logger.warning(
+                f"提交前复查发现重复，已拦截：{item.get('file_name') or pending_key}，"
+                f"{intercept_reason}"
+            )
+            try:
+                self._owner.funnel_mark_held_by_pending_key(
+                    str(pending_key or ""), intercept_reason
+                )
+            except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
+                logger.debug(f"提交前复查挂起漏斗行失败：{error}", exc_info=True)
+            self._abort_single_item(item, pending_key, intercept_reason, ctx, notify=False)
+            return
+
         self._update_postprocess_progress(
             item, pending_key, "strm", "生成并校验 STRM 文件"
         )
@@ -2464,13 +2571,31 @@ class PostprocessService(OwnerDelegator):
         else:
             self._schedule_finalize_retry(item, ctx.now)
 
-    def _process_due_items(self, ctx: PostprocessBatchContext) -> None:
-        """按序调度处理所有到期的后处理任务。"""
+    def _process_due_items(
+            self, ctx: PostprocessBatchContext, funnel_drive: bool = False,
+    ) -> None:
+        """按序调度处理所有到期的后处理任务。
+
+        ``funnel_drive``：漏斗 worker 自己的驱动——漏斗归属的记录由漏斗
+        worker 驱动，离线监控跳过；但 worker 驱动时走的也是本方法，
+        此时跳过逻辑必须让路（否则行被认领、驱动、放回，无限循环，
+        永远到不了终态，见 v1.29.7 阶段 1 复核修补 1（第二轮））。
+        离线监控保持默认 ``funnel_drive=False``。
+        """
         for pending_key in ctx.due_keys:
             item = ctx.pending.get(pending_key)
             if not item:
                 continue
             if self._should_skip_for_stop(item, pending_key, ctx):
+                continue
+            # v1.29.7 阶段 1：漏斗归属的记录由漏斗 worker 驱动，离线监控
+            # 跳过（开关关闭时回旧流水线，监控正常处理）；漏斗 worker
+            # 自己的驱动（funnel_drive=True）不受此跳过限制。
+            if (
+                    item.get("funnel_route")
+                    and self._funnel_phase1_active()
+                    and not funnel_drive
+            ):
                 continue
             if item.get("finalize_dead"):
                 self._handle_finalize_dead_item(item, pending_key, ctx)
@@ -2687,7 +2812,11 @@ class PostprocessService(OwnerDelegator):
                         postprocess_active=False,
                         postprocess_detail="",
                     )
-        self._notify_offline_pending_changed(result["pending"])
+        # v1.29.7 阶段 1 修补 4：喂给离线监控的计数只含非漏斗行（开关开启时
+        # 漏斗行由漏斗 worker 驱动）；result["pending"] 仍为总数（上报口径不变）。
+        self._notify_offline_pending_changed(
+            self._count_offline_monitor_pending(current_pending)
+        )
         return result
 
     def monitor_offline_strm_tasks(

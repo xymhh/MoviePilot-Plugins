@@ -1,6 +1,7 @@
 """v1.29.5：设置页按任务重排（6 组 + 常用设置 20 项 + 搜索框 + 字段级高级折叠）。
 
 分组表：~/workspace/figma-settings-redesign/GROUPING.md（227 项零丢失零新增）。
+v1.29.7 阶段 1 在转存组新增 6 个漏斗键（funnel_*），总数 233。
 静态接线测试 + node 真实组装/搜索测试；不拼 UI 行为，行为由 vite 构建 +
 全量套件保证。
 """
@@ -44,7 +45,7 @@ SECTION_VUE = os.path.join(
 
 TASK_COUNTS = {
     "tracking": 91,
-    "transfer": 66,
+    "transfer": 72,
     "playback": 18,
     "notify": 21,
     "channels": 24,
@@ -292,8 +293,8 @@ class TestAssemblyRuntime(unittest.TestCase):
             )
         )
         self.assertEqual(data["counts"], TASK_COUNTS)
-        self.assertEqual(data["totalKeys"], 227)
-        self.assertEqual(data["uniqueKeys"], 227)
+        self.assertEqual(data["totalKeys"], 233)
+        self.assertEqual(data["uniqueKeys"], 233)
         self.assertEqual(data["advancedCount"], 37)
         # 同一任务组内子分组标题不重复（ConfigSection 用标题做 v-for key 与折叠键）。
         for value, titles in data["groupTitles"].items():

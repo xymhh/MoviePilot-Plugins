@@ -73,7 +73,7 @@ class TestTgMonitorNav(unittest.TestCase):
         by_key = {item["nav_key"]: item for item in nav}
         self.assertEqual(
             [item["nav_key"] for item in nav],
-            ["channels", "tg-monitor", "history"],
+            ["channels", "tg-monitor", "history", "funnel"],
         )
         monitor = by_key["tg-monitor"]
         self.assertEqual(monitor["title"], "频道监控")
@@ -84,6 +84,13 @@ class TestTgMonitorNav(unittest.TestCase):
         # 频道监控插在渠道管理与转存记录之间，转存记录顺延一位。
         self.assertEqual(by_key["channels"]["order"], 30)
         self.assertEqual(by_key["history"]["order"], 32)
+        # v1.29.7 阶段 1：整理队列（funnel）独立成导航，排在转存记录之后。
+        funnel = by_key["funnel"]
+        self.assertEqual(funnel["title"], "整理队列")
+        self.assertEqual(funnel["section"], "system")
+        self.assertEqual(funnel["permission"], "manage")
+        self.assertEqual(funnel["order"], 33)
+        self.assertTrue(str(funnel["icon"]).startswith("mdi-"))
 
     def test_all_entries_in_host_whitelist(self):
         nav = _registration().get_sidebar_nav()

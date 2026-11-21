@@ -63,6 +63,7 @@ from .core.api import (
     SearchApi,
     SyncApi,
     TgMonitorApi,
+    FunnelApi,
 )
 from .core.channels import ChannelStore
 from .core.config_normalize import normalize_plugin_config
@@ -118,6 +119,7 @@ _COMPONENT_TYPES = (
     RedirectApi,
     DuplicateApi,
     TgMonitorApi,
+    FunnelApi,
     MessageRoutingHook,
     PluginEventHandler,
     MoviePilotRegistration,
@@ -197,7 +199,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.29.6"
+    plugin_version = "1.29.7"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -889,9 +891,18 @@ class CloudSubscribeX(_PluginBase):
             except Exception as error:  # noqa: BLE001 - 修复失败不得影响插件主流程
                 logger.warning(f"修复补写 registration 失败（不影响启动）：{error}")
         self._update_offline_monitor(
-            len(self._sync_handler.get_pending_finalize_tasks())
+            self._sync_handler.count_offline_monitor_pending(
+                self._sync_handler.get_pending_finalize_tasks()
+            )
             if self._sync_handler else 0
         )
+        if self._sync_handler:
+            # v1.29.7 阶段 1：重启后续跑队列里未处理行（断点续跑）；
+            # 开关关闭时不建 job，行保留、开关再开时继续处理。
+            try:
+                self._sync_handler.funnel_ensure_worker()
+            except Exception as error:  # noqa: BLE001 - 恢复失败不挡启动
+                logger.warning(f"恢复整理队列 worker 失败：{error}")
         service_config_keys = {
             "enabled", "cron", "auto_subscribe_enabled", "auto_subscribe_cron",
             "auto_subscribe_douban_enabled", "auto_subscribe_maoyan_enabled",

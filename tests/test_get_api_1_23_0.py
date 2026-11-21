@@ -139,11 +139,12 @@ ALLOWLIST = {
 }
 
 # 注册总数：有意写死，路由增减必须同步改这里（与 ALLOWLIST 一起审）。
-# 78 条 dict；/redirect 一条 dict 带 GET+HEAD 两个方法，所以
-# (path, method) 对是 79。v1.22.0 是 80 条 dict / 81 对，减掉
-# /aired_counts 与 GET /qrcode/check 各一对。
-EXPECTED_REGISTERED_ENTRIES = 78
-EXPECTED_REGISTERED_PAIRS = 79
+# 84 条 dict；/redirect 一条 dict 带 GET+HEAD 两个方法，所以
+# (path, method) 对是 85。v1.29.6 是 78 条 dict / 79 对，v1.29.7
+# 阶段 1 加 6 条整理队列路由（/funnel/rows|status|run|stop|requeue|delete，
+# 前端 FunnelQueue.vue 全调，不进 ALLOWLIST）。
+EXPECTED_REGISTERED_ENTRIES = 84
+EXPECTED_REGISTERED_PAIRS = 85
 
 # 第 5 项：7 个服务层方法的新签名（去掉 apikey 后的剩余参数名）。
 SERVICE_METHOD_PARAMS = {
@@ -192,6 +193,7 @@ _REAL_MODULES = (
     ("cloudsubscribex.core.api.sync", "plugins.v2/cloudsubscribex/core/api/sync.py"),
     ("cloudsubscribex.core.api.search", "plugins.v2/cloudsubscribex/core/api/search.py"),
     ("cloudsubscribex.core.api.tg", "plugins.v2/cloudsubscribex/core/api/tg.py"),
+    ("cloudsubscribex.core.api.funnel", "plugins.v2/cloudsubscribex/core/api/funnel.py"),
     ("cloudsubscribex.core.api.runtime", "plugins.v2/cloudsubscribex/core/api/runtime.py"),
     ("cloudsubscribex.core.api.registration", "plugins.v2/cloudsubscribex/core/api/registration.py"),
 )
@@ -213,6 +215,7 @@ _COMPONENT_MODULE_CLASSES = (
     ("cloudsubscribex.core.api.redirect", "RedirectApi"),
     ("cloudsubscribex.core.api.duplicate", "DuplicateApi"),
     ("cloudsubscribex.core.api.tg", "TgMonitorApi"),
+    ("cloudsubscribex.core.api.funnel", "FunnelApi"),
     ("cloudsubscribex.core.services.runtime", "SyncRuntimeService"),
     ("cloudsubscribex.core.services.offline", "OfflineTaskService"),
     ("cloudsubscribex.core.services.platform", "PlatformIntegrationService"),

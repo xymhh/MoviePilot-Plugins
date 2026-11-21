@@ -12,6 +12,7 @@ from sqlalchemy import (
     delete,
     inspect,
     select,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -211,4 +212,70 @@ class RetryIndex(CloudSubscribeBase):
         Index("ix_retry_identity", "record_time", "share_url", "file_name"),
         Index("ix_retry_status", "status"),
         Index("ix_retry_created", "created_at"),
+    )
+
+
+#: 漏斗队列在途状态（阶段 1 的持久化在途登记）：同一去重键同一时间
+#: 只有一行能处于在途状态，崩溃/重启也不丢登记（设计 §3.1、§5.1）。
+#: 去重键：剧集 (media_type, tmdb_id, season, episode)，电影
+#: (media_type, tmdb_id, 0, 0)；tmdb_id 为空时不参与唯一约束，
+#: 由入队时的 file_id 代码级检查兜底。
+FUNNEL_QUEUE_ACTIVE_STATUSES = ("queued", "processing", "failed")
+
+
+class FunnelQueueRow(CloudSubscribeBase):
+    """网盘整理漏斗队列行（v1.29.7 阶段 1）。
+
+    生产者只写队列表（手动提交在 finalize 边界入队），worker 逐行认领
+    处理；终态 ``done``/``held`` 释放去重键。``failed`` 是“本轮失败待
+    重试”（next_retry_at 未到不跑），``held`` 是“需人工复核”（不再
+    自动重试）。pending_key 指向后处理待终态记录（_OFFLINE_PENDING_KEY
+    里的键），worker 用它驱动同一条终态提交路径。
+    """
+
+    __tablename__ = "funnel_queue"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    media_type: Mapped[str] = mapped_column(String(16), nullable=False, default="")
+    tmdb_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    season: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    episode: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    file_id: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    file_name: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    file_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sha1: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    cloud_dir: Mapped[str] = mapped_column(String(2048), nullable=False, default="")
+    staging_dir: Mapped[str] = mapped_column(String(2048), nullable=False, default="")
+    staging_name: Mapped[str] = mapped_column(String(1024), nullable=False, default="")
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="manual")
+    subscribe_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    quality: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    is_upgrade: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    replaced_from: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    notification_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    skip_reason: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued")
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_retry_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_until: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    media_data: Mapped[Optional[Any]] = mapped_column(JSON, nullable=True)
+    pending_key: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    created_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (
+        Index(
+            "uq_funnel_queue_active_key",
+            "media_type", "tmdb_id", "season", "episode",
+            unique=True,
+            # sqlite_where 只接受 SQL 表达式：纯字符串会在 create_all 编译
+            # DDL 时抛 AttributeError（_compiler_dispatch 缺失）。
+            sqlite_where=text("status IN ('queued', 'processing', 'failed')"),
+        ),
+        Index("ix_funnel_queue_status", "status"),
+        Index("ix_funnel_queue_pending_key", "pending_key"),
+        Index("ix_funnel_queue_due", "status", "next_retry_at"),
     )

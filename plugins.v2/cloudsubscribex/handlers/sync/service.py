@@ -38,6 +38,7 @@ except Exception:
 from .baseline import UpgradeBaselineService
 from .cleanup import HistoryCleanupService
 from .episode_dedup import EpisodeDedupService
+from .funnel import FunnelService
 from .history_backfill import HistoryBackfillService
 from .landed import LandedVerifyService
 from .matching import FileMatchingService
@@ -127,6 +128,7 @@ COMPONENT_FIELDS = (
     ("strm_ops", StrmOpsMixin),
     ("transfer_ops", TransferOpsMixin),
     ("history_backfill", HistoryBackfillService),
+    ("funnel", FunnelService),
 )
 
 
@@ -227,6 +229,7 @@ class SyncHandler:
         self._init_batch_limits(_get_val)
         self._init_plugin_callbacks(_get_val)
         self._init_upgrade_rules(_get_val)
+        self._init_funnel_flags(_get_val)
         self._init_cloud_paths(cloud_transfer_path, cloud_media_root, cloud_transfer_paths, cloud_media_paths)
         self._init_strm_media_server(_get_val)
         self._init_locks_caches()
@@ -430,6 +433,29 @@ class SyncHandler:
         self._type_folder_tv = (
                 str(get_val("type_folder_tv", "剧集") or "").strip().strip("/") or "剧集"
         )
+
+    def _init_funnel_flags(self, get_val):
+        """v1.29.7 阶段 1：网盘整理漏斗配置（只读阶段 1 实际用的键）。"""
+        self._funnel_phase1_enabled = bool(get_val("funnel_phase1_enabled", False))
+        self._funnel_target_dir = str(
+            get_val("funnel_target_dir", "") or "/Alist/影视/moviepilot/转存/"
+        )
+        self._funnel_trigger = str(
+            get_val("funnel_trigger", "") or "immediate"
+        ).strip().lower()
+        try:
+            self._funnel_inflight_lease_seconds = max(
+                60, min(int(get_val("funnel_inflight_lease_seconds", 7200) or 7200), 86400)
+            )
+        except (TypeError, ValueError):
+            self._funnel_inflight_lease_seconds = 7200
+        try:
+            self._funnel_max_attempts = max(
+                1, min(int(get_val("funnel_max_attempts", 5) or 5), 20)
+            )
+        except (TypeError, ValueError):
+            self._funnel_max_attempts = 5
+        self._funnel_dedup_strict = bool(get_val("funnel_dedup_strict", True))
 
 
     def _init_cloud_paths(self, cloud_transfer_path, cloud_media_root, cloud_transfer_paths, cloud_media_paths):
@@ -741,6 +767,46 @@ class SyncHandler:
 
     def repair_backfill_registrations(self) -> int:
         return self.history_backfill.repair_invalid_registrations()
+
+    def enqueue_funnel_from_pending(self, item, pending_key, mediainfo, subscribe_id=None, season=None):
+        return self.funnel.enqueue_from_pending(item, pending_key, mediainfo, subscribe_id=subscribe_id, season=season)
+
+    def funnel_run_round(self) -> Dict[str, int]:
+        return self.funnel.run_round()
+
+    def funnel_run_now(self) -> Dict[str, Any]:
+        return self.funnel.run_now()
+
+    def funnel_request_stop(self) -> Dict[str, Any]:
+        return self.funnel.request_stop()
+
+    def funnel_precommit_recheck(self, item, pending_key, media, ctx=None):
+        return self.funnel.precommit_recheck(item, pending_key, media, ctx)
+
+    def funnel_ensure_worker(self) -> None:
+        return self.funnel.ensure_worker()
+
+    def funnel_list_rows(self, statuses, limit: int = 200) -> List[Dict[str, Any]]:
+        return self.funnel.list_rows(statuses, limit=limit)
+
+    def funnel_queue_counts(self) -> Dict[str, int]:
+        return self.funnel.queue_counts()
+
+    def funnel_requeue_rows(self, row_ids) -> int:
+        return self.funnel.requeue_rows(row_ids)
+
+    def funnel_delete_rows(self, row_ids) -> int:
+        return self.funnel.delete_rows(row_ids)
+
+    def funnel_mark_held_by_pending_key(self, pending_key: str, reason: str = "") -> bool:
+        """提交前复查拦截时，把该 pending 记录对应的漏斗行挂起（held）。"""
+        repo = self.funnel._repository()
+        if repo is None:
+            return False
+        row = repo.get_by_pending_key(str(pending_key or ""))
+        if row is None:
+            return False
+        return bool(repo.mark_held(int(row.get("id") or 0), reason))
 
     def repair_subscribe_tmdb_id(self, subscribe: Any) -> bool:
         return self.metadata.repair_subscribe_tmdb_id(subscribe)
@@ -1577,7 +1643,7 @@ class SyncHandler:
                 ),
             }
             self._save_offline_pending(pending)
-            pending_count = len(pending)
+            pending_count = self.count_offline_monitor_pending(pending)
         self._notify_offline_pending_changed(pending_count)
         logger.info(
             f"离线任务已提交：{pending[pending_key].get('staging_name') or pending[pending_key]['file_name']}"
@@ -1682,6 +1748,30 @@ class SyncHandler:
     def _save_offline_pending(self, pending: Dict[str, Dict[str, Any]]) -> None:
         if self._save_data:
             self._save_data(self._OFFLINE_PENDING_KEY, pending)
+
+    def count_offline_monitor_pending(self, pending) -> int:
+        """离线监控服务的待终态行数（v1.29.7 阶段 1 修补 4）。
+
+        漏斗归属行在阶段 1 开关开启时由漏斗 worker 驱动，不占离线监控
+        （否则 20 秒 job 空转）；开关关闭时回旧流水线，仍计入。
+        ``pending`` 可为待终态映射（key → item）或待终态行列表
+        （``get_pending_finalize_tasks`` 的返回形态）。
+        """
+        active = bool(getattr(self, "_funnel_phase1_enabled", False))
+        if isinstance(pending, dict):
+            items = pending.values()
+        else:
+            items = pending or []
+        count = 0
+        for item in items:
+            if (
+                    isinstance(item, dict)
+                    and item.get("funnel_route")
+                    and active
+            ):
+                continue
+            count += 1
+        return count
 
     def _notify_offline_pending_changed(self, pending_count: int) -> None:
         try:
@@ -1829,6 +1919,9 @@ class SyncHandler:
             subtitles: Optional[List[Dict[str, Any]]] = None,
             skip_history: bool = False,
             mp_organize: Optional[Dict[str, Any]] = None,
+            # v1.29.7 阶段 1：漏斗归属——手动提交入队后由漏斗 worker 驱动，
+            # 离线监控跳过这类记录；重登记时沿用旧值。
+            funnel_route: bool = False,
     ) -> Dict[str, Any]:
         """构造单个后处理记录；单项和批量入口共用同一字段规则。"""
         current = current or {}
@@ -1925,6 +2018,7 @@ class SyncHandler:
             # 等历史记录落盘才置位）；宽限期只为照顾更新前已登记的旧项。
             "history_ready": True,
             "skip_history": bool(skip_history or current.get("skip_history")),
+            "funnel_route": bool(funnel_route or current.get("funnel_route")),
             "mediainfo": (
                 media_data
                 if media_data is not None
@@ -2112,11 +2206,25 @@ class SyncHandler:
                     target_subscribe=target_subscribe,
                     skip_history=bool(item.get("skip_history")),
                     mp_organize=item.get("mp_organize"),
+                    funnel_route=bool(item.get("funnel_route")),
                 )
+                # v1.29.7 阶段 1：手动提交在 finalize 边界入队整理队列；
+                # 入队失败不挡旧流水线（行缺失时离线监控仍会处理本记录）。
+                if item.get("funnel_route"):
+                    try:
+                        self.enqueue_funnel_from_pending(
+                            item, pending_key, mediainfo,
+                            subscribe_id=subscribe_id, season=season,
+                        )
+                    except Exception as error:  # noqa: BLE001 - 入队失败走旧流水线
+                        logger.warning(
+                            f"手动提交入队整理队列失败（走旧流水线）：{error}",
+                            exc_info=True,
+                        )
                 result[str(item["result_key"])] = pending_key
             if result:
                 self._save_offline_pending(pending)
-            pending_count = len(pending)
+            pending_count = self.count_offline_monitor_pending(pending)
         self._notify_offline_pending_changed(pending_count)
         return result
 

@@ -296,7 +296,13 @@ class RuntimeApi(OwnerDelegator):
         upgrade_request = {"source": "resolved", "targets": targets}
         Thread(
             target=self.sync_subscribes,
-            kwargs={"upgrade_request": upgrade_request},
+            kwargs={
+                "upgrade_request": upgrade_request,
+                # v1.29.7 阶段 1：媒体服务器洗版入口同样走漏斗（开关开时）；
+                # is_upgrade 上下文随洗版薄入口进管线，replaced_from 格式
+                # 沿用 v1.29.1（{file_id, cloud_dir, file_name, file_size}）。
+                "funnel_route": bool(getattr(self, "_funnel_phase1_enabled", False)),
+            },
             daemon=True,
             name="cloudsubscribe-history-upgrade",
         ).start()

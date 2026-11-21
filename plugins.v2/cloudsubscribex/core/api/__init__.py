@@ -15,6 +15,7 @@ from .runtime import RuntimeApi
 from .search import SearchApi
 from .sync import SyncApi
 from .tg import TgMonitorApi
+from .funnel import FunnelApi
 
 __all__ = [
     "AccountApi",
@@ -32,4 +33,5 @@ __all__ = [
     "SearchApi",
     "SyncApi",
     "TgMonitorApi",
+    "FunnelApi",
 ]

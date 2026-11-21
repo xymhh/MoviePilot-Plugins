@@ -409,6 +409,49 @@ class MoviePilotRegistration(OwnerDelegator):
                 "auth": "bear",
                 "summary": "目标订阅列表",
             },
+            # v1.29.7 阶段 1：整理队列（漏斗）接口。
+            {
+                "path": "/funnel/rows",
+                "endpoint": self.api_vue_funnel_rows,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "整理队列列表（待处理/处理中/已挂起）",
+            },
+            {
+                "path": "/funnel/status",
+                "endpoint": self.api_vue_funnel_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "整理队列状态与 worker 运行状态",
+            },
+            {
+                "path": "/funnel/run",
+                "endpoint": self.api_vue_funnel_run,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "立即整理一轮",
+            },
+            {
+                "path": "/funnel/stop",
+                "endpoint": self.api_vue_funnel_stop,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "停止整理队列",
+            },
+            {
+                "path": "/funnel/requeue",
+                "endpoint": self.api_vue_funnel_requeue,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "把挂起/失败行放回队列",
+            },
+            {
+                "path": "/funnel/delete",
+                "endpoint": self.api_vue_funnel_delete,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "删除整理队列行（pending 记录与网盘文件均保留）",
+            },
             {
                 "path": "/tg/transfer",
                 "endpoint": self.api_vue_tg_transfer,
@@ -692,6 +735,15 @@ class MoviePilotRegistration(OwnerDelegator):
                 "section": "system",
                 "permission": "manage",
                 "order": 32,
+            },
+            # v1.29.7 阶段 1：整理队列（网盘整理漏斗）独立成主侧栏导航。
+            {
+                "nav_key": "funnel",
+                "title": "整理队列",
+                "icon": "mdi-filter-check-outline",
+                "section": "system",
+                "permission": "manage",
+                "order": 33,
             },
         ]
 

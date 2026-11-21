@@ -749,6 +749,14 @@ class SyncApi(OwnerDelegator):
 
         order = {value: index for index, value in enumerate(self._resource_type_order)}
         resources.sort(key=lambda item: order.get(item["resource_type"], len(order)))
+        # v1.29.7 阶段 1：手动提交走整理漏斗——只有“界面手动提交”
+        # （无 discovered_via、非 wait 调用）才入队；TG 监控（discovered_via）
+        # 与工作流/代理提交（wait=True，要拿实际转存数）仍走旧流水线。
+        funnel_route = (
+            bool(getattr(self, "_funnel_phase1_enabled", False))
+            and not str((payload or {}).get("discovered_via") or "").strip()
+            and not wait
+        )
         sync_kwargs = {
             "subscribe_id": subscribe_id or None,
             "manual_resources": resources,
@@ -761,6 +769,7 @@ class SyncApi(OwnerDelegator):
             "target_episodes": self._positive_ints(
                 (payload or {}).get("target_episodes")
             ),
+            "funnel_route": funnel_route,
         }
         queue_media = media_target or {
             "title": getattr(subscribe, "name", "") if subscribe else "",
@@ -803,6 +812,17 @@ class SyncApi(OwnerDelegator):
             sync_kwargs,
             queue_label,
         )
+        if funnel_route:
+            # 阶段 1：接口立即返回“已入队”，不再同步等终态；转存完成后
+            # 在 finalize 边界入队，整理队列页可见进度。
+            return {
+                "success": True,
+                "message": f"已入队整理队列，共 {len(resources)} 条资源",
+                "data": {
+                    "funnel_route": True,
+                    **({"media": dict(media_target)} if media_target else {}),
+                },
+            }
         return {
             "success": True,
             "message": (

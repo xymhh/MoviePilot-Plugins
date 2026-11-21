@@ -8,8 +8,9 @@ import re
 from collections import defaultdict
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .manager import CloudSubscribeDatabaseManager, DbOper, db_query, db_update
@@ -18,6 +19,7 @@ from .models import (
     AuthSession,
     CheckinHistoryRecord,
     CheckinScheduleState,
+    FunnelQueueRow,
     OfflinePendingTask,
     PointBudgetRecord,
     RetryIndex,
@@ -904,6 +906,372 @@ class SourceMissCacheRepository(DbOper):
             )
 
 
+class FunnelQueueRepository(DbOper):
+    """网盘整理漏斗队列仓储（v1.29.7 阶段 1）。
+
+    去重键 (media_type, tmdb_id, season, episode) 在途唯一：同一键
+    同一时间只有一行能处于 queued/processing/failed（DB 层 partial
+    unique index + 入队前代码级检查双重保障）；tmdb_id 为空时按
+    file_id 检查。终态 done/held 释放去重键。
+    """
+
+    @staticmethod
+    def _active_filter():
+        return FunnelQueueRow.status.in_(
+            ("queued", "processing", "failed")
+        )
+
+    @staticmethod
+    def _key_filter(
+            media_type: str,
+            tmdb_id: Optional[int],
+            season: int,
+            episode: int,
+            file_id: str = "",
+    ):
+        if tmdb_id is not None:
+            return (
+                FunnelQueueRow.media_type == str(media_type or ""),
+                FunnelQueueRow.tmdb_id == int(tmdb_id),
+                FunnelQueueRow.season == int(season or 0),
+                FunnelQueueRow.episode == int(episode or 0),
+            )
+        return (
+            FunnelQueueRow.file_id == str(file_id or ""),
+        )
+
+    @db_query
+    def find_active_by_key(
+            self,
+            media_type: str,
+            tmdb_id: Optional[int],
+            season: int = 0,
+            episode: int = 0,
+            file_id: str = "",
+            exclude_pending_key: str = "",
+            db: Session = None,
+    ) -> Optional[Dict[str, Any]]:
+        """查同一去重键的在途行（不含 exclude_pending_key 那行）。"""
+        conditions = [
+            self._active_filter(),
+            *self._key_filter(media_type, tmdb_id, season, episode, file_id),
+        ]
+        if str(exclude_pending_key or "").strip():
+            conditions.append(
+                FunnelQueueRow.pending_key != str(exclude_pending_key)
+            )
+        row = db.scalars(
+            select(FunnelQueueRow)
+            .where(*conditions)
+            .order_by(FunnelQueueRow.created_at.asc())
+        ).first()
+        return row.to_dict() if row is not None else None
+
+    @db_update
+    def enqueue(
+            self, payload: Dict[str, Any], db: Session = None
+    ) -> "tuple[Dict[str, Any], bool]":
+        """入队；同键已有在途行时返回旧行（不重复建行）。
+
+        :return: ``(行字典, 是否新建)``。
+        """
+        now = int(time.time())
+        values = {
+            key: (payload or {}).get(key)
+            for key in (
+                "media_type", "tmdb_id", "season", "episode", "title",
+                "file_id", "file_name", "file_size", "sha1", "cloud_dir",
+                "staging_dir", "staging_name", "source", "subscribe_id",
+                "score", "quality", "is_upgrade", "replaced_from",
+                "notification_kind", "pending_key", "media_data",
+            )
+        }
+        values["media_type"] = str(values.get("media_type") or "").strip().lower()
+        tmdb_id = values.get("tmdb_id")
+        values["tmdb_id"] = int(tmdb_id) if tmdb_id not in (None, "") else None
+        values["season"] = max(0, int(values.get("season") or 0))
+        values["episode"] = max(0, int(values.get("episode") or 0))
+        values["file_size"] = max(0, int(values.get("file_size") or 0))
+        values["score"] = int(values.get("score") or 0)
+        values["is_upgrade"] = bool(values.get("is_upgrade"))
+        values["status"] = "queued"
+        values["attempts"] = 0
+        values["next_retry_at"] = 0
+        values["lease_until"] = 0
+        values["skip_reason"] = ""
+        values["last_error"] = ""
+        values["created_at"] = now
+        values["updated_at"] = now
+        existing = self.find_active_by_key(
+            values["media_type"],
+            values["tmdb_id"],
+            values["season"],
+            values["episode"],
+            file_id=str(values.get("file_id") or ""),
+            db=db,
+        )
+        if existing is not None:
+            return existing, False
+        row = FunnelQueueRow(**values)
+        db.add(row)
+        try:
+            db.flush()
+        except IntegrityError:
+            # 并发入队撞上 partial unique index：回滚后返回已存在的行。
+            db.rollback()
+            existing = self.find_active_by_key(
+                values["media_type"],
+                values["tmdb_id"],
+                values["season"],
+                values["episode"],
+                file_id=str(values.get("file_id") or ""),
+                db=db,
+            )
+            if existing is not None:
+                return existing, False
+            raise
+        db.refresh(row)
+        return row.to_dict(), True
+
+    @db_query
+    def get_by_id(
+            self, row_id: int, db: Session = None
+    ) -> Optional[Dict[str, Any]]:
+        row = FunnelQueueRow.get(db, int(row_id or 0))
+        return row.to_dict() if row is not None else None
+
+    @db_query
+    def get_by_pending_key(
+            self, pending_key: str, db: Session = None
+    ) -> Optional[Dict[str, Any]]:
+        """按 pending_key 查在途行（终态行已出队，查不到）。"""
+        key = str(pending_key or "").strip()
+        if not key:
+            return None
+        row = db.scalars(
+            select(FunnelQueueRow).where(
+                self._active_filter(),
+                FunnelQueueRow.pending_key == key,
+            )
+        ).first()
+        return row.to_dict() if row is not None else None
+
+    @db_query
+    def list_due(
+            self, limit: int = 50, now: Optional[int] = None,
+            db: Session = None,
+    ) -> List[Dict[str, Any]]:
+        """到期的待处理行：queued/failed 且 next_retry_at 已到。"""
+        current = int(now if now is not None else time.time())
+        rows = db.scalars(
+            select(FunnelQueueRow)
+            .where(
+                FunnelQueueRow.status.in_(("queued", "failed")),
+                FunnelQueueRow.next_retry_at <= current,
+            )
+            .order_by(
+                FunnelQueueRow.created_at.asc(),
+                FunnelQueueRow.id.asc(),
+            )
+            .limit(max(1, int(limit or 50)))
+        ).all()
+        return [row.to_dict() for row in rows]
+
+    @db_query
+    def list_by_status(
+            self, statuses: Iterable[str], limit: int = 200,
+            db: Session = None,
+    ) -> List[Dict[str, Any]]:
+        values = [str(status or "").strip() for status in (statuses or [])]
+        values = [value for value in values if value]
+        if not values:
+            return []
+        rows = db.scalars(
+            select(FunnelQueueRow)
+            .where(FunnelQueueRow.status.in_(values))
+            .order_by(
+                FunnelQueueRow.updated_at.desc(),
+                FunnelQueueRow.id.desc(),
+            )
+            .limit(max(1, int(limit or 200)))
+        ).all()
+        return [row.to_dict() for row in rows]
+
+    @db_query
+    def count_by_status(self, db: Session = None) -> Dict[str, int]:
+        result = {}
+        for status, count in db.execute(
+            select(FunnelQueueRow.status, func.count())
+            .group_by(FunnelQueueRow.status)
+        ).all():
+            result[str(status or "")] = int(count or 0)
+        return result
+
+    @db_update
+    def claim(
+            self, row_id: int, lease_until: int, now: Optional[int] = None,
+            db: Session = None,
+    ) -> bool:
+        """原子认领：只有 queued/failed 且已到期的行能转 processing。"""
+        current = int(now if now is not None else time.time())
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(
+                FunnelQueueRow.id == int(row_id or 0),
+                FunnelQueueRow.status.in_(("queued", "failed")),
+                FunnelQueueRow.next_retry_at <= current,
+            )
+            .values(
+                status="processing",
+                lease_until=int(lease_until or 0),
+                updated_at=current,
+            )
+        )
+        return int(result.rowcount or 0) == 1
+
+    @db_update
+    def mark_done(
+            self, row_id: int, reason: str = "", db: Session = None
+    ) -> bool:
+        values: Dict[str, Any] = {
+            "status": "done",
+            "lease_until": 0,
+            "updated_at": int(time.time()),
+        }
+        if str(reason or "").strip():
+            values["skip_reason"] = str(reason or "")[:255]
+            values["last_error"] = str(reason or "")[:500]
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(FunnelQueueRow.id == int(row_id or 0))
+            .values(**values)
+        )
+        return int(result.rowcount or 0) == 1
+
+    @db_update
+    def release_to_queued(
+            self, row_id: int, next_retry_at: int, db: Session = None
+    ) -> bool:
+        """processing 行放回 queued（未结算、仍在重试等待，不耗 attempts）。"""
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(
+                FunnelQueueRow.id == int(row_id or 0),
+                FunnelQueueRow.status == "processing",
+            )
+            .values(
+                status="queued",
+                next_retry_at=int(next_retry_at or 0),
+                lease_until=0,
+                updated_at=int(time.time()),
+            )
+        )
+        return int(result.rowcount or 0) == 1
+
+    @db_update
+    def requeue_by_ids(
+            self, row_ids: Iterable[int], db: Session = None,
+    ) -> int:
+        """held/failed 行放回 queued（attempts 清零，立即到期）。"""
+        ids = {
+            int(row_id) for row_id in (row_ids or [])
+            if int(row_id or 0) > 0
+        }
+        if not ids:
+            return 0
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(
+                FunnelQueueRow.id.in_(sorted(ids)),
+                FunnelQueueRow.status.in_(("held", "failed")),
+            )
+            .values(
+                status="queued",
+                attempts=0,
+                next_retry_at=0,
+                lease_until=0,
+                skip_reason="",
+                last_error="",
+                updated_at=int(time.time()),
+            )
+        )
+        return int(result.rowcount or 0)
+
+    @db_update
+    def mark_failed(
+            self, row_id: int, next_retry_at: int, last_error: str = "",
+            db: Session = None,
+    ) -> bool:
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(FunnelQueueRow.id == int(row_id or 0))
+            .values(
+                status="failed",
+                attempts=FunnelQueueRow.attempts + 1,
+                next_retry_at=int(next_retry_at or 0),
+                lease_until=0,
+                last_error=str(last_error or "")[:500],
+                updated_at=int(time.time()),
+            )
+        )
+        return int(result.rowcount or 0) == 1
+
+    @db_update
+    def mark_held(
+            self, row_id: int, reason: str = "", db: Session = None,
+    ) -> bool:
+        """挂起待人工复核：终态，释放去重键，不再自动重试。"""
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(FunnelQueueRow.id == int(row_id or 0))
+            .values(
+                status="held",
+                lease_until=0,
+                skip_reason=str(reason or "")[:255],
+                last_error=str(reason or "")[:500],
+                updated_at=int(time.time()),
+            )
+        )
+        return int(result.rowcount or 0) == 1
+
+    @db_update
+    def requeue_lease_expired(
+            self, now: Optional[int] = None, db: Session = None,
+    ) -> int:
+        """租约过期的 processing 行回 queued（断点续跑）。"""
+        current = int(now if now is not None else time.time())
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(
+                FunnelQueueRow.status == "processing",
+                FunnelQueueRow.lease_until > 0,
+                FunnelQueueRow.lease_until < current,
+            )
+            .values(
+                status="queued",
+                lease_until=0,
+                last_error="租约过期回收",
+                updated_at=current,
+            )
+        )
+        return int(result.rowcount or 0)
+
+    @db_update
+    def delete_by_ids(
+            self, row_ids: Iterable[int], db: Session = None,
+    ) -> int:
+        ids = {
+            int(row_id) for row_id in (row_ids or [])
+            if int(row_id or 0) > 0
+        }
+        if not ids:
+            return 0
+        result = db.execute(delete(FunnelQueueRow).where(
+            FunnelQueueRow.id.in_(sorted(ids))
+        ))
+        return int(result.rowcount or 0)
+
+
 class CloudSubscribeRepositories:
     def __init__(
             self,
@@ -920,3 +1288,4 @@ class CloudSubscribeRepositories:
         self.source_sha1 = SourceSha1CacheRepository(manager, db)
         self.source_miss = SourceMissCacheRepository(manager, db)
         self.runtime = RuntimeRecordRepository(manager, db)
+        self.funnel_queue = FunnelQueueRepository(manager, db)

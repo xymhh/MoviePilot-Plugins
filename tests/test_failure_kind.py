@@ -91,6 +91,21 @@ class ClassifyTest(unittest.TestCase):
         self.assertFalse(failure.is_permanent(failure.KIND_LOCAL_CACHE_SPACE))
         self.assertFalse(failure.is_permanent(""))
 
+    def test_duplicate_intercept_kind(self):
+        """v1.29.7 阶段 1 修补 3：提交前复查拦截归类为 duplicate（永久性）。"""
+        for reason in (
+            "提交前复查发现重复，已拦截：媒体库已有另一份同集文件",
+            "提交前复查发现重复，已拦截：媒体库已有另一份电影文件",
+            "提交前复查发现重复，已拦截：整理队列已有同集在途行 #12",
+        ):
+            self.assertEqual(
+                failure.classify_failure(reason),
+                failure.KIND_DUPLICATE,
+                reason,
+            )
+        self.assertTrue(failure.is_permanent(failure.KIND_DUPLICATE))
+        self.assertEqual(failure.failure_label("duplicate"), "重复拦截")
+
 
 class RecordHelperTest(unittest.TestCase):
     def test_apply_failure_fills_three_fields(self):
@@ -102,6 +117,15 @@ class RecordHelperTest(unittest.TestCase):
         )
         self.assertFalse(record["failure_retryable"])
         self.assertIn("分享链接无效", record["failure_reason"])
+
+    def test_apply_failure_duplicate_not_retryable(self):
+        """v1.29.7 阶段 1 修补 3：拦截记录不可重试（失败页不出现死循环行）。"""
+        record = {"status": "处理中"}
+        failure.apply_failure(
+            record, "提交前复查发现重复，已拦截：媒体库已有另一份同集文件"
+        )
+        self.assertEqual(record["failure_kind"], failure.KIND_DUPLICATE)
+        self.assertFalse(record["failure_retryable"])
 
     def test_apply_failure_trusts_explicit_kind(self):
         record = {}
