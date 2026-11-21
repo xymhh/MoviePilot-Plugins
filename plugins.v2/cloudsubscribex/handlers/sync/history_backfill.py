@@ -44,6 +44,14 @@ oper/transferhistory.py）：
 - 电影与剧集走同一 commit 路径；多集聚合一条时按集分别写（与
   v1.26.4 通知的 per-episode 分流口径一致，调用方按集拆分后逐项进
   commit，每项一行）。
+
+v1.29.6 修正（2026-11-21 补写 bug）：v1.28.1 的 registration 漏了 MP
+TransferRegistrationAudit 必填的 actor_id、多了模型禁用的 note，
+导致 #/history 查列表时逐条 model_validate 抛错、整页“未知错误”
+（2026-11-21 15:07 首次爆出）。补写改按模型只写 5 键（actor_id 取
+MP 超级管理员 id，取不到 fallback 1）；启动时
+repair_invalid_registrations 修复已写坏的行（只动插件补写行，幂等、
+失败不挡启动）。
 """
 
 from __future__ import annotations
@@ -65,6 +73,103 @@ _BACKFILL_DEST_STORAGE = "local"
 
 # 审计字段：按 MP TransferRegistrationAudit 的形状，只记能证实的值。
 _BACKFILL_ACTOR = "网盘订阅助手"
+
+# MP TransferRegistrationAudit（v3.2.6 app/schemas/history.py）的合法
+# 形状：恰好 5 个键，extra="forbid"。v1.28.1 的补写漏了 actor_id、
+# 多了 note，导致 #/history 查列表时整页 model_validate 抛错；
+# v1.29.6 起补写与修复都只用这个形状，note 不再写（模型没有地方放
+# 这句说明，不要换个键名塞回去）。
+_REGISTRATION_VERIFICATIONS = ("matching_sizes", "native_hardlink", "destination_only")
+_REGISTRATION_SOURCE_STATES = ("present", "absent")
+_REGISTRATION_KEYS = frozenset(
+    {"actor_id", "actor_name", "registered_at", "verification", "source_state"}
+)
+
+
+def _build_backfill_registration(actor_id: int) -> Dict[str, Any]:
+    """拼一条合法的补写 registration：恰好 5 键，无 note。"""
+    return {
+        "actor_id": int(actor_id),
+        "actor_name": _BACKFILL_ACTOR,
+        "registered_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "verification": "destination_only",
+        "source_state": "present",
+    }
+
+
+def _registration_is_valid(registration: Any) -> bool:
+    """registration 是否符合 TransferRegistrationAudit。
+
+    非 dict（None 等）是 MP 旧行的合法状态（registration 为空）；dict
+    必须恰好 5 键且各项合法，否则 #/history 查列表时整页 model_validate
+    抛错。
+    """
+    if not isinstance(registration, dict):
+        return True
+    actor_value = registration.get("actor_id")
+    if not (
+        isinstance(actor_value, int)
+        and not isinstance(actor_value, bool)
+        and actor_value >= 1
+    ):
+        return False
+    actor_name = registration.get("actor_name")
+    if not (isinstance(actor_name, str) and bool(actor_name.strip())):
+        return False
+    registered_at = registration.get("registered_at")
+    if not (
+        isinstance(registered_at, str)
+        and bool(registered_at.strip())
+        and len(registered_at) <= 40
+    ):
+        return False
+    if registration.get("verification") not in _REGISTRATION_VERIFICATIONS:
+        return False
+    if registration.get("source_state") not in _REGISTRATION_SOURCE_STATES:
+        return False
+    return set(registration) <= _REGISTRATION_KEYS
+
+
+def _normalize_registration(
+    registration: Any, actor_id: int
+) -> Optional[Dict[str, Any]]:
+    """把一行 registration 修成合法形状；已合法返回 None（不动）。
+
+    只修 dict：保留合法的原值，缺失/非法项按新补写格式补默认，多余键
+    （note 等）一律丢掉——模型 extra="forbid"，多一个键整行都读不出。
+    """
+    if _registration_is_valid(registration):
+        return None
+    actor_value = registration.get("actor_id")
+    actor_ok = (
+        isinstance(actor_value, int)
+        and not isinstance(actor_value, bool)
+        and actor_value >= 1
+    )
+    actor_name = registration.get("actor_name")
+    fixed_name = (
+        actor_name.strip()
+        if isinstance(actor_name, str) and actor_name.strip()
+        else _BACKFILL_ACTOR
+    )
+    if len(fixed_name) > 128:
+        fixed_name = f"{fixed_name[:127]}…"
+    registered_at = registration.get("registered_at")
+    verification = registration.get("verification")
+    source_state = registration.get("source_state")
+    return {
+        "actor_id": actor_value if actor_ok else int(actor_id),
+        "actor_name": fixed_name,
+        "registered_at": (
+            registered_at
+            if isinstance(registered_at, str)
+            and registered_at.strip()
+            and len(registered_at) <= 40
+            else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        ),
+        "verification": verification if verification in _REGISTRATION_VERIFICATIONS else "destination_only",
+        "source_state": source_state if source_state in _REGISTRATION_SOURCE_STATES else "present",
+    }
 
 
 class HistoryBackfillService(OwnerDelegator):
@@ -140,6 +245,96 @@ class HistoryBackfillService(OwnerDelegator):
             logger.warning(f"补写 MP 整理历史失败（不影响转存）：{error}")
             return False
 
+    def _resolve_admin_actor_id(self, session: Any = None) -> int:
+        """取 MP 第一个超级管理员的 id；查不到或异常时 fallback 1。
+
+        MP 官方登记口径用认证管理员的 id（RegistrationActor.id）；
+        插件没有请求上下文，只能查用户表。失败只记 warning，不抛。
+        """
+        try:
+            from app.db.models.user import User
+            from sqlalchemy import select
+
+            query = (
+                select(User).where(User.is_superuser.is_(True)).order_by(User.id)
+            )
+            if session is not None:
+                row = session.execute(query).scalars().first()
+            else:
+                from app.db import SessionFactory
+
+                with SessionFactory() as db:
+                    row = db.execute(query).scalars().first()
+            actor_id = int(getattr(row, "id", 0) or 0)
+            if actor_id >= 1:
+                return actor_id
+            logger.warning("未找到 MP 超级管理员，补写 registration 用 actor_id=1 兜底")
+            return 1
+        except Exception as error:
+            logger.warning(f"取 MP 管理员 id 失败，补写 registration 用 1 兜底：{error}")
+            return 1
+
+    def repair_invalid_registrations(
+        self,
+        session: Any = None,
+        history_model: Any = None,
+        actor_id: Optional[int] = None,
+    ) -> int:
+        """启动时修复补写坏掉的 registration，返回修复条数；失败返回 0。
+
+        只动插件自己补写过的行（origin="external" 且 registration 字典
+        不合 MP TransferRegistrationAudit 模型）；MP 自己的记录与已合法
+        的行一个都不动。幂等：第二次启动无坏行时为 no-op。任何异常都吞
+        掉（只记 warning），绝不阻断插件启动。
+        """
+        try:
+            if session is None:
+                from app.db import SessionFactory
+
+                with SessionFactory() as db:
+                    return self._repair_invalid_registrations_in(
+                        db, history_model=history_model, actor_id=actor_id
+                    )
+            return self._repair_invalid_registrations_in(
+                session, history_model=history_model, actor_id=actor_id
+            )
+        except Exception as error:
+            logger.warning(f"修复补写 registration 失败（不影响启动）：{error}")
+            return 0
+
+    def _repair_invalid_registrations_in(
+        self,
+        db: Any,
+        history_model: Any = None,
+        actor_id: Optional[int] = None,
+    ) -> int:
+        """在给定会话里扫描 origin="external" 的行并修复坏 registration。"""
+        from sqlalchemy import select
+
+        if history_model is None:
+            from app.db.models.transferhistory import TransferHistory
+
+            history_model = TransferHistory
+        rows = (
+            db.execute(
+                select(history_model).where(history_model.origin == "external")
+            )
+            .scalars()
+            .all()
+        )
+        invalid = [
+            row for row in rows if not _registration_is_valid(row.registration)
+        ]
+        if not invalid:
+            return 0
+        if actor_id is None:
+            actor_id = self._resolve_admin_actor_id(db)
+        for row in invalid:
+            row.registration = _normalize_registration(row.registration, actor_id)
+        db.commit()
+        logger.info(f"已修复补写 registration 异常的整理历史 {len(invalid)} 条")
+        return len(invalid)
+
     def build_history_values(
         self,
         *,
@@ -148,6 +343,7 @@ class HistoryBackfillService(OwnerDelegator):
         media: Any = None,
         media_data: Optional[Dict[str, Any]] = None,
         detail: Optional[Dict[str, Any]] = None,
+        actor_id: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """按 MP 外部登记映射拼补写行的列值；拼不出真实记录时返回 None。
 
@@ -282,15 +478,9 @@ class HistoryBackfillService(OwnerDelegator):
             "name": dest_name,
             "size": dest_size,
         }
-        registration = {
-            "actor_name": _BACKFILL_ACTOR,
-            "registered_at": time.strftime(
-                "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
-            ),
-            "verification": "destination_only",
-            "source_state": "present",
-            "note": "网盘订阅助手直出 strm 时补写（MP 未走整理链）",
-        }
+        if actor_id is None:
+            actor_id = self._resolve_admin_actor_id()
+        registration = _build_backfill_registration(actor_id)
         return {
             "src": src,
             "src_storage": _BACKFILL_SRC_STORAGE,

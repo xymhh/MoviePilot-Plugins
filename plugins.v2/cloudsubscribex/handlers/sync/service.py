@@ -739,6 +739,9 @@ class SyncHandler:
     def remove_platform_transfer_history_mirror(self) -> int:
         return self.platform_history.remove_platform_transfer_history_mirror()
 
+    def repair_backfill_registrations(self) -> int:
+        return self.history_backfill.repair_invalid_registrations()
+
     def repair_subscribe_tmdb_id(self, subscribe: Any) -> bool:
         return self.metadata.repair_subscribe_tmdb_id(subscribe)
 

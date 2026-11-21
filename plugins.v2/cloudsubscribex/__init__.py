@@ -197,7 +197,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.29.5"
+    plugin_version = "1.29.6"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -881,6 +881,13 @@ class CloudSubscribeX(_PluginBase):
             # downloader 为空、src 为真实 115 路径），清理的两个条件都
             # 匹配不到补写行，补写行不受影响。
             self._sync_handler.remove_platform_transfer_history_mirror()
+            # v1.29.6：修复 v1.28.1 补写坏掉的 registration（缺 actor_id、
+            # 多 note），否则 #/history 整页查不到（model_validate 抛错）。
+            # 幂等、只动插件补写行、失败不挡启动。
+            try:
+                self._sync_handler.repair_backfill_registrations()
+            except Exception as error:  # noqa: BLE001 - 修复失败不得影响插件主流程
+                logger.warning(f"修复补写 registration 失败（不影响启动）：{error}")
         self._update_offline_monitor(
             len(self._sync_handler.get_pending_finalize_tasks())
             if self._sync_handler else 0
