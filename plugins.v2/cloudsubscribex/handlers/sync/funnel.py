@@ -36,9 +36,15 @@ from ...core.media import list_subscribes_by_tmdb_id, tmdb_id_of
 FUNNEL_WORKER_JOB_ID = "CloudSubscribe_FunnelWorker"
 #: worker 轮询间隔（秒）。
 FUNNEL_WORKER_INTERVAL_SECONDS = 20
-#: 失败退避（秒）：第 1..5 次失败分别等 10 秒、60 秒、300 秒、900 秒、
-#: 3600 秒；第 5 次失败后挂起待人工复核（不再自动重试）。
-FUNNEL_RETRY_DELAYS = (10, 60, 300, 900, 3600)
+#: 失败退避（秒）：第 1..4 次失败分别等 10 秒、60 秒、300 秒、900 秒；
+#: 第 5 次失败后挂起待人工复核（不再自动重试）。
+#:
+#: v1.29.10 热修复（评审 B3）：旧表 (10, 60, 300, 900, 3600) 的 3600
+#: 档永远取不到——第 5 次失败时 attempts+1 已到上限 5，先挂起、再
+#: 也轮不到查表（_fail_row 在 attempts+1 >= max_attempts 时直接 held）；
+#: 实际总退避只有 10+60+300+900 = 1270 秒（约 21 分钟），不是文档
+#: §8 写的 81 分钟。表与文档同步改成四档。
+FUNNEL_RETRY_DELAYS = (10, 60, 300, 900)
 #: 每轮最多处理的行数。
 FUNNEL_MAX_ROWS_PER_ROUND = 50
 #: 未结算行下次重试的最小间隔（秒）：与离线监控首档检查间隔一致。
@@ -186,24 +192,17 @@ class FunnelService(OwnerDelegator):
     # ------------------------------------------------------------------
     # 入队（finalize 边界）
     # ------------------------------------------------------------------
-    def enqueue_from_pending(
+    def _build_enqueue_payload(
             self,
             item: Dict[str, Any],
             pending_key: str,
             mediainfo: Any,
             subscribe_id: Optional[int] = None,
             season: Optional[int] = None,
-    ) -> Tuple[Optional[Dict[str, Any]], bool]:
-        """手动/TG 提交在 finalize 边界入队。
-
-        只由 ``SyncHandler._queue_file_finalize_batch`` 在
-        ``item["funnel_route"]`` 为真时调用。返回 ``(行字典, 是否新建)``；
-        存储不可用时返回 ``(None, False)``（调用方按旧流水线继续）。
+    ) -> Dict[str, Any]:
+        """入队载荷（v1.29.10 热修复，B2 替换路复用）：把 pending 项转成
+        funnel_queue 行字段；与 enqueue_from_pending 的旧内联逻辑一致。
         """
-        repo = self._repository()
-        if repo is None:
-            logger.debug("漏斗队列存储不可用，本项不入队，走旧流水线")
-            return None, False
         media_type = "movie"
         tmdb_id = None
         if mediainfo is not None:
@@ -276,7 +275,7 @@ class FunnelService(OwnerDelegator):
             except Exception as error:  # noqa: BLE001 - 序列化失败不挡入队
                 logger.debug(f"漏斗入队序列化媒体信息失败：{error}", exc_info=True)
                 media_data = None
-        payload = {
+        return {
             "media_type": media_type,
             "tmdb_id": tmdb_id,
             "season": season_value,
@@ -299,8 +298,33 @@ class FunnelService(OwnerDelegator):
             "pending_key": str(pending_key or ""),
             "media_data": media_data,
         }
+
+    def enqueue_from_pending(
+            self,
+            item: Dict[str, Any],
+            pending_key: str,
+            mediainfo: Any,
+            subscribe_id: Optional[int] = None,
+            season: Optional[int] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """手动/TG 提交在 finalize 边界入队。
+
+        只由 ``SyncHandler._queue_file_finalize_batch`` 在
+        ``item["funnel_route"]`` 为真时调用。返回 ``(行字典, 是否新建)``；
+        存储不可用时返回 ``(None, False)``（调用方按旧流水线继续）。
+        """
+        repo = self._repository()
+        if repo is None:
+            logger.debug("漏斗队列存储不可用，本项不入队，走旧流水线")
+            return None, False
+        payload = self._build_enqueue_payload(
+            item, pending_key, mediainfo,
+            subscribe_id=subscribe_id, season=season,
+        )
         row, created = repo.enqueue(payload)
         if created:
+            via = str(item.get("discovered_via") or "").strip()
+            producer = str(item.get("funnel_producer") or "").strip().lower()
             if via:
                 producer_label = "TG 转存"
             elif producer == "subscribe":
@@ -308,17 +332,54 @@ class FunnelService(OwnerDelegator):
             else:
                 producer_label = "手动提交"
             logger.info(
-                f"{producer_label}已入队整理队列：{title or payload['file_name']} "
+                f"{producer_label}已入队整理队列：{payload['title'] or payload['file_name']} "
                 f"（行 #{row.get('id')}，{pending_key}）"
             )
             self.ensure_worker()
         return row, created
 
+    def replace_row_with_pending(
+            self,
+            row: Dict[str, Any],
+            item: Dict[str, Any],
+            pending_key: str,
+            mediainfo: Any,
+            subscribe_id: Optional[int] = None,
+            season: Optional[int] = None,
+    ) -> bool:
+        """v1.29.10 热修复（B2）：洗版高分候选替换已入队行的文件身份。
+
+        只有 status 仍为 queued 的行能被替换（repo 层按 status='queued'
+        守卫；processing 行正在被 worker 驱动，身份换了会打乱在途处理）。
+        替换后行仍为 queued、attempts 不变、去重键不变、pending_key
+        换成新项的（worker 按新 pending_key 驱动）。"""
+        repo = self._repository()
+        if repo is None:
+            return False
+        row_id = int((row or {}).get("id") or 0)
+        if row_id <= 0:
+            return False
+        payload = self._build_enqueue_payload(
+            item, pending_key, mediainfo,
+            subscribe_id=subscribe_id, season=season,
+        )
+        replaced = repo.replace_row_file_identity(row_id, payload)
+        if replaced:
+            logger.info(
+                "漏斗洗版替换已入队行："
+                f"行 #{row_id} 换成 {payload['file_name']} "
+                f"（{pending_key}）"
+            )
+        return bool(replaced)
+
     def has_active_rows(self, subscribe_id) -> bool:
         """v1.29.9 阶段 3：指定订阅是否还有漏斗在途行（queued/processing/
         failed）。轮次结束结算前调用：在途行未终态时绝不结算，终态成功
-        时由 _finish_pending_subscription 回写。存储不可用时 fail-open
-        （返回 False，按旧行为结算）。"""
+        时由 _finish_pending_subscription 回写。
+
+        v1.29.10 热修复（评审 B4）：存储不可用 / 查询异常时 fail-closed
+        （返回 True，暂缓结算），绝不能因“查不到”就把没入库的集结算掉。
+        """
         try:
             if int(subscribe_id or 0) <= 0:
                 return False
@@ -326,15 +387,142 @@ class FunnelService(OwnerDelegator):
             return False
         repo = self._repository()
         if repo is None:
-            return False
+            logger.warning(
+                "漏斗仓储不可用，订阅结算暂缓："
+                f"subscribe_id={subscribe_id}"
+            )
+            return True
         has_active = getattr(repo, "has_active_for_subscribe", None)
         if not callable(has_active):
-            return False
+            logger.warning(
+                "漏斗仓储缺 has_active_for_subscribe，订阅结算暂缓："
+                f"subscribe_id={subscribe_id}"
+            )
+            return True
         try:
             return bool(has_active(int(subscribe_id)))
-        except Exception as error:  # noqa: BLE001 - 查询异常按无在途行处理
-            logger.debug(f"查询订阅漏斗在途行失败：{error}", exc_info=True)
+        except Exception as error:  # noqa: BLE001 - 查询异常暂缓结算
+            logger.warning(
+                "查询订阅漏斗在途行失败，订阅结算暂缓："
+                f"subscribe_id={subscribe_id}，{error}"
+            )
+            return True
+
+    def has_unsettled_rows(self, subscribe_id) -> bool:
+        """v1.29.10 热修复（评审 B4）：指定订阅是否还有漏斗未终态行
+        （queued/processing/failed/**held**）。结算守卫用：held 行的集
+        没入库——只有人工放回（终态成功）或删除后，订阅才可能结算。
+        查不到/异常时 fail-closed（返回 True，暂缓结算）。"""
+        try:
+            if int(subscribe_id or 0) <= 0:
+                return False
+        except (TypeError, ValueError):
             return False
+        repo = self._repository()
+        if repo is None:
+            logger.warning(
+                "漏斗仓储不可用，订阅结算暂缓："
+                f"subscribe_id={subscribe_id}"
+            )
+            return True
+        has_unsettled = getattr(repo, "has_unsettled_for_subscribe", None)
+        if not callable(has_unsettled):
+            logger.warning(
+                "漏斗仓储缺 has_unsettled_for_subscribe，订阅结算暂缓："
+                f"subscribe_id={subscribe_id}"
+            )
+            return True
+        try:
+            return bool(has_unsettled(int(subscribe_id)))
+        except Exception as error:  # noqa: BLE001 - 查询异常暂缓结算
+            logger.warning(
+                "查询订阅漏斗未终态行失败，订阅结算暂缓："
+                f"subscribe_id={subscribe_id}，{error}"
+            )
+            return True
+
+    def delete_old_version(self, row_ids) -> Dict[str, Any]:
+        """人工删旧版（v1.29.10 热修复，评审 B5）：held/failed 行的
+        replaced_from 旧文件由人在队列页点“删旧版”删除。
+
+        只认 held/failed 行；逐个删 ``replaced_from`` 里带 file_id 的
+        旧文件；全部删完才清 replaced_from（按钮消失）。删失败的留在
+        原地，按钮还在、可重试。返回每行的删成功/删失败数。"""
+        repo = self._repository()
+        if repo is None:
+            return {"success": False, "message": "漏斗仓储不可用"}
+        results = []
+        for raw_id in row_ids or []:
+            try:
+                row_id = int(raw_id or 0)
+            except (TypeError, ValueError):
+                continue
+            if row_id <= 0:
+                continue
+            row = None
+            try:
+                row = repo.get_by_id(row_id)
+            except Exception as error:  # noqa: BLE001 - 读不到按行不存在
+                logger.debug(f"删旧版读行 #{row_id} 失败：{error}", exc_info=True)
+            if not row:
+                results.append({
+                    "id": row_id, "success": False, "message": "行不存在",
+                })
+                continue
+            if str(row.get("status") or "") not in {"held", "failed"}:
+                results.append({
+                    "id": row_id, "success": False,
+                    "message": f"只有挂起/失败行能删旧版，当前状态 {row.get('status')}",
+                })
+                continue
+            replaced = row.get("replaced_from") or []
+            targets = [
+                entry for entry in replaced
+                if isinstance(entry, dict)
+                and str(entry.get("file_id") or "").strip()
+            ]
+            if not targets:
+                results.append({
+                    "id": row_id, "success": False, "message": "该行没有可删的旧版",
+                })
+                continue
+            mutations = getattr(self, "_cloud_mutations", None)
+            if mutations is None:
+                results.append({
+                    "id": row_id, "success": False, "message": "网盘未就绪",
+                })
+                continue
+            deleted = 0
+            failed_names = []
+            for entry in targets:
+                file_id = str(entry.get("file_id") or "").strip()
+                try:
+                    ok = mutations.delete_file(file_id)
+                except Exception as error:  # noqa: BLE001 - 删失败记名
+                    logger.debug(f"删旧版 {file_id} 异常：{error}", exc_info=True)
+                    ok = False
+                if ok:
+                    deleted += 1
+                else:
+                    failed_names.append(
+                        str(entry.get("file_name") or file_id)
+                    )
+            if failed_names:
+                results.append({
+                    "id": row_id, "success": False, "deleted": deleted,
+                    "failed": failed_names,
+                    "message": f"已删 {deleted} 个，失败 {len(failed_names)} 个",
+                })
+                continue
+            try:
+                repo.clear_replaced_from(row_id)
+            except Exception as error:  # noqa: BLE001 - 清字段失败不改删的结论
+                logger.debug(f"删旧版清行 #{row_id} 字段失败：{error}", exc_info=True)
+            logger.info(f"漏斗行 #{row_id} 人工删旧版 {deleted} 个")
+            results.append({
+                "id": row_id, "success": True, "deleted": deleted,
+            })
+        return {"success": True, "results": results}
 
     # ------------------------------------------------------------------
     # worker 轮次
@@ -357,7 +545,10 @@ class FunnelService(OwnerDelegator):
             if repo is None:
                 return stats
             try:
-                repo.requeue_lease_expired(now=int(time.time()))
+                # v1.29.10 热修复（评审 B3）：租约回收走服务层严格实查
+                # （_reclaim_lease_expired）——MP 整理可能仍在跑，盲目
+                # 回收会让同一行被两轮并发驱动；查不清时转 held。
+                self._reclaim_lease_expired(now=int(time.time()))
             except Exception as error:  # noqa: BLE001 - 回收失败不挡本轮
                 logger.debug(f"漏斗租约回收失败：{error}", exc_info=True)
             rows = repo.list_due(limit=FUNNEL_MAX_ROWS_PER_ROUND)
@@ -386,6 +577,130 @@ class FunnelService(OwnerDelegator):
                 self._funnel_worker_lock.release()
             except RuntimeError:
                 logger.debug("漏斗 worker 锁释放时未持有，忽略", exc_info=True)
+
+    def _reclaim_lease_expired(self, now: int) -> Dict[str, int]:
+        """租约过期回收（v1.29.10 热修复，评审 B3）：逐行严格实查，
+        绝不盲目回收。
+
+        - 行的待终态记录已不在 → held（需人工核对）；
+        - 行有 MP 整理身份 → 轮询 tracker：succeeded → held（“MP 整理
+          已成功，需人工确认”，绝不重跑）；failed/queued/running/
+          missing → 重回队列；unavailable → held；
+        - 无身份 → 严格落盘实查（前置条件不全 → held）：已落盘 → held
+          （需人工确认，绝不重跑）；未落盘 → 重回队列。
+        返回 {"requeued": n, "held": n}。"""
+        repo = self._repository()
+        if repo is None:
+            return {"requeued": 0, "held": 0}
+        expired = repo.list_lease_expired(now=now)
+        stats = {"requeued": 0, "held": 0}
+        for row in expired:
+            row_id = int(row.get("id") or 0)
+            pending_key = str(row.get("pending_key") or "")
+            item = self._load_pending_item(pending_key)
+            if item is None:
+                repo.mark_held(row_id, reason="租约过期：待终态记录已不在，需人工核对")
+                logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：待终态记录已不在")
+                stats["held"] += 1
+                continue
+            mp_organize = item.get("mp_organize")
+            if isinstance(mp_organize, dict) and mp_organize:
+                tracker = None
+                try:
+                    postprocess = self._owner.postprocess
+                    tracker = postprocess._mp_organize_tracker()
+                except Exception as error:  # noqa: BLE001 - 取不到轮询器按不可用
+                    logger.debug(f"漏斗行 #{row_id} 取 MP 整理轮询器失败：{error}", exc_info=True)
+                state = "unavailable"
+                if tracker is not None:
+                    try:
+                        state, _detail, _dest = tracker.poll(mp_organize)
+                    except Exception as error:  # noqa: BLE001 - 轮询异常按不可用
+                        logger.debug(f"漏斗行 #{row_id} MP 整理轮询异常：{error}", exc_info=True)
+                        state = "unavailable"
+                if state == "succeeded":
+                    repo.mark_held(row_id, reason="租约过期：MP 整理已成功，需人工确认")
+                    logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：MP 整理已成功")
+                    stats["held"] += 1
+                elif state in {"failed", "queued", "running", "missing"}:
+                    repo.requeue_lease_expired(now=now)
+                    logger.info(f"漏斗行 #{row_id} 租约过期回收重回队列（MP 整理 {state}）")
+                    stats["requeued"] += 1
+                else:
+                    repo.mark_held(row_id, reason="租约过期：MP 整理状态查不到，需人工确认")
+                    logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：MP 整理状态不可用")
+                    stats["held"] += 1
+                continue
+            # 无 MP 整理身份：严格落盘实查。
+            media = self._restore_media(row, item)
+            landed = self._strict_landed_check(row, item, media)
+            if landed is None:
+                repo.mark_held(row_id, reason="租约过期：落盘实查不可用，需人工确认")
+                logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：落盘实查不可用")
+                stats["held"] += 1
+            elif landed:
+                repo.mark_held(row_id, reason="租约过期：文件已落盘，需人工确认")
+                logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：文件已落盘")
+                stats["held"] += 1
+            else:
+                repo.requeue_lease_expired(now=now)
+                logger.info(f"漏斗行 #{row_id} 租约过期回收重回队列（文件未落盘）")
+                stats["requeued"] += 1
+        return stats
+
+    def _strict_landed_check(
+            self, row: Dict[str, Any], item: Dict[str, Any], media: Any,
+    ) -> Optional[bool]:
+        """严格落盘实查：本项新文件是否已在目标季目录/电影目录里。
+
+        返回 True（已落盘）/ False（未落盘）/ None（查不到——前置条件
+        不全或网盘不可用，调用方按 held 处理，绝不重跑）。"""
+        if media is None:
+            return None
+        dedup = getattr(self._owner, "episode_dedup", None)
+        if dedup is None:
+            return None
+        try:
+            if not dedup._episode_dedup_active():
+                return None
+        except Exception:  # noqa: BLE001 - 判重状态读不到按查不到处理
+            return None
+        subscribe = self._resolve_subscribe(item)
+        if subscribe is None:
+            return None
+        media_type = getattr(media, "type", None)
+        try:
+            if media_type == MediaType.TV:
+                season = int(item.get("season") or 1)
+                versions = dedup._collect_episode_versions(
+                    subscribe, media, season, force_refresh=True
+                ) or {}
+                episode = self._item_episode(item)
+                if episode <= 0:
+                    return None
+                entries = versions.get(episode) or []
+            elif media_type == MediaType.MOVIE:
+                entries = dedup._find_cloud_movie_versions(subscribe, media) or []
+            else:
+                return None
+        except Exception as error:  # noqa: BLE001 - 列目录异常按查不到处理
+            logger.debug(f"漏斗严格落盘实查异常：{error}", exc_info=True)
+            return None
+        own_file_id = str(row.get("file_id") or item.get("file_id") or "").strip()
+        own_file_name = str(item.get("file_name") or "").strip()
+        # 与 _other_versions 同口径的 own 判定：file_id 相同，或同名且
+        # 至少一边缺 file_id（MP 整理后改名不换 file_id，仍按 id 认）。
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            entry_id = str(entry.get("file_id") or "").strip()
+            entry_name = str(entry.get("file_name") or "").strip()
+            if own_file_id and entry_id and entry_id == own_file_id:
+                return True
+            if entry_name and entry_name == own_file_name:
+                if not own_file_id or not entry_id:
+                    return True
+        return False
 
     def run_now(self) -> Dict[str, Any]:
         """手动触发一轮（整理队列页“立即整理一轮”按钮）。"""
@@ -422,10 +737,15 @@ class FunnelService(OwnerDelegator):
         pending_key = str(row.get("pending_key") or "")
         item = self._load_pending_item(pending_key)
         if item is None:
-            # 待终态记录已不在（旧流水线已结算或被删）：行终态，释放去重键。
-            repo.mark_done(row_id, reason="待终态记录已不在")
-            logger.info(f"漏斗行 #{row_id} 的待终态记录已不在，直接终态")
-            return "done"
+            # v1.29.10 热修复（评审 B3）：待终态记录已不在，绝不能
+            # mark_done——行终态会把“没入库的集”当成已完成结算掉。
+            # 转 held 待人工核对（旧流水线已结算、还是记录被删、还是
+            # 存储丢了，都由人定）。租约已认领，held 时释放租约。
+            repo.mark_held(row_id, reason="待终态记录已不在，需人工核对")
+            logger.warning(
+                f"漏斗行 #{row_id} 的待终态记录已不在，转挂起待人工核对"
+            )
+            return "held"
         media = self._restore_media(row, item)
         ok, reason = self._prepare_row(row, item)
         if not ok:
@@ -559,8 +879,6 @@ class FunnelService(OwnerDelegator):
         """
         if media is None:
             return True, ""
-        if bool(item.get("upgrade")):
-            return True, ""
         key = self._item_dedup_key(item, media)
         if key is None:
             return True, ""
@@ -584,11 +902,22 @@ class FunnelService(OwnerDelegator):
         if episode <= 0:
             return True, ""
         try:
-            versions = dedup._collect_episode_versions(subscribe, media, season) or {}
+            # v1.29.10 热修复（评审 B1）：落盘前实查强制刷新，绝不读
+            # 6 小时 TTL 的季目录快照。
+            versions = dedup._collect_episode_versions(
+                subscribe, media, season, force_refresh=True
+            ) or {}
         except Exception as error:  # noqa: BLE001 - 查不到 fail-open
             logger.debug(f"漏斗落盘前实查异常（fail-open）：{error}", exc_info=True)
             return True, ""
-        others = self._other_versions(versions.get(episode) or [], item, row)
+        # v1.29.10 热修复（评审 B5）：洗版不再直通——旧版本除外后仍有
+        # 另一份新版时拦截（旧版本按 replaced_from / upgrade_old_* 排除）。
+        if bool(item.get("upgrade")):
+            others = self._upgrade_other_new_versions(
+                versions.get(episode) or [], item, row
+            )
+        else:
+            others = self._other_versions(versions.get(episode) or [], item, row)
         if not others:
             return True, ""
         reason = "已在库（实查）"
@@ -620,7 +949,12 @@ class FunnelService(OwnerDelegator):
         except Exception as error:  # noqa: BLE001 - 查不到 fail-open
             logger.debug(f"漏斗电影落盘前实查异常（fail-open）：{error}", exc_info=True)
             return True, ""
-        others = self._other_versions(versions, item, row)
+        # v1.29.10 热修复（评审 B5）：洗版电影同样走旧版本除外后的
+        # 新版检查，不再直通。
+        if bool(item.get("upgrade")):
+            others = self._upgrade_other_new_versions(versions, item, row)
+        else:
+            others = self._other_versions(versions, item, row)
         if not others:
             return True, ""
         return False, "已在库（实查）"
@@ -656,6 +990,46 @@ class FunnelService(OwnerDelegator):
                 continue
             others.append(version)
         return others
+
+    def _upgrade_other_new_versions(
+            self,
+            versions: List[Dict[str, Any]],
+            item: Dict[str, Any],
+            row: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        """洗版实查：同一集里除本项新文件与旧版本之外的另一份新版。
+
+        旧版本来源：行 ``replaced_from``（主旧版 + 额外旧版）、项的
+        ``dedup_extra_old_versions``、``upgrade_old_file_id/name``。
+        115 改名不换 file_id，备份改名后的旧文件仍按 file_id 排除；
+        旧文件已删时不在清单里，自然不计。
+        """
+        old_ids = set()
+        old_names = set()
+        for source in (
+                (row.get("replaced_from") or [])
+                + (item.get("dedup_extra_old_versions") or [])
+        ):
+            if not isinstance(source, dict):
+                continue
+            old_id = str(source.get("file_id") or "").strip()
+            if old_id:
+                old_ids.add(old_id)
+            old_name = str(source.get("file_name") or "").strip()
+            if old_name:
+                old_names.add(old_name)
+        old_id = str(item.get("upgrade_old_file_id") or "").strip()
+        if old_id:
+            old_ids.add(old_id)
+        old_name = str(item.get("upgrade_old_file_name") or "").strip()
+        if old_name:
+            old_names.add(old_name)
+        return [
+            version
+            for version in self._other_versions(versions, item, row)
+            if str(version.get("file_id") or "").strip() not in old_ids
+            and str(version.get("file_name") or "").strip() not in old_names
+        ]
 
     def _resolve_subscribe(self, item: Dict[str, Any]):
         """按 subscribe_id 或 tmdb_id 解析订阅；解析不到返回 None。"""
@@ -808,7 +1182,20 @@ class FunnelService(OwnerDelegator):
                 self._sync_row_outcome_to_monitor(item, False, reason)
             return "held"
         delay = FUNNEL_RETRY_DELAYS[min(attempts, len(FUNNEL_RETRY_DELAYS) - 1)]
-        repo.mark_failed(row_id, int(time.time()) + delay, reason)
+        # v1.29.10 热修复（评审 I5）：记失败被拒（行已被拦截路置 held，
+        # 驱动层拿过期快照又调 _fail_row）时以库里实际状态为准，绝不把
+        # held 翻回 failed。
+        if not repo.mark_failed(row_id, int(time.time()) + delay, reason):
+            current = None
+            try:
+                current = repo.get_by_id(row_id)
+            except Exception as error:  # noqa: BLE001 - 读不到按 held 处理
+                logger.debug(f"漏斗行 #{row_id} 读当前状态失败：{error}", exc_info=True)
+            status = str((current or {}).get("status") or "held")
+            logger.warning(
+                f"漏斗行 #{row_id} 记失败被拒，当前状态 {status}：{reason}"
+            )
+            return status if status in ("held", "done") else "failed"
         logger.warning(
             f"漏斗行 #{row_id} 失败（{attempts + 1}/{max_attempts} 次），"
             f"{delay} 秒后重试：{reason}"
@@ -860,8 +1247,10 @@ class FunnelService(OwnerDelegator):
 
         返回 (是否拦截, 原因)。两层：
         1. 在途登记校验：另一行在途同键（不同 pending_key）；
-        2. 落盘前实查（判重激活、非洗版）：剧集查季目录里已有另一份
-           同集文件，电影查电影目标目录里已有另一份电影文件。
+        2. 落盘前实查（判重激活）：剧集查季目录里已有另一份同集文件，
+           电影查电影目标目录里已有另一份电影文件。洗版同样查——旧版
+           按行 replaced_from 与项 upgrade_old_* 排除，只有“另一份新版”
+           才拦截（v1.29.10 热修复，评审 B5：三条件之一）。
         查不到/异常一律 fail-open（不拦截）。绝不删除任何文件。
         """
         key = self._item_dedup_key(item, media)
@@ -886,9 +1275,6 @@ class FunnelService(OwnerDelegator):
             return False, ""
         if media_type not in {"tv", "movie"}:
             return False, ""
-        if bool(item.get("upgrade")):
-            # 洗版：旧版在提交后才删，库里有旧版是正常的，跳过库检查。
-            return False, ""
         dedup = getattr(self._owner, "episode_dedup", None)
         if dedup is None:
             return False, ""
@@ -912,25 +1298,35 @@ class FunnelService(OwnerDelegator):
             return False, ""
         # 本项自己的刚落盘文件不算：同 file_id，或同 file_name。
         own_file_id = ""
+        own_row: Dict[str, Any] = {}
         if repo is not None:
             try:
-                own_row = repo.get_by_pending_key(str(pending_key or ""))
+                own_row = repo.get_by_pending_key(str(pending_key or "")) or {}
                 if own_row:
                     own_file_id = str(own_row.get("file_id") or "")
             except Exception:  # noqa: BLE001 - 行查不到按无 file_id 处理
-                own_row = None
+                own_row = {}
         probe_item = dict(item)
         if own_file_id:
             probe_item["file_id"] = own_file_id
         if media_type == "tv":
             try:
-                versions = dedup._collect_episode_versions(subscribe, media, season) or {}
+                # v1.29.10 热修复（评审 B1）：提交前复查强制刷新。
+                versions = dedup._collect_episode_versions(
+                    subscribe, media, season, force_refresh=True
+                ) or {}
             except Exception as error:  # noqa: BLE001 - 查不到 fail-open
                 logger.debug(f"提交前复查异常（fail-open）：{error}", exc_info=True)
                 return False, ""
-            others = self._other_versions(
-                versions.get(episode) or [], probe_item, {"file_id": own_file_id}
-            )
+            # v1.29.10 热修复（评审 B5）：洗版按旧版本除外后的新版检查。
+            if bool(item.get("upgrade")):
+                others = self._upgrade_other_new_versions(
+                    versions.get(episode) or [], probe_item, own_row
+                )
+            else:
+                others = self._other_versions(
+                    versions.get(episode) or [], probe_item, {"file_id": own_file_id}
+                )
             if not others:
                 return False, ""
             return True, "提交前复查发现重复，已拦截：媒体库已有另一份同集文件"
@@ -944,9 +1340,15 @@ class FunnelService(OwnerDelegator):
         except Exception as error:  # noqa: BLE001 - 查不到 fail-open
             logger.debug(f"提交前复查异常（fail-open）：{error}", exc_info=True)
             return False, ""
-        others = self._other_versions(
-            versions, probe_item, {"file_id": own_file_id}
-        )
+        # v1.29.10 热修复（评审 B5）：洗版电影按旧版本除外后的新版检查。
+        if bool(item.get("upgrade")):
+            others = self._upgrade_other_new_versions(
+                versions, probe_item, own_row
+            )
+        else:
+            others = self._other_versions(
+                versions, probe_item, {"file_id": own_file_id}
+            )
         if not others:
             return False, ""
         return True, "提交前复查发现重复，已拦截：媒体库已有另一份电影文件"

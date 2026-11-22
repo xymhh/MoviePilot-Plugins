@@ -105,8 +105,8 @@ class _Service(TransferOpsMixin):
     def _episode_dedup_active(self):
         return self._dedup_active
 
-    def _collect_episode_versions(self, subscribe, mediainfo, season):
-        self._collect_calls.append((subscribe, mediainfo, season))
+    def _collect_episode_versions(self, subscribe, mediainfo, season, *, force_refresh=False):
+        self._collect_calls.append((subscribe, mediainfo, season, force_refresh))
         if self._collect_error is not None:
             raise self._collect_error
         return dict(self._versions)

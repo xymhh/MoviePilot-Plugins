@@ -72,6 +72,16 @@
               >
                 放回队列
               </v-btn>
+              <v-btn
+                v-if="row.has_old_version && (group.key === 'held' || row.status === 'failed')"
+                size="small"
+                variant="tonal"
+                color="warning"
+                class="mr-2"
+                @click="deleteOldVersion(row)"
+              >
+                删旧版
+              </v-btn>
               <v-btn size="small" variant="text" color="error" @click="deleteRow(row)"> 删除 </v-btn>
             </template>
           </v-list-item>
@@ -222,6 +232,23 @@ async function deleteRow(row) {
     );
     if (result && result.success === false) throw new Error(result.message || "删除失败");
     message.value = (result && result.message) || "已删除";
+    await load();
+  } catch (err) {
+    error.value = err && err.message ? err.message : String(err);
+  }
+}
+
+async function deleteOldVersion(row) {
+  error.value = "";
+  message.value = "";
+  const count = row.old_version_count || 1;
+  if (!window.confirm(`确定删除该行的 ${count} 个旧版文件吗？新版不受影响，删后不可恢复。`)) return;
+  try {
+    const result = unwrap(
+      await props.api.post(`plugin/${props.pluginId}/funnel/delete-old-version`, { ids: [row.id] }),
+    );
+    if (result && result.success === false) throw new Error(result.message || "删旧版失败");
+    message.value = (result && result.message) || "已删旧版";
     await load();
   } catch (err) {
     error.value = err && err.message ? err.message : String(err);

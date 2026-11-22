@@ -922,6 +922,16 @@ class FunnelQueueRepository(DbOper):
         )
 
     @staticmethod
+    def _unsettled_filter():
+        """未终态（含 held）：结算守卫用。held 是终态但不是“完成”——
+        集没入库，订阅绝不能因此结算；只有人工放回/删除后才可能结算
+        （v1.29.10 热修复，评审 B4）。入队冲突与在途查询仍用
+        _active_filter（held 释放去重键的口径不变）。"""
+        return FunnelQueueRow.status.in_(
+            ("queued", "processing", "failed", "held")
+        )
+
+    @staticmethod
     def _key_filter(
             media_type: str,
             tmdb_id: Optional[int],
@@ -1124,6 +1134,87 @@ class FunnelQueueRepository(DbOper):
         ).first()
         return row is not None
 
+    @db_query
+    def has_unsettled_for_subscribe(
+            self, subscribe_id: int, db: Session = None
+    ) -> bool:
+        """v1.29.10 热修复：指定订阅是否还有漏斗未终态行（queued/
+        processing/failed/held）。结算守卫用：held 行的集没入库，
+        订阅绝不能结算——只有人工放回（终态成功）或删除后才可能结算。"""
+        if int(subscribe_id or 0) <= 0:
+            return False
+        row = db.scalars(
+            select(FunnelQueueRow.id).where(
+                self._unsettled_filter(),
+                FunnelQueueRow.subscribe_id == int(subscribe_id),
+            ).limit(1)
+        ).first()
+        return row is not None
+
+    @db_query
+    def list_lease_expired(
+            self, now: Optional[int] = None, db: Session = None,
+    ) -> List[Dict[str, Any]]:
+        """v1.29.10 热修复：租约过期的 processing 行（服务层逐行做
+        严格实查后再决定回收还是挂起，不再由 run_round 盲目回收）。"""
+        current = int(now if now is not None else time.time())
+        rows = db.scalars(
+            select(FunnelQueueRow)
+            .where(
+                FunnelQueueRow.status == "processing",
+                FunnelQueueRow.lease_until > 0,
+                FunnelQueueRow.lease_until < current,
+            )
+            .order_by(
+                FunnelQueueRow.lease_until.asc(),
+                FunnelQueueRow.id.asc(),
+            )
+        ).all()
+        return [row.to_dict() for row in rows]
+
+    @db_update
+    def replace_row_file_identity(
+            self, row_id: int, payload: Dict[str, Any], db: Session = None,
+    ) -> bool:
+        """v1.29.10 热修复（B2）：洗版高分候选替换已入队行的文件身份。
+
+        只有 status 仍为 queued 的行能被替换（processing 行正在被
+        worker 驱动，身份换了会打乱在途处理——此时调用方按“已在途”
+        跳过第二份）。替换后行仍为 queued、attempts 不变、去重键不变。
+        :return: 是否替换成功。"""
+        values = {
+            key: (payload or {}).get(key)
+            for key in (
+                "media_type", "tmdb_id", "season", "episode", "title",
+                "file_id", "file_name", "file_size", "sha1", "cloud_dir",
+                "staging_dir", "staging_name", "source", "subscribe_id",
+                "score", "quality", "is_upgrade", "replaced_from",
+                "notification_kind", "pending_key", "media_data",
+            )
+            if (payload or {}).get(key) is not None
+        }
+        values["updated_at"] = int(time.time())
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(
+                FunnelQueueRow.id == int(row_id or 0),
+                FunnelQueueRow.status == "queued",
+            )
+            .values(**values)
+        )
+        return int(result.rowcount or 0) == 1
+
+    @db_update
+    def clear_replaced_from(self, row_id: int, db: Session = None) -> bool:
+        """v1.29.10 热修复：人工删旧版成功后，清掉行的 replaced_from
+        （按钮消失，不再重复删）。只清字段，不动状态与原因。"""
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(FunnelQueueRow.id == int(row_id or 0))
+            .values(replaced_from=None, updated_at=int(time.time()))
+        )
+        return int(result.rowcount or 0) == 1
+
     @db_update
     def claim(
             self, row_id: int, lease_until: int, now: Optional[int] = None,
@@ -1219,9 +1310,15 @@ class FunnelQueueRepository(DbOper):
             self, row_id: int, next_retry_at: int, last_error: str = "",
             db: Session = None,
     ) -> bool:
+        """v1.29.10 热修复（评审 I5）：只对 queued/processing/failed
+        行记失败。held/done 行是终态——拦截路径已把行置 held 后，
+        驱动层拿过期快照再调 _fail_row 绝不能把 held 翻回 failed。"""
         result = db.execute(
             update(FunnelQueueRow)
-            .where(FunnelQueueRow.id == int(row_id or 0))
+            .where(
+                FunnelQueueRow.id == int(row_id or 0),
+                FunnelQueueRow.status.in_(("queued", "processing", "failed")),
+            )
             .values(
                 status="failed",
                 attempts=FunnelQueueRow.attempts + 1,

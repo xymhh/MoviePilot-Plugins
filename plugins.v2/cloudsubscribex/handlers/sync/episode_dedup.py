@@ -35,12 +35,19 @@ class EpisodeDedupService(OwnerDelegator):
             subscribe,
             mediainfo: MediaInfo,
             season: int,
+            *,
+            force_refresh: bool = False,
     ) -> Tuple[bool, str, List[Dict[str, Any]]]:
         """列出目标季目录里的正片文件，返回 ``(是否拿到实测数据, 目录路径, 文件条目)``。
 
         判重与「历史记录存在性校验」共用这一份列目录结果，避免同一季重复请求网盘。
         ``verified=False`` 表示目录解析/列目录失败（网络或鉴权问题），此时调用方
         必须按「没有实测数据」处理，不能据此判定某集不存在。
+
+        v1.29.10 热修复（评审 B1）：force_refresh=True 跳过缓存读、仍写
+        缓存。漏斗两处实查（落盘前 / 提交前）必须走强制刷新——缓存是
+        6 小时 TTL 的季目录快照，第一份 20:01 落盘、第二份 20:07 来查
+        仍读 19:59 快照，重复就漏过去。
         """
         key = None
         cache = getattr(self, "_season_listing_cache", None)
@@ -52,7 +59,7 @@ class EpisodeDedupService(OwnerDelegator):
                 )
             except Exception:
                 key = None
-            if key is not None:
+            if key is not None and not force_refresh:
                 cached = cache.get(key)
                 if cached is not None:
                     return bool(cached[0]), str(cached[1]), [
@@ -106,15 +113,20 @@ class EpisodeDedupService(OwnerDelegator):
             mediainfo: MediaInfo,
             season: int,
             score_cache: Optional[Dict[tuple, int]] = None,
+            *,
+            force_refresh: bool = False,
     ) -> Dict[int, List[Dict[str, Any]]]:
         """扫描目标季目录，用 MetaInfo 解析每条视频的季集，返回全部版本。
 
         Phase 3a 第 4 项：评分结果写进 ``score_cache``（同一查询内同名同体积
         只评一次）；不传时用一次性的本地缓存。调用方 ``_collect_episode_versions``
         会把同一个缓存传给基线侧，实现一次查询内评分共享。
+
+        v1.29.10 热修复（评审 B1）：force_refresh 透传给
+        ``_season_dir_files``，漏斗实查入口用。
         """
         verified, cloud_path, files = self._season_dir_files(
-            subscribe, mediainfo, season
+            subscribe, mediainfo, season, force_refresh=force_refresh
         )
         if not verified:
             return {}
@@ -281,6 +293,8 @@ class EpisodeDedupService(OwnerDelegator):
             subscribe,
             mediainfo: MediaInfo,
             season: int,
+            *,
+            force_refresh: bool = False,
     ) -> Dict[int, List[Dict[str, Any]]]:
         """两路数据源取并集，按 file_id（无则 目录+文件名）去重。
 
@@ -291,6 +305,10 @@ class EpisodeDedupService(OwnerDelegator):
         传给季目录扫描与基线侧（``_baseline_episode_versions`` →
         ``_build_episode_baseline`` → gather），同名同体积的规则评分只算一次；
         列目录也只列一次（``_season_dir_files`` 的缓存）。
+
+        v1.29.10 热修复（评审 B1）：force_refresh 只传给扫描那一路——
+        第一次实列即刷新缓存，其后直接查与基线侧复用刚刷新的条目，
+        一次查询仍只列一次目录。
         """
         merged: Dict[int, List[Dict[str, Any]]] = {}
         seen: Dict[int, set] = {}
@@ -309,7 +327,8 @@ class EpisodeDedupService(OwnerDelegator):
             merged.setdefault(episode, []).append(entry)
 
         scanned = self._scan_episode_versions_in_dir(
-            subscribe, mediainfo, season, score_cache=score_cache
+            subscribe, mediainfo, season, score_cache=score_cache,
+            force_refresh=force_refresh,
         )
         for episode, entries in scanned.items():
             for entry in entries:

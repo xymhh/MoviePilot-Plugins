@@ -1501,6 +1501,30 @@ class PostprocessService(OwnerDelegator):
         is_replacement = item.get("upgrade") and str(
             item.get("upgrade_mode") or self._upgrade_mode
         ) != "coexist"
+        if is_replacement:
+            # v1.29.10 热修复（评审 B5）：洗版删旧版前再过一次提交前复查
+            # （三条件之二、三）——MP 整理成功已由上游确认，这里确认落盘
+            # 前实查与提交前复查都通过；拦截时旧版不动、行转 held、不提交。
+            try:
+                intercepted, intercept_reason = self._owner.funnel.precommit_recheck(
+                    item, pending_key, media, ctx
+                )
+            except Exception as error:  # noqa: BLE001 - 复查异常 fail-open
+                logger.debug(f"删旧版前复查异常（fail-open）：{error}", exc_info=True)
+                intercepted, intercept_reason = False, ""
+            if intercepted:
+                logger.warning(
+                    f"洗版删旧版前复查拦截：{item.get('file_name') or pending_key}，"
+                    f"{intercept_reason}"
+                )
+                try:
+                    self._owner.funnel_mark_held_by_pending_key(
+                        str(pending_key or ""), intercept_reason
+                    )
+                except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
+                    logger.debug(f"删旧版前复查挂起漏斗行失败：{error}", exc_info=True)
+                self._abort_single_item(item, pending_key, intercept_reason, ctx, notify=False)
+                return
         if is_replacement and self._cloud_batch_mutations:
             backup_id = self._upgrade_old_file_id(
                 item, lambda d: self._cloud_directory_snapshot(d, ctx.directory_snapshots)
@@ -2674,42 +2698,81 @@ class PostprocessService(OwnerDelegator):
             f"{int(self._PENDING_ABSOLUTE_TIMEOUT_SECONDS // 3600)} 小时未完成）",
             ctx,
         )
+        # v1.29.10 热修复（评审 B3）：pending 绝对过期时，对应漏斗行
+        # 同步转 held——否则行还在 processing，租约过期后又被回收重跑，
+        # 终态变成无缘无故的失败。只挂这条绝对过期路，不挂
+        # _abort_single_item 本身（首次瞬时失败走重试，绝不因此 held）。
+        try:
+            self._owner.funnel_mark_held_by_pending_key(
+                pending_key, "后处理超时（超过 6 小时未完成），需人工核对"
+            )
+        except Exception as error:  # noqa: BLE001 - 挂起失败只记日志
+            logger.debug(f"漏斗行转挂起失败：{error}", exc_info=True)
         return True
 
     def _flush_batch_postprocess(self, ctx: PostprocessBatchContext) -> None:
         """批次后处理收尾：批量回收洗版旧文件、批量提交订阅集数、发送批次聚合通知。"""
         if ctx.upgrade_delete_batch:
-            delete_ids = list(dict.fromkeys(
-                value["file_id"] for value in ctx.upgrade_delete_batch.values()
-            ))
-            deleted_ids = {
-                str(file_id) for file_id in
-                self._cloud_batch_mutations.delete_files(delete_ids)
-            }
-            for pending_key, value in ctx.upgrade_delete_batch.items():
-                item = value["item"]
-                if str(value["file_id"]) not in deleted_ids:
-                    self._schedule_finalize_retry(item, ctx.now)
+            # v1.29.10 热修复（评审 B5）：批量删旧版前逐项过提交前复查；
+            # 拦截的项不删、不提交、行转 held；其余项照常删旧版提交。
+            gated: Dict[str, Dict[str, Any]] = {}
+            for batch_key, batch_value in ctx.upgrade_delete_batch.items():
+                batch_item = batch_value["item"]
+                try:
+                    intercepted, intercept_reason = self._owner.funnel.precommit_recheck(
+                        batch_item, batch_key, batch_value["media"], ctx
+                    )
+                except Exception as error:  # noqa: BLE001 - 复查异常 fail-open
+                    logger.debug(f"批量删旧版前复查异常（fail-open）：{error}", exc_info=True)
+                    intercepted, intercept_reason = False, ""
+                if intercepted:
+                    logger.warning(
+                        f"洗版批量删旧版前复查拦截：{batch_item.get('file_name') or batch_key}，"
+                        f"{intercept_reason}"
+                    )
+                    try:
+                        self._owner.funnel_mark_held_by_pending_key(
+                            str(batch_key or ""), intercept_reason
+                        )
+                    except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
+                        logger.debug(f"批量删旧版前复查挂起漏斗行失败：{error}", exc_info=True)
+                    self._abort_single_item(
+                        batch_item, batch_key, intercept_reason, ctx, notify=False
+                    )
                     continue
-                item["upgrade_old_deleted"] = True
-                self._commit_single_item(
-                    item,
-                    pending_key,
-                    value["strm_path"],
-                    value["media"],
-                    value["media_data"],
-                    ctx,
+                gated[batch_key] = batch_value
+            if gated:
+                delete_ids = list(dict.fromkeys(
+                    value["file_id"] for value in gated.values()
+                ))
+                deleted_ids = {
+                    str(file_id) for file_id in
+                    self._cloud_batch_mutations.delete_files(delete_ids)
+                }
+                for pending_key, value in gated.items():
+                    item = value["item"]
+                    if str(value["file_id"]) not in deleted_ids:
+                        self._schedule_finalize_retry(item, ctx.now)
+                        continue
+                    item["upgrade_old_deleted"] = True
+                    self._commit_single_item(
+                        item,
+                        pending_key,
+                        value["strm_path"],
+                        value["media"],
+                        value["media_data"],
+                        ctx,
+                    )
+                success_count = len(deleted_ids & set(map(str, delete_ids)))
+                total_count = len(delete_ids)
+                logger.info(
+                    f"洗版旧文件批量回收完成：成功 {success_count}/{total_count} 个"
                 )
-            success_count = len(deleted_ids & set(map(str, delete_ids)))
-            total_count = len(delete_ids)
-            logger.info(
-                f"洗版旧文件批量回收完成：成功 {success_count}/{total_count} 个"
-            )
-            if success_count < total_count:
-                logger.warning(
-                    f"洗版旧文件有 {total_count - success_count} 个回收失败，"
-                    "已保留后处理任务等待重试"
-                )
+                if success_count < total_count:
+                    logger.warning(
+                        f"洗版旧文件有 {total_count - success_count} 个回收失败，"
+                        "已保留后处理任务等待重试"
+                    )
 
         for batch in ctx.subscription_batches.values():
             completion_item = batch["item"]

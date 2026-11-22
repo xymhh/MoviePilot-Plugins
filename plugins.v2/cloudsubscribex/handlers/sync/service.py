@@ -825,16 +825,51 @@ class SyncHandler:
     def funnel_has_active_rows(self, subscribe_id) -> bool:
         """v1.29.9 阶段 3：订阅是否还有漏斗在途行（queued/processing/
         failed）。轮次结束结算前调用：在途行未终态时绝不结算，终态成功
-        时由 _finish_pending_subscription 回写。存储/组件不可用时
-        fail-open（返回 False，按旧行为结算）。"""
+        时由 _finish_pending_subscription 回写。
+
+        v1.29.10 热修复（评审 B4）：存储/组件不可用或查询异常时
+        fail-closed（返回 True，暂缓结算）。"""
         try:
             funnel = self.__dict__.get("funnel")
             has_active = getattr(funnel, "has_active_rows", None)
             if not callable(has_active):
-                return False
+                logger.warning(
+                    "漏斗组件缺 has_active_rows，订阅结算暂缓："
+                    f"subscribe_id={subscribe_id}"
+                )
+                return True
             return bool(has_active(subscribe_id))
-        except Exception:  # noqa: BLE001 - 查询异常按无在途行处理
-            return False
+        except Exception as error:  # noqa: BLE001 - 查询异常暂缓结算
+            logger.warning(
+                "查询订阅漏斗在途行失败，订阅结算暂缓："
+                f"subscribe_id={subscribe_id}，{error}"
+            )
+            return True
+
+    def funnel_has_unsettled_rows(self, subscribe_id) -> bool:
+        """v1.29.10 热修复（评审 B4）：订阅是否还有漏斗未终态行
+        （queued/processing/failed/**held**）。结算守卫用：held 行的集
+        没入库，订阅绝不能因此结算。查不到/异常时 fail-closed。"""
+        try:
+            funnel = self.__dict__.get("funnel")
+            has_unsettled = getattr(funnel, "has_unsettled_rows", None)
+            if not callable(has_unsettled):
+                logger.warning(
+                    "漏斗组件缺 has_unsettled_rows，订阅结算暂缓："
+                    f"subscribe_id={subscribe_id}"
+                )
+                return True
+            return bool(has_unsettled(subscribe_id))
+        except Exception as error:  # noqa: BLE001 - 查询异常暂缓结算
+            logger.warning(
+                "查询订阅漏斗未终态行失败，订阅结算暂缓："
+                f"subscribe_id={subscribe_id}，{error}"
+            )
+            return True
+
+    def funnel_delete_old_version(self, row_ids) -> Dict[str, Any]:
+        """v1.29.10 热修复：队列页人工删旧版（held/failed 行）。"""
+        return self.funnel.delete_old_version(row_ids)
 
     def funnel_run_round(self) -> Dict[str, int]:
         return self.funnel.run_round()
@@ -2275,9 +2310,15 @@ class SyncHandler:
                 )
                 # v1.29.7 阶段 1：手动提交在 finalize 边界入队整理队列；
                 # 入队失败不挡旧流水线（行缺失时离线监控仍会处理本记录）。
+                # v1.29.10 热修复（B2）：enqueue 冲突返回旧行时绝不能丢弃
+                # 返回值——第二份 pending 记录带 funnel_route=True 会被
+                # 离线监控跳过、漏斗 worker 只驱动第一份的 pending_key，
+                # 6 小时后变无缘无故的失败记录。
+                funnel_row = None
+                funnel_created = False
                 if item.get("funnel_route"):
                     try:
-                        self.enqueue_funnel_from_pending(
+                        funnel_row, funnel_created = self.enqueue_funnel_from_pending(
                             item, pending_key, mediainfo,
                             subscribe_id=subscribe_id, season=season,
                         )
@@ -2286,12 +2327,84 @@ class SyncHandler:
                             f"手动提交入队整理队列失败（走旧流水线）：{error}",
                             exc_info=True,
                         )
-                result[str(item["result_key"])] = pending_key
+                if funnel_row is not None and not funnel_created:
+                    keep_second = self._resolve_funnel_duplicate_enqueue(
+                        funnel_row, item, pending_key, pending, mediainfo,
+                        subscribe_id=subscribe_id, season=season,
+                    )
+                    if keep_second:
+                        result[str(item["result_key"])] = pending_key
+                else:
+                    result[str(item["result_key"])] = pending_key
             if result:
                 self._save_offline_pending(pending)
             pending_count = self.count_offline_monitor_pending(pending)
         self._notify_offline_pending_changed(pending_count)
         return result
+
+    def _resolve_funnel_duplicate_enqueue(
+            self, row, item, pending_key, pending, mediainfo,
+            subscribe_id=None, season=None,
+    ) -> bool:
+        """v1.29.10 热修复（B2）：同集已有在途行时第二份的终态。
+
+        - 同一 pending_key 重提交：记录就是该行自己的，保留；
+        - 洗版高分候选（评分更高，或评分相等且体积更大——留大）：替换行
+          身份（只 queued 行能换），弹出第一份的 pending 记录，第二份接替；
+        - 其余（普通转存 / 低分洗版 / 行已 processing 换不了）：第二份记
+          “已在途”跳过——弹出第二份的 pending 记录（不持久化、不写失败、
+          不进重试），第一份继续被驱动。
+        返回 True：第二份保留（调用方写 result）；False：第二份已弹出。
+        """
+        row_id = int((row or {}).get("id") or 0)
+        old_pending_key = str((row or {}).get("pending_key") or "")
+        if old_pending_key and old_pending_key == pending_key:
+            logger.info(
+                f"漏斗重复入队：同 pending_key 重提交，保留记录（行 #{row_id}）"
+            )
+            return True
+        if bool(item.get("upgrade")) and self._funnel_duplicate_is_better(row, item):
+            replaced = False
+            try:
+                replaced = bool(self.funnel.replace_row_with_pending(
+                    row, item, pending_key, mediainfo,
+                    subscribe_id=subscribe_id, season=season,
+                ))
+            except Exception as error:  # noqa: BLE001 - 替换失败按已在途跳过
+                logger.debug(f"漏斗洗版替换已入队行失败：{error}", exc_info=True)
+            if replaced:
+                if old_pending_key:
+                    pending.pop(old_pending_key, None)
+                logger.info(
+                    f"漏斗洗版替换已入队行 #{row_id}："
+                    f"{item.get('file_name')}（评分/体积更高）接替"
+                )
+                return True
+            logger.info(
+                f"漏斗重复入队：洗版候选评分更高但行 #{row_id} 已在处理，"
+                "第二份按已在途跳过"
+            )
+            pending.pop(pending_key, None)
+            return False
+        logger.info(
+            f"漏斗重复入队：同集已有在途行 #{row_id}，"
+            f"第二份 {item.get('file_name')} 按已在途跳过"
+        )
+        pending.pop(pending_key, None)
+        return False
+
+    @staticmethod
+    def _funnel_duplicate_is_better(row, item) -> bool:
+        """v1.29.10 热修复（B2，留大）：第二份洗版候选是否赢过已入队行。
+
+        评分仍是第一判定；评分相等时看体积（大者赢）。"""
+        new_score = int(item.get("dedup_new_score") or 0)
+        old_score = int((row or {}).get("score") or 0)
+        if new_score != old_score:
+            return new_score > old_score
+        new_size = int(item.get("dedup_new_size") or item.get("file_size") or 0)
+        old_size = int((row or {}).get("file_size") or 0)
+        return new_size > old_size
 
     def _write_terminal_upgrade_priority(
             self, subscribe, success_episodes, new_score: int
@@ -2365,10 +2478,25 @@ class SyncHandler:
             except Exception as error:
                 logger.debug(f"后处理订阅进度媒体信息恢复失败：{error}", exc_info=True)
         if not mediainfo or not success_episodes:
-            logger.debug(
-                f"跳过后处理订阅进度更新：媒体信息={'有' if mediainfo else '无'}，"
-                f"完成集数={success_episodes or '无'}"
+            # v1.29.10 热修复（评审 B4 两层结算）：这不是“没事可做”，
+            # 而是终态回写丢了完成集数——静默 return 会让订阅在“轮次
+            # 已推进、行已 done”的假完结下结算。记 warning 并把对应漏斗
+            # 行置 held，订阅结算被 held 挡住，等人工核对。
+            logger.warning(
+                f"后处理订阅进度回写缺完成集数，漏斗行转挂起："
+                f"媒体信息={'有' if mediainfo else '无'}，"
+                f"完成集数={success_episodes or '无'}，"
+                f"pending_key={item.get('pending_key') or ''}"
             )
+            pending_key = str(item.get("pending_key") or "")
+            if pending_key:
+                try:
+                    self.funnel_mark_held_by_pending_key(
+                        pending_key,
+                        "终态回写缺完成集数，需人工核对",
+                    )
+                except Exception as error:  # noqa: BLE001 - 挂起失败只记日志
+                    logger.debug(f"漏斗行转挂起失败：{error}", exc_info=True)
             return
         try:
             subscribe = None

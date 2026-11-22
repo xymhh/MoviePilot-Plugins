@@ -453,6 +453,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "删除整理队列行（pending 记录与网盘文件均保留）",
             },
             {
+                "path": "/funnel/delete-old-version",
+                "endpoint": self.api_vue_funnel_delete_old_version,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "人工删旧版：删除挂起/失败行 replaced_from 里的旧文件",
+            },
+            {
                 "path": "/tg/transfer",
                 "endpoint": self.api_vue_tg_transfer,
                 "methods": ["POST"],

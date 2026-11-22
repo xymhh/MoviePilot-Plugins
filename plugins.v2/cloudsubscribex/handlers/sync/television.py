@@ -115,19 +115,30 @@ class TelevisionSyncProcessor(OwnerDelegator):
         failed）。轮次结束结算前调用：在途行未终态时绝不结算——开场扫
         的是目标网盘目录，在途文件会被算作“已存在”，不守卫就会把订阅
         提前结算；终态成功时由 _finish_pending_subscription 回写。
-        漏斗组件不可用时 fail-open（返回 False，按旧行为结算）。"""
+
+        v1.29.10 热修复（评审 B4）：守卫改查未终态行（多一个 held——
+        held 行的集没入库，订阅绝不能因此结算）；漏斗组件不可用或
+        查询异常时 fail-closed（返回 True，暂缓结算）。"""
         try:
             subscribe_id = int(getattr(subscribe, "id", 0) or 0)
             if subscribe_id <= 0:
                 return False
-            has_active = getattr(
-                self._owner, "funnel_has_active_rows", None
+            has_unsettled = getattr(
+                self._owner, "funnel_has_unsettled_rows", None
             )
-            if not callable(has_active):
-                return False
-            return bool(has_active(subscribe_id))
-        except Exception:  # noqa: BLE001 - 查询异常按无在途行处理
-            return False
+            if not callable(has_unsettled):
+                logger.warning(
+                    "漏斗组件缺 funnel_has_unsettled_rows，订阅结算暂缓："
+                    f"subscribe_id={subscribe_id}"
+                )
+                return True
+            return bool(has_unsettled(subscribe_id))
+        except Exception as error:  # noqa: BLE001 - 查询异常暂缓结算
+            logger.warning(
+                "查询订阅漏斗未终态行失败，订阅结算暂缓："
+                f"subscribe_id={getattr(subscribe, 'id', '')}，{error}"
+            )
+            return True
 
     def process_tv_subscribe(
             self,

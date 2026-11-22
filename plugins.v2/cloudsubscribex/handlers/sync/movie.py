@@ -27,20 +27,31 @@ class MovieSyncProcessor(OwnerDelegator):
         """v1.29.9 阶段 3：订阅是否还有漏斗在途行（queued/processing/
         failed）。与 TelevisionSyncProcessor 同一守卫：轮次结束结算前
         调用，在途行未终态时绝不结算，终态成功时由
-        _finish_pending_subscription 回写。漏斗组件不可用时 fail-open
-        （返回 False，按旧行为结算）。"""
+        _finish_pending_subscription 回写。
+
+        v1.29.10 热修复（评审 B4）：守卫改查未终态行（多一个 held——
+        held 行的集没入库，订阅绝不能因此结算）；漏斗组件不可用或
+        查询异常时 fail-closed（返回 True，暂缓结算）。"""
         try:
             subscribe_id = int(getattr(subscribe, "id", 0) or 0)
             if subscribe_id <= 0:
                 return False
-            has_active = getattr(
-                self._owner, "funnel_has_active_rows", None
+            has_unsettled = getattr(
+                self._owner, "funnel_has_unsettled_rows", None
             )
-            if not callable(has_active):
-                return False
-            return bool(has_active(subscribe_id))
-        except Exception:  # noqa: BLE001 - 查询异常按无在途行处理
-            return False
+            if not callable(has_unsettled):
+                logger.warning(
+                    "漏斗组件缺 funnel_has_unsettled_rows，订阅结算暂缓："
+                    f"subscribe_id={subscribe_id}"
+                )
+                return True
+            return bool(has_unsettled(subscribe_id))
+        except Exception as error:  # noqa: BLE001 - 查询异常暂缓结算
+            logger.warning(
+                "查询订阅漏斗未终态行失败，订阅结算暂缓："
+                f"subscribe_id={getattr(subscribe, 'id', '')}，{error}"
+            )
+            return True
 
     def process_movie_subscribe(
             self,
@@ -211,11 +222,20 @@ class MovieSyncProcessor(OwnerDelegator):
                     self._owner.strm_ops._generate_strm(cloud_dir, file_name)
                     self._scrape_metadata(cloud_dir, file_name, mediainfo)
                     if not transient_target:
-                        self._subscribe_handler.check_and_finish_subscribe(
-                            subscribe=subscribe,
-                            mediainfo=mediainfo,
-                            success_episodes=[1],
-                        )
+                        # v1.29.10 热修复（评审 B4）：快路径结算前同样守卫
+                        # （与剧集 :429 一致）——漏斗还有未终态行时不结算，
+                        # 等行终态成功后的回写再结。
+                        if self._subscribe_has_active_funnel_rows(subscribe):
+                            logger.info(
+                                f"电影 {mediainfo.title_year} 已在库，"
+                                "但漏斗有未终态行，暂缓结算"
+                            )
+                        else:
+                            self._subscribe_handler.check_and_finish_subscribe(
+                                subscribe=subscribe,
+                                mediainfo=mediainfo,
+                                success_episodes=[1],
+                            )
                     if track_points and self._search_handler:
                         self._search_handler.clear_subscription_budgets(sub_key)
                     self._owner._last_skip_reason = "库中已存在该电影，无需转存"

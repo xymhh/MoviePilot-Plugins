@@ -777,7 +777,7 @@ class FunnelTvSettlementGuardTests(unittest.TestCase):
         owner = MergeOwner({}, cloud_upgrade_subscribe=False)
         owner.cloud_episodes = {1, 2, 3}
         self._search_stub(owner)
-        owner.funnel_has_active_rows = lambda subscribe_id: True
+        owner.funnel_has_unsettled_rows = lambda subscribe_id: True
         subscribe = _subscribe(total_episode=5)
         subscribe.id = SUBSCRIBE_ID
         result = TelevisionSyncProcessor(owner).process_tv_subscribe(
@@ -791,7 +791,7 @@ class FunnelTvSettlementGuardTests(unittest.TestCase):
         owner = MergeOwner({}, cloud_upgrade_subscribe=False)
         owner.cloud_episodes = {1, 2, 3}
         self._search_stub(owner)
-        owner.funnel_has_active_rows = lambda subscribe_id: False
+        owner.funnel_has_unsettled_rows = lambda subscribe_id: False
         subscribe = _subscribe(total_episode=5)
         subscribe.id = SUBSCRIBE_ID
         result = TelevisionSyncProcessor(owner).process_tv_subscribe(
@@ -808,7 +808,7 @@ class FunnelTvSettlementGuardTests(unittest.TestCase):
         owner = MergeOwner({}, cloud_upgrade_subscribe=False)
         owner.cloud_episodes = {1, 2, 3, 4, 5}
         self._search_stub(owner)
-        owner.funnel_has_active_rows = lambda subscribe_id: True
+        owner.funnel_has_unsettled_rows = lambda subscribe_id: True
         subscribe = _subscribe(total_episode=5)
         subscribe.id = SUBSCRIBE_ID
         result = TelevisionSyncProcessor(owner).process_tv_subscribe(

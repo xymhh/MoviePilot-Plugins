@@ -460,8 +460,10 @@ class _FakeDedup:
     def _episode_dedup_active(self):
         return self.active
 
-    def _collect_episode_versions(self, subscribe, media, season):
-        self.collect_calls.append((subscribe, media, season))
+    def _collect_episode_versions(self, subscribe, media, season, *, force_refresh=False):
+        # v1.29.10 热修复：签名与真实方法逐字一致（force_refresh 旁路）；
+        # 调用记下 force_refresh，实查入口的测试据此断言强制刷新。
+        self.collect_calls.append((subscribe, media, season, force_refresh))
         if self.fail_collect:
             raise RuntimeError("library lookup down")
         return dict(self.versions)
@@ -882,12 +884,49 @@ class FunnelPreCheckTests(_DbMixin):
         ok, _ = self._check({9: [other]}, episode_dedup=dedup)
         self.assertTrue(ok)
 
-    def test_upgrade_skips_library_check(self):
-        """洗版项跳过库检查：旧版在提交后才删，库里有旧版是正常的。"""
+    def test_upgrade_old_version_only_passes(self):
+        """洗版项落盘前实查：库里只有旧版时放行（旧版按 replaced_from /
+        upgrade_old_* 除外；v1.29.10 热修复：洗版不再跳过库检查，
+        只把旧版除外，另一份新版仍拦截）。"""
         other = {"file_id": "f-old", "file_name": _TV_FILE, "file_size": 1}
-        ok, _ = self._check({9: [other]}, item_extra={"upgrade": True})
+        ok, _ = self._check(
+            {9: [other]},
+            item_extra={
+                "upgrade": True,
+                "upgrade_old_file_id": "f-old",
+                "upgrade_old_file_name": _TV_FILE,
+            },
+            row_extra={
+                "is_upgrade": True,
+                "replaced_from": [dict(other)],
+            },
+        )
         self.assertTrue(ok)
-        self.assertEqual(self.owner.episode_dedup.collect_calls, [])
+        self.assertEqual(len(self.owner.episode_dedup.collect_calls), 1)
+        self.assertTrue(self.owner.episode_dedup.collect_calls[0][3])
+
+    def test_upgrade_other_new_version_intercepts(self):
+        """洗版项落盘前实查：旧版之外还有另一份新版时拦截。"""
+        old = {"file_id": "f-old", "file_name": _TV_FILE, "file_size": 1}
+        new = {
+            "file_id": "f-new",
+            "file_name": "多喜一家人 {tmdb-294498} - S01E09 - 第9集 2160p.mkv",
+            "file_size": 2000000000,
+        }
+        ok, reason = self._check(
+            {9: [old, new]},
+            item_extra={
+                "upgrade": True,
+                "upgrade_old_file_id": "f-old",
+                "upgrade_old_file_name": _TV_FILE,
+            },
+            row_extra={
+                "is_upgrade": True,
+                "replaced_from": [dict(old)],
+            },
+        )
+        self.assertFalse(ok)
+        self.assertIn("已在库", reason)
 
     def test_strict_false_ignores_different_name(self):
         """排障模式（strict=False）：不同名的另一份不算重复。"""
@@ -1038,12 +1077,13 @@ class FunnelRoundTests(_DbMixin):
         self.assertEqual(self.owner.mp_organize.calls, [])
         self.assertEqual(self.repo.get_by_id(row["id"])["status"], "queued")
 
-    def test_missing_pending_record_marks_done(self):
-        """待终态记录已不在（旧流水线已结算）：行直接终态，释放去重键。"""
+    def test_missing_pending_record_marks_held(self):
+        """待终态记录已不在：v1.29.10 热修复（评审 B3）——行转 held 待人工
+        核对，绝不直接终态（行终态会把“没入库的集”当成已完成结算掉）。"""
         row, _ = self.service.enqueue_from_pending(_tv_item(), "pk-tv-09", _tv_media())
         stats = self.service.run_round()
-        self.assertEqual(stats["done"], 1)
-        self.assertEqual(self.repo.get_by_id(row["id"])["status"], "done")
+        self.assertEqual(stats["held"], 1)
+        self.assertEqual(self.repo.get_by_id(row["id"])["status"], "held")
         self.assertEqual(self.owner.mp_organize.calls, [])
 
     def test_unsettled_row_released_without_attempt_cost(self):
@@ -1144,16 +1184,60 @@ class FunnelPrecommitTests(_DbMixin):
         self.assertTrue(intercepted)
         self.assertIn("媒体库已有另一份", reason)
 
-    def test_upgrade_skips_library_part(self):
-        """提交前复查：洗版项跳过库检查（旧版在提交后才删）。"""
-        self.service.enqueue_from_pending(_tv_item(), "pk-tv-09", _tv_media())
+    def test_upgrade_old_version_only_passes(self):
+        """提交前复查：洗版项库里只有旧版时放行（旧版按 replaced_from 除外；
+        v1.29.10 热修复：洗版不再跳过库检查）。"""
+        self.service.enqueue_from_pending(
+            _tv_item(
+                upgrade=True,
+                upgrade_old_file_id="f-old",
+                upgrade_old_file_name=_TV_FILE,
+            ),
+            "pk-tv-09", _tv_media(),
+        )
         self.owner.episode_dedup = _FakeDedup(versions={9: [{
             "file_id": "f-old",
             "file_name": _TV_FILE,
             "file_size": 1,
         }]})
-        intercepted, _ = self._recheck(_tv_item(upgrade=True), "pk-tv-09")
+        intercepted, _ = self._recheck(
+            _tv_item(
+                upgrade=True,
+                upgrade_old_file_id="f-old",
+                upgrade_old_file_name=_TV_FILE,
+            ),
+            "pk-tv-09",
+        )
         self.assertFalse(intercepted)
+
+    def test_upgrade_other_new_version_intercepts(self):
+        """提交前复查：洗版项旧版之外还有另一份新版时拦截。"""
+        self.service.enqueue_from_pending(
+            _tv_item(
+                upgrade=True,
+                upgrade_old_file_id="f-old",
+                upgrade_old_file_name=_TV_FILE,
+            ),
+            "pk-tv-09", _tv_media(),
+        )
+        self.owner.episode_dedup = _FakeDedup(versions={9: [
+            {"file_id": "f-old", "file_name": _TV_FILE, "file_size": 1},
+            {
+                "file_id": "f-new",
+                "file_name": "多喜一家人 {tmdb-294498} - S01E09 - 第9集 2160p.mkv",
+                "file_size": 2000000000,
+            },
+        ]})
+        intercepted, reason = self._recheck(
+            _tv_item(
+                upgrade=True,
+                upgrade_old_file_id="f-old",
+                upgrade_old_file_name=_TV_FILE,
+            ),
+            "pk-tv-09",
+        )
+        self.assertTrue(intercepted)
+        self.assertIn("媒体库已有另一份", reason)
 
     def test_lookup_failure_fail_open(self):
         """提交前复查：实查异常 fail-open，不挡提交。"""
@@ -1399,12 +1483,47 @@ class FunnelMoviePreCheckTests(_DbMixin):
         ok, _ = self._check([other], item_extra={"subscribe_id": 0})
         self.assertTrue(ok)
 
-    def test_upgrade_skips_library_check(self):
-        """洗版电影项跳过库检查（旧版在提交后才删，不靠实查拦）。"""
+    def test_upgrade_old_version_only_passes(self):
+        """洗版电影项落盘前实查：库里只有旧版时放行（旧版按 replaced_from
+        除外；v1.29.10 热修复：洗版不再跳过库检查）。"""
         other = {"file_id": "f-old", "file_name": _MOVIE_FILE, "file_size": 1}
-        ok, _ = self._check([other], item_extra={"upgrade": True})
+        ok, _ = self._check(
+            [other],
+            item_extra={
+                "upgrade": True,
+                "upgrade_old_file_id": "f-old",
+                "upgrade_old_file_name": _MOVIE_FILE,
+            },
+            row_extra={
+                "is_upgrade": True,
+                "replaced_from": [dict(other)],
+            },
+        )
         self.assertTrue(ok)
-        self.assertEqual(self.owner.episode_dedup.movie_calls, [])
+        self.assertEqual(len(self.owner.episode_dedup.movie_calls), 1)
+
+    def test_upgrade_other_new_version_intercepts(self):
+        """洗版电影落盘前实查：旧版之外还有另一份新版时拦截。"""
+        old = {"file_id": "f-old", "file_name": _MOVIE_FILE, "file_size": 1}
+        new = {
+            "file_id": "f-new",
+            "file_name": "测试电影 (2026) 2160p.mkv",
+            "file_size": 6000000000,
+        }
+        ok, reason = self._check(
+            [old, new],
+            item_extra={
+                "upgrade": True,
+                "upgrade_old_file_id": "f-old",
+                "upgrade_old_file_name": _MOVIE_FILE,
+            },
+            row_extra={
+                "is_upgrade": True,
+                "replaced_from": [dict(old)],
+            },
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason, "已在库（实查）")
 
     def test_dedup_off_fail_open(self):
         """判重关闭时不实查，直接放行。"""
@@ -1463,18 +1582,60 @@ class FunnelMoviePrecommitTests(_DbMixin):
         self.assertFalse(intercepted)
         self.assertEqual(reason, "")
 
-    def test_upgrade_skips_library_part(self):
-        """提交前复查：洗版电影项跳过库检查。"""
+    def test_upgrade_old_version_only_passes(self):
+        """提交前复查：洗版电影项库里只有旧版时放行（旧版按
+        replaced_from 除外；v1.29.10 热修复：洗版不再跳过库检查）。"""
         self.service.enqueue_from_pending(
-            _movie_item(), "pk-mv-01", _movie_media()
+            _movie_item(
+                upgrade=True,
+                upgrade_old_file_id="f-old",
+                upgrade_old_file_name=_MOVIE_FILE,
+            ),
+            "pk-mv-01", _movie_media(),
         )
         self.owner.episode_dedup = _FakeDedup(movie_versions=[{
             "file_id": "f-old",
             "file_name": _MOVIE_FILE,
             "file_size": 1,
         }])
-        intercepted, _ = self._recheck(_movie_item(upgrade=True), "pk-mv-01")
+        intercepted, _ = self._recheck(
+            _movie_item(
+                upgrade=True,
+                upgrade_old_file_id="f-old",
+                upgrade_old_file_name=_MOVIE_FILE,
+            ),
+            "pk-mv-01",
+        )
         self.assertFalse(intercepted)
+
+    def test_upgrade_other_new_version_intercepts(self):
+        """提交前复查：洗版电影项旧版之外还有另一份新版时拦截。"""
+        self.service.enqueue_from_pending(
+            _movie_item(
+                upgrade=True,
+                upgrade_old_file_id="f-old",
+                upgrade_old_file_name=_MOVIE_FILE,
+            ),
+            "pk-mv-01", _movie_media(),
+        )
+        self.owner.episode_dedup = _FakeDedup(movie_versions=[
+            {"file_id": "f-old", "file_name": _MOVIE_FILE, "file_size": 1},
+            {
+                "file_id": "f-new",
+                "file_name": "测试电影 (2026) 2160p.mkv",
+                "file_size": 6000000000,
+            },
+        ])
+        intercepted, reason = self._recheck(
+            _movie_item(
+                upgrade=True,
+                upgrade_old_file_id="f-old",
+                upgrade_old_file_name=_MOVIE_FILE,
+            ),
+            "pk-mv-01",
+        )
+        self.assertTrue(intercepted)
+        self.assertIn("另一份电影", reason)
 
     def test_subscribe_missing_fail_open(self):
         """提交前复查：电影订阅解析不到时 fail-open。"""

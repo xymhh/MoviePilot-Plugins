@@ -42,6 +42,7 @@ class FunnelApi(OwnerDelegator):
         else:
             season_episode = ""
         reason = str(row.get("skip_reason") or row.get("last_error") or "").strip()
+        replaced_from = row.get("replaced_from") or []
         return {
             "id": int(row.get("id") or 0),
             "title": str(row.get("title") or row.get("file_name") or ""),
@@ -58,6 +59,9 @@ class FunnelApi(OwnerDelegator):
             "next_retry_at": int(row.get("next_retry_at") or 0),
             "reason": reason,
             "is_upgrade": bool(row.get("is_upgrade")),
+            # v1.29.10 热修复：挂起/失败行的人工删旧版按钮据此显示。
+            "has_old_version": bool(replaced_from),
+            "old_version_count": len(replaced_from),
             "created_at": int(row.get("created_at") or 0),
             "updated_at": int(row.get("updated_at") or 0),
         }
@@ -194,4 +198,38 @@ class FunnelApi(OwnerDelegator):
             "success": True,
             "message": f"已删除 {count} 行（pending 记录与网盘文件均保留）",
             "data": {"deleted": count},
+        }
+
+    def api_vue_funnel_delete_old_version(self, payload: Dict[str, Any] = None) -> dict:
+        """v1.29.10 热修复：人工删旧版（held/failed 行的 replaced_from）。"""
+        handler, failure = self._sync_handler_or_error("funnel_delete_old_version")
+        if handler is None:
+            return failure
+        ids = self._row_ids(payload or {})
+        if not ids:
+            return {"success": False, "message": "未选择可删旧版的行"}
+        try:
+            result = handler.funnel_delete_old_version(ids)
+        except Exception as error:  # noqa: BLE001 - 删旧版异常返回失败
+            logger.warning(f"人工删旧版失败：{error}")
+            return {"success": False, "message": f"删旧版失败：{error}"}
+        results = (result or {}).get("results") or []
+        ok_count = sum(1 for item in results if item.get("success"))
+        fail_count = len(results) - ok_count
+        if fail_count and not ok_count:
+            return {
+                "success": False,
+                "message": "; ".join(
+                    str(item.get("message") or "删旧版失败")
+                    for item in results
+                ),
+                "data": result,
+            }
+        return {
+            "success": True,
+            "message": (
+                f"已删旧版 {ok_count} 行"
+                + (f"，失败 {fail_count} 行" if fail_count else "")
+            ),
+            "data": result,
         }
