@@ -528,16 +528,17 @@ const searchResultSection = computed(() =>
 // 字段按 key 从既有 sections 里挑，不复制定义，避免两处漂移。
 // v1.29.5：常用设置从 8 项扩到 20 项（分组表 GROUPING.md 开头所列）。
 // 取字段时读 baseSections（全部 6 个任务 section，未按高级折叠过滤），
-// 否则取不到 organize_source_path（网盘整理，高级）与
-// enable_cloud_upgrade（洗版设置，高级）。
+// 否则取不到 enable_cloud_upgrade（洗版设置，高级）。
+// v1.30.0 阶段 4：organize_after_transfer 与 organize_source_path
+// 随漏斗接管退役，由 funnel_enabled 与 funnel_scan_dry_run 顶替。
 const COMMON_FIELD_KEYS = Object.freeze([
   "enabled",
   "cloud_drive",
   "cron",
   "platform_download_policy",
   "cross_transfer_enabled",
-  "organize_after_transfer",
-  "organize_source_path",
+  "funnel_enabled",
+  "funnel_scan_dry_run",
   "enable_cloud_upgrade",
   "tg_monitor_enabled",
   "strm_generate_enabled",
@@ -584,8 +585,8 @@ function buildCommonSection(list) {
     groups.push({title: "基础", icon: "mdi-cog-outline", fields: baseFields})
   }
   const transferFields = pick([
-    "organize_source_path",
-    "organize_after_transfer",
+    "funnel_enabled",
+    "funnel_scan_dry_run",
     "cross_transfer_enabled",
     "enable_cloud_upgrade",
     "upgrade_episode_limit",

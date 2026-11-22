@@ -31,8 +31,8 @@ COMMON_KEYS = (
     "cron",
     "platform_download_policy",
     "cross_transfer_enabled",
-    "organize_after_transfer",
-    "organize_source_path",
+    "funnel_enabled",
+    "funnel_scan_dry_run",
     "enable_cloud_upgrade",
     "tg_monitor_enabled",
     "strm_generate_enabled",
@@ -130,8 +130,7 @@ class CommonSectionTest(unittest.TestCase):
 
     def test_common_picks_from_unfiltered_base_sections(self):
         # 常用设置按 key 取字段必须读未折叠的 baseSections（全部 6 个任务
-        # section），否则取不到高级字段 organize_source_path
-        # 与 enable_cloud_upgrade。
+        # section），否则取不到高级字段 enable_cloud_upgrade（洗版设置）。
         config = _read(CONFIG)
         pick = re.search(
             r"function pickFields\(keys\) \{.*?for \(const section of (\w+)\.value",
@@ -154,7 +153,7 @@ class CommonSectionTest(unittest.TestCase):
             config,
         )
         self.assertIn(
-            'pick([\n    "organize_source_path",\n    "organize_after_transfer",\n    "cross_transfer_enabled",\n    "enable_cloud_upgrade",\n    "upgrade_episode_limit",\n    "cross_transfer_daily_upload_limit_gb",\n    "transfer_risk_cooldown",\n    "batch_size",\n  ])',
+            'pick([\n    "funnel_enabled",\n    "funnel_scan_dry_run",\n    "cross_transfer_enabled",\n    "enable_cloud_upgrade",\n    "upgrade_episode_limit",\n    "cross_transfer_daily_upload_limit_gb",\n    "transfer_risk_cooldown",\n    "batch_size",\n  ])',
             config,
         )
         self.assertIn(

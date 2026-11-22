@@ -114,6 +114,24 @@ class PageApi(OwnerDelegator):
         except Exception as err:
             logger.warning(f"重试索引转换失败：{err}")
             failures = []
+        # v1.30.0 阶段 4：漏斗失败行在失败记录页标 source“整理漏斗”
+        #（按 finalize_key 批量查漏斗行；查不到按原 source，不改行）。
+        try:
+            store = self._get_data_store()
+            funnel_repo = store.repositories.funnel_queue
+            keys = {
+                str(record.get("finalize_key") or "").strip()
+                for record in failures
+                if str(record.get("finalize_key") or "").strip()
+            }
+            if keys and funnel_repo is not None:
+                funnel_rows = funnel_repo.pending_keys_with_rows(keys)
+                for record in failures:
+                    key = str(record.get("finalize_key") or "").strip()
+                    if key and key in funnel_rows:
+                        record["source"] = "整理漏斗"
+        except Exception as err:  # noqa: BLE001 - 标注失败不挡列表
+            logger.debug(f"失败记录页漏斗 source 标注失败：{err}", exc_info=True)
         if status_filter:
             failures = [
                 record for record in failures

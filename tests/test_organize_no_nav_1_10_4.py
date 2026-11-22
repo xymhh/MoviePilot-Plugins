@@ -69,8 +69,9 @@ class TestOrganizeSettingsStayInConfig(unittest.TestCase):
             "frontend/cloudsubscribex/src/config/fields/organize.js"
         )
         self.assertIn("createOrganizeSection", section)
-        # 整理范围：待整理目录 + 单次上限 + 冲突策略。
-        self.assertIn("organize_source_path", section)
+        # 整理范围：单次上限 + 冲突策略。v1.30.0 阶段 4：organize_source_path
+        # 已退役（整理台源目录改手动现选），字段定义删掉。
+        self.assertNotIn("organize_source_path", section)
         self.assertIn("organize_max_files", section)
         self.assertIn("organize_conflict_policy", section)
         # 定时整理：开关 + Cron + 自动执行。
@@ -95,9 +96,10 @@ class TestOrganizeSettingsStayInConfig(unittest.TestCase):
 
     def test_organize_service_still_scheduled(self):
         # 整理服务本身仍在；v1.27.0 起定时任务改由 MP 调度（get_service 声明）。
+        # v1.30.0 阶段 4：04:00 任务改为漏斗扫描对账触发器。
         plugin_init = _read("plugins.v2/cloudsubscribex/__init__.py")
         registration = _read("plugins.v2/cloudsubscribex/core/api/registration.py")
-        self.assertIn('"organize": lambda: self.start_scan(', plugin_init)
+        self.assertIn('"organize": self._run_scheduled_organize_scan', plugin_init)
         self.assertIn('"CloudSubscribe_Organize"', registration)
         self.assertIn("OrganizeService", plugin_init)
 

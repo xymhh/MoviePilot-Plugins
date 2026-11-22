@@ -10,7 +10,7 @@ finalize 边界（``SyncHandler._queue_file_finalize_batch``）写
 同一条终态提交（``_commit_single_item``），不另写 STRM/通知/历史。
 
 不在阶段 1 范围内的事：TG 监控、订阅轮次、洗版薄入口仍走旧流水线；
-不做扫描对账（阶段 4）、轮次历史（阶段 4）、孤儿认领（阶段 4）。
+扫描对账、轮次历史、孤儿认领是阶段 4（v1.30.0）的事，见本文件末尾。
 """
 
 from __future__ import annotations
@@ -49,6 +49,12 @@ FUNNEL_RETRY_DELAYS = (10, 60, 300, 900)
 FUNNEL_MAX_ROWS_PER_ROUND = 50
 #: 未结算行下次重试的最小间隔（秒）：与离线监控首档检查间隔一致。
 FUNNEL_UNSETTLED_RETRY_SECONDS = 20
+#: 轮次历史只保留最近这么多条（v1.30.0 阶段 4；形态复用
+#: OrganizeService 的 history，只保留最近 20 条）。
+FUNNEL_ROUND_HISTORY_LIMIT = 20
+#: held 行原因里孤儿文件位置的标记前缀（v1.30.0 阶段 4；队列页
+#: “删除孤儿文件”解析用，位置形如 ``云盘目录/文件名``）。
+FUNNEL_ORPHAN_LOCATION_MARKER = "orphan_location="
 
 
 class FunnelService(OwnerDelegator):
@@ -100,6 +106,12 @@ class FunnelService(OwnerDelegator):
     @property
     def _dedup_strict(self) -> bool:
         return bool(getattr(self, "_funnel_dedup_strict", True))
+
+    @property
+    def _scan_dry_run(self) -> bool:
+        # v1.30.0 阶段 4：04:00 扫描对账默认 dry-run（只分类记日志，
+        # 不入队、不删文件）；关掉也不接管（接管留给以后一版）。
+        return bool(getattr(self, "_funnel_scan_dry_run", True))
 
     # ------------------------------------------------------------------
     # 存储
@@ -533,6 +545,7 @@ class FunnelService(OwnerDelegator):
         由调度器每 20 秒调一次（队列空时 job 会被停掉）。返回本轮统计。
         """
         stats = {"processed": 0, "done": 0, "failed": 0, "held": 0, "skipped": 0}
+        started = int(time.time())
         if not self._funnel_worker_lock.acquire(blocking=False):
             logger.debug("漏斗 worker 已有一轮在跑，本轮跳过")
             return stats
@@ -571,6 +584,14 @@ class FunnelService(OwnerDelegator):
                 if outcome in stats:
                     stats[outcome] += 1
             self._update_funnel_worker_from_repo(repo)
+            # v1.30.0 阶段 4：轮次历史（最近 20 轮，队列页展示）。
+            self._record_round({
+                "kind": "worker",
+                "trigger": "worker",
+                "started_at": started,
+                "finished_at": int(time.time()),
+                **stats,
+            })
             return stats
         finally:
             try:
@@ -1433,11 +1454,39 @@ class FunnelService(OwnerDelegator):
             return {}
 
     def requeue_rows(self, row_ids: List[int]) -> int:
-        """把 held/failed 行放回 queued（attempts 清零，立即到期）。"""
+        """把 held/failed 行放回 queued（attempts 清零，立即到期）。
+
+        v1.30.0 阶段 4：放回前先确保待终态记录存在——终态失败的旧
+        行可能已被 _reconcile_pending_state 弹出记录，直接放回会
+        在 worker 里立刻转回 held（“待终态记录已不在”）。缺失时按
+        行重建一条（6 小时新窗口，task_type 恒为 share：文件已落盘，
+        worker 不再重传，只走 MP 整理 + 终态提交）。
+        """
         repo = self._repository()
         if repo is None:
             return 0
         try:
+            for raw_id in row_ids or []:
+                try:
+                    row_id = int(raw_id or 0)
+                except (TypeError, ValueError):
+                    continue
+                if row_id <= 0:
+                    continue
+                row = None
+                try:
+                    row = repo.get_by_id(row_id)
+                except Exception as error:  # noqa: BLE001 - 读不到按行不存在
+                    logger.debug(f"漏斗行 #{row_id} 放回前读行失败：{error}", exc_info=True)
+                if not row:
+                    continue
+                if str(row.get("status") or "") not in {"held", "failed"}:
+                    continue
+                if not self.ensure_pending_record(row):
+                    logger.warning(
+                        f"漏斗行 #{row_id} 待终态记录重建失败，放回后"
+                        " worker 可能再次挂起"
+                    )
             return repo.requeue_by_ids(row_ids)
         except Exception as error:  # noqa: BLE001 - 放回失败返回 0
             logger.debug(f"漏斗行放回队列失败：{error}", exc_info=True)
@@ -1453,3 +1502,651 @@ class FunnelService(OwnerDelegator):
         except Exception as error:  # noqa: BLE001 - 删除失败返回 0
             logger.debug(f"漏斗行删除失败：{error}", exc_info=True)
             return 0
+
+    def find_row_by_pending_key(self, pending_key: str) -> Optional[Dict[str, Any]]:
+        """按终态键查漏斗行（任意状态，含 held/done；失败重试路径用）。"""
+        repo = self._repository()
+        if repo is None:
+            return None
+        try:
+            return repo.find_row_by_pending_key(str(pending_key or ""))
+        except Exception as error:  # noqa: BLE001 - 查不到按无行处理
+            logger.debug(f"漏斗按终态键查行失败：{error}", exc_info=True)
+            return None
+
+    # ------------------------------------------------------------------
+    # 阶段 4（v1.30.0）：扫描对账 dry-run、轮次历史、held 认领、孤儿清理
+    # ------------------------------------------------------------------
+    def _round_history_list(self) -> List[Dict[str, Any]]:
+        """轮次历史（存宿主身上，形态复用 _funnel_stop_requested）。"""
+        history = getattr(self._owner, "_funnel_round_history", None)
+        if not isinstance(history, list):
+            history = []
+            setattr(self._owner, "_funnel_round_history", history)
+        return history
+
+    def _record_round(self, entry: Dict[str, Any]) -> None:
+        """记一轮摘要，只保留最近 FUNNEL_ROUND_HISTORY_LIMIT 条。"""
+        try:
+            history = self._round_history_list()
+            history.append(dict(entry or {}))
+            while len(history) > FUNNEL_ROUND_HISTORY_LIMIT:
+                history.pop(0)
+        except Exception as error:  # noqa: BLE001 - 历史记不上不挡轮次
+            logger.debug(f"漏斗轮次历史记录失败：{error}", exc_info=True)
+
+    def round_history(self) -> List[Dict[str, Any]]:
+        """最近 20 轮摘要（新在前，整理队列页展示）。"""
+        try:
+            return [dict(entry) for entry in reversed(self._round_history_list())]
+        except Exception as error:  # noqa: BLE001 - 读不到返回空
+            logger.debug(f"漏斗轮次历史读取失败：{error}", exc_info=True)
+            return []
+
+    # -- 扫描对账 dry-run ----------------------------------------------
+    def run_scan_dry_run(
+            self,
+            trigger: str = "手动",
+            organize_service: Any = None,
+            provider: Any = None,
+            library_check: Any = None,
+    ) -> Dict[str, Any]:
+        """04:00 扫描对账（阶段 4：默认 dry-run）。
+
+        扫描 ``funnel_target_dir``，用 OrganizeService 的识别能力按
+        §5.3 分类并只记日志：可识别的孤儿记“可认领入队（dry-run，未
+        入队）”、不可识别的记“待人工认领（dry-run）”、可识别但已在库
+        的记跳过（skip_reason=“已入库”）。dry-run 阶段不写队列行、
+        不删任何文件。``funnel_scan_dry_run`` 关掉也不接管（接管留给
+        以后一版），只记一条警告并返回。
+
+        ``organize_service`` / ``provider`` / ``library_check`` 为
+        测试注入点（默认从插件侧解析）；``library_check`` 签名
+        ``(media, season, episode, file_name) -> True/False/None``，
+        None=查不出来（fail-open，按可认领记）。
+        """
+        started = int(time.time())
+        summary: Dict[str, Any] = {
+            "success": True,
+            "trigger": trigger,
+            "started_at": started,
+            "finished_at": started,
+            "scanned": 0,
+            "recognizable": 0,
+            "unrecognizable": 0,
+            "already_in_library": 0,
+            "errors": 0,
+            "dry_run": True,
+        }
+        if not self._phase1_enabled:
+            summary["success"] = False
+            summary["message"] = "漏斗未启用，跳过扫描对账"
+            return summary
+        if not self._scan_dry_run:
+            logger.warning(
+                "漏斗扫描对账：dry-run 已关闭，接管未实现，本版不接管，跳过扫描"
+            )
+            summary["success"] = False
+            summary["message"] = "dry-run 已关闭，接管未实现，跳过扫描"
+            summary["dry_run"] = False
+            return summary
+        if organize_service is None:
+            organize_service = self._scan_organize_service()
+        if organize_service is None:
+            summary["success"] = False
+            summary["message"] = "整理台服务未就绪，跳过扫描对账"
+            return summary
+        if provider is None:
+            provider = self._scan_provider()
+        if provider is None:
+            summary["success"] = False
+            summary["message"] = "网盘目录读取能力未就绪，跳过扫描对账"
+            return summary
+        try:
+            # 懒加载：顶层 import 在假包名单测环境下走不通（见
+            # OrganizeService._recognize_package 的同款做法）；且
+            # organize_plan 是纯函数模块，不依赖 MP 运行时。
+            from ...utils.organize_plan import build_packages, scan_entries
+        except Exception as error:  # noqa: BLE001 - 加载失败按扫描不可用
+            logger.warning(f"漏斗扫描对账加载扫描原语失败：{error}")
+            summary["success"] = False
+            summary["message"] = "扫描原语加载失败，跳过扫描对账"
+            return summary
+        target_dir = self._target_dir
+        try:
+            scanned = scan_entries(provider, target_dir)
+        except Exception as error:  # noqa: BLE001 - 扫描异常记轮次后返回
+            logger.warning(f"漏斗扫描对账读取目标目录失败：{target_dir}：{error}")
+            summary["success"] = False
+            summary["message"] = f"读取目标目录失败：{error}"
+            summary["errors"] = 1
+            summary["finished_at"] = int(time.time())
+            self._record_round({**summary, "kind": "scan"})
+            return summary
+        if getattr(scanned, "errors", None):
+            summary["errors"] = len(scanned.errors)
+            for message in list(scanned.errors)[:5]:
+                logger.warning(f"漏斗扫描对账：{message}")
+        try:
+            packages = build_packages(getattr(scanned, "entries", []) or [], target_dir)
+        except Exception as error:  # noqa: BLE001 - 分组异常记轮次后返回
+            logger.warning(f"漏斗扫描对账分组失败：{error}")
+            summary["success"] = False
+            summary["message"] = f"分组失败：{error}"
+            summary["errors"] = summary.get("errors", 0) + 1
+            summary["finished_at"] = int(time.time())
+            self._record_round({**summary, "kind": "scan"})
+            return summary
+        recognize = getattr(organize_service, "_recognize_package", None)
+        if not callable(recognize):
+            summary["success"] = False
+            summary["message"] = "整理台识别能力未就绪，跳过扫描对账"
+            return summary
+        for package in packages:
+            try:
+                media = recognize(package)
+            except Exception as error:  # noqa: BLE001 - 单包识别失败记不可识别
+                logger.debug(f"漏斗扫描对账识别失败：{package.pack_name}：{error}", exc_info=True)
+                media = None
+            status, detail = self._scan_classify_package(
+                package, media, library_check
+            )
+            summary["scanned"] += 1
+            if status == "already_in_library":
+                summary["already_in_library"] += 1
+                logger.info(
+                    f"漏斗扫描对账 dry-run：跳过（已入库）{detail}"
+                )
+            elif status == "recognizable":
+                summary["recognizable"] += 1
+                logger.info(
+                    f"漏斗扫描对账 dry-run：可认领入队（dry-run，未入队）{detail}"
+                )
+            else:
+                summary["unrecognizable"] += 1
+                logger.info(
+                    f"漏斗扫描对账 dry-run：待人工认领（dry-run）{detail}"
+                )
+        summary["finished_at"] = int(time.time())
+        self._record_round({**summary, "kind": "scan"})
+        logger.info(
+            "漏斗扫描对账 dry-run 完成：扫描 "
+            f"{summary['scanned']} 包，可认领 {summary['recognizable']}，"
+            f"待人工认领 {summary['unrecognizable']}，"
+            f"已入库跳过 {summary['already_in_library']}"
+        )
+        return summary
+
+    def _scan_organize_service(self) -> Any:
+        """取整理台服务（只借识别能力，不走它的移动/生成 STRM 执行路）。"""
+        plugin = getattr(self._owner, "_plugin", None)
+        if plugin is None:
+            return None
+        get_component = getattr(plugin, "_get_component", None)
+        if not callable(get_component):
+            return None
+        try:
+            from ...core.services.organize import OrganizeService
+        except Exception as error:  # noqa: BLE001 - 懒加载失败按无服务
+            logger.debug(f"漏斗扫描对账加载整理台失败：{error}", exc_info=True)
+            return None
+        try:
+            return get_component(OrganizeService)
+        except Exception as error:  # noqa: BLE001 - 取不到按无服务
+            logger.debug(f"漏斗扫描对账取整理台失败：{error}", exc_info=True)
+            return None
+
+    def _scan_provider(self) -> Any:
+        """取网盘目录读取能力（DIRECTORY_READ）。"""
+        drive = getattr(self, "_cloud_drive", None)
+        if drive is None:
+            return None
+        require = getattr(drive, "require", None)
+        if not callable(require):
+            return None
+        try:
+            from ...core import CloudDriveCapability
+        except Exception as error:  # noqa: BLE001 - 能力枚举取不到按无能力
+            logger.debug(f"漏斗扫描对账取目录读取能力失败：{error}", exc_info=True)
+            return None
+        try:
+            return require(CloudDriveCapability.DIRECTORY_READ)
+        except Exception as error:  # noqa: BLE001 - 能力未就绪按无能力
+            logger.debug(f"漏斗扫描对账取目录读取能力失败：{error}", exc_info=True)
+            return None
+
+    def _scan_classify_package(
+            self, package: Any, media: Any, library_check: Any,
+    ) -> Tuple[str, str]:
+        """按 §5.3 分类一包：返回 (状态, 说明)。
+
+        状态：recognizable（可认领入队）、unrecognizable（待人工认领）、
+        already_in_library（已入库，跳过）。媒体认不出即不可识别；认
+        出但查库失败（library_check 返回 None）按可认领记（fail-open）。
+        """
+        pack_name = str(getattr(package, "pack_name", "") or "").strip()
+        if media is None:
+            return "unrecognizable", pack_name or "未知包"
+        title = str(getattr(media, "title", "") or pack_name).strip()
+        videos = list(getattr(package, "videos", []) or [])
+        first_video = videos[0] if videos else None
+        if bool(getattr(package, "is_tv", False)):
+            season = max(1, int(getattr(first_video, "season", 1) or 1)) if first_video else 1
+            episode = max(1, int(getattr(first_video, "episode", 1) or 1)) if first_video else 1
+        else:
+            season, episode = 0, 0
+        file_name = ""
+        if first_video is not None:
+            entry = getattr(first_video, "entry", None)
+            file_name = str(getattr(entry, "name", "") or "").strip()
+        detail = title
+        if season and episode:
+            detail = f"{title} S{season:02d}E{episode:02d}"
+        elif file_name:
+            detail = f"{title}（{file_name}）"
+        check = library_check
+        if check is None:
+            check = self._scan_library_check
+        try:
+            in_library = check(media, season, episode, file_name)
+        except Exception as error:  # noqa: BLE001 - 查库异常按可认领记
+            logger.debug(f"漏斗扫描对账查库异常：{detail}：{error}", exc_info=True)
+            in_library = None
+        if in_library is True:
+            return "already_in_library", detail
+        return "recognizable", detail
+
+    def _scan_library_check(
+            self, media: Any, season: int, episode: int, file_name: str,
+    ) -> Optional[bool]:
+        """扫描用的入库查核：MP 自己的 get_no_exists_info（Emby 口径）。
+
+        True=已在库，False=不在库，None=查不出来（fail-open）。
+        """
+        mp_organize = getattr(self._owner, "mp_organize", None)
+        check = getattr(mp_organize, "_episode_exists_in_library_via_mp", None)
+        if not callable(check):
+            return None
+        try:
+            return check(
+                mediainfo=media, season=season, file_name=file_name,
+            )
+        except Exception as error:  # noqa: BLE001 - 查库异常按查不出来
+            logger.debug(f"漏斗扫描对账查库失败：{error}", exc_info=True)
+            return None
+
+    # -- 待终态记录重建 ----------------------------------------------
+    def ensure_pending_record(self, row: Dict[str, Any]) -> bool:
+        """行重回队列前确保待终态记录存在；缺失时按行重建。
+
+        终态失败的旧行可能已被 _reconcile_pending_state 弹出记录，
+        直接放回会在 worker 里立刻转回 held。重建用行里已有的字段：
+        云盘位置/文件名/体积/media_data/订阅/季集/洗版旧版/评分，
+        share_url 与 source_sha1 行里没有——文件已落盘，worker 不再
+        重传（只走 MP 整理 + 终态提交），share_url 置空、source_sha1
+        取行里的 sha1；task_type 恒为 share。first_seen_at 取现在，
+        给重建的记录一个全新的 6 小时绝对窗口。
+        """
+        pending_key = str((row or {}).get("pending_key") or "")
+        if not pending_key:
+            return False
+        if self._load_pending_item(pending_key) is not None:
+            return True
+        build = getattr(self._owner, "_build_pending_record", None)
+        save = getattr(self, "_save_offline_pending", None)
+        get_data = getattr(self, "_get_data", None)
+        if not callable(build) or not callable(save) or not callable(get_data):
+            return False
+        mediainfo = self._restore_media(row, {})
+        media_data = (row or {}).get("media_data")
+        if not isinstance(media_data, dict):
+            media_data = None
+        now = time.time()
+        episode = int((row or {}).get("episode") or 0)
+        is_tv = str((row or {}).get("media_type") or "").strip().lower() == "tv"
+        replaced = (row or {}).get("replaced_from") or []
+        if not isinstance(replaced, list):
+            replaced = []
+        first_old = replaced[0] if replaced and isinstance(replaced[0], dict) else {}
+        try:
+            record = build(
+                current={},
+                pending_key=pending_key,
+                task_type="share",
+                info_hash="",
+                source_hash=str((row or {}).get("sha1") or ""),
+                share_url="",
+                cloud_dir=str((row or {}).get("cloud_dir") or ""),
+                file_name=str((row or {}).get("file_name") or ""),
+                staging_dir=str(
+                    (row or {}).get("staging_dir") or (row or {}).get("cloud_dir") or ""
+                ),
+                staging_name=str(
+                    (row or {}).get("staging_name") or (row or {}).get("file_name") or ""
+                ),
+                file_size=int((row or {}).get("file_size") or 0),
+                now=now,
+                mediainfo=mediainfo,
+                media_data=media_data,
+                subscribe_id=(row or {}).get("subscribe_id"),
+                success_episodes=[episode] if is_tv and episode > 0 else [],
+                notification_episodes=[episode] if is_tv and episode > 0 else [],
+                season=int((row or {}).get("season") or 1) if is_tv else None,
+                upgrade=bool((row or {}).get("is_upgrade")),
+                upgrade_old_cloud_dir=str(first_old.get("cloud_dir") or ""),
+                upgrade_old_file_name=str(first_old.get("file_name") or ""),
+                upgrade_old_file_id=str(first_old.get("file_id") or ""),
+                upgrade_old_size=int(first_old.get("file_size") or 0),
+                dedup_extra_old_versions=[
+                    dict(entry) for entry in replaced[1:]
+                    if isinstance(entry, dict)
+                ],
+                dedup_new_score=int((row or {}).get("score") or 0),
+                funnel_route=True,
+            )
+        except Exception as error:  # noqa: BLE001 - 重建失败按无记录
+            logger.warning(
+                f"漏斗行 #{(row or {}).get('id')} 待终态记录重建失败：{error}"
+            )
+            return False
+        record["result_key"] = str((row or {}).get("file_id") or "")
+        try:
+            # 注意：不能用 `get_data(...) or {}`——空字典是 falsy，会被
+            # 换成新对象，写进新对象后内存里的待终态映射还是空的（生产
+            # 靠 save 兜底才没爆，save 是 no-op 的环境直接丢记录）。
+            # 只有取不到/非字典时才新建，取到字典（哪怕空）就地写。
+            pending = get_data(self._OFFLINE_PENDING_KEY)
+            if not isinstance(pending, dict):
+                pending = {}
+            pending[pending_key] = record
+            save(pending)
+        except Exception as error:  # noqa: BLE001 - 写盘失败按无记录
+            logger.warning(
+                f"漏斗行 #{(row or {}).get('id')} 待终态记录写盘失败：{error}"
+            )
+            return False
+        logger.info(
+            f"漏斗行 #{(row or {}).get('id')} 待终态记录已重建"
+            f"（{pending_key}，6 小时新窗口）"
+        )
+        return True
+
+    # -- held 行人工认领 ----------------------------------------------
+    def _resolve_claim_media(
+            self, tmdb_id: int, media_type: str, title: str,
+    ) -> Any:
+        """认领时按 TMDB ID 直查媒体（复用手动添加的直查路）。
+
+        识别失败或返回的 TMDB ID 不符时返回 None（调用方拒绝认领，
+        绝不带着错身份入队）。测试可直接猴补本方法。
+        """
+        try:
+            from app.core.metainfo import MetaInfo
+        except Exception as error:  # noqa: BLE001 - MP 未提供时按识别失败
+            logger.debug(f"认领查媒体：MetaInfo 不可用：{error}", exc_info=True)
+            return None
+        try:
+            from ...core.media import recognize_media
+        except Exception as error:  # noqa: BLE001 - 识别入口不可用
+            logger.debug(f"认领查媒体：recognize_media 不可用：{error}", exc_info=True)
+            return None
+        plugin = getattr(self._owner, "_plugin", None)
+        chain = getattr(plugin, "chain", None) if plugin is not None else None
+        if chain is None:
+            chain = getattr(self._owner, "chain", None)
+        if chain is None:
+            return None
+        mtype = MediaType.MOVIE if str(media_type or "").strip().lower() == "movie" else MediaType.TV
+        try:
+            mediainfo = recognize_media(
+                chain,
+                meta=MetaInfo(str(title or tmdb_id)),
+                mtype=mtype,
+                tmdb_id=int(tmdb_id),
+                cache=True,
+            )
+        except Exception as error:  # noqa: BLE001 - 识别失败按无媒体
+            logger.debug(f"认领查媒体失败（tmdb={tmdb_id}）：{error}", exc_info=True)
+            return None
+        if not mediainfo:
+            return None
+        try:
+            resolved_id = int(getattr(mediainfo, "tmdb_id", 0) or 0)
+        except (TypeError, ValueError):
+            resolved_id = 0
+        if resolved_id != int(tmdb_id):
+            return None
+        return mediainfo
+
+    def claim_row(
+            self, row_id: int, tmdb_id: int, media_type: str,
+            season: Any = None, episode: Any = None,
+    ) -> Dict[str, Any]:
+        """held 行人工认领：指定剧集/TMDB 后重新入队。
+
+        只认 held/failed 行；先按 TMDB ID 直查媒体（查不到或 ID 不符
+        拒绝认领），再把身份写进行（media_type/tmdb_id/season/episode/
+        title/media_data），重建待终态记录后放回队列（attempts 清零）。
+        """
+        repo = self._repository()
+        if repo is None:
+            return {"success": False, "message": "漏斗仓储不可用"}
+        try:
+            row_id = int(row_id or 0)
+            tmdb_id = int(tmdb_id or 0)
+        except (TypeError, ValueError):
+            return {"success": False, "message": "行 ID 或 TMDB ID 非法"}
+        if row_id <= 0 or tmdb_id <= 0:
+            return {"success": False, "message": "行 ID 或 TMDB ID 非法"}
+        media_type = str(media_type or "").strip().lower()
+        if media_type not in {"movie", "tv"}:
+            return {"success": False, "message": "媒体类型只能是 movie 或 tv"}
+        try:
+            season_value = int(season or 0) if season not in (None, "") else 0
+            episode_value = int(episode or 0) if episode not in (None, "") else 0
+        except (TypeError, ValueError):
+            return {"success": False, "message": "季/集号非法"}
+        if media_type == "tv" and episode_value <= 0:
+            return {"success": False, "message": "剧集认领必须指定集号"}
+        if media_type == "tv" and season_value <= 0:
+            season_value = 1
+        row = None
+        try:
+            row = repo.get_by_id(row_id)
+        except Exception as error:  # noqa: BLE001 - 读不到按行不存在
+            logger.debug(f"认领读行 #{row_id} 失败：{error}", exc_info=True)
+        if not row:
+            return {"success": False, "message": "行不存在"}
+        if str(row.get("status") or "") not in {"held", "failed"}:
+            return {
+                "success": False,
+                "message": f"只有挂起/失败行能认领，当前状态 {row.get('status')}",
+            }
+        mediainfo = self._resolve_claim_media(
+            tmdb_id, media_type, str(row.get("title") or ""),
+        )
+        if mediainfo is None:
+            return {
+                "success": False,
+                "message": f"按 TMDB ID {tmdb_id} 查不到媒体，认领失败",
+            }
+        title = str(getattr(mediainfo, "title", "") or row.get("title") or "").strip()
+        media_data = None
+        serialize = getattr(self, "_serialize_mediainfo", None)
+        if callable(serialize):
+            try:
+                media_data = serialize(mediainfo)
+            except Exception as error:  # noqa: BLE001 - 序列化失败按无媒体数据
+                logger.debug(f"认领序列化媒体信息失败：{error}", exc_info=True)
+                media_data = None
+        try:
+            updated = repo.claim_row(
+                row_id, media_type, tmdb_id, season_value, episode_value,
+                title, media_data,
+            )
+        except Exception as error:  # noqa: BLE001 - 写行失败按认领失败
+            logger.debug(f"认领写行 #{row_id} 失败：{error}", exc_info=True)
+            return {"success": False, "message": f"认领写行失败：{error}"}
+        if not updated:
+            return {"success": False, "message": "认领写行失败（行状态已变）"}
+        fresh_row = row
+        try:
+            fresh_row = repo.get_by_id(row_id) or row
+        except Exception as error:  # noqa: BLE001 - 重读失败用旧行重建
+            logger.debug(f"认领重读行 #{row_id} 失败：{error}", exc_info=True)
+        if not self.ensure_pending_record(fresh_row):
+            logger.warning(
+                f"漏斗行 #{row_id} 认领后待终态记录重建失败，放回后"
+                " worker 可能再次挂起"
+            )
+        try:
+            repo.requeue_by_ids([row_id])
+        except Exception as error:  # noqa: BLE001 - 放回失败按认领失败
+            logger.debug(f"认领放回行 #{row_id} 失败：{error}", exc_info=True)
+            return {"success": False, "message": f"认领放回失败：{error}"}
+        self.ensure_worker()
+        logger.info(
+            f"漏斗行 #{row_id} 已认领：{title}（tmdb={tmdb_id}，"
+            f"{media_type}，S{season_value:02d}E{episode_value:02d}），已重新入队"
+        )
+        return {"success": True, "message": "已认领并重新入队", "id": row_id}
+
+    # -- 孤儿文件人工清理 ----------------------------------------------
+    @staticmethod
+    def _orphan_location_from_reason(reason: str) -> str:
+        """从 held 行原因里解析孤儿文件位置（``orphan_location=`` 标记）。
+
+        位置取到第一个分隔符为止；原因串是中英混排，分隔符可能是
+        ASCII 分号（_held_reason_with_orphan 写的格式）或中文分号。"""
+        text = str(reason or "")
+        marker = FUNNEL_ORPHAN_LOCATION_MARKER
+        index = text.find(marker)
+        if index < 0:
+            return ""
+        rest = text[index + len(marker):].strip()
+        ends = [
+            end for end in (rest.find(";"), rest.find("；")) if end >= 0
+        ]
+        if ends:
+            rest = rest[:min(ends)].strip()
+        return rest
+
+    def _delete_strm_for_file(self, cloud_dir: str, file_name: str) -> bool:
+        """删指定云盘文件匹配的本地 .strm（两京十五日清理规则：删
+        .mkv 时连同匹配的 .strm 一起删）。没有 .strm 也算成功。"""
+        generator = getattr(self, "_strm_generator", None)
+        if generator is None:
+            # 没有 STRM 生成器 = 本插件没给该文件生成过 .strm（STRM
+            # 生成关着时不会有孤儿 .strm），无物可删，算成功。
+            return True
+        try:
+            from pathlib import Path
+            local_path = generator.local_path("", "", cloud_dir, file_name)
+        except Exception as error:  # noqa: BLE001 - 算不出路径按未删
+            logger.debug(f"删孤儿 .strm 算路径失败：{error}", exc_info=True)
+            return False
+        if not local_path:
+            return True
+        try:
+            path = Path(str(local_path))
+        except Exception as error:  # noqa: BLE001 - 路径非法按未删
+            logger.debug(f"删孤儿 .strm 路径非法：{error}", exc_info=True)
+            return False
+        try:
+            if path.is_file():
+                path.unlink()
+                logger.info(f"孤儿清理已删 .strm：{path}")
+            return True
+        except Exception as error:  # noqa: BLE001 - 删失败按未删
+            logger.debug(f"删孤儿 .strm 失败：{path}：{error}", exc_info=True)
+            return False
+
+    def delete_orphan_files(self, row_ids) -> Dict[str, Any]:
+        """held 行人工删孤儿文件（v1.30.0 阶段 4，评审 B5-2/B5-3 落地）。
+
+        默认不自动删（删文件是人工决策）；只认带孤儿位置的 held 行，
+        删 .mkv（按行 file_id）时连同匹配的 .strm 一起删，两个都删完
+        才清行里的孤儿标记。删失败的留在原地、可重试。
+        """
+        repo = self._repository()
+        if repo is None:
+            return {"success": False, "message": "漏斗仓储不可用"}
+        results = []
+        for raw_id in row_ids or []:
+            try:
+                row_id = int(raw_id or 0)
+            except (TypeError, ValueError):
+                continue
+            if row_id <= 0:
+                continue
+            row = None
+            try:
+                row = repo.get_by_id(row_id)
+            except Exception as error:  # noqa: BLE001 - 读不到按行不存在
+                logger.debug(f"删孤儿读行 #{row_id} 失败：{error}", exc_info=True)
+            if not row:
+                results.append({
+                    "id": row_id, "success": False, "message": "行不存在",
+                })
+                continue
+            if str(row.get("status") or "") != "held":
+                results.append({
+                    "id": row_id, "success": False,
+                    "message": f"只有挂起行能删孤儿文件，当前状态 {row.get('status')}",
+                })
+                continue
+            orphan_location = self._orphan_location_from_reason(
+                str(row.get("skip_reason") or "")
+            )
+            if not orphan_location:
+                results.append({
+                    "id": row_id, "success": False, "message": "该行没有孤儿文件位置",
+                })
+                continue
+            file_id = str(row.get("file_id") or "").strip()
+            if not file_id:
+                results.append({
+                    "id": row_id, "success": False, "message": "该行没有孤儿文件 ID",
+                })
+                continue
+            mutations = getattr(self, "_cloud_mutations", None)
+            if mutations is None:
+                results.append({
+                    "id": row_id, "success": False, "message": "网盘未就绪",
+                })
+                continue
+            try:
+                ok = mutations.delete_file(file_id)
+            except Exception as error:  # noqa: BLE001 - 删失败记名
+                logger.debug(f"删孤儿文件 {file_id} 异常：{error}", exc_info=True)
+                ok = False
+            if not ok:
+                results.append({
+                    "id": row_id, "success": False,
+                    "message": f"删除孤儿文件失败：{orphan_location}",
+                })
+                continue
+            cloud_dir = str(row.get("cloud_dir") or "").strip()
+            file_name = str(row.get("file_name") or "").strip()
+            if cloud_dir and file_name:
+                if not self._delete_strm_for_file(cloud_dir, file_name):
+                    logger.warning(
+                        f"漏斗行 #{row_id} 孤儿 .mkv 已删，匹配 .strm 未删："
+                        f"{orphan_location}"
+                    )
+                    # .strm 没删掉时不清理标记（否则行丢了孤儿位置，
+                    # 残留 .strm 再也删不掉）；本行记失败，可重试。
+                    results.append({
+                        "id": row_id, "success": False,
+                        "message": f"孤儿 .mkv 已删，匹配 .strm 未删：{orphan_location}",
+                    })
+                    continue
+            try:
+                repo.clear_orphan_location(row_id)
+            except Exception as error:  # noqa: BLE001 - 清标记失败不改删的结论
+                logger.debug(f"删孤儿清行 #{row_id} 标记失败：{error}", exc_info=True)
+            logger.info(f"漏斗行 #{row_id} 人工删孤儿文件：{orphan_location}")
+            results.append({
+                "id": row_id, "success": True, "deleted": orphan_location,
+            })
+        return {"success": True, "results": results}

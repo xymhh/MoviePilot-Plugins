@@ -450,19 +450,16 @@ class FunnelSubscribeSameDirTests(unittest.TestCase):
         self.assertEqual(len(self.queue_calls), 1)
         self.assertEqual(results["f-tv-09"], (None, "pk-f-tv-09"))
 
-    def test_manual_same_dir_item_still_generates_inline(self):
-        """手动同目录项（producer=manual）：仍按阶段 1 当场生成，
-        阶段 3 不动手动提交（阶段 4 再统）。"""
+    def test_manual_same_dir_item_queued_not_generated(self):
+        """v1.30.0 阶段 4（d）：手动同目录项（producer=manual）也入队，
+        不再当场生成（阶段 3 有意留着手动直出路等阶段 4 统一）。"""
         service = self._service()
         item = _tv_item(funnel_route=True, funnel_producer="manual")
         results = service._generate_or_queue_strm_batch([item], _tv_media())
-        self.assertEqual(
-            self.generate_calls, [(_TV_CLOUD_DIR, _TV_FILE)]
-        )
-        self.assertEqual(
-            [item for batch in self.queue_calls for item in batch], []
-        )
-        self.assertEqual(results["f-tv-09"][0], Path("/tmp/x.strm"))
+        self.assertEqual(self.generate_calls, [])
+        self.assertEqual(len(self.queue_calls), 1)
+        self.assertEqual(self.queue_calls[0][0]["result_key"], "f-tv-09")
+        self.assertEqual(results["f-tv-09"], (None, "pk-f-tv-09"))
 
 
 # ----------------------------------------------------------------------
@@ -871,11 +868,14 @@ class FunnelApiPhase3Tests(unittest.TestCase):
 
     def _api(self, phase1=True, phase2=True, phase3=True):
         api = self.FunnelApi.__new__(self.FunnelApi)
+        object.__setattr__(api, "_funnel_enabled", True)
+        object.__setattr__(api, "_funnel_scan_dry_run", True)
         object.__setattr__(api, "_funnel_phase1_enabled", phase1)
         object.__setattr__(api, "_funnel_phase2_enabled", phase2)
         object.__setattr__(api, "_funnel_phase3_enabled", phase3)
-        # _funnel_target_dir 也要显式设：否则 getattr 会经 OwnerDelegator
-        # 委托到未设置的 _owner，递归爆栈。
+        # _funnel_target_dir / _funnel_enabled / _funnel_scan_dry_run
+        # 都要显式设：否则 getattr 会经 OwnerDelegator 委托到未设置的
+        # _owner，递归爆栈。
         object.__setattr__(api, "_funnel_target_dir", "/Alist/影视/moviepilot/转存/")
         handler = SimpleNamespace(
             funnel_queue_counts=lambda: {

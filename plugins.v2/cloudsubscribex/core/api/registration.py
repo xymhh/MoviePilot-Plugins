@@ -460,6 +460,34 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "人工删旧版：删除挂起/失败行 replaced_from 里的旧文件",
             },
             {
+                "path": "/funnel/rounds",
+                "endpoint": self.api_vue_funnel_rounds,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "漏斗轮次历史（最近 20 轮，worker + 扫描轮次）",
+            },
+            {
+                "path": "/funnel/scan",
+                "endpoint": self.api_vue_funnel_scan,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "手动触发一次扫描对账（默认 dry-run，只分类记日志）",
+            },
+            {
+                "path": "/funnel/claim",
+                "endpoint": self.api_vue_funnel_claim,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "挂起行人工认领：指定剧集/TMDB 后重新入队",
+            },
+            {
+                "path": "/funnel/delete-orphan",
+                "endpoint": self.api_vue_funnel_delete_orphan,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "人工删孤儿文件：删除挂起行落盘后拦截留下的 .mkv 连带 .strm",
+            },
+            {
                 "path": "/tg/transfer",
                 "endpoint": self.api_vue_tg_transfer,
                 "methods": ["POST"],
@@ -977,8 +1005,17 @@ class MoviePilotRegistration(OwnerDelegator):
             })
         if bool(getattr(self, "_organize_schedule_enabled", False)):
             cron = str(getattr(self, "_organize_schedule_cron", "") or "")
-            if not getattr(self, "_organize_source_path", ""):
-                logger.warning("整理台定时任务已开启，但未配置 organize_source_path")
+            # v1.30.0 阶段 4：04:00 定时任务改为漏斗扫描对账触发器
+            #（设计 §12 修订范围）。organize_source_path 已退役，注册
+            # 条件改读漏斗总闸 + 阶段 1：漏斗开时 04:00 跑 dry-run 扫描
+            # 对账；漏斗关时不注册（旧整理台定时扫描随源目录退役而停用，
+            # 手动整理仍可在整理台页面上现选源目录）。
+            funnel_live = bool(
+                getattr(self, "_funnel_enabled", True)
+                and getattr(self, "_funnel_phase1_enabled", False)
+            )
+            if not funnel_live:
+                logger.info("04:00 扫描对账任务未注册：漏斗未启用")
             elif not self._cron_is_valid(cron):
                 logger.warning(f"整理台定时任务 Cron 无效：{cron}，未注册")
             else:

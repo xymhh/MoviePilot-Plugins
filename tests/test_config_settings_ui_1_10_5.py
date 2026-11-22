@@ -225,8 +225,9 @@ class TestSectionAssemblyRuntime(unittest.TestCase):
         self.assertEqual(data["channelsSubtabs"], ["common"])
         self.assertEqual(data["totalKeys"], 235)
         self.assertEqual(data["uniqueKeys"], 235)
-        # 静态高级字段：organize 9 + upgrade 11 + strm 9 + emby 4 + checkin 4。
-        self.assertEqual(data["advancedKeys"], 37)
+        # 静态高级字段：organize 8（v1.30.0 阶段 4 删 organize_source_path）
+        # + upgrade 11 + strm 9 + emby 4 + checkin 4。
+        self.assertEqual(data["advancedKeys"], 36)
 
 
 class TestGroupFolding(unittest.TestCase):

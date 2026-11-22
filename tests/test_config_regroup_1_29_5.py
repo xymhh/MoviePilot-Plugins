@@ -4,6 +4,10 @@
 v1.29.7 阶段 1 在转存组新增 6 个漏斗键（funnel_*），总数 233；
 v1.29.8 阶段 2 再加 funnel_phase2_enabled（TG 进漏斗），总数 234。
 v1.29.9 阶段 3 再加 funnel_phase3_enabled（订阅与洗版进漏斗），总数 235。
+v1.30.0 阶段 4：转存组删 organize_after_transfer、加 funnel_enabled
+与 funnel_scan_dry_run（+1 净），网盘整理组删 organize_source_path
+（转存组 -1）；转存组仍 74、总数仍 235。常用设置 20 项里两处退役键
+由两个漏斗键顶替。
 静态接线测试 + node 真实组装/搜索测试；不拼 UI 行为，行为由 vite 构建 +
 全量套件保证。
 """
@@ -161,8 +165,8 @@ class TestCommon20(unittest.TestCase):
                 "cron",
                 "platform_download_policy",
                 "cross_transfer_enabled",
-                "organize_after_transfer",
-                "organize_source_path",
+                "funnel_enabled",
+                "funnel_scan_dry_run",
                 "enable_cloud_upgrade",
                 "tg_monitor_enabled",
                 "strm_generate_enabled",
@@ -297,7 +301,11 @@ class TestAssemblyRuntime(unittest.TestCase):
         self.assertEqual(data["counts"], TASK_COUNTS)
         self.assertEqual(data["totalKeys"], 235)
         self.assertEqual(data["uniqueKeys"], 235)
-        self.assertEqual(data["advancedCount"], 37)
+        # v1.30.0 阶段 4：organize_source_path（advanced 字段）随源目录退役
+        # 删除，advanced 37→36；organize_after_transfer 不是 advanced 字段，
+        # 其删除不影响该计数；新增的 funnel_enabled / funnel_scan_dry_run
+        # 均不是 advanced，总数 235 不变。
+        self.assertEqual(data["advancedCount"], 36)
         # 同一任务组内子分组标题不重复（ConfigSection 用标题做 v-for key 与折叠键）。
         for value, titles in data["groupTitles"].items():
             self.assertEqual(len(titles), len(set(titles)), f"{value} 有重复子分组标题")
@@ -329,7 +337,8 @@ class TestAssemblyRuntime(unittest.TestCase):
         self.assertEqual(home["enabled"], "drive")
         self.assertEqual(home["cron"], "tracking")
         self.assertEqual(home["enable_cloud_upgrade"], "transfer")
-        self.assertEqual(home["organize_source_path"], "transfer")
+        self.assertEqual(home["funnel_enabled"], "transfer")
+        self.assertEqual(home["funnel_scan_dry_run"], "transfer")
         self.assertEqual(home["auto_subscribe_douban_enabled"], "tracking")
         self.assertEqual(home["strm_generate_enabled"], "playback")
 

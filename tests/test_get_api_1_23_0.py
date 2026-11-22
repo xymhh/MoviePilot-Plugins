@@ -139,14 +139,16 @@ ALLOWLIST = {
 }
 
 # 注册总数：有意写死，路由增减必须同步改这里（与 ALLOWLIST 一起审）。
-# 85 条 dict；/redirect 一条 dict 带 GET+HEAD 两个方法，所以
-# (path, method) 对是 86。v1.29.6 是 78 条 dict / 79 对，v1.29.7
+# 89 条 dict；/redirect 一条 dict 带 GET+HEAD 两个方法，所以
+# (path, method) 对是 90。v1.29.6 是 78 条 dict / 79 对，v1.29.7
 # 阶段 1 加 6 条整理队列路由（/funnel/rows|status|run|stop|requeue|delete，
 # 前端 FunnelQueue.vue 全调，不进 ALLOWLIST）；v1.29.10 热修复加 1 条
 # 人工删旧版路由（/funnel/delete-old-version，前端 FunnelQueue.vue
-# 的“删旧版”按钮调用，不进 ALLOWLIST）。
-EXPECTED_REGISTERED_ENTRIES = 85
-EXPECTED_REGISTERED_PAIRS = 86
+# 的“删旧版”按钮调用，不进 ALLOWLIST）；v1.30.0 阶段 4 加 4 条
+# （/funnel/rounds|scan|claim|delete-orphan，前端 FunnelQueue.vue
+# 的轮次历史/扫描对账/认领/删孤儿调用，不进 ALLOWLIST）。
+EXPECTED_REGISTERED_ENTRIES = 89
+EXPECTED_REGISTERED_PAIRS = 90
 
 # 第 5 项：7 个服务层方法的新签名（去掉 apikey 后的剩余参数名）。
 SERVICE_METHOD_PARAMS = {

@@ -488,32 +488,18 @@ class StrmOpsMixin(OwnerDelegator):
             result_key = str(item["result_key"])
             staging_dir = str(item.get("staging_dir") or "").rstrip("/")
             cloud_dir = str(item.get("cloud_dir") or "").rstrip("/")
-            # v1.29.8 阶段 2：TG 项（discovered_via 非空）入队后不再当场
-            # 生成 STRM——funnel_route 为真时走 finalize 边界入队，由漏斗
-            # worker 经 MP 整理；阶段 2 开关关时 funnel_route 为假，仍走
-            # 旧直出路。手动同目录提交仍按阶段 1 行为当场生成（阶段 3/4 再统）。
-            is_tg_routed = bool(
-                str(item.get("discovered_via") or "").strip()
-                and item.get("funnel_route")
-            )
-            # v1.29.9 阶段 3：订阅轮次项（funnel_producer=subscribe）与
-            # 洗版项（upgrade）入队后同样不再当场生成 STRM——文件随后由
-            # 漏斗 worker 经 MP 整理进媒体库，当场生成的 STRM 会指向被
-            # 移走的目标目录文件而失效；手动同目录提交（producer=manual
-            # 或无标记）仍当场生成，阶段 4 再统。
-            is_subscribe_routed = bool(
-                item.get("funnel_route")
-                and (
-                    str(item.get("funnel_producer") or "").strip().lower()
-                    == "subscribe"
-                    or bool(item.get("upgrade"))
-                )
-            )
+            # v1.30.0 阶段 4：漏斗路由项（funnel_route 为真）入队后不再
+            # 当场生成 STRM——文件随后由漏斗 worker 经 MP 整理进媒体库，
+            # 当场生成的 STRM 会指向被移走的目标目录文件而失效。阶段 2
+            # 只排除了 TG 项、阶段 3 只排除了订阅/洗版项，手动同目录仍
+            # 当场生成；本版统一：只要 funnel_route 为真就入队（含手动
+            # 同目录），funnel_route 由生产者按阶段开关在 _do_sync 里
+            # 下沉（总闸关时为假，仍走旧直出路）。
+            is_funnel_routed = bool(item.get("funnel_route"))
             if (
                     not organize_enabled
                     or (staging_dir and staging_dir != cloud_dir)
-                    or is_tg_routed
-                    or is_subscribe_routed
+                    or is_funnel_routed
             ):
                 queued_items.append(item)
                 continue

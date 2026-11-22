@@ -279,8 +279,83 @@ class HistoryRetryService(OwnerDelegator):
             return
         apply_failure(record, reason)
         record.pop("retrying", None)
-        record.pop("finalize_key", None)
+        # v1.30.0 阶段 4：漏斗行还在时保留 finalize_key——它是下一次
+        # 重试找到漏斗行的唯一线索；旧路的 pending 记录已不在，stale
+        # key 才要清（否则下次重试走旧路重传，有重复入库风险）。
+        if not self._has_funnel_row(str(record.get("finalize_key") or "")):
+            record.pop("finalize_key", None)
         self._upsert_retry_index_row(record, "失败")
+
+    def _has_funnel_row(self, finalize_key: str) -> bool:
+        """指定终态键是否还有漏斗行（任意状态，含 held/done）。"""
+        if not str(finalize_key or "").strip():
+            return False
+        funnel = getattr(self._owner, "funnel", None)
+        find_row = getattr(funnel, "find_row_by_pending_key", None)
+        if not callable(find_row):
+            return False
+        try:
+            return find_row(str(finalize_key or "").strip()) is not None
+        except Exception as error:  # noqa: BLE001 - 查不到按无行处理
+            logger.debug(f"重试查漏斗行失败：{error}", exc_info=True)
+            return False
+
+    def _retry_funnel_row(self, record: Dict[str, Any]) -> bool:
+        """漏斗失败行的重试：重新入队（attempts 清零）。
+
+        按记录的 finalize_key 查漏斗行：无行→返回 False（调用方走
+        旧重试路）；行在 queued/processing→拒绝重试（已在处理中）；
+        行在 held/failed 且漏斗开→重建待终态记录（缺失时）后放回
+        队列，返回 True；漏斗关→返回 False（走旧重试路）。
+        """
+        finalize_key = str(record.get("finalize_key") or "").strip()
+        if not finalize_key:
+            return False
+        funnel = getattr(self._owner, "funnel", None)
+        find_row = getattr(funnel, "find_row_by_pending_key", None)
+        if funnel is None or not callable(find_row):
+            return False
+        try:
+            row = find_row(finalize_key)
+        except Exception as error:  # noqa: BLE001 - 查不到按无行处理
+            logger.debug(f"重试查漏斗行失败：{error}", exc_info=True)
+            return False
+        if not row:
+            return False
+        status = str(row.get("status") or "")
+        if status in {"queued", "processing"}:
+            raise ValueError("该记录已在整理漏斗处理中，无需重试")
+        if status not in {"held", "failed"}:
+            return False
+        if not bool(getattr(self._owner, "_funnel_phase1_enabled", False)):
+            return False
+        row_id = int(row.get("id") or 0)
+        ensure = getattr(funnel, "ensure_pending_record", None)
+        if callable(ensure):
+            try:
+                if not ensure(row):
+                    logger.warning(
+                        f"漏斗行 #{row_id} 重试重建待终态记录失败"
+                    )
+            except Exception as error:  # noqa: BLE001 - 重建失败仍尝试放回
+                logger.debug(f"漏斗行 #{row_id} 重试重建记录异常：{error}", exc_info=True)
+        requeue = getattr(funnel, "requeue_rows", None)
+        if not callable(requeue):
+            raise ValueError("整理漏斗未就绪，无法重新入队")
+        try:
+            requeued = int(requeue([row_id]) or 0)
+        except Exception as error:  # noqa: BLE001 - 放回异常按重试失败
+            raise ValueError(f"重新入队失败：{error}") from error
+        if requeued <= 0:
+            raise ValueError("重新入队失败（行状态已变）")
+        ensure_worker = getattr(funnel, "ensure_worker", None)
+        if callable(ensure_worker):
+            try:
+                ensure_worker()
+            except Exception as error:  # noqa: BLE001 - 起轮失败不挡入队结论
+                logger.debug(f"漏斗重试起轮失败：{error}", exc_info=True)
+        logger.info(f"历史重试已重新入队漏斗行 #{row_id}（{finalize_key}）")
+        return True
 
     def _upsert_retry_index_row(self, record: Dict[str, Any], status: str) -> bool:
         """把一条 history 形状记录写进重试索引（失败/处理中/待修复成功行）。
@@ -452,6 +527,13 @@ class HistoryRetryService(OwnerDelegator):
                 raise ValueError(retry_title)
         else:
             record.pop("retrying", None)
+
+        # v1.30.0 阶段 4：漏斗失败行改走重新入队（attempts 清零），
+        # 不再直接重跑整理；非漏斗行行为不变。True=已重新入队，旧路
+        # 停在这里（提交阶段已把记录置为“处理中”，终态由漏斗 worker
+        # 的 _commit_single_item 写回同一条索引行）。
+        if self._retry_funnel_row(record):
+            return {"success": True, "message": "已重新入队，整理漏斗将继续处理"}
 
         source_sha1 = str(record.get("source_sha1") or "").strip()
         source_name = str(

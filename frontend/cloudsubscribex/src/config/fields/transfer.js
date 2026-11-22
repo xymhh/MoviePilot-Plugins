@@ -54,13 +54,6 @@ export function createTransferSection(options) {
             cols: 4,
           },
           {
-            key: "organize_after_transfer",
-            label: "转存后自动整理",
-            type: "switch",
-            hint: "关闭后保留在中转目录，不执行刮削整理",
-            cols: 4,
-          },
-          {
             key: "mp_organize_after_share_save",
             label: "直存后交 MP 整理",
             type: "switch",
@@ -458,6 +451,13 @@ export function createTransferSection(options) {
         icon: "mdi-filter-check-outline",
         fields: [
           {
+            key: "funnel_enabled",
+            label: "整理漏斗总闸",
+            type: "switch",
+            hint: "关闭后全部生产者停止入队、worker 不起轮，回旧流水线；队列行保留在库，开关再开时继续处理。这是漏斗的 kill-switch，回滚时先关它",
+            cols: 4,
+          },
+          {
             key: "funnel_phase1_enabled",
             label: "整理队列（阶段 1）",
             type: "switch",
@@ -518,6 +518,13 @@ export function createTransferSection(options) {
             label: "落盘前双名实查",
             type: "switch",
             hint: "打开时带/不带 {tmdb-} 的两个名字都算重复；关闭只查规范名，仅排障用",
+            cols: 4,
+          },
+          {
+            key: "funnel_scan_dry_run",
+            label: "扫描对账 dry-run",
+            type: "switch",
+            hint: "打开时每天 04:00 只分类记日志，不入队、不删文件；关闭也不接管（接管留给以后一版）",
             cols: 4,
           },
         ],

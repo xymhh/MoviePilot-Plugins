@@ -199,7 +199,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.29.11"
+    plugin_version = "1.30.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -863,6 +863,22 @@ class CloudSubscribeX(_PluginBase):
                     logger.warning(f"忽略未知插件配置键：{key}（未进白名单）")
                     continue
                 setattr(self, f"_{key}", val)
+            # v1.30.0 阶段 4：funnel_enabled 总闸生效（kill-switch）。
+            # 插件实例属性是上面白名单循环写的原始值，各处读到的必须
+            # 是“总闸 AND 原始值”，否则只改一处关不掉 API 侧/运行侧的
+            # 入队路。_init_handlers 在下面建 SyncHandler（它读插件
+            # 属性），所以必须在此处、在建 handler 之前算出有效值。
+            _funnel_master = bool(getattr(self, "_funnel_enabled", True))
+            self._funnel_enabled = _funnel_master
+            self._funnel_phase1_enabled = bool(
+                _funnel_master and getattr(self, "_funnel_phase1_enabled", False)
+            )
+            self._funnel_phase2_enabled = bool(
+                _funnel_master and getattr(self, "_funnel_phase2_enabled", False)
+            )
+            self._funnel_phase3_enabled = bool(
+                _funnel_master and getattr(self, "_funnel_phase3_enabled", False)
+            )
             # 渠道库是搜索源与 TG 频道的唯一运行来源：先迁移旧配置，
             # 再让 _apply_search_config / _apply_tg_monitor_config 读渠道库。
             self._migrate_channels_from_config(config)
@@ -918,6 +934,9 @@ class CloudSubscribeX(_PluginBase):
             "strm_increment_enabled", "strm_increment_minutes",
             "organize_schedule_enabled", "organize_schedule_cron",
             "organize_source_path", "organize_schedule_auto_execute",
+            # v1.30.0 阶段 4：漏斗总闸/阶段 1 开关影响 04:00 扫描对账
+            # 任务（CloudSubscribe_Organize）的注册，改动须刷新维护任务。
+            "funnel_enabled", "funnel_phase1_enabled",
         }
         try:
             from .core.checkin_manager import get_checkin_definitions
@@ -1238,6 +1257,28 @@ class CloudSubscribeX(_PluginBase):
         Thread(target=_run, daemon=True).start()
         return {"success": True, "message": "已开始后台增量补齐"}
 
+    def _run_scheduled_organize_scan(self) -> Any:
+        """04:00 定时扫描：v1.30.0 阶段 4 改为漏斗扫描对账触发器。
+
+        漏斗开（总闸 + 阶段 1）时跑 dry-run 扫描对账：只分类记日志，
+        不入队、不删文件（接管留给以后一版）。漏斗关时保留旧整理台
+        定时扫描行为（源目录取退役前的配置值，配置已废弃故恒为空，
+        此时直接返回不跑，避免空目录扫描）。
+        """
+        if getattr(self, "_funnel_phase1_enabled", False):
+            if self._sync_handler is None:
+                return {"success": False, "message": "同步处理器未初始化"}
+            return self._sync_handler.funnel_run_scan_dry_run(trigger="定时")
+        source_path = str(getattr(self, "_organize_source_path", "") or "").strip()
+        if not source_path:
+            logger.info("04:00 整理扫描跳过：漏斗未启用且未配置整理台源目录")
+            return {"success": True, "message": "漏斗未启用，跳过整理扫描"}
+        return self.start_scan(
+            source_path=source_path,
+            auto_execute=self._organize_schedule_auto_execute,
+            trigger="定时",
+        )
+
     def _run_scheduled_task(self, task: str) -> Any:
         """MP 调度的插件维护任务唯一入口（get_service 声明的 func）。
 
@@ -1252,11 +1293,10 @@ class CloudSubscribeX(_PluginBase):
             "strm_full_scan": lambda: self.run_strm_full_scan("定时"),
             "strm_increment": lambda: self.run_strm_increment("定时"),
             "retry_index_maintenance": self._run_retry_index_maintenance,
-            "organize": lambda: self.start_scan(
-                source_path=self._organize_source_path,
-                auto_execute=self._organize_schedule_auto_execute,
-                trigger="定时",
-            ),
+            # v1.30.0 阶段 4：04:00 定时任务改为漏斗扫描对账触发器
+            #（设计 §12 修订范围）：漏斗开时跑 dry-run 扫描（只分类
+            # 记日志，不入队）；漏斗关时保留旧整理台定时扫描行为。
+            "organize": self._run_scheduled_organize_scan,
         }
         runner = runners.get(task)
         if runner is None:
@@ -2099,7 +2139,8 @@ class CloudSubscribeX(_PluginBase):
                 str(config.get("type_folder_tv", "剧集") or "").strip().strip("/") or "剧集"
         )
 
-        self._organize_after_transfer = bool(config.get("organize_after_transfer", True))
+        # v1.30.0 阶段 4：organize_after_transfer 已退役（转存后整理恒开，
+        # 旧值由 normalize 静默丢弃）；类默认值 True 保持行为不变。
         self._organize_subtitles = bool(config.get("organize_subtitles", True))
         self._subtitle_traditional_to_simplified = bool(config.get("subtitle_traditional_to_simplified", False))
         self._anime_pack_preferred = bool(config.get("anime_pack_preferred", True))
@@ -2120,7 +2161,8 @@ class CloudSubscribeX(_PluginBase):
             )
         except (TypeError, ValueError):
             self._strm_increment_budget = 180
-        self._organize_source_path = str(config.get("organize_source_path", "") or "").strip()
+        # v1.30.0 阶段 4：organize_source_path 已退役（整理台源目录改
+        # 为手动现选，旧值由 normalize 静默丢弃）；类默认值 "" 保持行为不变。
         try:
             organize_max_files = int(config.get("organize_max_files", 500) or 500)
         except (TypeError, ValueError):

@@ -1067,6 +1067,108 @@ class FunnelQueueRepository(DbOper):
         return row.to_dict() if row is not None else None
 
     @db_query
+    def find_row_by_pending_key(
+            self, pending_key: str, db: Session = None
+    ) -> Optional[Dict[str, Any]]:
+        """v1.30.0 阶段 4：按 pending_key 查行（任意状态，含 held/done）。
+
+        失败重试路径用：``get_by_pending_key`` 只认在途行，终态失败
+        的行（记录已被弹出）查不到，重试就找不到漏斗行。
+        """
+        key = str(pending_key or "").strip()
+        if not key:
+            return None
+        row = db.scalars(
+            select(FunnelQueueRow).where(
+                FunnelQueueRow.pending_key == key,
+            )
+            .order_by(FunnelQueueRow.id.desc())
+        ).first()
+        return row.to_dict() if row is not None else None
+
+    @db_query
+    def pending_keys_with_rows(
+            self, pending_keys: Iterable[str], db: Session = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """v1.30.0 阶段 4：批量按 pending_key 查行（失败记录页 source
+        标注用）。返回 {pending_key: 行字典}，无行不占位。"""
+        keys = {
+            str(key or "").strip() for key in (pending_keys or [])
+            if str(key or "").strip()
+        }
+        if not keys:
+            return {}
+        rows = db.scalars(
+            select(FunnelQueueRow).where(
+                FunnelQueueRow.pending_key.in_(sorted(keys)),
+            )
+        ).all()
+        result: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            data = row.to_dict()
+            key = str(data.get("pending_key") or "").strip()
+            if key and key not in result:
+                result[key] = data
+        return result
+
+    @db_update
+    def claim_row(
+            self, row_id: int, media_type: str, tmdb_id: int, season: int,
+            episode: int, title: str, media_data: Any, db: Session = None,
+    ) -> bool:
+        """v1.30.0 阶段 4：held/failed 行人工认领——改写媒体身份。
+
+        只改身份字段（media_type/tmdb_id/season/episode/title/
+        media_data），不动状态与原因（认领后由 requeue_by_ids 放回
+        队列时清 attempts 与原因）。queued/processing/done 行拒绝，
+        防止认领途中的行被改身份。
+        """
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(
+                FunnelQueueRow.id == int(row_id or 0),
+                FunnelQueueRow.status.in_(("held", "failed")),
+            )
+            .values(
+                media_type=str(media_type or "").strip().lower(),
+                tmdb_id=int(tmdb_id or 0),
+                season=max(0, int(season or 0)),
+                episode=max(0, int(episode or 0)),
+                title=str(title or "").strip(),
+                media_data=media_data,
+                updated_at=int(time.time()),
+            )
+        )
+        return int(result.rowcount or 0) == 1
+
+    @db_update
+    def clear_orphan_location(self, row_id: int, db: Session = None) -> bool:
+        """v1.30.0 阶段 4：孤儿文件删完后，清掉行原因里的
+        ``orphan_location=...;`` 标记（按钮消失，不再重复删）。只清
+        标记，不动状态与原因其余部分。"""
+        row = FunnelQueueRow.get(db, int(row_id or 0))
+        if row is None:
+            return False
+        reason = str(row.skip_reason or "")
+        marker = "orphan_location="
+        index = reason.find(marker)
+        if index < 0:
+            return True
+        rest = reason[index + len(marker):]
+        ends = [
+            end for end in (rest.find(";"), rest.find("；")) if end >= 0
+        ]
+        end = min(ends) if ends else -1
+        cleaned = reason[:index] + (rest[end + 1:] if end >= 0 else "")
+        cleaned = cleaned.strip().strip(";；").strip()
+        result = db.execute(
+            update(FunnelQueueRow)
+            .where(FunnelQueueRow.id == int(row_id or 0))
+            .values(skip_reason=cleaned[:255], updated_at=int(time.time()))
+        )
+        return int(result.rowcount or 0) == 1
+
+    @db_query
     def list_due(
             self, limit: int = 50, now: Optional[int] = None,
             db: Session = None,

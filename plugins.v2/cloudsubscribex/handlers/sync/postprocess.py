@@ -1294,6 +1294,29 @@ class PostprocessService(OwnerDelegator):
             return removed_keys, self._count_offline_monitor_pending(pending), removed_items
 
 
+    @staticmethod
+    def _held_reason_with_orphan(item: Dict[str, Any], reason: str) -> str:
+        """拦截挂起原因后附孤儿文件位置（v1.30.0 阶段 4）。
+
+        拦截时本份 .mkv 已落盘（MP 整理已落盘即既成事实），位置即
+        item 的 cloud_dir/file_name；队列页“删除孤儿文件”按
+        ``orphan_location=`` 标记解析（规范常量见 funnel.py 的
+        FUNNEL_ORPHAN_LOCATION_MARKER，这里懒加载取同一值，失败时
+        用字面量兜底）。位置不明时只返回原原因。
+        """
+        reason = str(reason or "")
+        try:
+            from .funnel import FUNNEL_ORPHAN_LOCATION_MARKER
+        except Exception:  # noqa: BLE001 - 取不到常量用字面量
+            FUNNEL_ORPHAN_LOCATION_MARKER = "orphan_location="
+        if FUNNEL_ORPHAN_LOCATION_MARKER in reason:
+            return reason
+        cloud_dir = str(item.get("cloud_dir") or "").strip().rstrip("/")
+        file_name = str(item.get("file_name") or "").strip()
+        if not cloud_dir or not file_name:
+            return reason
+        return f"{reason}; {FUNNEL_ORPHAN_LOCATION_MARKER}{cloud_dir}/{file_name}"
+
     def _commit_single_item(
             self,
             item: Dict[str, Any],
@@ -1322,7 +1345,8 @@ class PostprocessService(OwnerDelegator):
             )
             try:
                 self._owner.funnel_mark_held_by_pending_key(
-                    str(pending_key or ""), intercept_reason
+                    str(pending_key or ""),
+                    self._held_reason_with_orphan(item, intercept_reason),
                 )
             except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
                 logger.debug(f"提交前复查挂起漏斗行失败：{error}", exc_info=True)
@@ -1519,7 +1543,8 @@ class PostprocessService(OwnerDelegator):
                 )
                 try:
                     self._owner.funnel_mark_held_by_pending_key(
-                        str(pending_key or ""), intercept_reason
+                        str(pending_key or ""),
+                        self._held_reason_with_orphan(item, intercept_reason),
                     )
                 except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
                     logger.debug(f"删旧版前复查挂起漏斗行失败：{error}", exc_info=True)
@@ -2151,7 +2176,8 @@ class PostprocessService(OwnerDelegator):
             )
             try:
                 self._owner.funnel_mark_held_by_pending_key(
-                    str(pending_key or ""), intercept_reason
+                    str(pending_key or ""),
+                    self._held_reason_with_orphan(item, intercept_reason),
                 )
             except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
                 logger.debug(f"提交前复查挂起漏斗行失败：{error}", exc_info=True)
@@ -2555,7 +2581,8 @@ class PostprocessService(OwnerDelegator):
             )
             try:
                 self._owner.funnel_mark_held_by_pending_key(
-                    str(pending_key or ""), intercept_reason
+                    str(pending_key or ""),
+                    self._held_reason_with_orphan(item, intercept_reason),
                 )
             except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
                 logger.debug(f"提交前复查挂起漏斗行失败：{error}", exc_info=True)
@@ -2732,7 +2759,8 @@ class PostprocessService(OwnerDelegator):
                     )
                     try:
                         self._owner.funnel_mark_held_by_pending_key(
-                            str(batch_key or ""), intercept_reason
+                            str(batch_key or ""),
+                            self._held_reason_with_orphan(batch_item, intercept_reason),
                         )
                     except Exception as error:  # noqa: BLE001 - 挂起失败不挡拦截结算
                         logger.debug(f"批量删旧版前复查挂起漏斗行失败：{error}", exc_info=True)

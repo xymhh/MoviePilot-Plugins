@@ -380,19 +380,18 @@ class FunnelTgSameDirTests(unittest.TestCase):
         )
         self.assertEqual(results["f-tv-09"][0], Path("/tmp/x.strm"))
 
-    def test_manual_same_dir_item_still_generates_inline(self):
-        """手动同目录项（无 via）：仍按阶段 1 当场生成（阶段 3/4 再统）。"""
+    def test_manual_same_dir_item_queued_not_generated(self):
+        """v1.30.0 阶段 4（d）：手动同目录项（无 via）也入队，不再当场生成。
+
+        阶段 2/3 有意留着手动直出路等阶段 4 统一；本版以 funnel_route
+        为唯一判定，手动同目录与 TG/订阅/洗版一致。"""
         service = self._service()
         item = _tv_item(funnel_route=True)
         results = service._generate_or_queue_strm_batch([item], _tv_media())
-        self.assertEqual(
-            self.generate_calls, [(_TV_CLOUD_DIR, _TV_FILE)]
-        )
-        # 末尾无条件调一次 _queue_file_finalize_batch（空批），但没有项入队。
-        self.assertEqual(
-            [item for batch in self.queue_calls for item in batch], []
-        )
-        self.assertEqual(results["f-tv-09"][0], Path("/tmp/x.strm"))
+        self.assertEqual(self.generate_calls, [])
+        self.assertEqual(len(self.queue_calls), 1)
+        self.assertEqual(self.queue_calls[0][0]["result_key"], "f-tv-09")
+        self.assertEqual(results["f-tv-09"], (None, "pk-f-tv-09"))
 
     def test_tg_routed_staging_differs_queued(self):
         """TG 路由项（暂存目录不同）：同样入队（原有分支行为不变）。"""

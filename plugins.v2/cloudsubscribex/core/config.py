@@ -276,7 +276,8 @@ class UIConfig:
                 "https://mikanani.me", "https://mikanime.tv"
             ],
             "cloud_drive": "115",
-            "organize_after_transfer": True,
+            # v1.30.0 阶段 4：organize_after_transfer 已退役（转存后整理恒开），
+            # 不再是配置键；旧值由 normalize_plugin_config 静默丢弃。
             "mp_organize_after_share_save": True,
             "organize_subtitles": True,
             "subtitle_traditional_to_simplified": False,
@@ -292,7 +293,8 @@ class UIConfig:
             "strm_increment_enabled": False,
             "strm_increment_minutes": 10,
             "strm_increment_budget": 180,
-            "organize_source_path": "",
+            # v1.30.0 阶段 4：organize_source_path 已退役（整理台源目录改
+            # 为手动现选），不再是配置键；旧值由 normalize_plugin_config 静默丢弃。
             "organize_max_files": 500,
             "organize_max_depth": 8,
             "organize_include_subtitles": True,
@@ -385,6 +387,11 @@ class UIConfig:
             "cross_season_path_guard": True,
             "enable_cloud_upgrade": False,
             "enable_pt_upgrade": False,
+            # v1.30.0 阶段 4：整理漏斗总闸（kill-switch，默认开）。
+            # 关 = 全部生产者停止入队、worker 不起轮，旧流水线接手在途
+            # 记录；队列行保留在 DB，开关再开时继续处理，不丢。
+            # 开 = 行为与此前一致（阶段 1 为总闸，阶段 2/3 各自生效）。
+            "funnel_enabled": True,
             # v1.29.7 阶段 1：网盘整理漏斗（手动提交入队 + worker 逐行整理）。
             # 关 = 手动提交回旧流水线，队列里未处理行保留、开关再开时继续处理。
             "funnel_phase1_enabled": False,
@@ -406,6 +413,10 @@ class UIConfig:
             "funnel_max_attempts": 5,
             # True=落盘前实查双名（带/不带 {tmdb-} 都算）；False=只查规范名，仅排障用。
             "funnel_dedup_strict": True,
+            # v1.30.0 阶段 4：04:00 扫描对账默认 dry-run——只分类记日志，
+            # 不入队、不删文件。接管（真正入队）留给以后一版，本版关掉
+            # 也不接管（只记一条警告），绝不静默接管。
+            "funnel_scan_dry_run": True,
             "upgrade_mode": "largest",
             "episode_dedup_enabled": True,
             "verify_landed_enabled": True,

@@ -277,6 +277,8 @@ const EXTRA_SOURCE_META = {
   tg: {key: "tg", name: "TG频道", icon: "mdi-television-guide", color: "cyan"},
   unknown: {key: "unknown", name: "未知来源", icon: "mdi-help-circle-outline", color: "grey"},
   quark: {key: "quark", name: "夸克（历史来源）", icon: "mdi-cloud", color: "blue"},
+  // v1.30.0 阶段 4：失败记录页漏斗失败行的 source 标注。
+  "整理漏斗": {key: "整理漏斗", name: "整理漏斗", icon: "mdi-filter-check-outline", color: "teal"},
 };
 
 const THEME_COLOR_NAMES = new Set([

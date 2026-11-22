@@ -262,7 +262,11 @@ class PluginScheduledTaskTests(unittest.TestCase):
             "_strm_increment_minutes": 7,
             "_organize_schedule_enabled": True,
             "_organize_schedule_cron": "0 3 * * *",
+            # v1.30.0 阶段 4：organize_source_path 已退役，04:00 任务
+            # 注册条件改读漏斗总闸 + 阶段 1（这里默认全开）。
             "_organize_source_path": "/转存",
+            "_funnel_enabled": True,
+            "_funnel_phase1_enabled": True,
             "_organize_schedule_auto_execute": False,
         }
         values.update(flags)
@@ -305,8 +309,14 @@ class PluginScheduledTaskTests(unittest.TestCase):
             _organize_schedule_enabled=False,
         )
         self.assertEqual(set(services), {"CloudSubscribe_RetryIndexMaintenance"})
-        services = self._maintenance(plugin, _organize_source_path="")
+        # v1.30.0 阶段 4：04:00 任务注册条件改读漏斗总闸 + 阶段 1；
+        # organize_source_path 已退役，不再参与判定。
+        services = self._maintenance(plugin, _funnel_phase1_enabled=False)
         self.assertNotIn("CloudSubscribe_Organize", services)
+        services = self._maintenance(plugin, _funnel_enabled=False)
+        self.assertNotIn("CloudSubscribe_Organize", services)
+        services = self._maintenance(plugin, _organize_source_path="")
+        self.assertIn("CloudSubscribe_Organize", services)
         services = self._maintenance(plugin, _organize_schedule_cron="not a cron")
         self.assertNotIn("CloudSubscribe_Organize", services)
 

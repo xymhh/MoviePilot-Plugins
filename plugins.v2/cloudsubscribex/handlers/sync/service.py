@@ -259,8 +259,10 @@ class SyncHandler:
 
 
     def _init_organize_flags(self, get_val):
-        """Phase 5 第 3 项（v1.20.0）：整理与转存开关：整理后整理、离线超时、跨盘开关与媒体类型、网盘注册表。原 __init__ 第 234-259 行原样搬移，行为不变。"""
-        self._organize_after_transfer = bool(get_val("organize_after_transfer", True))
+        """Phase 5 第 3 项（v1.20.0）：整理与转存开关：整理后整理、离线超时、跨盘开关与媒体类型、网盘注册表。原 __init__ 第 234-259 行原样搬移，行为不变。
+        v1.30.0 阶段 4：organize_after_transfer 已退役（转存后整理恒开），
+        这里不再读配置，直接恒为 True。"""
+        self._organize_after_transfer = True
         self._mp_organize_after_share_save = bool(
             get_val("mp_organize_after_share_save", True)
         )
@@ -438,10 +440,22 @@ class SyncHandler:
         """v1.29.7 阶段 1：网盘整理漏斗配置（只读阶段 1 实际用的键）。
         v1.29.8 阶段 2 加 funnel_phase2_enabled（TG 进漏斗 kill-switch）。
         v1.29.9 阶段 3 加 funnel_phase3_enabled（订阅与洗版进漏斗
-        kill-switch）。"""
-        self._funnel_phase1_enabled = bool(get_val("funnel_phase1_enabled", False))
-        self._funnel_phase2_enabled = bool(get_val("funnel_phase2_enabled", False))
-        self._funnel_phase3_enabled = bool(get_val("funnel_phase3_enabled", False))
+        kill-switch）。
+        v1.30.0 阶段 4 加 funnel_enabled 总闸：插件 _apply_plugin_config
+        已算出有效值（总闸 AND 原始值）写进插件属性，这里读到的阶段
+        键已是有效值；为防直接构造（测试/旧调用）绕过插件层，这里再
+        与 funnel_enabled 原始值取一次 AND，双保险。"""
+        self._funnel_enabled = bool(get_val("funnel_enabled", True))
+        self._funnel_phase1_enabled = bool(
+            self._funnel_enabled and get_val("funnel_phase1_enabled", False)
+        )
+        self._funnel_phase2_enabled = bool(
+            self._funnel_enabled and get_val("funnel_phase2_enabled", False)
+        )
+        self._funnel_phase3_enabled = bool(
+            self._funnel_enabled and get_val("funnel_phase3_enabled", False)
+        )
+        self._funnel_scan_dry_run = bool(get_val("funnel_scan_dry_run", True))
         self._funnel_target_dir = str(
             get_val("funnel_target_dir", "") or "/Alist/影视/moviepilot/转存/"
         )
@@ -870,6 +884,31 @@ class SyncHandler:
     def funnel_delete_old_version(self, row_ids) -> Dict[str, Any]:
         """v1.29.10 热修复：队列页人工删旧版（held/failed 行）。"""
         return self.funnel.delete_old_version(row_ids)
+
+    def funnel_run_scan_dry_run(self, trigger: str = "手动") -> Dict[str, Any]:
+        """v1.30.0 阶段 4：04:00 扫描对账（默认 dry-run，只分类记日志）。"""
+        return self.funnel.run_scan_dry_run(trigger=trigger)
+
+    def funnel_round_history(self) -> List[Dict[str, Any]]:
+        """v1.30.0 阶段 4：最近 20 轮漏斗轮次摘要（worker + 扫描轮次）。"""
+        return self.funnel.round_history()
+
+    def funnel_claim_row(
+            self, row_id: int, tmdb_id: int, media_type: str,
+            season: Any = None, episode: Any = None,
+    ) -> Dict[str, Any]:
+        """v1.30.0 阶段 4：held 行人工认领（指定剧集/TMDB 后重新入队）。"""
+        return self.funnel.claim_row(
+            row_id, tmdb_id, media_type, season=season, episode=episode,
+        )
+
+    def funnel_delete_orphan_files(self, row_ids) -> Dict[str, Any]:
+        """v1.30.0 阶段 4：held 行人工删孤儿文件（.mkv 连带同名 .strm）。"""
+        return self.funnel.delete_orphan_files(row_ids)
+
+    def funnel_find_row_by_pending_key(self, pending_key: str) -> Optional[Dict[str, Any]]:
+        """v1.30.0 阶段 4：按终态键查漏斗行（任意状态，含 held/done）。"""
+        return self.funnel.find_row_by_pending_key(pending_key)
 
     def funnel_run_round(self) -> Dict[str, int]:
         return self.funnel.run_round()

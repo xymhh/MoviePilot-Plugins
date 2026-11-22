@@ -105,6 +105,12 @@ def normalize_plugin_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             #（不再读该键；若留在配置里会在 _apply_plugin_config 的白名单
             # 循环里报“忽略未知插件配置键”警告）。
             "quality_prefer_enabled",
+            # v1.30.0 阶段 4：整理台源目录与转存后自动整理随漏斗接管退役，
+            # 旧值静默丢弃。整理台定时任务改为漏斗 04:00 扫描对账触发器，
+            # 扫描源目录改读 funnel_target_dir；手动整理仍可在整理台页
+            # 面上现选源目录。
+            "organize_source_path",
+            "organize_after_transfer",
     ):
         config.pop(deprecated_key, None)
     if "platform_download_policy" in config:

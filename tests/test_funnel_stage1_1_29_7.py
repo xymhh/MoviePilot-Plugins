@@ -1284,7 +1284,12 @@ class FunnelCommitInterceptTests(unittest.TestCase):
         self.assertEqual(args[2], reason)
         self.assertIs(args[3], ctx)
         self.assertFalse(kwargs.get("notify", True))
-        self.assertEqual(held, [("pk-tv-09", reason)])
+        # v1.30.0 阶段 4（g）：挂起原因后附孤儿文件位置标记；abort
+        # 的原因仍是裸原因（上面已断言）。
+        self.assertEqual(held, [(
+            "pk-tv-09",
+            f"{reason}; orphan_location={_TV_CLOUD_DIR}/{_TV_FILE}",
+        )])
         progress.assert_not_called()
 
     def test_recheck_exception_fails_open_to_commit(self):
@@ -1722,13 +1727,17 @@ class FunnelPreStrmRecheckTests(unittest.TestCase):
     def test_intercept_before_strm_generation(self):
         """拦截：STRM 未生成、abort（notify=False）、漏斗行挂起、未终态。"""
         reason = "提交前复查发现重复，已拦截：测试"
-        self._run(lambda item, key, media, ctx: (True, reason))
+        item, _pending, _ctx = self._run(lambda item, key, media, ctx: (True, reason))
         self.assertEqual(self.generate_calls, [])
         self.assertEqual(len(self.abort_calls), 1)
         self.assertEqual(self.abort_calls[0]["key"], "key1")
         self.assertEqual(self.abort_calls[0]["reason"], reason)
         self.assertFalse(self.abort_calls[0]["notify"])
-        self.assertEqual(self.held, [("key1", reason)])
+        # v1.30.0 阶段 4（g）：挂起原因后附孤儿文件位置标记。
+        self.assertEqual(self.held, [(
+            "key1",
+            f"{reason}; orphan_location={item['cloud_dir']}/{item['file_name']}",
+        )])
         self.assertEqual(self.finalize_calls, [])
 
     def test_pass_through_generates_strm(self):
