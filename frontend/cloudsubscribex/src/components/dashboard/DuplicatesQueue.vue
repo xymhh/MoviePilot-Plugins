@@ -30,6 +30,9 @@
           已扫 {{ dirsScanned }} 个目录、{{ strmCount }} 个 STRM，发现 {{ groups.length }} 组重复；
           根目录：{{ strmRoot || "—" }}。
         </span>
+        <span v-if="scanned && savedAt">
+          上次扫描 {{ formatSavedAt(savedAt) }} · {{ groups.length }} 组重复。
+        </span>
         <span v-if="scanned && !groups.length">没有发现重复，可以放心。</span>
       </v-card-text>
     </v-card>
@@ -70,7 +73,7 @@
           :model-value="keepByKey[group.key]"
           density="compact"
           class="pa-0 ma-0"
-          @update:model-value="(value) => (keepByKey[group.key] = value)"
+          @update:model-value="(value) => onKeepChange(group, value)"
         >
           <v-list density="compact" class="pa-0">
             <v-list-item v-for="(item, index) in group.items" :key="item.file_name" class="px-0">
@@ -101,7 +104,7 @@
 </template>
 
 <script setup>
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 
 const props = defineProps({
   api: { type: [Object, Function], default: () => ({}) },
@@ -123,6 +126,8 @@ const keepByKey = ref({});
 const strmRoot = ref("");
 const dirsScanned = ref(0);
 const strmCount = ref(0);
+const unreadable = ref(0);
+const savedAt = ref(0);
 const scanned = ref(false);
 
 function unwrap(result) {
@@ -152,6 +157,12 @@ function kindColor(group) {
   return "error";
 }
 
+function formatSavedAt(seconds) {
+  const value = Number(seconds) || 0;
+  if (!value) return "—";
+  return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
 async function scanNow() {
   scanning.value = true;
   error.value = "";
@@ -164,6 +175,8 @@ async function scanNow() {
     strmRoot.value = data.strm_root || "";
     dirsScanned.value = data.dirs_scanned || 0;
     strmCount.value = data.strm_count || 0;
+    unreadable.value = data.unreadable || 0;
+    savedAt.value = data.saved_at || 0;
     scanned.value = true;
     message.value = `扫描完成：${dirsScanned.value} 个目录、${strmCount.value} 个 STRM，${groups.value.length} 组重复`;
     if (groups.value.length) await enrichNow();
@@ -173,6 +186,74 @@ async function scanNow() {
     scanning.value = false;
   }
 }
+
+// v1.31.2：扫描状态持久化——扫描结果 + 核对进度 + 保留选择落插件
+// 私有库（runtime_records 命名空间 strm_duplicates），离开页面回来
+// 可恢复。扫描成功后服务端已存一份初始状态；核对每批合并后前端再存
+// 一次；删除后重新扫描即覆盖保存。保存失败不阻塞主流程。
+function buildState() {
+  return {
+    groups: groups.value,
+    strm_root: strmRoot.value,
+    dirs_scanned: dirsScanned.value,
+    strm_count: strmCount.value,
+    unreadable: unreadable.value,
+    keep_by_key: keepByKey.value,
+  };
+}
+
+async function saveState() {
+  if (!scanned.value || !groups.value.length) return;
+  try {
+    const result = unwrap(
+      await props.api.post(`plugin/${props.pluginId}/duplicates/save-state`, {
+        state: buildState(),
+      }),
+    );
+    if (result && result.saved_at) savedAt.value = result.saved_at;
+  } catch (err) {
+    // 保存失败不阻塞核对/删除主流程，下次保存再试。
+  }
+}
+
+// 保留选择改动也要落库：只在用户点选时触发（恢复时直接写 keepByKey，
+// 不走这里，不会一打开页面就重写 saved_at）；防抖 800ms，连续点选只存一次。
+let saveTimer = null;
+function onKeepChange(group, value) {
+  keepByKey.value[group.key] = value;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveState();
+  }, 800);
+}
+
+async function restoreState() {
+  try {
+    const result = unwrap(
+      await props.api.post(`plugin/${props.pluginId}/duplicates/load-state`, {}),
+    );
+    if (result && result.success === false) return;
+    const state = (result || {}).state;
+    if (!state || !Array.isArray(state.groups) || !state.groups.length) return;
+    groups.value = state.groups;
+    strmRoot.value = state.strm_root || "";
+    dirsScanned.value = state.dirs_scanned || 0;
+    strmCount.value = state.strm_count || 0;
+    unreadable.value = state.unreadable || 0;
+    savedAt.value = state.saved_at || 0;
+    keepByKey.value = { ...(state.keep_by_key || {}) };
+    for (const group of groups.value) {
+      if (keepByKey.value[group.key] === undefined) {
+        keepByKey.value[group.key] = group.suggested_keep ?? 0;
+      }
+    }
+    scanned.value = true;
+  } catch (err) {
+    // 读不到保存的状态就当没有，不阻塞页面。
+  }
+}
+
+onMounted(restoreState);
 
 // v1.31.1：核对改分片——全库 93 组一次 POST 会在反代 120 秒读超时里
 // 失败；每批 10 组顺序请求（不并行，避免 115 限流与超时叠加），
@@ -221,11 +302,13 @@ async function enrichNow() {
           keepByKey.value[group.key] = group.suggested_keep ?? 0;
         }
       }
+      // 按原顺序合并回 groups（只替换核对过的组，失败的组保留原样），
+      // 每批合并后保存一次：离开页面回来可从这批继续核对。
+      groups.value = groups.value.map((group) => byKey[group.key] || group);
       done += enriched.length;
       enrichDone.value = done;
+      await saveState();
     }
-    // 按原顺序合并回 groups（只替换核对过的组，失败的组保留原样）。
-    groups.value = groups.value.map((group) => byKey[group.key] || group);
     if (failedKeys.length) {
       error.value = `核对完成，${failedKeys.length} 组失败（大小未知），可点“重新核对大小”重试`;
     }

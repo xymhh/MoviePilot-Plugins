@@ -6,7 +6,7 @@
 - pickcode 同/不同判定与留大建议（同视频组与不同视频组）；
 - 删除映射（file_id 解析不到拒绝删除、pickcode 核对不上拒绝删除）；
 - 根因回归：真实 _generate_strm 同一集两次生成只剩一份 .strm；
-- API 层三端点转发到 SyncHandler。
+- API 层三端点转发到 SyncHandler；v1.31.2 状态保存/读取两个端点同口径。
 
 harness：真实 StrmGenerator + 真实 _generate_strm（复用
 test_strm_pickcode_refresh_1_17_0 的假 playback/query 做法）；
@@ -15,6 +15,7 @@ SxxExx / 第 N 集），只在需要分组的用例里临时替换
 ``sys.modules["app.core.metainfo"].MetaInfo``，用完恢复。
 """
 
+import copy
 import os
 import sys
 import tempfile
@@ -217,7 +218,7 @@ class _FakePlaybackReference:
         return {"pickcode": getattr(file_item, "pickcode", "")}
 
 
-def _duplicates_service(root, query=None, mutations=None, media_root=None):
+def _duplicates_service(root, query=None, mutations=None, media_root=None, store=None):
     owner = SimpleNamespace(
         _local_resource_path=str(root),
         _cloud_query=query,
@@ -226,6 +227,9 @@ def _duplicates_service(root, query=None, mutations=None, media_root=None):
     )
     if media_root is not None:
         owner._CLOUD_MEDIA_ROOT = media_root
+    if store is not None:
+        # 经宿主 _plugin 取不到时，服务回落到宿主直挂的 _get_data_store。
+        owner._get_data_store = lambda: store
     return StrmDuplicatesService(owner)
 
 
@@ -836,6 +840,30 @@ class ApiDelegationTests(unittest.TestCase):
         self.assertEqual(api.api_vue_duplicates_enrich({}), failure)
         self.assertEqual(api.api_vue_duplicates_delete({}), failure)
 
+    def test_save_load_state_delegate(self):
+        calls = {}
+        handler = SimpleNamespace(
+            duplicates_save_state=lambda state: calls.setdefault(
+                "save", {"success": True},
+            ),
+            duplicates_load_state=lambda: calls.setdefault(
+                "load", {"success": True},
+            ),
+        )
+        api = self._api(handler=handler)
+        self.assertEqual(
+            api.api_vue_duplicates_save_state({"state": {}}),
+            {"success": True},
+        )
+        self.assertEqual(api.api_vue_duplicates_load_state(), {"success": True})
+        self.assertEqual(set(calls), {"save", "load"})
+
+    def test_save_load_missing_handler_returns_failure(self):
+        failure = {"success": False, "message": "同步服务未就绪"}
+        api = self._api(handler=None, failure=failure)
+        self.assertEqual(api.api_vue_duplicates_save_state({"state": {}}), failure)
+        self.assertEqual(api.api_vue_duplicates_load_state(), failure)
+
 
 class MediaRootMappingTests(_MetaInfoTestCase):
     """线上口径：_local_resource_path 就是 .strm 根（/strm/115网盘），
@@ -1063,6 +1091,193 @@ class EnrichChunkingTests(_MetaInfoTestCase):
                 if item["kind"] == "redirect"
             ))
             self.assertIsNotNone(group["suggested_keep"])
+
+
+class _FakeStateStore:
+    """runtime_records 命名空间的状态存储替身（dict 内存，深拷贝隔离）。"""
+
+    def __init__(self):
+        self.rows = {}
+
+    def load(self, key, default=None):
+        return copy.deepcopy(self.rows.get(key, default))
+
+    def save(self, key, value):
+        self.rows[key] = copy.deepcopy(value)
+
+    def delete(self, key):
+        self.rows.pop(key, None)
+
+
+class _FakeDataStore:
+    """CloudSubscribeDataStore 替身：只提供 runtime_store。"""
+
+    def __init__(self):
+        self.stores = {}
+
+    def runtime_store(self, namespace):
+        return self.stores.setdefault(namespace, _FakeStateStore())
+
+
+class DuplicatesStateTests(_MetaInfoTestCase):
+    """扫描状态持久化（v1.31.2）：runtime_records 命名空间 strm_duplicates。
+
+    存的内容 = groups 全量（含 video_size/video_id/suggested_keep/
+    sizes_pending）+ 扫描元数据 + keep_by_key；saved_at 由服务端补写。
+    """
+
+    def _state_service(self, root=None, query=None, mutations=None, media_root=None):
+        store = _FakeDataStore()
+        service = _duplicates_service(
+            root or self.root, query=query, mutations=mutations,
+            media_root=media_root, store=store,
+        )
+        return service, store
+
+    def _three_groups(self):
+        """_build_library 的 3 组（两京 E05/E06 + 双帝之战电影组）。"""
+        ScanServiceTests._build_library(self)
+        service = _duplicates_service(self.root)
+        result = service.duplicates_scan()
+        self.assertTrue(result["success"], result)
+        self.assertEqual(len(result["data"]["groups"]), 3)
+        return result["data"]["groups"]
+
+    def test_save_load_round_trip(self):
+        groups = self._three_groups()
+        query = EnrichServiceTests._query_for(self)
+        service, _store = self._state_service(query=query)
+        enriched = service.duplicates_enrich(groups)["data"]["groups"]
+        keep_by_key = {enriched[0]["key"]: 1, enriched[1]["key"]: 0}
+        state = {
+            "groups": enriched,
+            "strm_root": str(self.root),
+            "dirs_scanned": 3,
+            "strm_count": 7,
+            "unreadable": 0,
+            "keep_by_key": keep_by_key,
+        }
+        result = service.duplicates_save_state(state)
+        self.assertTrue(result["success"], result)
+        self.assertIsInstance(result["data"]["saved_at"], int)
+        self.assertGreater(result["data"]["saved_at"], 0)
+        loaded = service.duplicates_load_state()
+        self.assertTrue(loaded["success"], loaded)
+        saved = loaded["data"]["state"]
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["groups"], enriched)
+        self.assertEqual(saved["keep_by_key"], keep_by_key)
+        self.assertEqual(saved["strm_root"], str(self.root))
+        self.assertEqual(saved["dirs_scanned"], 3)
+        self.assertEqual(saved["strm_count"], 7)
+        self.assertEqual(saved["saved_at"], result["data"]["saved_at"])
+
+    def test_scan_saves_state(self):
+        # 线上布局：_local_resource_path 就是 .strm 根，_CLOUD_MEDIA_ROOT 另设。
+        strm_root = self.root / "115网盘"
+        season_dir = strm_root / "剧集" / "国产剧" / "两京十五日" / "Season 1"
+        _write_strm(
+            season_dir / "两京十五日 {tmdb-203483} - S01E06 - 第6集.strm",
+            _redirect_content(
+                "pick-e06-tagged",
+                "两京十五日 {tmdb-203483} - S01E06 - 第6集.mkv",
+            ),
+        )
+        _write_strm(
+            season_dir / "两京十五日 - S01E06 - 第6集.strm",
+            _redirect_content(
+                "pick-e06-plain", "两京十五日 - S01E06 - 第6集.mkv",
+            ),
+        )
+        service, _store = self._state_service(
+            root=strm_root, media_root=MediaRootMappingTests.MEDIA_ROOT,
+        )
+        result = service.duplicates_scan()
+        self.assertTrue(result["success"], result)
+        self.assertEqual(len(result["data"]["groups"]), 1)
+        self.assertIn("saved_at", result["data"])
+        loaded = service.duplicates_load_state()["data"]["state"]
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded["groups"], result["data"]["groups"])
+        self.assertEqual(loaded["strm_root"], str(strm_root))
+        self.assertEqual(
+            loaded["dirs_scanned"], result["data"]["dirs_scanned"],
+        )
+        self.assertEqual(
+            loaded["strm_count"], result["data"]["strm_count"],
+        )
+        self.assertEqual(loaded["keep_by_key"], {})
+        self.assertEqual(loaded["saved_at"], result["data"]["saved_at"])
+
+    def test_sliced_enrich_flow_matches_full_enrich(self):
+        groups = self._three_groups()
+        query = EnrichServiceTests._query_for(self)
+        service, _store = self._state_service(query=query)
+        full = service.duplicates_enrich(groups)["data"]["groups"]
+        # 模拟前端：扫描后保存 → 分片核对、每批合并后保存 → 读回。
+        service.duplicates_save_state({
+            "groups": groups, "strm_root": str(self.root),
+            "dirs_scanned": 0, "strm_count": 0, "unreadable": 0,
+            "keep_by_key": {},
+        })
+        merged = {group["key"]: group for group in groups}
+        keep_by_key = {}
+        for start in range(0, len(groups), 2):
+            batch = groups[start:start + 2]
+            enriched = service.duplicates_enrich(batch)["data"]["groups"]
+            for group in enriched:
+                merged[group["key"]] = group
+                if group["key"] not in keep_by_key:
+                    suggested = group["suggested_keep"]
+                    keep_by_key[group["key"]] = (
+                        suggested if suggested is not None else 0
+                    )
+            ordered = [merged[group["key"]] for group in groups]
+            service.duplicates_save_state({
+                "groups": ordered, "strm_root": str(self.root),
+                "dirs_scanned": 0, "strm_count": 0, "unreadable": 0,
+                "keep_by_key": keep_by_key,
+            })
+        loaded = service.duplicates_load_state()["data"]["state"]
+        self.assertIsNotNone(loaded)
+        self.assertEqual(
+            EnrichChunkingTests._snapshot(loaded["groups"]),
+            EnrichChunkingTests._snapshot(full),
+        )
+        self.assertEqual(loaded["keep_by_key"], keep_by_key)
+
+    def test_load_without_save_returns_empty(self):
+        service, _store = self._state_service()
+        loaded = service.duplicates_load_state()
+        self.assertTrue(loaded["success"], loaded)
+        self.assertIsNone(loaded["data"]["state"])
+        # 没有存储可用时也按无保存处理，不报错。
+        no_store = _duplicates_service(self.root)
+        loaded = no_store.duplicates_load_state()
+        self.assertTrue(loaded["success"], loaded)
+        self.assertIsNone(loaded["data"]["state"])
+
+    def test_save_without_store_fails_softly_and_scan_still_works(self):
+        service = _duplicates_service(self.root)
+        result = service.duplicates_save_state({"groups": []})
+        self.assertFalse(result["success"])
+        # 扫描的自动保存 fail-open，不影响扫描结果。
+        scanned = service.duplicates_scan()
+        self.assertTrue(scanned["success"], scanned)
+        self.assertNotIn("saved_at", scanned["data"])
+
+    def test_save_rejects_bad_state(self):
+        service, _store = self._state_service()
+        self.assertFalse(service.duplicates_save_state(None)["success"])
+        self.assertFalse(service.duplicates_save_state("x")["success"])
+        self.assertFalse(
+            service.duplicates_save_state({"groups": "not-a-list"})["success"]
+        )
+        self.assertFalse(
+            service.duplicates_save_state(
+                {"groups": [], "keep_by_key": [1]},
+            )["success"]
+        )
 
 
 if __name__ == "__main__":

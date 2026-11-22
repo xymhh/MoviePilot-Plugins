@@ -148,9 +148,11 @@ ALLOWLIST = {
 # （/funnel/rounds|scan|claim|delete-orphan，前端 FunnelQueue.vue
 # 的轮次历史/扫描对账/认领/删孤儿调用，不进 ALLOWLIST）；v1.31.0
 # 重复扫描加 3 条（/duplicates/scan|enrich|delete，前端
-# DuplicatesQueue.vue 的扫描/核对大小/删除调用，不进 ALLOWLIST）。
-EXPECTED_REGISTERED_ENTRIES = 92
-EXPECTED_REGISTERED_PAIRS = 93
+# DuplicatesQueue.vue 的扫描/核对大小/删除调用，不进 ALLOWLIST）；v1.31.2
+# 状态保存/读取加 2 条（/duplicates/save-state|load-state，前端
+# DuplicatesQueue.vue 的挂载恢复/每批保存调用，不进 ALLOWLIST）。
+EXPECTED_REGISTERED_ENTRIES = 94
+EXPECTED_REGISTERED_PAIRS = 95
 
 # 第 5 项：7 个服务层方法的新签名（去掉 apikey 后的剩余参数名）。
 SERVICE_METHOD_PARAMS = {

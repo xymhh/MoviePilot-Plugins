@@ -511,6 +511,20 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "重复扫描删除：按用户确认删一组重复（视频 + STRM + NFO）",
             },
             {
+                "path": "/duplicates/save-state",
+                "endpoint": self.api_vue_duplicates_save_state,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重复扫描状态保存：扫描结果 + 核对进度 + 保留选择落库",
+            },
+            {
+                "path": "/duplicates/load-state",
+                "endpoint": self.api_vue_duplicates_load_state,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重复扫描状态读取：离开页面回来恢复上次扫描结果",
+            },
+            {
                 "path": "/tg/transfer",
                 "endpoint": self.api_vue_tg_transfer,
                 "methods": ["POST"],

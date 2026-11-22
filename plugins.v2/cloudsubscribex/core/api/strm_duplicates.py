@@ -1,4 +1,4 @@
-"""重复扫描 API：扫描（纯本地）/ 核对大小 / 删除（v1.31.0）。
+"""重复扫描 API：扫描（纯本地）/ 核对大小 / 删除 / 状态保存与读取（v1.31.2）。
 
 端点都是普通实例方法（MP 按 query 参数以 kwargs 调用，不传实例；
 staticmethod 会丢 self，见 MP 端点分发规则）。
@@ -45,3 +45,23 @@ class StrmDuplicatesApi(OwnerDelegator):
             )
         except Exception as error:  # noqa: BLE001 - 删除异常返回失败
             return {"success": False, "message": f"删除重复失败：{error}"}
+
+    def api_vue_duplicates_save_state(self, payload: Dict[str, Any] = None) -> dict:
+        """保存重复扫描状态（扫描结果 + 核对进度 + 保留选择）。"""
+        handler, failure = self._sync_handler_or_error("duplicates_save_state")
+        if handler is None:
+            return failure
+        try:
+            return handler.duplicates_save_state((payload or {}).get("state"))
+        except Exception as error:  # noqa: BLE001 - 保存异常返回失败
+            return {"success": False, "message": f"保存扫描状态失败：{error}"}
+
+    def api_vue_duplicates_load_state(self) -> dict:
+        """读取上次保存的重复扫描状态（无保存时返回空，不报错）。"""
+        handler, failure = self._sync_handler_or_error("duplicates_load_state")
+        if handler is None:
+            return failure
+        try:
+            return handler.duplicates_load_state()
+        except Exception as error:  # noqa: BLE001 - 读取异常返回失败
+            return {"success": False, "message": f"读取扫描状态失败：{error}"}

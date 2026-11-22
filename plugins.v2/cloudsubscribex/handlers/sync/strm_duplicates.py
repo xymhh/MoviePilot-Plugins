@@ -49,6 +49,10 @@
   实际大小与 file_id——MP 历史 dest 不可用作统一口径（回填行的
   ``dest_fileitem.size`` 是本地 .strm 大小，见 core 注释），115 列表
   是大小与 file_id 的唯一权威来源；删除本来就要查它。
+* 状态持久化（v1.31.2）：扫描结果 + 核对进度 + 保留选择落插件私有库
+  runtime_records（命名空间 ``strm_duplicates``），离开页面回来可恢复；
+  扫描成功后存一份初始状态，核对每批合并后由前端再存一次；陈旧状态
+  不自动删，只展示 saved_at，刷新靠用户重新扫描。
 * 删除：删除前重读磁盘 .strm 核对 pickcode、``find_file_strict``
   （fail-closed：目录读不到抛错，不当作“文件不存在”）定位视频、
   ``_playback_reference`` 核对 pickcode 一致后才删；解析不到就拒绝，
@@ -66,6 +70,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
@@ -84,6 +89,12 @@ from .naming import _TMDB_TAG_RE
 #: .strm 内容是单行 URL；redirect 形带 pickcode，分享形带 id。
 #: file_name 参数是视频在网盘里的准确文件名（URL 编码后）。
 _STRM_SEASON_DIR_RE = re.compile(r"season\s*(\d+)", re.IGNORECASE)
+
+#: 重复扫描状态的持久化位置：runtime_records 表，命名空间
+#: ``strm_duplicates``、键 ``state``。不要用 ``strm_scan`` / ``state``——
+#: 那是 STRM 全量重建的续扫断点（utils/strm_scan.py）。
+_DUPLICATES_STATE_NAMESPACE = "strm_duplicates"
+_DUPLICATES_STATE_KEY = "state"
 
 
 def parse_strm_identity(content: str) -> Dict[str, str]:
@@ -425,16 +436,103 @@ class StrmDuplicatesService(OwnerDelegator):
             "发现 %s 组重复（%s 个文件读失败）",
             dirs_scanned, len(entries), len(groups), unreadable,
         )
-        return {
-            "success": True,
-            "data": {
-                "strm_root": local_root,
-                "dirs_scanned": dirs_scanned,
-                "strm_count": len(entries),
-                "unreadable": unreadable,
-                "groups": groups,
-            },
+        data = {
+            "strm_root": local_root,
+            "dirs_scanned": dirs_scanned,
+            "strm_count": len(entries),
+            "unreadable": unreadable,
+            "groups": groups,
         }
+        saved_at = self._persist_scan_state(data)
+        if saved_at:
+            data["saved_at"] = saved_at
+        return {"success": True, "data": data}
+
+    def _state_store(self):
+        """取重复扫描状态存储（runtime_records 命名空间 strm_duplicates）。
+
+        走插件的 ``_get_data_store()``（经宿主 ``_plugin`` 取；SyncHandler
+        本身没有该属性，直接 getattr 拿不到，见 FunnelService._repository
+        的同款注释）；测试替身可能直接挂在宿主上。存储不可用时返回
+        None，调用方 fail-open（扫描/核对照常跑，只是不持久化）。
+        """
+        plugin = getattr(self._owner, "_plugin", None)
+        get_store = getattr(plugin, "_get_data_store", None) if plugin is not None else None
+        if not callable(get_store):
+            get_store = getattr(self._owner, "_get_data_store", None)
+        if not callable(get_store):
+            return None
+        try:
+            return get_store().runtime_store(_DUPLICATES_STATE_NAMESPACE)
+        except Exception as error:  # noqa: BLE001 - 存储不可用时调用方 fail-open
+            logger.debug(f"重复扫描状态存储不可用：{error}", exc_info=True)
+            return None
+
+    def duplicates_save_state(self, state: Any) -> Dict[str, Any]:
+        """保存重复扫描状态（扫描结果 + 核对进度 + 保留选择）。
+
+        state 由前端发来：groups 全量、扫描元数据、keep_by_key；服务端
+        只补 saved_at 时间戳。格式不对或存储不可用时返回失败，不抛错
+        （前端保存失败不阻塞核对主流程，下次保存再试）。
+        """
+        if not isinstance(state, dict):
+            return {"success": False, "message": "扫描状态格式错误"}
+        groups = state.get("groups")
+        if groups is not None and not isinstance(groups, list):
+            return {"success": False, "message": "扫描状态格式错误"}
+        keep_by_key = state.get("keep_by_key")
+        if keep_by_key is not None and not isinstance(keep_by_key, dict):
+            return {"success": False, "message": "扫描状态格式错误"}
+        store = self._state_store()
+        if store is None:
+            return {"success": False, "message": "状态存储不可用，扫描结果未保存"}
+        payload = dict(state)
+        payload["saved_at"] = int(time.time())
+        try:
+            store.save(_DUPLICATES_STATE_KEY, payload)
+        except Exception as error:  # noqa: BLE001 - 保存失败只报失败，不抛错
+            logger.warning(f"重复扫描状态保存失败：{error}")
+            return {"success": False, "message": f"保存扫描状态失败：{error}"}
+        return {"success": True, "data": {"saved_at": payload["saved_at"]}}
+
+    def duplicates_load_state(self) -> Dict[str, Any]:
+        """读取上次保存的重复扫描状态；无保存或存储不可用时返回空。"""
+        store = self._state_store()
+        if store is None:
+            return {"success": True, "data": {"state": None}}
+        try:
+            state = store.load(_DUPLICATES_STATE_KEY, None)
+        except Exception as error:  # noqa: BLE001 - 读失败按无保存处理
+            logger.warning(f"重复扫描状态读取失败：{error}")
+            return {"success": True, "data": {"state": None}}
+        if not isinstance(state, dict):
+            if state is not None:
+                logger.warning("重复扫描状态损坏（不是 dict），按无保存处理")
+            return {"success": True, "data": {"state": None}}
+        return {"success": True, "data": {"state": state}}
+
+    def _persist_scan_state(self, data: Dict[str, Any]) -> Optional[int]:
+        """扫描成功后保存一份初始状态（保留选择为空，核对时再补）。
+
+        失败只记日志、不影响扫描结果返回（fail-open）；返回 saved_at，
+        存不上返回 None。
+        """
+        try:
+            result = self.duplicates_save_state({
+                "groups": data.get("groups") or [],
+                "strm_root": data.get("strm_root") or "",
+                "dirs_scanned": data.get("dirs_scanned") or 0,
+                "strm_count": data.get("strm_count") or 0,
+                "unreadable": data.get("unreadable") or 0,
+                "keep_by_key": {},
+            })
+        except Exception as error:  # noqa: BLE001 - 保存失败不影响扫描
+            logger.warning(f"重复扫描状态保存失败：{error}")
+            return None
+        if not result.get("success"):
+            logger.warning(f"重复扫描状态未保存：{result.get('message')}")
+            return None
+        return (result.get("data") or {}).get("saved_at")
 
     def _cloud_dir_for_local(self, local_path: str) -> str:
         """本地 .strm 相对路径 → 网盘目录。

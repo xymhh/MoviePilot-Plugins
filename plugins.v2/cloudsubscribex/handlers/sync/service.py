@@ -899,6 +899,14 @@ class SyncHandler:
         """v1.31.0 重复扫描：按用户确认删一组重复（视频 + STRM + NFO）。"""
         return self.strm_duplicates.duplicates_delete(group, keep_index)
 
+    def duplicates_save_state(self, state) -> Dict[str, Any]:
+        """v1.31.2 重复扫描：保存上次扫描状态（离开页面回来可恢复）。"""
+        return self.strm_duplicates.duplicates_save_state(state)
+
+    def duplicates_load_state(self) -> Dict[str, Any]:
+        """v1.31.2 重复扫描：读取上次扫描状态（无保存时返回空）。"""
+        return self.strm_duplicates.duplicates_load_state()
+
     def funnel_run_scan_dry_run(self, trigger: str = "手动") -> Dict[str, Any]:
         """v1.30.0 阶段 4：04:00 扫描对账（默认 dry-run，只分类记日志）。"""
         return self.funnel.run_scan_dry_run(trigger=trigger)
