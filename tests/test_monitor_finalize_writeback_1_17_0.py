@@ -200,6 +200,41 @@ class ApplyFinalizeOutcomeTests(unittest.TestCase):
         )
         self.assertEqual(self._load()[0]["status"], "skipped")
 
+    def test_transferring_then_finalize_succeeded(self):
+        """v1.29.8 阶段 2：仍在 transferring + 漏斗终态成功 → transferred。
+
+        TG 入队后转存变异步：同步返回时条目可能还没改状态（如插件重启
+        打断、漏斗 worker 恢复后终态），回写时直接落 transferred。
+        """
+        self._seed([_item(status="transferring", match_status="transferring")])
+        touched = self.monitor.apply_finalize_outcome(URL, 101, success=True)
+        self.assertEqual(touched, 1)
+        item = self._load()[0]
+        self.assertEqual(item["status"], "transferred")
+        self.assertEqual(item["match_status"], "transferred")
+        self.assertEqual(item["failure_stage"], "")
+        self.assertEqual(item["auto_transfer_error"], "")
+        self.assertEqual(item["finalize_status"], "landed")
+        self.assertIn("finalize_completed_at", item)
+
+    def test_transferring_then_finalize_failed(self):
+        """v1.29.8 阶段 2：仍在 transferring + 漏斗终态失败 → failed。
+
+        与已 transferred 的失败终态同口径：阶段为 postprocess，原因带前缀。
+        """
+        self._seed([_item(status="transferring", match_status="transferring")])
+        touched = self.monitor.apply_finalize_outcome(
+            URL, 101, success=False, reason="MP 整理失败",
+        )
+        self.assertEqual(touched, 1)
+        item = self._load()[0]
+        self.assertEqual(item["status"], "failed")
+        self.assertEqual(item["match_status"], "failed")
+        self.assertEqual(item["failure_stage"], "postprocess")
+        self.assertEqual(item["auto_transfer_error"], "后处理失败：MP 整理失败")
+        self.assertEqual(item["finalize_status"], "failed")
+        self.assertIn("finalize_failed_at", item)
+
 
 class FailureStageTests(unittest.TestCase):
     """失败分阶段：订阅处理阶段失败标 subscribe，成功/跳过清掉。"""

@@ -264,6 +264,28 @@ class SyncApi(OwnerDelegator):
             },
         }
 
+    @staticmethod
+    def _funnel_route_for_submit(
+        *,
+        phase1_enabled: bool,
+        phase2_enabled: bool,
+        discovered_via: str,
+        wait: bool,
+    ) -> bool:
+        """漏斗路由判定（阶段 1 v1.29.7 + 阶段 2 v1.29.8）。
+
+        阶段 1 是漏斗总闸（关则一律不入队）。开时满足任一分支即入队：
+        - 界面手动提交：无 discovered_via 且非 wait 调用；
+        - TG 项：阶段 2 开关开且 discovered_via 非空（TG 提交恒为
+          wait=True，入队后不再同步等终态，终态由漏斗 worker 回写）。
+        工作流/代理提交（wait=True、无 discovered_via）仍走旧流水线。
+        """
+        if not phase1_enabled:
+            return False
+        if not discovered_via and not wait:
+            return True
+        return bool(phase2_enabled and discovered_via)
+
     def api_vue_start_manual_sync(
             self, payload: Dict[str, Any], wait: bool = False
     ) -> dict:
@@ -750,12 +772,19 @@ class SyncApi(OwnerDelegator):
         order = {value: index for index, value in enumerate(self._resource_type_order)}
         resources.sort(key=lambda item: order.get(item["resource_type"], len(order)))
         # v1.29.7 阶段 1：手动提交走整理漏斗——只有“界面手动提交”
-        # （无 discovered_via、非 wait 调用）才入队；TG 监控（discovered_via）
-        # 与工作流/代理提交（wait=True，要拿实际转存数）仍走旧流水线。
-        funnel_route = (
-            bool(getattr(self, "_funnel_phase1_enabled", False))
-            and not str((payload or {}).get("discovered_via") or "").strip()
-            and not wait
+        # （无 discovered_via、非 wait 调用）才入队；工作流/代理提交
+        # （wait=True，要拿实际转存数）仍走旧流水线。
+        # v1.29.8 阶段 2：TG 进漏斗——阶段 2 开关开且为 TG 项
+        # （discovered_via 非空，如 tg:{channel}/{message_id} 或 push）
+        # 时也入队；TG 提交恒为 wait=True，入队后不再同步等终态，终态由
+        # 漏斗 worker 回写。阶段 1 是漏斗总闸：两条分支都要求阶段 1 开启，
+        # worker 驱动条件与离线监控跳过语义不变。
+        discovered_via = str((payload or {}).get("discovered_via") or "").strip()
+        funnel_route = self._funnel_route_for_submit(
+            phase1_enabled=bool(getattr(self, "_funnel_phase1_enabled", False)),
+            phase2_enabled=bool(getattr(self, "_funnel_phase2_enabled", False)),
+            discovered_via=discovered_via,
+            wait=wait,
         )
         sync_kwargs = {
             "subscribe_id": subscribe_id or None,
@@ -763,7 +792,7 @@ class SyncApi(OwnerDelegator):
             "manual_target": media_target,
             "manual_upgrade": bool((payload or {}).get("manual_upgrade")),
             # 候选来源标识（如 tg:@频道/消息 id），用于历史记录回溯「谁发现的」
-            "discovered_via": str((payload or {}).get("discovered_via") or "").strip(),
+            "discovered_via": discovered_via,
             # 资源本身覆盖的集数（TTG 频道消息里的「E20」「19-20集」「更至28集」）。
             # 空列表 = 不限集，保持原有整季行为。
             "target_episodes": self._positive_ints(

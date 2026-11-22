@@ -465,6 +465,13 @@ export function createTransferSection(options) {
             cols: 4,
           },
           {
+            key: "funnel_phase2_enabled",
+            label: "整理队列（阶段 2：TG 进漏斗）",
+            type: "switch",
+            hint: "打开后 TG 自动转存与频道手动转存进入整理队列、直出 strm 路关闭，入库变异步（入队后 10–60 秒）；关闭后 TG 回旧流水线与直出 strm 路；需先开阶段 1 开关",
+            cols: 4,
+          },
+          {
             key: "funnel_target_dir",
             label: "整理目标目录",
             type: "text",

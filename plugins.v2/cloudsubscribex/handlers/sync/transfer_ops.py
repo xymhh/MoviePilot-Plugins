@@ -627,6 +627,9 @@ class TransferOpsMixin(OwnerDelegator):
                     # （_do_sync 里按 funnel_route 置位），随项进 pending
                     # 记录；finalize 边界按此标记入队整理队列。
                     "funnel_route": bool(getattr(subscribe, "_funnel_route", False)),
+                    # v1.29.8 阶段 2：TG 来源标识随项进 pending 记录与漏斗行
+                    # （_do_sync 里随订阅对象下沉）；入队时 source 即此 via。
+                    "discovered_via": str(getattr(subscribe, "_discovered_via", "") or ""),
                     "skip_history": bool(
                         (item.get("resource") or {}).get("skip_history")
                         or str(item["file"]["id"]) in mp_organized_ids

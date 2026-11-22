@@ -382,7 +382,12 @@ class StrmHistoryBackfillTests(unittest.TestCase):
         self.assertTrue(session.committed)
 
     def test_commit_single_item_calls_backfill(self):
-        """接线：_commit_single_item 在详情建成后调 history_backfill。"""
+        """接线：_commit_single_item 在详情建成后调 history_backfill。
+
+        v1.29.8 阶段 2 复核修正：调用点必须保留——阶段 2 开关关时 TG 仍
+        走直出 strm 路，MP 不写历史；漏斗 MP 整理项由 backfill 内部守卫
+        跳过，不会多写一行。
+        """
         postprocess_path = os.path.join(
             project_root,
             "plugins.v2", "cloudsubscribex", "handlers", "sync",

@@ -488,7 +488,19 @@ class StrmOpsMixin(OwnerDelegator):
             result_key = str(item["result_key"])
             staging_dir = str(item.get("staging_dir") or "").rstrip("/")
             cloud_dir = str(item.get("cloud_dir") or "").rstrip("/")
-            if not organize_enabled or (staging_dir and staging_dir != cloud_dir):
+            # v1.29.8 阶段 2：TG 项（discovered_via 非空）入队后不再当场
+            # 生成 STRM——funnel_route 为真时走 finalize 边界入队，由漏斗
+            # worker 经 MP 整理；阶段 2 开关关时 funnel_route 为假，仍走
+            # 旧直出路。手动同目录提交仍按阶段 1 行为当场生成（阶段 3/4 再统）。
+            is_tg_routed = bool(
+                str(item.get("discovered_via") or "").strip()
+                and item.get("funnel_route")
+            )
+            if (
+                    not organize_enabled
+                    or (staging_dir and staging_dir != cloud_dir)
+                    or is_tg_routed
+            ):
                 queued_items.append(item)
                 continue
             cloud_dir = item["cloud_dir"]

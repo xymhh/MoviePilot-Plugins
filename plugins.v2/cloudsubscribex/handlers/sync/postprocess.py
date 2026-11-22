@@ -1365,6 +1365,10 @@ class PostprocessService(OwnerDelegator):
             # 定方向 A）。守卫在 backfill 内部：MP 整理分支（item 带
             # mp_organize 身份，MP 自己已写）与 skip_history 项不写；
             # 写失败不阻断转存（backfill 内部全程 try/except）。
+            # v1.29.8 阶段 2 复核修正：这行调用不能删——阶段 2 开关关时 TG
+            # 仍走直出 strm 路，MP 不写历史，删了 #/history 就看不到这些
+            # 转存；漏斗 MP 整理项本来就被内部守卫跳过，恢复调用不会给
+            # 漏斗项多写一行。补写服务本体保留到阶段 4 再删。
             try:
                 self._owner.history_backfill.backfill_strm_history(
                     item=item,

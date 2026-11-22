@@ -10,6 +10,10 @@
         <v-chip v-if="!phase1Enabled" size="small" color="warning" variant="tonal">
           阶段 1 未启用（手动提交走旧流水线）
         </v-chip>
+        <v-chip v-else-if="!phase2Enabled" size="small" color="warning" variant="tonal">
+          阶段 2 未启用（TG 走旧流水线，直出 strm 路仍在）
+        </v-chip>
+        <v-chip v-else size="small" color="success" variant="tonal"> 阶段 2 已启用（TG 已进漏斗） </v-chip>
         <v-spacer />
         <v-btn size="small" variant="tonal" :loading="running" @click="runNow"> 立即整理一轮 </v-btn>
         <v-btn size="small" variant="tonal" color="error" :loading="stopping" @click="stopQueue"> 停止 </v-btn>
@@ -17,6 +21,7 @@
       </v-card-title>
       <v-card-text class="pt-0 text-medium-emphasis">
         手动提交进入整理队列后由漏斗逐行整理：整理前改名 → 落盘前实查 → MP 整理 → 终态提交。
+        <span v-if="phase1Enabled && phase2Enabled">TG 自动转存与频道手动转存也进入整理队列（直出 strm 路已关闭）。</span>
         目标目录：{{ targetDir || "—" }}；待处理 {{ counts.queued || 0 }} 行，
         处理中 {{ counts.processing || 0 }} 行，已挂起 {{ counts.held || 0 }} 行。
       </v-card-text>
@@ -40,7 +45,7 @@
           <v-list-item v-for="row in group.rows" :key="row.id" class="px-0">
             <template #prepend>
               <v-chip size="small" :color="row.is_upgrade ? 'warning' : 'info'" variant="tonal">
-                {{ row.is_upgrade ? "洗版" : row.source === "upgrade" ? "洗版" : "手动" }}
+                {{ sourceLabel(row) }}
               </v-chip>
             </template>
             <v-list-item-title class="funnel-row-title">
@@ -88,6 +93,7 @@ const error = ref("");
 const message = ref("");
 const counts = ref({});
 const phase1Enabled = ref(false);
+const phase2Enabled = ref(false);
 const targetDir = ref("");
 const workerRunning = ref(false);
 const queued = ref([]);
@@ -115,6 +121,20 @@ function formatTime(epochSeconds) {
   }
 }
 
+// v1.29.8 阶段 2：行来源标签——TG 行显示频道名（source 即 Candidate.via()，
+// 如 tg:@QukanMovie/12281 或 push），洗版/手动与阶段 1 一致。
+function sourceLabel(row) {
+  if (!row) return "手动";
+  if (row.is_upgrade || row.source === "upgrade") return "洗版";
+  const source = String(row.source || "");
+  if (source === "push") return "TG推送";
+  if (source.startsWith("tg:")) {
+    const channel = source.slice(3).split("/")[0];
+    return channel || "TG";
+  }
+  return "手动";
+}
+
 async function load() {
   loading.value = true;
   error.value = "";
@@ -124,6 +144,7 @@ async function load() {
     const data = rowsResult || {};
     counts.value = data.counts || {};
     phase1Enabled.value = !!data.phase1_enabled;
+    phase2Enabled.value = !!data.phase2_enabled;
     targetDir.value = data.target_dir || "";
     queued.value = (data.groups || {}).queued || [];
     processing.value = (data.groups || {}).processing || [];

@@ -194,7 +194,7 @@ class FunnelService(OwnerDelegator):
             subscribe_id: Optional[int] = None,
             season: Optional[int] = None,
     ) -> Tuple[Optional[Dict[str, Any]], bool]:
-        """手动提交在 finalize 边界入队。
+        """手动/TG 提交在 finalize 边界入队。
 
         只由 ``SyncHandler._queue_file_finalize_batch`` 在
         ``item["funnel_route"]`` 为真时调用。返回 ``(行字典, 是否新建)``；
@@ -234,11 +234,28 @@ class FunnelService(OwnerDelegator):
                 if isinstance(version, dict)
             )
         task_type = str(item.get("task_type") or "").strip().lower()
-        notification_kind = (
-            "upgrade" if (is_upgrade or replaced_from)
-            else "cross_transfer" if task_type in {"cross_cloud", "cross"}
-            else "transfer"
+        # v1.29.8 阶段 2：通知类型走唯一派生点（_derive_notification_kind），
+        # 不由生产者手写；组件不可用时（测试替身）回退到等价内联公式。
+        derive_kind = getattr(
+            getattr(self._owner, "transfer_details", None),
+            "_derive_notification_kind", None,
         )
+        if callable(derive_kind):
+            notification_kind = derive_kind(
+                is_upgrade=is_upgrade,
+                replaced_from=replaced_from or None,
+                cross=task_type in {"cross_cloud", "cross"},
+            )
+        else:
+            notification_kind = (
+                "upgrade" if (is_upgrade or replaced_from)
+                else "cross_transfer" if task_type in {"cross_cloud", "cross"}
+                else "transfer"
+            )
+        # v1.29.8 阶段 2：TG 行的 source 即 Candidate.via()
+        # （tg:{channel}/{message_id} 或 push），原样带入，列表里显示频道名。
+        via = str(item.get("discovered_via") or "").strip()
+        source = via if via else ("upgrade" if is_upgrade else "manual")
         media_data = None
         serialize = getattr(self, "_serialize_mediainfo", None)
         if callable(serialize) and mediainfo is not None:
@@ -260,7 +277,7 @@ class FunnelService(OwnerDelegator):
             "cloud_dir": str(item.get("cloud_dir") or ""),
             "staging_dir": str(item.get("staging_dir") or item.get("cloud_dir") or ""),
             "staging_name": str(item.get("staging_name") or item.get("file_name") or ""),
-            "source": "upgrade" if is_upgrade else "manual",
+            "source": source,
             "subscribe_id": subscribe_id,
             "score": int(item.get("dedup_new_score") or 0),
             "quality": str(item.get("quality") or ""),
@@ -273,7 +290,7 @@ class FunnelService(OwnerDelegator):
         row, created = repo.enqueue(payload)
         if created:
             logger.info(
-                f"手动提交已入队整理队列：{title or payload['file_name']} "
+                f"{'TG 转存' if via else '手动提交'}已入队整理队列：{title or payload['file_name']} "
                 f"（行 #{row.get('id')}，{pending_key}）"
             )
             self.ensure_worker()
@@ -372,23 +389,28 @@ class FunnelService(OwnerDelegator):
         media = self._restore_media(row, item)
         ok, reason = self._prepare_row(row, item)
         if not ok:
-            return self._fail_row(repo, row, reason)
+            return self._fail_row(repo, row, reason, item)
         ok, reason = self._pre_organize_check(row, item, media)
         if not ok:
             # 库里已有另一份：不写第二份 STRM/历史/通知；弹出 pending
             # 记录（旧流水线不再碰它），行终态并记短原因，绝不删文件。
             self._pop_pending_record(pending_key)
             repo.mark_done(row_id, reason=reason)
+            # v1.29.8 阶段 2 复核修补：拦截路不经过 _write_terminal_state，
+            # 须把“已在库”终态同步给频道监控（否则 TG 项一直停在入队时标
+            # 的 transferred、缺终态戳）。
+            self._sync_row_outcome_to_monitor(item, True, reason)
             logger.info(f"漏斗行 #{row_id} 落盘前实查拦截：{reason}")
             return "done"
         ok, reason, skip = self._trigger_organize(row, item, media)
         if skip:
             self._pop_pending_record(pending_key)
             repo.mark_done(row_id, reason=reason)
+            self._sync_row_outcome_to_monitor(item, True, reason)
             logger.info(f"漏斗行 #{row_id} 跳过整理：{reason}")
             return "done"
         if not ok:
-            return self._fail_row(repo, row, reason)
+            return self._fail_row(repo, row, reason, item)
         return self._drive_postprocess(repo, row, pending_key, item)
 
     def _load_pending_item(self, pending_key: str) -> Optional[Dict[str, Any]]:
@@ -673,15 +695,15 @@ class FunnelService(OwnerDelegator):
         """驱动已有的单项后处理；按 ctx 的终态计数映射行终态。"""
         postprocess = getattr(self._owner, "postprocess", None)
         if postprocess is None:
-            return self._fail_row(repo, row, "后处理服务未就绪")
+            return self._fail_row(repo, row, "后处理服务未就绪", item)
         try:
             ctx = postprocess._prepare_postprocess_context(
                 force=True, pending_keys={pending_key}
             )
         except Exception as error:  # noqa: BLE001 - 上下文异常按失败重试
-            return self._fail_row(repo, row, f"准备后处理上下文异常：{error}")
+            return self._fail_row(repo, row, f"准备后处理上下文异常：{error}", item)
         if ctx is None or not ctx.due_keys:
-            return self._fail_row(repo, row, "后处理上下文为空（记录可能已被结算）")
+            return self._fail_row(repo, row, "后处理上下文为空（记录可能已被结算）", item)
         completed_before = ctx.completed
         failed_before = ctx.failed
         try:
@@ -690,13 +712,13 @@ class FunnelService(OwnerDelegator):
             postprocess._reconcile_pending_state(ctx)
         except Exception as error:  # noqa: BLE001 - 驱动异常按失败重试
             logger.error(f"漏斗驱动后处理异常：{pending_key}，{error}", exc_info=True)
-            return self._fail_row(repo, row, f"后处理异常：{error}")
+            return self._fail_row(repo, row, f"后处理异常：{error}", item)
         if ctx.completed > completed_before:
             repo.mark_done(int(row.get("id") or 0))
             return "done"
         if ctx.failed > failed_before:
             reason = self._terminal_failure_reason(pending_key)
-            return self._fail_row(repo, row, reason)
+            return self._fail_row(repo, row, reason, item)
         # 未结算（仍在重试等待）：行放回 queued，按 pending 记录的
         # next_check_at 重试，不耗 attempts。
         try:
@@ -726,14 +748,24 @@ class FunnelService(OwnerDelegator):
             logger.debug("漏斗：取终态失败原因异常，用默认文案", exc_info=True)
         return "后处理失败（见失败记录）"
 
-    def _fail_row(self, repo, row: Dict[str, Any], reason: str) -> str:
-        """失败记账：次数未满按退避重试，满了挂起待人工复核。"""
+    def _fail_row(self, repo, row: Dict[str, Any], reason: str,
+                    item: Optional[Dict[str, Any]] = None) -> str:
+        """失败记账：次数未满按退避重试，满了挂起待人工复核。
+
+        挂起时把终态同步给频道监控（v1.29.8 阶段 2 复核修补）：挂起路
+        不经过 _write_terminal_state，不同步 TG 项会一直停在入队时标的
+        transferred、而文件根本没入库。驱动 abort 的失败已由终态回写
+        同步过一次，apply_finalize_outcome 对同原因的重复回写只更新
+        原因与时间，是幂等的。
+        """
         row_id = int(row.get("id") or 0)
         attempts = int(row.get("attempts") or 0)
         max_attempts = self._max_attempts
         if attempts + 1 >= max_attempts:
             repo.mark_held(row_id, reason)
             logger.warning(f"漏斗行 #{row_id} 失败 {attempts + 1} 次已挂起：{reason}")
+            if item is not None:
+                self._sync_row_outcome_to_monitor(item, False, reason)
             return "held"
         delay = FUNNEL_RETRY_DELAYS[min(attempts, len(FUNNEL_RETRY_DELAYS) - 1)]
         repo.mark_failed(row_id, int(time.time()) + delay, reason)
@@ -742,6 +774,37 @@ class FunnelService(OwnerDelegator):
             f"{delay} 秒后重试：{reason}"
         )
         return "failed"
+
+    def _sync_row_outcome_to_monitor(
+            self, item: Dict[str, Any], success: bool, reason: str = "",
+    ) -> None:
+        """漏斗行终态回写频道监控（拦截/挂起路径专用）。
+
+        后处理驱动的终态已由 _write_terminal_state 回写；但落盘前实查
+        拦截、MP 整理跳过与挂起三条路不经过它。按 pending 项的 share_url
+        找监控条目；监控不可用（无插件宿主、监控未初始化、回写抛异常）
+        时静默跳过，绝不阻塞。share_url 为空的项（手动提交无链接等）
+        没有监控条目可写，直接返回。
+        """
+        share_url = str(item.get("share_url") or "").strip()
+        if not share_url:
+            return
+        plugin = getattr(self._owner, "_plugin", None)
+        if plugin is None:
+            return
+        try:
+            from ...core.tg_monitor import get_channel_monitor
+
+            monitor = get_channel_monitor(plugin)
+            monitor.apply_finalize_outcome(
+                share_url,
+                int(item.get("subscribe_id") or 0),
+                success=success,
+                reason=reason,
+                file_name=str(item.get("file_name") or ""),
+            )
+        except Exception as error:  # noqa: BLE001 - 监控回写失败不阻塞
+            logger.debug(f"漏斗行终态回写频道监控失败：{error}", exc_info=True)
 
     # ------------------------------------------------------------------
     # 提交前复查（_commit_single_item 入口调用）

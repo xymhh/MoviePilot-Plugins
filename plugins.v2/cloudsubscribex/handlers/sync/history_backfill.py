@@ -23,12 +23,17 @@ oper/transferhistory.py）：
   ``TransferHistoryOper.stage_insert_if_source_absent`` 并显式 commit
   （该方法不提交），不拼 SQL。
 
-补写点：handlers/sync/postprocess.py ``_commit_single_item``，在详情
-（detail）建成之后；只在直出 strm 分支写：
+补写点（v1.29.8 阶段 2 已停产）：原先在 handlers/sync/postprocess.py
+``_commit_single_item``，在详情（detail）建成之后；只在直出 strm 分支写：
 - MP 整理分支不写：item 带 ``mp_organize`` 身份时 MP 自己已写；
 - ``skip_history`` 项不写（already_in_library 等，MP 库里已有该集）；
 - 没有生成 .strm（strm_path 为空）不写；失败不写（失败不进 commit）；
 - 写失败绝不阻断转存：全程 try/except，只写日志。
+阶段 2 起漏斗 MP 整理项不再需要补写（MP 自己写历史，内部守卫跳过带
+``mp_organize`` 身份的项）；直出 strm 项（阶段 2 开关关时的 TG、MP 整理
+禁用时的回退）仍由 ``_commit_single_item`` 调本服务补写，否则 #/history
+看不到这些转存。本服务本体保留到阶段 4 再删，启动修复
+（repair_invalid_registrations）继续修复历史遗留行。
 
 字段全部取真实值，不编造 MP 整理链才有的字段：
 - src：115 内实际文件路径（cloud_dir + file_name，/Alist/... 风格，

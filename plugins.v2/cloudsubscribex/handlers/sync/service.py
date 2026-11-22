@@ -435,8 +435,10 @@ class SyncHandler:
         )
 
     def _init_funnel_flags(self, get_val):
-        """v1.29.7 阶段 1：网盘整理漏斗配置（只读阶段 1 实际用的键）。"""
+        """v1.29.7 阶段 1：网盘整理漏斗配置（只读阶段 1 实际用的键）。
+        v1.29.8 阶段 2 加 funnel_phase2_enabled（TG 进漏斗 kill-switch）。"""
         self._funnel_phase1_enabled = bool(get_val("funnel_phase1_enabled", False))
+        self._funnel_phase2_enabled = bool(get_val("funnel_phase2_enabled", False))
         self._funnel_target_dir = str(
             get_val("funnel_target_dir", "") or "/Alist/影视/moviepilot/转存/"
         )

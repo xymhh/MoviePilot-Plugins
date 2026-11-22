@@ -1168,11 +1168,13 @@ class TgChannelMonitor:
 
         成功：订阅失败（postprocess 阶段）→ transferred（文件后来还是
         落库了，失败已翻转）；已 transferred 的只补终态字段
-        finalize_status/finalize_completed_at；订阅阶段失败与 skipped
+        finalize_status/finalize_completed_at；仍在 transferring 的
+        （v1.29.8 阶段 2：TG 入队后终态异步回写，同步返回时可能还没改
+        状态）直接落 transferred；订阅阶段失败与 skipped
         不动（那不是这条后处理的终态）。
         失败：已 transferred → failed（failure_stage="postprocess"，
-        原因写“后处理失败：…”）；已是 postprocess 失败 → 更新原因与
-        时间；订阅阶段失败不动。
+        原因写“后处理失败：…”）；仍在 transferring 的同样直接落 failed；
+        已是 postprocess 失败 → 更新原因与时间；订阅阶段失败不动。
 
         返回被改动的条目数。调用方（finalize）应包 try/except：监控
         不可用绝不能阻塞终态结算。
@@ -1206,12 +1208,39 @@ class TgChannelMonitor:
                         item["finalize_status"] = "landed"
                         item["finalize_completed_at"] = now
                         touched += 1
+                    elif status == "transferring":
+                        # v1.29.8 阶段 2：TG 入队后转存变异步，终态回写时条目
+                        # 可能仍在 transferring（如插件重启打断同步返回、
+                        # 漏斗 worker 恢复后终态）——直接落 transferred，
+                        # 与 postprocess 失败翻转分支同口径。
+                        item["status"] = "transferred"
+                        item["match_status"] = "transferred"
+                        item["auto_transfer_error"] = ""
+                        item["failure_kind"] = ""
+                        item["failure_stage"] = ""
+                        item["retry_count"] = 0
+                        item["finalize_status"] = "landed"
+                        item["finalize_completed_at"] = now
+                        touched += 1
                     elif status == "transferred":
                         item["finalize_status"] = "landed"
                         item["finalize_completed_at"] = now
                         touched += 1
                 else:
                     if status == "transferred":
+                        item["status"] = "failed"
+                        item["match_status"] = "failed"
+                        item["failure_kind"] = "permanent"
+                        item["failure_stage"] = "postprocess"
+                        item["auto_transfer_error"] = (
+                            f"后处理失败：{reason or '转存失败'}"
+                        )[:300]
+                        item["finalize_status"] = "failed"
+                        item["finalize_failed_at"] = now
+                        touched += 1
+                    elif status == "transferring":
+                        # v1.29.8 阶段 2：同上，transferring 的失败终态
+                        # 直接落 failed（postprocess 阶段），不再等同步返回改状态。
                         item["status"] = "failed"
                         item["match_status"] = "failed"
                         item["failure_kind"] = "permanent"
