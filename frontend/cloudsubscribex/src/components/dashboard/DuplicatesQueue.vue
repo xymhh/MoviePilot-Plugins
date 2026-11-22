@@ -7,7 +7,7 @@
       <v-card-title class="d-flex align-center flex-wrap ga-2">
         <span>重复扫描</span>
         <v-chip v-if="scanned" size="small" variant="tonal">{{ groups.length }} 组重复</v-chip>
-        <v-chip v-if="enriching" size="small" color="info" variant="tonal">正在核对视频大小…</v-chip>
+        <v-chip v-if="enriching" size="small" color="info" variant="tonal">正在核对视频大小…（{{ enrichDone }}/{{ enrichTotal }} 组）</v-chip>
         <v-spacer />
         <v-btn size="small" variant="tonal" color="primary" :loading="scanning" @click="scanNow">
           开始扫描
@@ -113,6 +113,8 @@ const props = defineProps({
 
 const scanning = ref(false);
 const enriching = ref(false);
+const enrichDone = ref(0);
+const enrichTotal = ref(0);
 const deletingKey = ref("");
 const error = ref("");
 const message = ref("");
@@ -172,26 +174,65 @@ async function scanNow() {
   }
 }
 
+// v1.31.1：核对改分片——全库 93 组一次 POST 会在反代 120 秒读超时里
+// 失败；每批 10 组顺序请求（不并行，避免 115 限流与超时叠加），
+// 单批失败重试一次，仍失败则记下该批继续下一批，不中断整轮。
+const ENRICH_BATCH_SIZE = 10;
+
+async function enrichBatch(batch) {
+  const result = unwrap(
+    await props.api.post(`plugin/${props.pluginId}/duplicates/enrich`, { groups: batch }),
+  );
+  if (result && result.success === false) throw new Error(result.message || "核对失败");
+  return (result || {}).groups || [];
+}
+
 async function enrichNow() {
   if (!groups.value.length) return;
+  // 只核对尚未核对的组；全部已核对时（显式点“重新核对大小”）全量重核。
+  const pending = groups.value.filter((group) => group.sizes_pending);
+  const targets = pending.length ? pending : groups.value.slice();
   enriching.value = true;
   error.value = "";
+  enrichDone.value = 0;
+  enrichTotal.value = targets.length;
+  const failedKeys = [];
   try {
-    const result = unwrap(
-      await props.api.post(`plugin/${props.pluginId}/duplicates/enrich`, { groups: groups.value }),
-    );
-    if (result && result.success === false) throw new Error(result.message || "核对失败");
-    const data = result || {};
-    groups.value = data.groups || groups.value;
-    for (const group of groups.value) {
-      if (keepByKey.value[group.key] === undefined) {
-        keepByKey.value[group.key] = group.suggested_keep ?? 0;
+    const byKey = {};
+    for (const group of groups.value) byKey[group.key] = group;
+    let done = 0;
+    for (let start = 0; start < targets.length; start += ENRICH_BATCH_SIZE) {
+      const batch = targets.slice(start, start + ENRICH_BATCH_SIZE);
+      let enriched = null;
+      for (let attempt = 0; attempt < 2 && enriched === null; attempt += 1) {
+        try {
+          enriched = await enrichBatch(batch);
+        } catch (err) {
+          enriched = null;
+        }
       }
+      if (enriched === null) {
+        failedKeys.push(...batch.map((group) => group.key));
+        continue;
+      }
+      for (const group of enriched) {
+        byKey[group.key] = group;
+        if (keepByKey.value[group.key] === undefined) {
+          keepByKey.value[group.key] = group.suggested_keep ?? 0;
+        }
+      }
+      done += enriched.length;
+      enrichDone.value = done;
     }
-  } catch (err) {
-    error.value = err && err.message ? err.message : String(err);
+    // 按原顺序合并回 groups（只替换核对过的组，失败的组保留原样）。
+    groups.value = groups.value.map((group) => byKey[group.key] || group);
+    if (failedKeys.length) {
+      error.value = `核对完成，${failedKeys.length} 组失败（大小未知），可点“重新核对大小”重试`;
+    }
   } finally {
     enriching.value = false;
+    enrichDone.value = 0;
+    enrichTotal.value = 0;
   }
 }
 

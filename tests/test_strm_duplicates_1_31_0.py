@@ -927,5 +927,143 @@ class MediaRootMappingTests(_MetaInfoTestCase):
         )
 
 
+class _RaisingCloudQuery(_FakeCloudQuery):
+    """指定（目录，文件名）抛错的假查询：锁住单项失败隔离。"""
+
+    def __init__(self, files, raise_for=()):
+        super().__init__(files)
+        self._raise_for = set(raise_for)
+
+    def find_file(self, cloud_dir, file_name):
+        self.find_calls.append((cloud_dir, file_name))
+        if (cloud_dir, file_name) in self._raise_for:
+            raise RuntimeError("115 查询异常（测试桩）")
+        return self._files.get((cloud_dir, file_name))
+
+
+class EnrichChunkingTests(_MetaInfoTestCase):
+    """核对分片契约（v1.31.1）：后端 enrich 本就接受 groups 子集；
+    前端分片循环依赖这三条不变——切片只返回切片、两次分片等价全量、
+    单项失败不拖垮整组/整轮。"""
+
+    def _five_groups(self):
+        ScanServiceTests._build_library(self)
+        other_dir = (
+            self.root / "115网盘" / "剧集" / "国产剧" / "冰之城墙" / "Season 1"
+        )
+        _write_strm(
+            other_dir / "冰之城墙 {tmdb-999001} - S01E01 - 第1集.strm",
+            _redirect_content("pick-bz01-tagged", "冰之城墙 {tmdb-999001} - S01E01 - 第1集.mkv"),
+        )
+        _write_strm(
+            other_dir / "冰之城墙 - S01E01 - 第1集.strm",
+            _redirect_content("pick-bz01-plain", "冰之城墙 - S01E01 - 第1集.mkv"),
+        )
+        _write_strm(
+            other_dir / "冰之城墙 {tmdb-999001} - S01E02 - 第2集.strm",
+            _redirect_content("pick-bz02-tagged", "冰之城墙 {tmdb-999001} - S01E02 - 第2集.mkv"),
+        )
+        _write_strm(
+            other_dir / "冰之城墙 - S01E02 - 第2集.strm",
+            _redirect_content("pick-bz02-plain", "冰之城墙 - S01E02 - 第2集.mkv"),
+        )
+        service = _duplicates_service(self.root)
+        result = service.duplicates_scan()
+        self.assertTrue(result["success"], result)
+        self.assertEqual(len(result["data"]["groups"]), 5)
+        return result["data"]["groups"]
+
+    def _query_for_five(self):
+        query = EnrichServiceTests._query_for(self)
+        query._files.update({
+            ("/115网盘/剧集/国产剧/冰之城墙/Season 1", "冰之城墙 {tmdb-999001} - S01E01 - 第1集.mkv"):
+                _FakeCloudFile("fid-bz01-tagged", "x", 2_100_000_000, "pick-bz01-tagged"),
+            ("/115网盘/剧集/国产剧/冰之城墙/Season 1", "冰之城墙 - S01E01 - 第1集.mkv"):
+                _FakeCloudFile("fid-bz01-plain", "x", 1_800_000_000, "pick-bz01-plain"),
+            ("/115网盘/剧集/国产剧/冰之城墙/Season 1", "冰之城墙 {tmdb-999001} - S01E02 - 第2集.mkv"):
+                _FakeCloudFile("fid-bz02-tagged", "x", 2_200_000_000, "pick-bz02-tagged"),
+            ("/115网盘/剧集/国产剧/冰之城墙/Season 1", "冰之城墙 - S01E02 - 第2集.mkv"):
+                _FakeCloudFile("fid-bz02-plain", "x", 1_900_000_000, "pick-bz02-plain"),
+        })
+        return query
+
+    @staticmethod
+    def _snapshot(groups):
+        return [
+            {
+                "key": group["key"],
+                "kind": group["kind"],
+                "suggested_keep": group["suggested_keep"],
+                "sizes_pending": group["sizes_pending"],
+                "items": [
+                    (item["file_name"], item["video_size"], item["video_id"])
+                    for item in group["items"]
+                ],
+            }
+            for group in groups
+        ]
+
+    def test_slice_enrich_returns_only_the_slice(self):
+        groups = self._five_groups()
+        query = self._query_for_five()
+        service = _duplicates_service(self.root, query=query)
+        result = service.duplicates_enrich(groups[:2])
+        self.assertTrue(result["success"], result)
+        enriched = result["data"]["groups"]
+        self.assertEqual(len(enriched), 2)
+        self.assertEqual(
+            [group["key"] for group in enriched],
+            [group["key"] for group in groups[:2]],
+        )
+        self.assertFalse(any(group["sizes_pending"] for group in enriched))
+        # 未传的组原样不动：大小仍未知、仍待核对。
+        for group in groups[2:]:
+            self.assertTrue(group["sizes_pending"])
+            self.assertTrue(all(item["video_size"] is None for item in group["items"]))
+
+    def test_two_slices_equal_one_full_enrich(self):
+        groups = self._five_groups()
+        service = _duplicates_service(self.root, query=self._query_for_five())
+        full = service.duplicates_enrich(groups)["data"]["groups"]
+        first = service.duplicates_enrich(groups[:2])["data"]["groups"]
+        second = service.duplicates_enrich(groups[2:])["data"]["groups"]
+        self.assertEqual(self._snapshot(first + second), self._snapshot(full))
+
+    def test_failed_group_is_isolated(self):
+        groups = self._five_groups()
+        failing = {
+            (
+                "/115网盘/剧集/国产剧/两京十五日/Season 1",
+                "两京十五日 {tmdb-203483} - S01E05 - 第5集.mkv",
+            ),
+            (
+                "/115网盘/剧集/国产剧/两京十五日/Season 1",
+                "两京十五日 - S01E05 - 第5集.mkv",
+            ),
+        }
+        query = _RaisingCloudQuery(
+            self._query_for_five()._files, raise_for=failing,
+        )
+        service = _duplicates_service(self.root, query=query)
+        enriched = service.duplicates_enrich(groups)["data"]["groups"]
+        self.assertEqual(len(enriched), 5)
+        e05 = next(
+            group for group in enriched
+            if group["title"] == "两京十五日" and group["episode"] == 5
+        )
+        self.assertTrue(all(item["video_size"] is None for item in e05["items"]))
+        self.assertIsNone(e05["suggested_keep"])
+        self.assertFalse(e05["sizes_pending"])
+        for group in enriched:
+            if group is e05:
+                continue
+            self.assertTrue(all(
+                item["video_size"] is not None
+                for item in group["items"]
+                if item["kind"] == "redirect"
+            ))
+            self.assertIsNotNone(group["suggested_keep"])
+
+
 if __name__ == "__main__":
     unittest.main()
