@@ -122,11 +122,15 @@ const statusLabel = computed(() => {
 const statusTone = computed(() => STATUS[props.item.status]?.[1] || "grey")
 
 // 完整原因：不压缩，排障用（列表上的短标签只是摘要）。
+// skipped 条目的 skip_reason 存的是本轮完整原文；其他状态的 skip_reason
+// 可能是上一轮跳过留下的旧值，只对 skipped 用它，其余仍看 auto_transfer_error。
 const reasonFull = computed(() => {
   const item = props.item
-  const text = String(item.auto_transfer_error || "").trim()
-  if (text) return text
-  return String(item.skip_reason || "").trim()
+  if (item.status === "skipped") {
+    const full = String(item.skip_reason || "").trim().replace(/^未转存：/, "")
+    if (full) return full
+  }
+  return String(item.auto_transfer_error || "").trim().replace(/^未转存：/, "")
 })
 const reasonClass = computed(() =>
   props.item.status === "failed" && props.item.failure_kind !== "interrupted"

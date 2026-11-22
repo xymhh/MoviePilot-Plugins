@@ -1024,6 +1024,10 @@ class TgChannelMonitor:
         except Exception as error:  # noqa: BLE001 - 单批失败不影响后续
             return {"success": False, "message": str(error)}
 
+    # 订阅已接管：订阅搜索已提交网盘任务、文件还在等待就绪。短句与 kind
+    # 共用同一模式；终态回写靠 kind 把它和其他跳过区分开。
+    _TAKEOVER_RE = re.compile(r"订阅搜索已提交网盘任务，其中 (\d+) 个网盘文件等待")
+
     _SHORT_REASON_RULES: tuple[tuple[Any, str], ...] = (
         (
             re.compile(r"分享根目录与订阅标题不符（根目录：(.*?)）"),
@@ -1038,6 +1042,10 @@ class TgChannelMonitor:
         (re.compile(r"库中已有或未匹配到可下载资源"), "无可用资源"),
         (re.compile(r"分享地址已失效"), "分享失效"),
         (re.compile(r"库中已完整存在，无需转存"), "已入库"),
+        (
+            _TAKEOVER_RE,
+            r"订阅已接管 · \1 个文件等待",
+        ),
     )
 
     _EPISODE_MISS_RE = re.compile(
@@ -1086,8 +1094,13 @@ class TgChannelMonitor:
         """返回 (原因类型, 原因文案)：本轮订阅级原因 > 兜底。
 
         v1.13.0 起候选账本已删除，不再按分享链接查账本明细。
+        订阅已接管（订阅搜索已提交网盘任务、文件还在等待）单独记 kind
+        ``subscribe_submitted``，终态回写时才能把它和其他跳过区分开。
         """
-        return "run", self._shorten_skip_reason(fallback)
+        short = self._shorten_skip_reason(fallback)
+        if self._TAKEOVER_RE.search(str(fallback or "")):
+            return "subscribe_submitted", short
+        return "run", short
 
     def _apply_group_outcome(
             self, item_ids: List[str], subscribe_id: int,
@@ -1116,6 +1129,12 @@ class TgChannelMonitor:
         if outcome == "skipped":
             # 逐条落「为什么没转存」：用本轮同步的订阅级原因
             # （已入库/未播出/识别失败…），最后才退回笼统文案。
+            # skip_reason 存完整原文（详情页排障用），auto_transfer_error
+            # 只存短标签；历史遗留的接管条目不做启动时一次性对账，随下
+            # 一轮监控复核更新原因。
+            full_reason = str(message or "").strip()
+            if full_reason.startswith("未转存："):
+                full_reason = full_reason[len("未转存："):].strip()
             buckets: Dict[Tuple[str, str], List[str]] = {}
             for row, item_id in zip(rows, item_ids):
                 kind, text = self._resolve_skip_reason(row, message)
@@ -1127,7 +1146,7 @@ class TgChannelMonitor:
                     auto_skipped_at=now,
                     auto_transfer_error=f"未转存：{text}"[:300],
                     skip_kind=kind,
-                    skip_reason=text[:100],
+                    skip_reason=full_reason[:100],
                     retry_count=0,
                     failure_kind="",
                     # Phase 4 第 7 项：跳过不是失败，阶段字段同样清掉。
@@ -1171,10 +1190,13 @@ class TgChannelMonitor:
         finalize_status/finalize_completed_at；仍在 transferring 的
         （v1.29.8 阶段 2：TG 入队后终态异步回写，同步返回时可能还没改
         状态）直接落 transferred；订阅阶段失败与 skipped
-        不动（那不是这条后处理的终态）。
+        不动（那不是这条后处理的终态）——接管的 skipped
+        （skip_kind="subscribe_submitted"）例外：按 share_url + 订阅
+        匹配到同一条资源时翻 transferred，其他 kind 的 skipped 一律不动。
         失败：已 transferred → failed（failure_stage="postprocess"，
         原因写“后处理失败：…”）；仍在 transferring 的同样直接落 failed；
-        已是 postprocess 失败 → 更新原因与时间；订阅阶段失败不动。
+        已是 postprocess 失败 → 更新原因与时间；接管的 skipped 同样按
+        匹配翻 failed（原因写“订阅转存失败：…”）；订阅阶段失败不动。
 
         返回被改动的条目数。调用方（finalize）应包 try/except：监控
         不可用绝不能阻塞终态结算。
@@ -1222,6 +1244,22 @@ class TgChannelMonitor:
                         item["finalize_status"] = "landed"
                         item["finalize_completed_at"] = now
                         touched += 1
+                    elif (
+                            status == "skipped"
+                            and str(item.get("skip_kind") or "") == "subscribe_submitted"
+                    ):
+                        # 接管条目：订阅搜索已提交网盘任务时监控记为 skipped；
+                        # 终态回写按 share_url + 订阅匹配到同一条资源时才翻
+                        # transferred，其他 kind 的 skipped 一律不动。
+                        item["status"] = "transferred"
+                        item["match_status"] = "transferred"
+                        item["auto_transfer_error"] = ""
+                        item["failure_kind"] = ""
+                        item["failure_stage"] = ""
+                        item["retry_count"] = 0
+                        item["finalize_status"] = "landed"
+                        item["finalize_completed_at"] = now
+                        touched += 1
                     elif status == "transferred":
                         item["finalize_status"] = "landed"
                         item["finalize_completed_at"] = now
@@ -1247,6 +1285,22 @@ class TgChannelMonitor:
                         item["failure_stage"] = "postprocess"
                         item["auto_transfer_error"] = (
                             f"后处理失败：{reason or '转存失败'}"
+                        )[:300]
+                        item["finalize_status"] = "failed"
+                        item["finalize_failed_at"] = now
+                        touched += 1
+                    elif (
+                            status == "skipped"
+                            and str(item.get("skip_kind") or "") == "subscribe_submitted"
+                    ):
+                        # 接管条目失败：同上按 share_url + 订阅匹配翻 failed，
+                        # 其他 kind 的 skipped 一律不动。
+                        item["status"] = "failed"
+                        item["match_status"] = "failed"
+                        item["failure_kind"] = "permanent"
+                        item["failure_stage"] = "postprocess"
+                        item["auto_transfer_error"] = (
+                            f"订阅转存失败：{reason or '转存失败'}"
                         )[:300]
                         item["finalize_status"] = "failed"
                         item["finalize_failed_at"] = now

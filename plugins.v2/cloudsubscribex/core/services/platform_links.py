@@ -48,7 +48,7 @@ class PlatformLinkMixin:
                 or str(preview.get("title") or "").strip()
                 or self._link_media_title(links)
         )
-        if not recognized_title:
+        if not recognized_title and not requested_tmdb_id:
             return {"success": False, "message": "未能从分享内容识别媒体名称"}
         media_type = requested_type or str(preview.get("media_type") or "").strip().lower()
         if media_type and media_type not in {"movie", "tv"}:
@@ -71,7 +71,30 @@ class PlatformLinkMixin:
             if len(seasons) <= 1 else None
         )
         candidates = []
-        if not matched:
+        if not matched and requested_tmdb_id > 0:
+            # 手动指定 TMDB ID 时按 ID 直查（_candidate_for_tmdb_id 不走
+            # 标题搜索）：规避名标题搜不到候选时也能定位；ID 查不到或类型
+            # 对不上时回退到下面的标题搜索，不硬报错。没给类型时两种类型
+            # 都试一次：TMDB 的电影/电视剧 ID 并不全局唯一，两种都命中
+            # 时把两个候选都返回，让前端点选，不猜。
+            types_to_try = (
+                [media_type] if media_type else ["movie", "tv"]
+            )
+            seen_direct = set()
+            for try_type in types_to_try:
+                direct = self._candidate_for_tmdb_id(
+                    requested_tmdb_id, try_type, recognized_title,
+                )
+                if not direct or direct.get("media_type") != try_type:
+                    continue
+                identity = (direct.get("tmdb_id"), direct.get("media_type"))
+                if identity in seen_direct:
+                    continue
+                seen_direct.add(identity)
+                candidates.append(direct)
+        if not matched and not candidates:
+            if not recognized_title:
+                return {"success": False, "message": "未能从分享内容识别媒体名称"}
             search_result = self.api_vue_search_tmdb_candidates({
                 "title": recognized_title,
                 "tmdb_id": requested_tmdb_id or None,

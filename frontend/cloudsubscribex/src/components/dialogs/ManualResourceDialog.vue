@@ -14,6 +14,60 @@
         <v-alert v-if="error" type="error" variant="tonal" density="compact" class="mb-3">{{ error }}</v-alert>
         <v-alert v-else-if="resolvedLabel" type="info" variant="tonal" density="compact" class="mb-3">{{ resolvedLabel }}</v-alert>
 
+        <div v-if="manualNeeded" class="manual-media-box mb-3">
+          <v-divider class="mb-3" />
+          <div class="text-subtitle-2 mb-2">手动指定影片</div>
+          <v-list v-if="manualCandidates.length" density="compact" class="manual-candidate-list mb-2">
+            <v-list-item
+              v-for="item in manualCandidates"
+              :key="`${item.media_type}-${item.tmdb_id}`"
+              :title="`${item.title} · ${item.media_type === 'movie' ? '电影' : '电视剧'}${item.year ? ` · ${item.year}` : ''}`"
+              :subtitle="`TMDB ${item.tmdb_id}`"
+              @click="selectManualCandidate(item)" />
+          </v-list>
+          <v-text-field
+            v-model="manualTitle"
+            label="片名"
+            placeholder="例如：斗破苍穹剧场版 双帝之战"
+            variant="outlined"
+            density="compact"
+            hide-details="auto"
+            class="mb-2"
+            :disabled="submitting || manualResolving" />
+          <div class="d-flex ga-2">
+            <v-text-field
+              v-model="manualTmdbId"
+              label="TMDB ID（可选）"
+              placeholder="例如：1599184"
+              inputmode="numeric"
+              variant="outlined"
+              density="compact"
+              hide-details="auto"
+              class="flex-grow-1"
+              :disabled="submitting || manualResolving" />
+            <v-select
+              v-model="manualMediaType"
+              :items="manualMediaTypeItems"
+              label="类型"
+              variant="outlined"
+              density="compact"
+              hide-details="auto"
+              clearable
+              style="max-width: 130px"
+              :disabled="submitting || manualResolving" />
+          </div>
+          <v-btn
+            color="primary"
+            variant="tonal"
+            size="small"
+            class="mt-2"
+            :loading="manualResolving"
+            :disabled="submitting || (!manualTitle.trim() && !manualTmdbId.trim())"
+            @click="resolveWithManualMedia">
+            重新识别
+          </v-btn>
+        </div>
+
         <v-select
           v-if="resolvedMedia?.media_type === 'tv' && availableSeasons.length"
           v-model="seasons"
@@ -120,6 +174,7 @@ import DirectoryDialog from "./DirectoryDialog.vue";
 // v1.23.0：只留“粘贴分享链接 → sync/manual/resolve → 提交”；TMDB 搜索、
 // 订阅选择、媒体洗版（media/servers + media/content 浏览）已删，洗版入口
 // 本就无人调用（PluginWorkbench 只以 links 模式打开本弹窗）。
+// 零/多候选时允许用户在弹窗内手动指定影片或点选候选（不另开搜索页）。
 const props = defineProps({
   modelValue: Boolean,
   api: { type: [Object, Function], required: true },
@@ -136,11 +191,24 @@ const selectedCloudResource = ref(null);
 const cloudDirectoryVisible = ref(false);
 const manualUpgrade = ref(false)
 const skipHistory = ref(false);
-// resolve 识别出的媒体（内部状态，不再让用户选片）：
+// resolve 识别出的媒体（内部状态）：
 // {subscribe_id, tmdb_id, media_type, title, year}，无匹配时为 null。
+// resolve 返回零/多候选时无法自动定，改由下面的手动指定区让用户定
+// （填片名/TMDB ID 重新识别，或直接点选候选）。
 const resolvedMedia = ref(null)
 const seasons = ref([]);
 const availableSeasons = ref([]);
+// 手动指定影片：resolve 零/多候选时出现；填好后重新调 resolve。
+const manualNeeded = ref(false)
+const manualCandidates = ref([])
+const manualTitle = ref("")
+const manualTmdbId = ref("")
+const manualMediaType = ref("")
+const manualResolving = ref(false)
+const manualMediaTypeItems = [
+  { title: "电影", value: "movie" },
+  { title: "电视剧", value: "tv" },
+]
 const submitting = ref(false)
 const error = ref("")
 let cloudMediaResolveRevision = 0;
@@ -210,6 +278,7 @@ function updateResourceInput(value) {
     selectedCloudResource.value = null;
   }
   resourceLinks.value = text;
+  clearManualState()
   if (!selectedCloudResource.value) scheduleResourceTargetResolve(text);
 }
 
@@ -217,6 +286,14 @@ function clearResolvedMedia() {
   resolvedMedia.value = null
   seasons.value = []
   availableSeasons.value = []
+}
+
+function clearManualState() {
+  manualNeeded.value = false
+  manualCandidates.value = []
+  manualTitle.value = ""
+  manualTmdbId.value = ""
+  manualMediaType.value = ""
 }
 
 function scheduleResourceTargetResolve(text) {
@@ -233,13 +310,16 @@ function scheduleResourceTargetResolve(text) {
 }
 
 // resolve 只返回一种可用媒体：已定位的订阅，或 TMDB 唯一候选；
-// 多候选/零候选无法自动定，直接报错，让用户在链接里补年份/季信息。
+// 多候选/零候选无法自动定：先记下手动指定区要用的状态再报错——
+// 报错文案照旧（用户还没填手动信息时看到的仍是它），手动指定区随之出现。
 function applyResolveData(data) {
   const parsed = normalizeSeasons(data.seasons || []);
   availableSeasons.value = normalizeSeasons(data.available_seasons || []);
   seasons.value = parsed;
   const matchedId = Number(data.subscribe_id || 0);
   if (matchedId > 0) {
+    manualNeeded.value = false
+    manualCandidates.value = []
     resolvedMedia.value = {
       subscribe_id: matchedId,
       tmdb_id: null,
@@ -252,6 +332,8 @@ function applyResolveData(data) {
   const candidates = Array.isArray(data.candidates) ? data.candidates : [];
   if (candidates.length === 1) {
     const item = candidates[0] || {};
+    manualNeeded.value = false
+    manualCandidates.value = []
     resolvedMedia.value = {
       subscribe_id: null,
       tmdb_id: Number(item.tmdb_id || 0),
@@ -263,9 +345,59 @@ function applyResolveData(data) {
   }
   clearResolvedMedia()
   if (candidates.length > 1) {
+    manualCandidates.value = candidates.map((item) => ({
+      tmdb_id: Number(item?.tmdb_id || 0),
+      media_type: String(item?.media_type || data.media_type || ""),
+      title: String(item?.title || data.title || ""),
+      year: String(item?.year || ""),
+    }))
+    manualNeeded.value = true
     throw new Error("识别到多个同名媒体，请在链接标题中补充年份或季信息后重试");
   }
+  manualCandidates.value = []
+  manualNeeded.value = true
   throw new Error("未能从链接识别媒体，请检查链接是否完整");
+}
+
+function selectManualCandidate(item) {
+  if (!item || !Number(item.tmdb_id || 0)) return
+  resolvedMedia.value = {
+    subscribe_id: null,
+    tmdb_id: Number(item.tmdb_id || 0),
+    media_type: String(item.media_type || ""),
+    title: String(item.title || ""),
+    year: String(item.year || ""),
+  }
+  manualNeeded.value = false
+  manualCandidates.value = []
+  error.value = ""
+}
+
+async function resolveWithManualMedia() {
+  const title = manualTitle.value.trim()
+  const tmdbId = Number(manualTmdbId.value.trim())
+  const hasTmdbId = Number.isInteger(tmdbId) && tmdbId > 0
+  if (!title && !hasTmdbId) return
+  manualResolving.value = true
+  error.value = ""
+  try {
+    const result = unwrap(
+      await props.api.post(`plugin/${props.pluginId}/sync/manual/resolve`, {
+        resource_links: resourceLinks.value.split(/\r?\n/),
+        title: title || undefined,
+        tmdb_id: hasTmdbId ? tmdbId : undefined,
+        media_type: manualMediaType.value || undefined,
+      }),
+    )
+    if (result.success === false) throw new Error(result.message || "资源识别失败");
+    applyResolveData(result.data || {});
+    error.value = "";
+  } catch (e) {
+    clearResolvedMedia()
+    error.value = e.message || "资源识别失败";
+  } finally {
+    manualResolving.value = false
+  }
 }
 
 async function resolveResourceTarget(text, revision) {
@@ -369,6 +501,7 @@ async function resolveCloudPathMedia(path, revision) {
 function selectCloudPath(path, provider) {
   if (resourceResolveTimer) window.clearTimeout(resourceResolveTimer);
   resourceResolveRevision += 1;
+  clearManualState()
   selectedCloudResource.value = {
     provider: String(provider || targetCloudDrive.value || "").trim(),
     path: String(path || "/").trim() || "/",
@@ -382,6 +515,7 @@ function selectCloudPath(path, provider) {
 function clearCloudResource() {
   cloudMediaResolveRevision += 1;
   clearResolvedMedia()
+  clearManualState()
   selectedCloudResource.value = null;
   resourceLinks.value = "";
 }
@@ -439,6 +573,7 @@ async function submit() {
     resourceLinks.value = ""
     selectedCloudResource.value = null;
     clearResolvedMedia()
+    clearManualState()
     manualUpgrade.value = false
     skipHistory.value = false;
     emit("update:modelValue", false)
@@ -459,6 +594,7 @@ watch(
       cloudDirectoryVisible.value = false;
       resourceLinks.value = ""
       clearResolvedMedia()
+      clearManualState()
       await loadOptions()
     } else {
       error.value = ""
@@ -478,6 +614,17 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.manual-media-box {
+  border: 1px dashed rgba(var(--v-theme-primary), 0.4);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.manual-candidate-list {
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  border-radius: 8px;
 }
 
 .cloud-resource-input :deep(.v-field) {

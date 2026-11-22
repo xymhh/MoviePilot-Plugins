@@ -479,6 +479,7 @@ const REASON_KINDS = {
   mismatch: { label: "剧名不符", tone: "warning" },
   episode_miss: { label: "集号不符", tone: "muted" },
   unparsable: { label: "无法解析集号", tone: "muted" },
+  subscribe_submitted: { label: "订阅已接管", tone: "muted" },
 }
 
 // 历史数据里存的是长文案，这里按同一套规则压成「定性词 · 证据」短句。
@@ -503,6 +504,7 @@ const LEGACY_REASON_RULES = [
   [/库中已完整存在，无需转存/, "已入库"],
   [/分享地址已失效/, "分享失效"],
   [/库中已有或未匹配到可下载资源/, "无可用资源"],
+  [/订阅搜索已提交网盘任务，其中 (\d+) 个网盘文件等待/, "订阅已接管 · $1 个文件等待"],
 ]
 
 function reasonText(item) {
