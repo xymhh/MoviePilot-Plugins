@@ -23,6 +23,25 @@ from ...drive.common import format_size
 class MovieSyncProcessor(OwnerDelegator):
     """处理电影订阅同步。"""
 
+    def _subscribe_has_active_funnel_rows(self, subscribe) -> bool:
+        """v1.29.9 阶段 3：订阅是否还有漏斗在途行（queued/processing/
+        failed）。与 TelevisionSyncProcessor 同一守卫：轮次结束结算前
+        调用，在途行未终态时绝不结算，终态成功时由
+        _finish_pending_subscription 回写。漏斗组件不可用时 fail-open
+        （返回 False，按旧行为结算）。"""
+        try:
+            subscribe_id = int(getattr(subscribe, "id", 0) or 0)
+            if subscribe_id <= 0:
+                return False
+            has_active = getattr(
+                self._owner, "funnel_has_active_rows", None
+            )
+            if not callable(has_active):
+                return False
+            return bool(has_active(subscribe_id))
+        except Exception:  # noqa: BLE001 - 查询异常按无在途行处理
+            return False
+
     def process_movie_subscribe(
             self,
             subscribe,
@@ -720,13 +739,22 @@ class MovieSyncProcessor(OwnerDelegator):
                             )
 
                             if not pending_key and not transient_target:
-                                self._subscribe_handler.check_and_finish_subscribe(
-                                    subscribe=subscribe,
-                                    mediainfo=mediainfo,
-                                    success_episodes=[1],
-                                )
-                                if track_points and self._search_handler:
-                                    self._search_handler.clear_subscription_budgets(sub_key)
+                                # v1.29.9 阶段 3：订阅仍有漏斗在途行时不结算
+                                # （与电视流水线同一守卫），终态成功时由
+                                # _finish_pending_subscription 回写。
+                                if self._subscribe_has_active_funnel_rows(subscribe):
+                                    logger.info(
+                                        f"{mediainfo.title_year} 仍有漏斗在途行，"
+                                        "本轮不结算订阅，终态成功后回写"
+                                    )
+                                else:
+                                    self._subscribe_handler.check_and_finish_subscribe(
+                                        subscribe=subscribe,
+                                        mediainfo=mediainfo,
+                                        success_episodes=[1],
+                                    )
+                                    if track_points and self._search_handler:
+                                        self._search_handler.clear_subscription_budgets(sub_key)
                         else:
                             logger.error(f"转存失败：{mediainfo.title}")
 

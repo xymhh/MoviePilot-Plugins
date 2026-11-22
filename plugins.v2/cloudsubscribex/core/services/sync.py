@@ -759,6 +759,17 @@ class SyncExecutionService(OwnerDelegator):
         if funnel_route:
             for subscribe in subscribes:
                 setattr(subscribe, "_funnel_route", True)
+            # v1.29.9 阶段 3：生产者标记随订阅对象下沉——finalize 边界入队
+            # 时 source 取 subscribe:<id>（设计 §5.1），同目录 STRM 分支
+            # 靠它区分订阅轮次项（须入队）与手动同目录项（仍当场生成，
+            # 阶段 4 再统）。TG 项以 discovered_via 为准，不靠本标记。
+            producer = (
+                "upgrade" if upgrade_request
+                else "subscribe" if not manual_resources and not manual_target
+                else "manual"
+            )
+            for subscribe in subscribes:
+                setattr(subscribe, "_funnel_producer", producer)
 
         tv_subscribes = []
         movie_subscribes = []
@@ -1407,6 +1418,31 @@ class SyncExecutionService(OwnerDelegator):
             try:
                 if progress_callback:
                     progress_callback(value=0, text="网盘订阅助手开始处理订阅搜索")
+                # v1.29.9 阶段 3（复核修补）：订阅驱动的同步都按阶段 3
+                # 开关路由——不只是整轮 cron，MP 接管的订阅卡片搜索
+                # （subscribe_id/ids/state 指定）同样走这里；否则 MP 驱
+                # 动的订阅搜索在阶段 3 开时仍跑旧流水线，漏斗的去重保护
+                # 形同虚设。手动提交/洗版入口（显式 funnel_route）与 TG
+                # （discovered_via）各有自己的路由，不受此影响。
+                route_predicate = getattr(
+                    self._sync_handler,
+                    "_should_route_subscribe_sync_to_funnel", None
+                )
+                if callable(route_predicate):
+                    funnel_route = bool(route_predicate(
+                        funnel_route=funnel_route,
+                        discovered_via=discovered_via,
+                        manual_resources=manual_resources,
+                        manual_target=manual_target,
+                        upgrade_request=upgrade_request,
+                        manual_upgrade=manual_upgrade,
+                        phase1_enabled=bool(getattr(
+                            self._sync_handler, "_funnel_phase1_enabled", False
+                        )),
+                        phase3_enabled=bool(getattr(
+                            self._sync_handler, "_funnel_phase3_enabled", False
+                        )),
+                    ))
                 success = self._do_sync(
                     subscribe_id=subscribe_id,
                     subscribe_ids=subscribe_ids,

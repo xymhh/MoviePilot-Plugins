@@ -630,6 +630,10 @@ class TransferOpsMixin(OwnerDelegator):
                     # v1.29.8 阶段 2：TG 来源标识随项进 pending 记录与漏斗行
                     # （_do_sync 里随订阅对象下沉）；入队时 source 即此 via。
                     "discovered_via": str(getattr(subscribe, "_discovered_via", "") or ""),
+                    # v1.29.9 阶段 3：生产者标记随项进漏斗行（subscribe /
+                    # upgrade / manual）；入队时 source 取 subscribe:<id>，
+                    # 同目录 STRM 分支靠它区分订阅轮次项与手动同目录项。
+                    "funnel_producer": str(getattr(subscribe, "_funnel_producer", "") or ""),
                     "skip_history": bool(
                         (item.get("resource") or {}).get("skip_history")
                         or str(item["file"]["id"]) in mp_organized_ids

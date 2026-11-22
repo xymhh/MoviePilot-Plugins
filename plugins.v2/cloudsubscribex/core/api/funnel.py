@@ -94,6 +94,9 @@ class FunnelApi(OwnerDelegator):
                     "phase2_enabled": bool(
                         getattr(self, "_funnel_phase2_enabled", False)
                     ),
+                    "phase3_enabled": bool(
+                        getattr(self, "_funnel_phase3_enabled", False)
+                    ),
                     "target_dir": str(
                         getattr(self, "_funnel_target_dir", "") or ""
                     ),
@@ -126,6 +129,9 @@ class FunnelApi(OwnerDelegator):
                 ),
                 "phase2_enabled": bool(
                     getattr(self, "_funnel_phase2_enabled", False)
+                ),
+                "phase3_enabled": bool(
+                    getattr(self, "_funnel_phase3_enabled", False)
                 ),
                 "target_dir": str(getattr(self, "_funnel_target_dir", "") or ""),
             },

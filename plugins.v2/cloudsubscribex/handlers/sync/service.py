@@ -436,9 +436,12 @@ class SyncHandler:
 
     def _init_funnel_flags(self, get_val):
         """v1.29.7 阶段 1：网盘整理漏斗配置（只读阶段 1 实际用的键）。
-        v1.29.8 阶段 2 加 funnel_phase2_enabled（TG 进漏斗 kill-switch）。"""
+        v1.29.8 阶段 2 加 funnel_phase2_enabled（TG 进漏斗 kill-switch）。
+        v1.29.9 阶段 3 加 funnel_phase3_enabled（订阅与洗版进漏斗
+        kill-switch）。"""
         self._funnel_phase1_enabled = bool(get_val("funnel_phase1_enabled", False))
         self._funnel_phase2_enabled = bool(get_val("funnel_phase2_enabled", False))
+        self._funnel_phase3_enabled = bool(get_val("funnel_phase3_enabled", False))
         self._funnel_target_dir = str(
             get_val("funnel_target_dir", "") or "/Alist/影视/moviepilot/转存/"
         )
@@ -458,6 +461,52 @@ class SyncHandler:
         except (TypeError, ValueError):
             self._funnel_max_attempts = 5
         self._funnel_dedup_strict = bool(get_val("funnel_dedup_strict", True))
+
+    @staticmethod
+    def _funnel_route_for_subscribe_sync(
+            phase1_enabled: bool, phase3_enabled: bool
+    ) -> bool:
+        """v1.29.9 阶段 3：订阅驱动同步的漏斗路由判定。
+
+        阶段 1 是漏斗总闸，阶段 3 是订阅与洗版的 kill-switch：两者都开
+        时订阅同步内转存走漏斗（_do_sync 里随订阅对象下沉 _funnel_route），
+        任一关都走旧流水线。覆盖整轮订阅（cron 全量）与 MP 接管的订阅
+        卡片搜索（subscribe_id/ids/state 指定）——后者是 MP 驱动订阅搜
+        索的主路径，只判整轮会让它在阶段 3 开时仍跑旧流水线。
+        """
+        return bool(phase1_enabled and phase3_enabled)
+
+    @staticmethod
+    def _should_route_subscribe_sync_to_funnel(
+            *,
+            funnel_route: bool,
+            discovered_via: str = "",
+            manual_resources=None,
+            manual_target=None,
+            upgrade_request=None,
+            manual_upgrade: bool = False,
+            phase1_enabled: bool = False,
+            phase3_enabled: bool = False,
+    ) -> bool:
+        """v1.29.9 阶段 3（复核修补）：sync_subscribes 是否把本次同步
+        路由进漏斗。纯判定，可直接单测。
+
+        - 已显式置位的 funnel_route（手动提交/媒体服务器洗版入口）保持；
+        - TG（discovered_via 非空）走阶段 2 自己的路由，不由阶段 3 判定；
+        - 手动资源/手动目标/洗版请求/手动洗版各有自己的入口路由，不由
+          阶段 3 判定；
+        - 其余订阅驱动的同步（整轮 cron、单订阅、subscribe_ids 批量、
+          subscribe_states 过滤）按阶段 1 总闸 + 阶段 3 开关判定。
+        """
+        if funnel_route:
+            return True
+        if str(discovered_via or "").strip():
+            return False
+        if manual_resources or manual_target:
+            return False
+        if upgrade_request or manual_upgrade:
+            return False
+        return bool(phase1_enabled and phase3_enabled)
 
 
     def _init_cloud_paths(self, cloud_transfer_path, cloud_media_root, cloud_transfer_paths, cloud_media_paths):
@@ -772,6 +821,20 @@ class SyncHandler:
 
     def enqueue_funnel_from_pending(self, item, pending_key, mediainfo, subscribe_id=None, season=None):
         return self.funnel.enqueue_from_pending(item, pending_key, mediainfo, subscribe_id=subscribe_id, season=season)
+
+    def funnel_has_active_rows(self, subscribe_id) -> bool:
+        """v1.29.9 阶段 3：订阅是否还有漏斗在途行（queued/processing/
+        failed）。轮次结束结算前调用：在途行未终态时绝不结算，终态成功
+        时由 _finish_pending_subscription 回写。存储/组件不可用时
+        fail-open（返回 False，按旧行为结算）。"""
+        try:
+            funnel = self.__dict__.get("funnel")
+            has_active = getattr(funnel, "has_active_rows", None)
+            if not callable(has_active):
+                return False
+            return bool(has_active(subscribe_id))
+        except Exception:  # noqa: BLE001 - 查询异常按无在途行处理
+            return False
 
     def funnel_run_round(self) -> Dict[str, int]:
         return self.funnel.run_round()
@@ -2230,6 +2293,40 @@ class SyncHandler:
         self._notify_offline_pending_changed(pending_count)
         return result
 
+    def _write_terminal_upgrade_priority(
+            self, subscribe, success_episodes, new_score: int
+    ) -> bool:
+        """v1.29.9 阶段 3：终态成功时把洗版新评分写进订阅 episode_priority。
+
+        只由 _finish_pending_subscription 对漏斗归属洗版项调用（轮次内
+        已改由终态回写，见 television.py）。与轮次内更新同一口径：
+        键为 str(episode)，值相同则不写库。返回是否写入。
+        """
+        episodes = [
+            int(episode) for episode in (success_episodes or [])
+            if int(episode) > 0
+        ]
+        if not episodes or int(new_score or 0) <= 0:
+            return False
+        current_priority = dict(self._read_ep_priority(subscribe) or {})
+        changed = False
+        for episode in episodes:
+            key = str(episode)
+            if int(current_priority.get(key) or 0) != int(new_score):
+                current_priority[key] = int(new_score)
+                changed = True
+        if not changed:
+            return False
+        from app.db.subscribe_oper import SubscribeOper
+
+        SubscribeOper().update(
+            int(subscribe.id), {"episode_priority": current_priority}
+        )
+        logger.debug(
+            f"终态洗版评分已回写：{getattr(subscribe, 'name', '')} "
+            f"{sorted(episodes)}→{int(new_score)} 分"
+        )
+        return True
 
     def _finish_pending_subscription(
             self,
@@ -2311,6 +2408,25 @@ class SyncHandler:
                 mediainfo=mediainfo,
                 success_episodes=success_episodes,
             )
+            # v1.29.9 阶段 3：洗版项的单集评分终态回写。轮次内漏斗归属的
+            # 洗版项不再提前更新 episode_priority（见 television.py），
+            # 终态成功时在这里按 pending 记录里的 dedup_new_score 补写；
+            # 旧流水线洗版项仍在轮次内更新（funnel_route 为假时跳过，
+            # 不重复写）。写失败只记 warning，不挡终态提交。
+            if (
+                    item.get("funnel_route")
+                    and item.get("upgrade")
+                    and int(item.get("dedup_new_score") or 0) > 0
+            ):
+                try:
+                    self._write_terminal_upgrade_priority(
+                        subscribe, success_episodes,
+                        int(item.get("dedup_new_score") or 0),
+                    )
+                except Exception as error:  # noqa: BLE001 - 评分回写失败不挡终态
+                    logger.warning(
+                        f"终态洗版评分回写失败：{subscribe.name}，{error}"
+                    )
             with SessionFactory() as db:
                 remaining_subscribe = SubscribeOper(db=db).get(subscribe_id)
             if remaining_subscribe:

@@ -222,6 +222,11 @@ class UpgradeService(OwnerDelegator):
                 "missing_episode_set": set(missing_episode_set),
                 "existing_ep_pri": existing_ep_pri,
                 "all_expected_episodes": set(all_expected_episodes),
+                # v1.29.9 阶段 3：洗版计划带漏斗归属标记，供统一流水线结算
+                # 分支读取。注意计划里没有候选资源（搜索在流水线内），薄
+                # 入口无法直接入队——流水线保留搜索与判定，执行侧由漏斗归
+                # 属标记决定：finalize 边界入队，不再直出/直整。
+                "funnel_route": bool(getattr(subscribe, "_funnel_route", False)),
             }
             return self.process_tv_subscribe(
                 subscribe=subscribe, history=history,

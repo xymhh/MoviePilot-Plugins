@@ -1107,6 +1107,23 @@ class FunnelQueueRepository(DbOper):
             result[str(status or "")] = int(count or 0)
         return result
 
+    @db_query
+    def has_active_for_subscribe(
+            self, subscribe_id: int, db: Session = None
+    ) -> bool:
+        """v1.29.9 阶段 3：指定订阅是否还有漏斗在途行（queued/processing/
+        failed，见 _active_filter）。轮次结束结算前调用：在途行未终态
+        时绝不结算，终态成功时由 _finish_pending_subscription 回写。"""
+        if int(subscribe_id or 0) <= 0:
+            return False
+        row = db.scalars(
+            select(FunnelQueueRow.id).where(
+                self._active_filter(),
+                FunnelQueueRow.subscribe_id == int(subscribe_id),
+            ).limit(1)
+        ).first()
+        return row is not None
+
     @db_update
     def claim(
             self, row_id: int, lease_until: int, now: Optional[int] = None,

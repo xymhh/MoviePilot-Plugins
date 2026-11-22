@@ -110,6 +110,25 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     result[number] = text
         return result
 
+    def _subscribe_has_active_funnel_rows(self, subscribe) -> bool:
+        """v1.29.9 阶段 3：订阅是否还有漏斗在途行（queued/processing/
+        failed）。轮次结束结算前调用：在途行未终态时绝不结算——开场扫
+        的是目标网盘目录，在途文件会被算作“已存在”，不守卫就会把订阅
+        提前结算；终态成功时由 _finish_pending_subscription 回写。
+        漏斗组件不可用时 fail-open（返回 False，按旧行为结算）。"""
+        try:
+            subscribe_id = int(getattr(subscribe, "id", 0) or 0)
+            if subscribe_id <= 0:
+                return False
+            has_active = getattr(
+                self._owner, "funnel_has_active_rows", None
+            )
+            if not callable(has_active):
+                return False
+            return bool(has_active(subscribe_id))
+        except Exception:  # noqa: BLE001 - 查询异常按无在途行处理
+            return False
+
     def process_tv_subscribe(
             self,
             subscribe,
@@ -197,6 +216,10 @@ class TelevisionSyncProcessor(OwnerDelegator):
             new_priority: Dict[str, int] = {}
             upgrade_episodes: Set[int] = set()
             upgrade_downloaded = 0
+            # v1.29.9 阶段 3：漏斗归属的待终态洗版集（已入队、未确认入库）。
+            # 本轮不计入 upgrade_episodes/new_priority，终态成功时由
+            # _finish_pending_subscription 回写进度与评分。
+            funnel_pending_upgrade_episodes: Set[int] = set()
             if upgrade_scope:
                 mediainfo = _upgrade_plan["mediainfo"]
                 season = _upgrade_plan["season"]
@@ -400,11 +423,20 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     )
                     self._owner._last_skip_reason = "库中已完整存在，无需转存"
                     if not transient_target:
-                        self._subscribe_handler.check_and_finish_subscribe(
-                            subscribe=subscribe,
-                            mediainfo=mediainfo,
-                            success_episodes=sorted(existing_episodes_in_resources),
-                        )
+                        # v1.29.9 阶段 3：在途文件也在目标网盘目录里，会被
+                        # 算作“已存在”——订阅仍有漏斗在途行时不结算，终态
+                        # 成功后由 _finish_pending_subscription 回写。
+                        if self._subscribe_has_active_funnel_rows(subscribe):
+                            logger.info(
+                                f"{mediainfo.title_year} S{season:02d} 仍有漏斗在途行，"
+                                "本轮不结算订阅，终态成功后回写"
+                            )
+                        else:
+                            self._subscribe_handler.check_and_finish_subscribe(
+                                subscribe=subscribe,
+                                mediainfo=mediainfo,
+                                success_episodes=sorted(existing_episodes_in_resources),
+                            )
                     if track_points and self._search_handler:
                         self._search_handler.clear_subscription_budgets(sub_key)
                     return transferred_count
@@ -1272,11 +1304,25 @@ class TelevisionSyncProcessor(OwnerDelegator):
                                     success_episodes.append(episode)
 
                                 if upgrade_scope:
-                                    # 洗版结算用：已转存集（缺集 + 替换）与
-                                    # 新评分，供末尾更新订阅进度与 episode_priority。
-                                    upgrade_episodes.add(episode)
-                                    upgrade_downloaded += 1
-                                    new_priority[str(episode)] = current_score
+                                    # v1.29.9 阶段 3：漏斗归属的待终态洗版项
+                                    # 不计入本轮结算——“已转存”按终态成功计数
+                                    # （设计 §6），终态成功时由
+                                    # _finish_pending_subscription 回写进度与
+                                    # 评分；否则同一集会在确认入库前就被记进
+                                    # note/评分。判定：本项待终态且本订阅/计划
+                                    # 走漏斗（计划标记优先，订阅标记兜底）。
+                                    funnel_routed = bool(
+                                        (_upgrade_plan or {}).get("funnel_route")
+                                        or getattr(subscribe, "_funnel_route", False)
+                                    )
+                                    if pending_key and funnel_routed:
+                                        funnel_pending_upgrade_episodes.add(episode)
+                                    else:
+                                        # 洗版结算用：已转存集（缺集 + 替换）与
+                                        # 新评分，供末尾更新订阅进度与 episode_priority。
+                                        upgrade_episodes.add(episode)
+                                        upgrade_downloaded += 1
+                                        new_priority[str(episode)] = current_score
 
                                 score_info = f"(平台优先级:{current_score})"
                                 upgrade_info = " [洗版升级]" if is_upgrade else ""
@@ -1503,19 +1549,38 @@ class TelevisionSyncProcessor(OwnerDelegator):
                         f"{mediainfo.title_year} S{season:02d} "
                         "洗版转存完成，未发现可升级资源"
                     )
+                # v1.29.9 阶段 3：本轮入队的洗版集尚未确认入库，只记一条
+                # 入队日志；进度与评分在终态成功时由
+                # _finish_pending_subscription 回写。
+                if funnel_pending_upgrade_episodes:
+                    logger.info(
+                        f"{mediainfo.title_year} S{season:02d} 洗版 "
+                        f"{len(funnel_pending_upgrade_episodes)} 集已入队整理队列，"
+                        "终态成功后回写订阅进度与评分"
+                    )
             else:
                 # 将媒体路径已存在的集数和本次成功转存的集数合并
                 all_success_episodes = list(set(success_episodes) | existing_episodes_in_resources)
                 if all_success_episodes and not transient_target:
-                    remaining_lack = self._subscribe_handler.check_and_finish_subscribe(
-                        subscribe=subscribe,
-                        mediainfo=mediainfo,
-                        success_episodes=all_success_episodes
-                    )
-                    if track_points and remaining_lack == 0 and hasattr(
-                            self._search_handler, "clear_subscription_budgets"
-                    ):
-                        self._search_handler.clear_subscription_budgets(sub_key)
+                    # v1.29.9 阶段 3：订阅仍有漏斗在途行时不结算——开场扫
+                    # 的目标网盘目录含在途文件，会被算作“已存在”，不守卫
+                    # 就会把订阅提前结算；终态成功时由
+                    # _finish_pending_subscription 回写。
+                    if self._subscribe_has_active_funnel_rows(subscribe):
+                        logger.info(
+                            f"{mediainfo.title_year} S{season:02d} 仍有漏斗在途行，"
+                            "本轮不结算订阅，终态成功后回写"
+                        )
+                    else:
+                        remaining_lack = self._subscribe_handler.check_and_finish_subscribe(
+                            subscribe=subscribe,
+                            mediainfo=mediainfo,
+                            success_episodes=all_success_episodes
+                        )
+                        if track_points and remaining_lack == 0 and hasattr(
+                                self._search_handler, "clear_subscription_budgets"
+                        ):
+                            self._search_handler.clear_subscription_budgets(sub_key)
 
         except Exception as e:
             logger.error(f"处理订阅 {subscribe.name} 出错：{str(e)}")

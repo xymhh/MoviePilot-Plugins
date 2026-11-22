@@ -254,8 +254,20 @@ class FunnelService(OwnerDelegator):
             )
         # v1.29.8 阶段 2：TG 行的 source 即 Candidate.via()
         # （tg:{channel}/{message_id} 或 push），原样带入，列表里显示频道名。
+        # v1.29.9 阶段 3：订阅轮次行的 source 为 subscribe:<id>（设计 §5.1；
+        # 生产者标记 funnel_producer 由 _do_sync 随订阅对象下沉，经
+        # _ingest_stage_confirm 带进 finalize 边界的项）；洗版项 source
+        # 仍为 upgrade，手动项为 manual。
         via = str(item.get("discovered_via") or "").strip()
-        source = via if via else ("upgrade" if is_upgrade else "manual")
+        producer = str(item.get("funnel_producer") or "").strip().lower()
+        if via:
+            source = via
+        elif producer == "subscribe" and subscribe_id:
+            source = f"subscribe:{int(subscribe_id)}"
+        elif producer == "subscribe":
+            source = "subscribe"
+        else:
+            source = "upgrade" if is_upgrade else "manual"
         media_data = None
         serialize = getattr(self, "_serialize_mediainfo", None)
         if callable(serialize) and mediainfo is not None:
@@ -289,12 +301,40 @@ class FunnelService(OwnerDelegator):
         }
         row, created = repo.enqueue(payload)
         if created:
+            if via:
+                producer_label = "TG 转存"
+            elif producer == "subscribe":
+                producer_label = "订阅轮次"
+            else:
+                producer_label = "手动提交"
             logger.info(
-                f"{'TG 转存' if via else '手动提交'}已入队整理队列：{title or payload['file_name']} "
+                f"{producer_label}已入队整理队列：{title or payload['file_name']} "
                 f"（行 #{row.get('id')}，{pending_key}）"
             )
             self.ensure_worker()
         return row, created
+
+    def has_active_rows(self, subscribe_id) -> bool:
+        """v1.29.9 阶段 3：指定订阅是否还有漏斗在途行（queued/processing/
+        failed）。轮次结束结算前调用：在途行未终态时绝不结算，终态成功
+        时由 _finish_pending_subscription 回写。存储不可用时 fail-open
+        （返回 False，按旧行为结算）。"""
+        try:
+            if int(subscribe_id or 0) <= 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        repo = self._repository()
+        if repo is None:
+            return False
+        has_active = getattr(repo, "has_active_for_subscribe", None)
+        if not callable(has_active):
+            return False
+        try:
+            return bool(has_active(int(subscribe_id)))
+        except Exception as error:  # noqa: BLE001 - 查询异常按无在途行处理
+            logger.debug(f"查询订阅漏斗在途行失败：{error}", exc_info=True)
+            return False
 
     # ------------------------------------------------------------------
     # worker 轮次

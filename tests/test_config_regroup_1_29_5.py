@@ -3,6 +3,7 @@
 分组表：~/workspace/figma-settings-redesign/GROUPING.md（227 项零丢失零新增）。
 v1.29.7 阶段 1 在转存组新增 6 个漏斗键（funnel_*），总数 233；
 v1.29.8 阶段 2 再加 funnel_phase2_enabled（TG 进漏斗），总数 234。
+v1.29.9 阶段 3 再加 funnel_phase3_enabled（订阅与洗版进漏斗），总数 235。
 静态接线测试 + node 真实组装/搜索测试；不拼 UI 行为，行为由 vite 构建 +
 全量套件保证。
 """
@@ -46,7 +47,7 @@ SECTION_VUE = os.path.join(
 
 TASK_COUNTS = {
     "tracking": 91,
-    "transfer": 73,
+    "transfer": 74,
     "playback": 18,
     "notify": 21,
     "channels": 24,
@@ -294,8 +295,8 @@ class TestAssemblyRuntime(unittest.TestCase):
             )
         )
         self.assertEqual(data["counts"], TASK_COUNTS)
-        self.assertEqual(data["totalKeys"], 234)
-        self.assertEqual(data["uniqueKeys"], 234)
+        self.assertEqual(data["totalKeys"], 235)
+        self.assertEqual(data["uniqueKeys"], 235)
         self.assertEqual(data["advancedCount"], 37)
         # 同一任务组内子分组标题不重复（ConfigSection 用标题做 v-for key 与折叠键）。
         for value, titles in data["groupTitles"].items():
@@ -351,9 +352,12 @@ class TestSearchRuntime(unittest.TestCase):
             )
         )
         # label 命中：洗版相关字段跨 3 个任务组。
-        self.assertEqual(len(data["labelHit"]), 8)
+        # v1.29.9 阶段 3：funnel_phase3_enabled 的 label 含“洗版”
+        # （订阅与洗版进漏斗），洗版命中由 8 增至 9。
+        self.assertEqual(len(data["labelHit"]), 9)
         self.assertIn("enable_cloud_upgrade", data["labelHit"])
         self.assertIn("notify_template_upgrade", data["labelHit"])
+        self.assertIn("funnel_phase3_enabled", data["labelHit"])
         # key 命中（大小写不敏感）。
         self.assertEqual(
             sorted(data["keyHit"]),

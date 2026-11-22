@@ -13,7 +13,10 @@
         <v-chip v-else-if="!phase2Enabled" size="small" color="warning" variant="tonal">
           阶段 2 未启用（TG 走旧流水线，直出 strm 路仍在）
         </v-chip>
-        <v-chip v-else size="small" color="success" variant="tonal"> 阶段 2 已启用（TG 已进漏斗） </v-chip>
+        <v-chip v-else-if="!phase3Enabled" size="small" color="warning" variant="tonal">
+          阶段 3 未启用（订阅与洗版走旧流水线）
+        </v-chip>
+        <v-chip v-else size="small" color="success" variant="tonal"> 阶段 3 已启用（订阅与洗版已进漏斗） </v-chip>
         <v-spacer />
         <v-btn size="small" variant="tonal" :loading="running" @click="runNow"> 立即整理一轮 </v-btn>
         <v-btn size="small" variant="tonal" color="error" :loading="stopping" @click="stopQueue"> 停止 </v-btn>
@@ -22,6 +25,7 @@
       <v-card-text class="pt-0 text-medium-emphasis">
         手动提交进入整理队列后由漏斗逐行整理：整理前改名 → 落盘前实查 → MP 整理 → 终态提交。
         <span v-if="phase1Enabled && phase2Enabled">TG 自动转存与频道手动转存也进入整理队列（直出 strm 路已关闭）。</span>
+        <span v-if="phase1Enabled && phase2Enabled && phase3Enabled">订阅轮次与洗版替换也进入整理队列。</span>
         目标目录：{{ targetDir || "—" }}；待处理 {{ counts.queued || 0 }} 行，
         处理中 {{ counts.processing || 0 }} 行，已挂起 {{ counts.held || 0 }} 行。
       </v-card-text>
@@ -94,6 +98,7 @@ const message = ref("");
 const counts = ref({});
 const phase1Enabled = ref(false);
 const phase2Enabled = ref(false);
+const phase3Enabled = ref(false);
 const targetDir = ref("");
 const workerRunning = ref(false);
 const queued = ref([]);
@@ -123,6 +128,7 @@ function formatTime(epochSeconds) {
 
 // v1.29.8 阶段 2：行来源标签——TG 行显示频道名（source 即 Candidate.via()，
 // 如 tg:@QukanMovie/12281 或 push），洗版/手动与阶段 1 一致。
+// v1.29.9 阶段 3：订阅轮次行 source 为 subscribe:<id>，显示“订阅”。
 function sourceLabel(row) {
   if (!row) return "手动";
   if (row.is_upgrade || row.source === "upgrade") return "洗版";
@@ -132,6 +138,7 @@ function sourceLabel(row) {
     const channel = source.slice(3).split("/")[0];
     return channel || "TG";
   }
+  if (source.startsWith("subscribe:")) return "订阅";
   return "手动";
 }
 
@@ -145,6 +152,7 @@ async function load() {
     counts.value = data.counts || {};
     phase1Enabled.value = !!data.phase1_enabled;
     phase2Enabled.value = !!data.phase2_enabled;
+    phase3Enabled.value = !!data.phase3_enabled;
     targetDir.value = data.target_dir || "";
     queued.value = (data.groups || {}).queued || [];
     processing.value = (data.groups || {}).processing || [];

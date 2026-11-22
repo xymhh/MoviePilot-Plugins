@@ -392,6 +392,10 @@ class UIConfig:
             # 关 = TG 回旧流水线与直出 strm 路；开 = TG 走漏斗。只在阶段 1
             # 开启时生效（阶段 1 是漏斗总闸，worker 驱动条件不变）。
             "funnel_phase2_enabled": False,
+            # v1.29.9 阶段 3：订阅与洗版进漏斗（订阅轮次 + 洗版替换入队）。
+            # 关 = 订阅与洗版回旧流水线；开 = 订阅与洗版走漏斗。只在阶段 1
+            # 开启时生效（阶段 1 是漏斗总闸，worker 驱动条件不变）。
+            "funnel_phase3_enabled": False,
             # 漏斗目标目录：默认即现有资源目录，零迁移（设计 §14 推荐值）。
             "funnel_target_dir": "/Alist/影视/moviepilot/转存/",
             # 触发方式：immediate=入队后 10 秒内起轮（阶段 1 只支持 immediate）。

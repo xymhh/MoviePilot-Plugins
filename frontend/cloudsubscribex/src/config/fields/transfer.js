@@ -472,6 +472,13 @@ export function createTransferSection(options) {
             cols: 4,
           },
           {
+            key: "funnel_phase3_enabled",
+            label: "整理队列（阶段 3：订阅与洗版进漏斗）",
+            type: "switch",
+            hint: "打开后订阅轮次与洗版替换进入整理队列、由漏斗逐行整理，入库变异步；关闭后订阅与洗版回旧流水线；需先开阶段 1 开关",
+            cols: 4,
+          },
+          {
             key: "funnel_target_dir",
             label: "整理目标目录",
             type: "text",
