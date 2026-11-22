@@ -90,11 +90,12 @@ class TestSidebarNavChannels(unittest.TestCase):
         # 1.10.4：网盘整理（organize）导航已撤，侧栏只剩两项；
         # 1.13.2：频道监控（tg-monitor）独立成导航，侧栏是三项；
         # v1.29.7：整理队列（funnel）独立成导航，侧栏是四项；
+        # v1.31.0：重复扫描（duplicates）独立成导航，侧栏是五项；
         # main/resource 仍不出现。
         nav = _registration().get_sidebar_nav()
         self.assertEqual(
             [item["nav_key"] for item in nav],
-            ["channels", "tg-monitor", "history", "funnel"],
+            ["channels", "tg-monitor", "history", "funnel", "duplicates"],
         )
         self.assertNotIn("main", {item["nav_key"] for item in nav})
         self.assertNotIn("resource", {item["nav_key"] for item in nav})

@@ -49,10 +49,11 @@ def main(root: Path) -> int:
     app_channels = components / "AppPageChannels.vue"
     app_tg_monitor = components / "AppPageTgMonitor.vue"
     app_funnel = components / "AppPageFunnel.vue"
+    app_duplicates = components / "AppPageDuplicates.vue"
     page = components / "Page.vue"
     errors: list[str] = []
 
-    for path in (workbench, app_page, app_history, app_channels, app_tg_monitor, app_funnel, page):
+    for path in (workbench, app_page, app_history, app_channels, app_tg_monitor, app_funnel, app_duplicates, page):
         if not path.exists():
             errors.append(f"缺少文件：{path}")
     if errors:
@@ -77,6 +78,7 @@ def main(root: Path) -> int:
     channels_text = app_channels.read_text(encoding="utf-8")
     tg_monitor_text = app_tg_monitor.read_text(encoding="utf-8")
     funnel_text = app_funnel.read_text(encoding="utf-8")
+    duplicates_text = app_duplicates.read_text(encoding="utf-8")
     page_text = page.read_text(encoding="utf-8")
 
     # 薄壳：不含页签，只转发 PluginWorkbench；v1.23.0 起 mode prop 已删，
@@ -113,6 +115,12 @@ def main(root: Path) -> int:
         errors.append("AppPageFunnel 未挂载 FunnelQueue")
     if re.search(r"<v-tab\b", funnel_text):
         errors.append("AppPageFunnel 不应有页签")
+
+    # v1.31.0：重复扫描页是薄壳，只挂载 DuplicatesQueue，不含页签。
+    if "DuplicatesQueue" not in duplicates_text:
+        errors.append("AppPageDuplicates 未挂载 DuplicatesQueue")
+    if re.search(r"<v-tab\b", duplicates_text):
+        errors.append("AppPageDuplicates 不应有页签")
 
     # v1.24.0：Config.vue 与 ChannelManager.vue 拆分子组件后的页面组成。
     config_path = components / "Config.vue"
@@ -180,6 +188,8 @@ def main(root: Path) -> int:
         errors.append("vite 联邦缺少暴露：./AppPageTgMonitor（1.13.2 频道监控导航）")
     if '"./AppPageFunnel": "./src/components/AppPageFunnel.vue"' not in vite:
         errors.append("vite 联邦缺少暴露：./AppPageFunnel（v1.29.7 整理队列导航）")
+    if '"./AppPageDuplicates": "./src/components/AppPageDuplicates.vue"' not in vite:
+        errors.append("vite 联邦缺少暴露：./AppPageDuplicates（v1.31.0 重复扫描导航）")
     if "AppPageOrganize" in vite:
         errors.append("vite 联邦不应再暴露 ./AppPageOrganize（1.10.4 已删除）")
     if "AppPageResource" in vite:

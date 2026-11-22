@@ -16,6 +16,7 @@ from .search import SearchApi
 from .sync import SyncApi
 from .tg import TgMonitorApi
 from .funnel import FunnelApi
+from .strm_duplicates import StrmDuplicatesApi
 
 __all__ = [
     "AccountApi",
@@ -34,4 +35,5 @@ __all__ = [
     "SyncApi",
     "TgMonitorApi",
     "FunnelApi",
+    "StrmDuplicatesApi",
 ]

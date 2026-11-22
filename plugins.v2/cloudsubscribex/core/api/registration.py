@@ -487,6 +487,29 @@ class MoviePilotRegistration(OwnerDelegator):
                 "auth": "bear",
                 "summary": "人工删孤儿文件：删除挂起行落盘后拦截留下的 .mkv 连带 .strm",
             },
+            # v1.31.0 重复扫描：递归走 .strm 根目录（只读本地文件），
+            # 按集分组 → 按 115 列表核对视频大小 → 人工确认后删除。
+            {
+                "path": "/duplicates/scan",
+                "endpoint": self.api_vue_duplicates_scan,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重复扫描：递归 .strm 根目录，列出同集多份 .strm 的组",
+            },
+            {
+                "path": "/duplicates/enrich",
+                "endpoint": self.api_vue_duplicates_enrich,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重复扫描核对：按 115 列表取各份视频实际大小，给留大建议",
+            },
+            {
+                "path": "/duplicates/delete",
+                "endpoint": self.api_vue_duplicates_delete,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "重复扫描删除：按用户确认删一组重复（视频 + STRM + NFO）",
+            },
             {
                 "path": "/tg/transfer",
                 "endpoint": self.api_vue_tg_transfer,
@@ -779,6 +802,15 @@ class MoviePilotRegistration(OwnerDelegator):
                 "section": "system",
                 "permission": "manage",
                 "order": 33,
+            },
+            # v1.31.0：重复扫描（同集多份 .strm）独立成主侧栏导航。
+            {
+                "nav_key": "duplicates",
+                "title": "重复扫描",
+                "icon": "mdi-content-duplicate",
+                "section": "system",
+                "permission": "manage",
+                "order": 34,
             },
         ]
 

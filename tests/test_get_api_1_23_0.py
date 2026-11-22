@@ -146,9 +146,11 @@ ALLOWLIST = {
 # 人工删旧版路由（/funnel/delete-old-version，前端 FunnelQueue.vue
 # 的“删旧版”按钮调用，不进 ALLOWLIST）；v1.30.0 阶段 4 加 4 条
 # （/funnel/rounds|scan|claim|delete-orphan，前端 FunnelQueue.vue
-# 的轮次历史/扫描对账/认领/删孤儿调用，不进 ALLOWLIST）。
-EXPECTED_REGISTERED_ENTRIES = 89
-EXPECTED_REGISTERED_PAIRS = 90
+# 的轮次历史/扫描对账/认领/删孤儿调用，不进 ALLOWLIST）；v1.31.0
+# 重复扫描加 3 条（/duplicates/scan|enrich|delete，前端
+# DuplicatesQueue.vue 的扫描/核对大小/删除调用，不进 ALLOWLIST）。
+EXPECTED_REGISTERED_ENTRIES = 92
+EXPECTED_REGISTERED_PAIRS = 93
 
 # 第 5 项：7 个服务层方法的新签名（去掉 apikey 后的剩余参数名）。
 SERVICE_METHOD_PARAMS = {
@@ -198,6 +200,7 @@ _REAL_MODULES = (
     ("cloudsubscribex.core.api.search", "plugins.v2/cloudsubscribex/core/api/search.py"),
     ("cloudsubscribex.core.api.tg", "plugins.v2/cloudsubscribex/core/api/tg.py"),
     ("cloudsubscribex.core.api.funnel", "plugins.v2/cloudsubscribex/core/api/funnel.py"),
+    ("cloudsubscribex.core.api.strm_duplicates", "plugins.v2/cloudsubscribex/core/api/strm_duplicates.py"),
     ("cloudsubscribex.core.api.runtime", "plugins.v2/cloudsubscribex/core/api/runtime.py"),
     ("cloudsubscribex.core.api.registration", "plugins.v2/cloudsubscribex/core/api/registration.py"),
 )
@@ -220,6 +223,7 @@ _COMPONENT_MODULE_CLASSES = (
     ("cloudsubscribex.core.api.duplicate", "DuplicateApi"),
     ("cloudsubscribex.core.api.tg", "TgMonitorApi"),
     ("cloudsubscribex.core.api.funnel", "FunnelApi"),
+    ("cloudsubscribex.core.api.strm_duplicates", "StrmDuplicatesApi"),
     ("cloudsubscribex.core.services.runtime", "SyncRuntimeService"),
     ("cloudsubscribex.core.services.offline", "OfflineTaskService"),
     ("cloudsubscribex.core.services.platform", "PlatformIntegrationService"),

@@ -73,7 +73,7 @@ class TestTgMonitorNav(unittest.TestCase):
         by_key = {item["nav_key"]: item for item in nav}
         self.assertEqual(
             [item["nav_key"] for item in nav],
-            ["channels", "tg-monitor", "history", "funnel"],
+            ["channels", "tg-monitor", "history", "funnel", "duplicates"],
         )
         monitor = by_key["tg-monitor"]
         self.assertEqual(monitor["title"], "频道监控")

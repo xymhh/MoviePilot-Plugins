@@ -45,6 +45,7 @@ from .matching import FileMatchingService
 from .media_refresh import MediaRefreshMixin
 from .media_targets import MediaTargetsService
 from .mp_organize import MpOrganizeMixin
+from .strm_duplicates import StrmDuplicatesService
 from .strm_ops import StrmOpsMixin
 from .transfer_ops import TransferOpsMixin
 
@@ -129,6 +130,7 @@ COMPONENT_FIELDS = (
     ("transfer_ops", TransferOpsMixin),
     ("history_backfill", HistoryBackfillService),
     ("funnel", FunnelService),
+    ("strm_duplicates", StrmDuplicatesService),
 )
 
 
@@ -884,6 +886,18 @@ class SyncHandler:
     def funnel_delete_old_version(self, row_ids) -> Dict[str, Any]:
         """v1.29.10 热修复：队列页人工删旧版（held/failed 行）。"""
         return self.funnel.delete_old_version(row_ids)
+
+    def duplicates_scan(self) -> Dict[str, Any]:
+        """v1.31.0 重复扫描：递归走 .strm 根目录，只读本地文件。"""
+        return self.strm_duplicates.duplicates_scan()
+
+    def duplicates_enrich(self, groups) -> Dict[str, Any]:
+        """v1.31.0 重复扫描：按 115 列表核对视频实际大小，给留大建议。"""
+        return self.strm_duplicates.duplicates_enrich(groups)
+
+    def duplicates_delete(self, group, keep_index) -> Dict[str, Any]:
+        """v1.31.0 重复扫描：按用户确认删一组重复（视频 + STRM + NFO）。"""
+        return self.strm_duplicates.duplicates_delete(group, keep_index)
 
     def funnel_run_scan_dry_run(self, trigger: str = "手动") -> Dict[str, Any]:
         """v1.30.0 阶段 4：04:00 扫描对账（默认 dry-run，只分类记日志）。"""

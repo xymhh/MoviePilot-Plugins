@@ -20,6 +20,7 @@ from ...utils import (
     rebuild_strm_tree,
 )
 from ...utils.legacy_strm import iter_strm_files, migrate_strm_content
+from .strm_duplicates import cleanup_sibling_strms
 
 
 class StrmOpsMixin(OwnerDelegator):
@@ -360,6 +361,18 @@ class StrmOpsMixin(OwnerDelegator):
             )
             if log_success:
                 logger.debug(f"STRM 已生成：{strm_path} -> {content}")
+            # v1.31.0 根因修复（两京十五日 S01E05/E06 实测）：写点只按视频
+            # 文件名派生 .strm 名，同一集两次入库、文件名一次带 {tmdb-}
+            # 标记一次不带，就会各写一份 .strm（两份各指不同视频，不是旧
+            # 文件残留）。新生成后按“集”清理同目录旧兄弟 .strm（+ 同主干
+            # .nfo），只删本地指针文件，不动网盘视频；清理失败不影响本次
+            # 生成（fail-open，记 warning）。漏斗落盘前实查是第一道防线，
+            # 这里是最后一道。洗版时旧版 .strm 会比 _delete_upgrade_old_strm
+            # 早一步被清掉，终态与洗版成功时一致（见 strm_duplicates 模块注释）。
+            try:
+                cleanup_sibling_strms(strm_path.parent, strm_path)
+            except Exception as error:  # noqa: BLE001 - 清理失败不影响生成
+                logger.warning(f"清理同集旧 STRM 失败：{strm_path}，{error}")
             return strm_path
         except (OSError, StrmTemplateError) as error:
             logger.error(f"生成 STRM 失败：{file_name}，原因：{error}")

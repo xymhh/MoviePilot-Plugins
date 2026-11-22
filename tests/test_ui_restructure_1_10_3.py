@@ -83,11 +83,12 @@ class TestSidebarNavRestructure(unittest.TestCase):
         # 1.10.4：网盘整理不新增导航，侧栏只剩渠道管理与转存记录。
         # 1.13.2：频道监控从渠道页独立成导航，侧栏是渠道管理、频道监控、转存记录。
         # 1.13.3：转存记录页瘦身为失败记录页，导航标题同步改名。
+        # v1.31.0：重复扫描独立成导航，侧栏是五项。
         nav = _registration().get_sidebar_nav()
         by_key = {item["nav_key"]: item for item in nav}
         self.assertEqual(
             [item["nav_key"] for item in nav],
-            ["channels", "tg-monitor", "history", "funnel"],
+            ["channels", "tg-monitor", "history", "funnel", "duplicates"],
         )
         self.assertNotIn("organize", by_key)
         monitor = by_key["tg-monitor"]

@@ -32,6 +32,7 @@ export default defineConfig({
                 "./AppPageChannels": "./src/components/AppPageChannels.vue",
                 "./AppPageTgMonitor": "./src/components/AppPageTgMonitor.vue",
                 "./AppPageFunnel": "./src/components/AppPageFunnel.vue",
+                "./AppPageDuplicates": "./src/components/AppPageDuplicates.vue",
             },
             shared: {
                 vue: {requiredVersion: false, generate: false},
