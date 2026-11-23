@@ -224,11 +224,70 @@
         <v-btn icon="mdi-close" size="small" variant="text" @click="snack.show = false" />
       </template>
     </v-snackbar>
+
+    <!-- 确认对话框：替换原生 window.confirm（云端浏览器点不了原生确认框）。
+         取消只关框、不调任何 API；确认跑原来 confirm 之后的那段逻辑；
+         文案与原来 lines 的内容、顺序一字不差，用 slot 的 div 逐行渲染。 -->
+    <ConfirmDialog
+      v-model="deleteConfirmVisible"
+      title="删除重复"
+      icon="mdi-delete-outline"
+      icon-color="error"
+      confirm-text="确认删除"
+      confirm-color="error"
+      :loading="Boolean(deletingKey)"
+      :persistent="Boolean(deletingKey)"
+      @confirm="confirmDeleteGroup">
+      <div
+        v-for="(line, index) in deleteConfirmLines"
+        :key="index"
+        class="text-body-2"
+        :class="index === 0 ? 'font-weight-medium' : 'text-medium-emphasis mt-1'">
+        {{ line }}
+      </div>
+    </ConfirmDialog>
+    <ConfirmDialog
+      v-model="batchConfirmVisible"
+      title="批量删除同视频组"
+      icon="mdi-delete-outline"
+      icon-color="error"
+      confirm-text="确认删除"
+      confirm-color="error"
+      :loading="batchDeleting"
+      :persistent="batchDeleting"
+      @confirm="confirmDeleteSameVideoBatch">
+      <div
+        v-for="(line, index) in batchConfirmLines"
+        :key="index"
+        class="text-body-2"
+        :class="index === 0 ? 'font-weight-medium' : 'text-medium-emphasis mt-1'">
+        {{ line }}
+      </div>
+    </ConfirmDialog>
+    <ConfirmDialog
+      v-model="restoreConfirmVisible"
+      title="一键还原"
+      icon="mdi-backup-restore"
+      icon-color="primary"
+      confirm-text="确认还原"
+      confirm-color="primary"
+      :loading="restoring"
+      :persistent="restoring"
+      @confirm="confirmRevertSelectedRestore">
+      <div
+        v-for="(line, index) in restoreConfirmLines"
+        :key="index"
+        class="text-body-2"
+        :class="index === 0 ? 'font-weight-medium' : 'text-medium-emphasis mt-1'">
+        {{ line }}
+      </div>
+    </ConfirmDialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref } from "vue"
+import ConfirmDialog from "../dialogs/ConfirmDialog.vue"
 
 const props = defineProps({
   api: { type: [Object, Function], default: () => ({}) },
@@ -244,6 +303,15 @@ const enrichDone = ref(0)
 const enrichTotal = ref(0)
 const deletingKey = ref("")
 const batchDeleting = ref(false)
+// 确认对话框（替换原生 window.confirm：云端浏览器点不了原生确认框）：
+// 每处操作各一个实例；打开时把文案与操作快照存下来，确认跑原有逻辑。
+const deleteConfirmVisible = ref(false)
+const deleteConfirmGroup = ref(null)
+const deleteConfirmKeepIndex = ref(0)
+const deleteConfirmLines = ref([])
+const batchConfirmVisible = ref(false)
+const batchConfirmTargets = ref([])
+const batchConfirmLines = ref([])
 const error = ref("")
 const message = ref("")
 const snack = reactive({ show: false, text: "", color: "success" })
@@ -265,6 +333,9 @@ const restoreFailed = ref([])
 const restoreListing = ref(false)
 const restoring = ref(false)
 const restoreListed = ref(false)
+const restoreConfirmVisible = ref(false)
+const restoreConfirmItems = ref([])
+const restoreConfirmLines = ref([])
 
 function unwrap(result) {
   if (result && typeof result === "object" && "data" in result) return result.data
@@ -504,7 +575,20 @@ async function deleteGroup(group) {
       : []),
     "删后不可恢复。",
   ]
-  if (!window.confirm(lines.join("\n"))) return
+  // 原生 window.confirm 云端浏览器点不了，改走 ConfirmDialog：先把
+  // 文案与操作快照存下来再弹框，确认后由 confirmDeleteGroup 执行。
+  deleteConfirmGroup.value = group
+  deleteConfirmKeepIndex.value = keepIndex
+  deleteConfirmLines.value = lines
+  deleteConfirmVisible.value = true
+}
+
+async function confirmDeleteGroup() {
+  const group = deleteConfirmGroup.value
+  if (!group) return
+  error.value = ""
+  message.value = ""
+  const keepIndex = deleteConfirmKeepIndex.value
   deletingKey.value = group.key
   try {
     const result = unwrap(
@@ -542,6 +626,8 @@ async function deleteGroup(group) {
     setError(err && err.message ? err.message : String(err))
   } finally {
     deletingKey.value = ""
+    deleteConfirmVisible.value = false
+    deleteConfirmGroup.value = null
   }
 }
 
@@ -560,7 +646,18 @@ async function deleteSameVideoBatch() {
     "若选中的那份名字在网盘已不存在，删除时会自动改保留规范名那份。",
     "删后不可恢复。",
   ]
-  if (!window.confirm(lines.join("\n"))) return
+  // 原生 window.confirm 云端浏览器点不了，改走 ConfirmDialog：先把
+  // 文案与操作快照存下来再弹框，确认后由 confirmDeleteSameVideoBatch 执行。
+  batchConfirmTargets.value = targets
+  batchConfirmLines.value = lines
+  batchConfirmVisible.value = true
+}
+
+async function confirmDeleteSameVideoBatch() {
+  const targets = batchConfirmTargets.value
+  if (!targets.length) return
+  error.value = ""
+  message.value = ""
   batchDeleting.value = true
   try {
     const items = targets.map((group) => ({
@@ -598,6 +695,7 @@ async function deleteSameVideoBatch() {
     setError(err && err.message ? err.message : String(err))
   } finally {
     batchDeleting.value = false
+    batchConfirmVisible.value = false
   }
 }
 
@@ -651,7 +749,18 @@ async function revertSelectedRestore() {
     ...selected.slice(0, 10).map((candidate) => `· ${candidate.name || candidate.rid}`),
     ...(selected.length > 10 ? [`· ……等 ${selected.length} 条`] : []),
   ]
-  if (!window.confirm(lines.join("\n"))) return
+  // 原生 window.confirm 云端浏览器点不了，改走 ConfirmDialog：先把
+  // 文案与操作快照存下来再弹框，确认后由 confirmRevertSelectedRestore 执行。
+  restoreConfirmItems.value = selected
+  restoreConfirmLines.value = lines
+  restoreConfirmVisible.value = true
+}
+
+async function confirmRevertSelectedRestore() {
+  const selected = restoreConfirmItems.value
+  if (!selected.length) return
+  error.value = ""
+  message.value = ""
   restoring.value = true
   try {
     const result = unwrap(
@@ -686,6 +795,7 @@ async function revertSelectedRestore() {
     setError(err && err.message ? err.message : String(err))
   } finally {
     restoring.value = false
+    restoreConfirmVisible.value = false
   }
 }
 </script>
