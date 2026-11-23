@@ -2,44 +2,22 @@
   <!-- v1.31.0 重复扫描：同一集多份 .strm 的发现、核对与删除。
        扫描只读本地 .strm 文件（零网盘调用）；核对大小按 115 列表取视频
        实际大小；删除人工确认、逐项核对后才删（视频 + STRM + 同名 NFO）。
-       视觉重做（移动优先 390px）：sticky 汇总条 + 卡片式分组 + 底部固定
-       toast——结果提示不再只写在页面顶部，滚到下方也能看到。 -->
-  <div class="duplicates-queue">
-    <div class="dup-summary">
-      <div class="dup-summary-head">
-        <div class="dup-summary-titles">
-          <h1 class="dup-title">重复扫描</h1>
-          <p class="dup-subtitle">
-            <template v-if="scanned">
-              上次扫描 {{ formatSavedAt(savedAt) }} · 已扫 {{ dirsScanned }} 个目录、{{ strmCount }} 个 STRM
-            </template>
-            <template v-else>扫描本地 .strm 文件，发现同一集的多余副本</template>
-          </p>
-        </div>
-        <div v-if="scanned" class="dup-stats">
-          <span class="dup-stat">
-            <strong>{{ groups.length }}</strong>
-            组重复
-          </span>
-          <span v-if="sameVideoGroups.length" class="dup-stat">
-            <strong>{{ sameVideoGroups.length }}</strong>
-            组同视频
-          </span>
-        </div>
-      </div>
-      <div v-if="enriching" class="dup-progress" role="status">
-        <span class="dup-progress-text">正在核对视频大小…（{{ enrichDone }}/{{ enrichTotal }} 组）</span>
-        <div class="dup-progress-track">
-          <div
-            class="dup-progress-fill"
-            :style="{ width: enrichTotal ? `${Math.round((enrichDone / enrichTotal) * 100)}%` : '0%' }" />
-        </div>
-      </div>
-      <div class="dup-actions">
-        <v-btn size="small" variant="flat" color="primary" :loading="scanning" @click="scanNow()">开始扫描</v-btn>
+       表现层复用 MP 原生写法（FunnelQueue 同款 v-card / v-radio /
+       v-snackbar），不自定义样式：字号与间距全部走 Vuetify 默认与
+       MP 页面现有的工具类。 -->
+  <div>
+    <v-card class="cs-card-clean mb-4">
+      <v-card-title class="d-flex align-center flex-wrap ga-2">
+        <span>重复扫描</span>
+        <v-chip v-if="scanned" size="small" variant="tonal">{{ groups.length }} 组重复</v-chip>
+        <v-chip v-if="sameVideoGroups.length" size="small" variant="tonal">
+          {{ sameVideoGroups.length }} 组同视频
+        </v-chip>
+        <v-spacer />
+        <v-btn size="small" color="primary" variant="flat" :loading="scanning" @click="scanNow()">开始扫描</v-btn>
         <v-btn
           size="small"
-          variant="outlined"
+          variant="tonal"
           :loading="enriching"
           :disabled="!scanned || !groups.length"
           @click="enrichNow">
@@ -55,34 +33,128 @@
           @click="deleteSameVideoBatch">
           批量删除同视频组（{{ sameVideoGroups.length }} 组）
         </v-btn>
-      </div>
-    </div>
+      </v-card-title>
+      <v-card-text class="pt-0 text-medium-emphasis">
+        扫描递归走 .strm 根目录，只读本地文件，不访问网盘；三种文件名算同一集（没标签 / 带 {tmdb-} 标签 / 带 .mp4
+        后缀）。保留规则：同一视频保留规范名那份——名字当前在网盘里的那份，删了不会再生；不同视频保留最大的那份。删除前请确认保留哪一份。
+        <span v-if="scanned">
+          上次扫描 {{ formatSavedAt(savedAt) }} · 已扫 {{ dirsScanned }} 个目录、{{ strmCount }} 个 STRM。根目录：{{
+            strmRoot || "—"
+          }}。
+        </span>
+      </v-card-text>
+      <v-card-text v-if="enriching" class="pt-0">
+        <div class="text-caption text-medium-emphasis mb-1">
+          正在核对视频大小…（{{ enrichDone }}/{{ enrichTotal }} 组）
+        </div>
+        <v-progress-linear
+          :model-value="enrichTotal ? (enrichDone / enrichTotal) * 100 : 0"
+          color="primary"
+          height="4"
+          rounded />
+      </v-card-text>
+    </v-card>
 
-    <p class="dup-intro">
-      扫描递归走 .strm 根目录，只读本地文件，不访问网盘；三种文件名算同一集（没标签 / 带 {tmdb-} 标签 / 带 .mp4
-      后缀）。保留规则：同一视频保留规范名那份——名字当前在网盘里的那份，删了不会再生；不同视频保留最大的那份。删除前请确认保留哪一份。
-      <span v-if="scanned">根目录：{{ strmRoot || "—" }}。</span>
-    </p>
+    <!-- v1.31.6 回收站恢复：2026-11-23 批量删除误删的 115 视频（48 个文件 +
+         32 个目录）还在 115 回收站里（30 天内可还原）。先按事发窗口列出
+         候选，用户勾选确认后一键还原，还原后逐项重查回收站核对。 -->
+    <v-card class="cs-card-clean mb-4">
+      <v-card-title class="d-flex align-center flex-wrap ga-2">
+        <span>回收站恢复</span>
+        <v-chip v-if="restoreCandidates.length" size="small" variant="tonal">
+          {{ restoreCandidates.length }} 条可恢复
+        </v-chip>
+        <v-spacer />
+        <v-btn
+          size="small"
+          color="primary"
+          variant="flat"
+          :loading="restoreListing"
+          :disabled="restoring"
+          @click="listRestoreCandidates">
+          查找可恢复的误删文件
+        </v-btn>
+        <v-btn
+          v-if="restoreCandidates.length"
+          size="small"
+          variant="tonal"
+          color="error"
+          :loading="restoring"
+          :disabled="!selectedRestoreRids.length || restoreListing"
+          @click="revertSelectedRestore">
+          一键还原（{{ selectedRestoreRids.length }} 条）
+        </v-btn>
+      </v-card-title>
+      <v-card-text class="pt-0 text-medium-emphasis">
+        2026-11-23 批量删除误删的视频还在 115 回收站里（30 天内可还原）。默认按事发窗口 16:25–16:55
+        查找，列出后勾选确认再还原；还原后逐项重查回收站核对，失败的会列出来。还原完丢的 .strm 可用 STRM
+        全量校准重建。
+      </v-card-text>
+      <v-card-text v-if="restoreListed && !restoreCandidates.length" class="pt-0 text-medium-emphasis">
+        该窗口内没有找到可恢复的记录（可能已还原，或不在这个时间窗口内）。
+      </v-card-text>
+      <v-card-text v-if="restoreCandidates.length" class="pt-0">
+        <v-checkbox
+          v-for="candidate in restoreCandidates"
+          :key="candidate.rid"
+          v-model="selectedRestoreRids"
+          :value="candidate.rid"
+          density="compact"
+          hide-details>
+          <template #label>
+            <div>
+              <div class="text-body-2 text-break">
+                {{ candidate.name || candidate.rid }}
+                <v-chip v-if="candidate.is_dir" size="x-small" variant="tonal" class="ml-1">文件夹</v-chip>
+              </div>
+              <div class="text-caption text-medium-emphasis">
+                <span v-if="candidate.size !== null && candidate.size !== undefined">
+                  {{ formatSize(candidate.size) }} ·
+                </span>
+                删除于 {{ formatDeletedAt(candidate.deleted_at) }}
+              </div>
+            </div>
+          </template>
+        </v-checkbox>
+      </v-card-text>
+      <v-card-text v-if="restoreFailed.length" class="pt-0">
+        <div class="text-caption text-medium-emphasis mb-1">还原失败：</div>
+        <div v-for="item in restoreFailed" :key="item.rid" class="text-body-2 text-error">
+          {{ item.name || item.rid }}（{{ item.reason }}）
+        </div>
+      </v-card-text>
+    </v-card>
 
-    <v-alert v-if="error" type="error" variant="tonal" class="dup-alert" closable @click:close="error = ''">
+    <v-alert
+      v-if="error"
+      type="error"
+      variant="tonal"
+      density="compact"
+      class="mb-4"
+      closable
+      @click:close="error = ''">
       {{ error }}
     </v-alert>
-    <v-alert v-if="message" type="success" variant="tonal" class="dup-alert" closable @click:close="message = ''">
+    <v-alert
+      v-if="message"
+      type="success"
+      variant="tonal"
+      density="compact"
+      class="mb-4"
+      closable
+      @click:close="message = ''">
       {{ message }}
     </v-alert>
 
-    <div v-if="scanned && !groups.length" class="dup-empty">没有发现重复，可以放心。</div>
+    <div v-if="scanned && !groups.length" class="text-medium-emphasis">没有发现重复，可以放心。</div>
 
-    <v-card v-for="group in groups" :key="group.key" class="cs-card-clean dup-group">
-      <div class="dup-group-head">
-        <div class="dup-group-titles">
-          <div class="dup-group-title">{{ group.title }}</div>
-          <div v-if="group.season_episode" class="dup-group-sub">{{ group.season_episode }}</div>
-        </div>
-        <div class="dup-group-chips">
-          <v-chip size="small" :color="kindColor(group)" variant="tonal">{{ kindLabel(group) }}</v-chip>
-          <v-chip size="small" variant="outlined">{{ group.items.length }} 份</v-chip>
-        </div>
+    <v-card v-for="group in groups" :key="group.key" class="cs-card-clean mb-4">
+      <v-card-title class="d-flex align-center flex-wrap ga-2">
+        <span>{{ group.title }}</span>
+        <span v-if="group.season_episode" class="text-body-2 text-medium-emphasis">{{ group.season_episode }}</span>
+        <v-chip size="small" :color="kindColor(group)" variant="tonal">{{ kindLabel(group) }}</v-chip>
+        <v-chip size="small" variant="outlined">{{ group.items.length }} 份</v-chip>
+        <v-spacer />
         <v-btn
           size="small"
           variant="outlined"
@@ -92,64 +164,71 @@
           @click="deleteGroup(group)">
           删除重复
         </v-btn>
-      </div>
-      <div class="dup-group-body">
-        <p v-if="group.kind === 'unknown'" class="dup-note">
+      </v-card-title>
+      <v-card-text class="pt-0">
+        <div v-if="group.kind === 'unknown'" class="text-caption text-medium-emphasis">
           读不到 pickcode，无法确认视频身份，不能删除——请人工核对后手动处理。
-        </p>
-        <p v-if="group.kind === 'different-video' && group.suggested_keep === null" class="dup-note">
-          视频大小未知，无法按“留大”建议，请人工选择保留哪一份。
-        </p>
+        </div>
+        <div
+          v-if="group.kind === 'different-video' && group.suggested_keep === null"
+          class="text-caption text-medium-emphasis">
+          视频大小未知，无法按大小给出建议，请人工选择保留哪一份。
+        </div>
         <v-radio-group
           :model-value="keepByKey[group.key]"
           density="compact"
-          class="dup-radios"
+          hide-details
           @update:model-value="(value) => onKeepChange(group, value)">
-          <div
+          <v-radio
             v-for="(item, index) in group.items"
             :key="item.file_name"
-            class="dup-item"
-            :class="{ 'dup-item--kept': index === keepByKey[group.key] }"
-            @click="onKeepChange(group, index)">
-            <v-radio :value="index" density="compact" hide-details class="dup-item-radio" />
-            <div class="dup-item-main">
-              <div class="dup-item-name">
-                {{ item.file_name }}
-                <v-chip
-                  v-if="index === keepByKey[group.key]"
-                  size="x-small"
-                  color="success"
-                  variant="tonal"
-                  class="dup-keep-chip">
-                  保留
-                </v-chip>
+            :value="index"
+            density="compact"
+            hide-details>
+            <template #label>
+              <div>
+                <div class="text-body-2 text-break">
+                  {{ item.file_name }}
+                  <v-chip
+                    v-if="index === keepByKey[group.key]"
+                    size="x-small"
+                    color="success"
+                    variant="tonal"
+                    class="ml-1">
+                    保留
+                  </v-chip>
+                </div>
+                <div v-if="item.video_name" class="text-caption text-medium-emphasis text-truncate">
+                  {{ item.video_name }}
+                </div>
+                <div class="text-caption text-medium-emphasis">
+                  STRM {{ formatSize(item.size) }} · pickcode {{ item.pickcode_prefix || "—" }}
+                  <span v-if="item.video_size !== null && item.video_size !== undefined">
+                    · 视频 {{ formatSize(item.video_size) }}
+                  </span>
+                  <span v-else-if="item.kind === 'redirect'">· 视频大小核对中/查不到</span>
+                  <span v-else-if="item.kind === 'share'">· 分享视频（不在自己网盘）</span>
+                </div>
               </div>
-              <div v-if="item.video_name" class="dup-item-video">{{ item.video_name }}</div>
-              <div class="dup-item-meta">
-                STRM {{ formatSize(item.size) }} · pickcode {{ item.pickcode_prefix || "—" }}
-                <span v-if="item.video_size !== null && item.video_size !== undefined">
-                  · 视频 {{ formatSize(item.video_size) }}
-                </span>
-                <span v-else-if="item.kind === 'redirect'">· 视频大小核对中/查不到</span>
-                <span v-else-if="item.kind === 'share'">· 分享视频（不在自己网盘）</span>
-              </div>
-            </div>
-          </div>
+            </template>
+          </v-radio>
         </v-radio-group>
-      </div>
+      </v-card-text>
     </v-card>
 
-    <!-- 底部固定 toast：最新一条结果提示同时写进这里；扫描/重扫只清页面
-         顶部的 inline 提示，不清 toast；点 × 关闭或被下一条提示替换。 -->
-    <div v-if="toast" class="dup-toast" :class="`dup-toast--${toast.kind}`" role="status" aria-live="polite">
-      <span class="dup-toast-text">{{ toast.text }}</span>
-      <button class="dup-toast-close" type="button" aria-label="关闭提示" @click="toast = null">×</button>
-    </div>
+    <!-- 结果提示的第二落点：ChannelManager 同款 v-snackbar（location="bottom"），
+         timeout -1 不自动消失；扫描/重扫只清页面顶部的 inline 提示，不清它。 -->
+    <v-snackbar v-model="snack.show" :timeout="-1" :color="snack.color" location="bottom">
+      {{ snack.text }}
+      <template #actions>
+        <v-btn icon="mdi-close" size="small" variant="text" @click="snack.show = false" />
+      </template>
+    </v-snackbar>
   </div>
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from "vue"
+import { computed, onMounted, reactive, ref } from "vue"
 
 const props = defineProps({
   api: { type: [Object, Function], default: () => ({}) },
@@ -167,7 +246,7 @@ const deletingKey = ref("")
 const batchDeleting = ref(false)
 const error = ref("")
 const message = ref("")
-const toast = ref(null)
+const snack = reactive({ show: false, text: "", color: "success" })
 const groups = ref([])
 const keepByKey = ref({})
 const strmRoot = ref("")
@@ -176,6 +255,16 @@ const strmCount = ref(0)
 const unreadable = ref(0)
 const savedAt = ref(0)
 const scanned = ref(false)
+
+// v1.31.6 回收站恢复：默认窗口 = 事发窗口 2026-11-23 16:25–16:55（本地时区）。
+const RESTORE_WINDOW_START = Math.floor(new Date(2026, 10, 23, 16, 25, 0).getTime() / 1000)
+const RESTORE_WINDOW_END = Math.floor(new Date(2026, 10, 23, 16, 55, 0).getTime() / 1000)
+const restoreCandidates = ref([])
+const selectedRestoreRids = ref([])
+const restoreFailed = ref([])
+const restoreListing = ref(false)
+const restoring = ref(false)
+const restoreListed = ref(false)
 
 function unwrap(result) {
   if (result && typeof result === "object" && "data" in result) return result.data
@@ -214,21 +303,24 @@ function formatSavedAt(seconds) {
   return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false })
 }
 
-// 结果提示双写：inline 提示区（页面顶部）+ 底部固定 toast。扫描/重扫/
-// 删除开头的 inline 清空只清 inline，不动 toast——用户滚到下方也能
-// 看到最新一条结果；toast 只在点 × 或被下一条提示替换时消失。
-function showToast(kind, text) {
-  toast.value = { kind, text }
+// 结果提示双写：inline v-alert（页面顶部）+ 底部 v-snackbar（ChannelManager
+// 同款写法，location="bottom"）。扫描/重扫/删除开头的 inline 清空只清
+// inline，不动 snackbar——滚到下方也能看到最新一条结果；snackbar 用
+// timeout -1（不自动消失），只在点 × 或被下一条提示替换时消失。
+function showSnack(text, color) {
+  snack.text = text
+  snack.color = color
+  snack.show = true
 }
 
 function setMessage(text) {
   message.value = text
-  showToast("success", text)
+  showSnack(text, "success")
 }
 
 function setError(text) {
   error.value = text
-  showToast("error", text)
+  showSnack(text, "error")
 }
 
 async function scanNow(quiet = false) {
@@ -247,7 +339,7 @@ async function scanNow(quiet = false) {
     savedAt.value = data.saved_at || 0
     scanned.value = true
     message.value = `扫描完成：${dirsScanned.value} 个目录、${strmCount.value} 个 STRM，${groups.value.length} 组重复`
-    if (!quiet) showToast("success", message.value)
+    if (!quiet) showSnack(message.value, "success")
     if (groups.value.length) await enrichNow()
   } catch (err) {
     setError(err && err.message ? err.message : String(err))
@@ -437,14 +529,14 @@ async function deleteGroup(group) {
       resultText = `已删除 ${deletedCount} 份重复`
       setMessage(resultText)
     }
-    // 删完重扫：quiet 模式——inline 提示写扫描完成，toast 里留删除结果。
+    // 删完重扫：quiet 模式——inline 提示写扫描完成，snackbar 里留删除结果。
     await scanNow(true)
     // v1.31.4：单组删除也可能纠正保留项（同视频组、原选名字已作废）；
-    // 纠正说明追加到 inline 提示后，toast 同步成“删除结果 + 纠正说明”。
+    // 纠正说明追加到 inline 提示后，snackbar 同步成“删除结果 + 纠正说明”。
     if (adjustedKeep) {
       const note = `保留项已按规范名调整为第 ${adjustedKeep.to + 1} 份（原选第 ${adjustedKeep.from + 1} 份的名称在网盘已不存在）`
       message.value = message.value ? `${message.value}；${note}` : note
-      showToast(failed.length ? "error" : "success", `${resultText}；${note}`)
+      showSnack(`${resultText}；${note}`, failed.length ? "error" : "success")
     }
   } catch (err) {
     setError(err && err.message ? err.message : String(err))
@@ -508,293 +600,92 @@ async function deleteSameVideoBatch() {
     batchDeleting.value = false
   }
 }
-</script>
 
-<style scoped>
-.duplicates-queue {
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 0 12px 24px;
+function formatDeletedAt(seconds) {
+  const value = Number(seconds) || 0
+  if (!value) return "—"
+  return new Date(value * 1000).toLocaleString("zh-CN", { hour12: false })
 }
 
-/* sticky 汇总条：标题 + 统计 + 进度 + 操作，滚到下方也看得到 */
-.dup-summary {
-  position: sticky;
-  top: 8px;
-  z-index: 20;
-  margin-bottom: 16px;
-  padding: 14px 16px;
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid var(--cs-border-default);
-  border-radius: var(--cs-radius-lg);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
-}
-
-.dup-summary-head {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.dup-summary-titles {
-  min-width: 0;
-}
-
-.dup-title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 1.3;
-}
-
-.dup-subtitle {
-  margin: 4px 0 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: rgb(var(--v-theme-on-surface-variant));
-}
-
-.dup-stats {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 8px;
-}
-
-.dup-stat {
-  padding: 4px 8px;
-  font-size: 12px;
-  color: rgb(var(--v-theme-on-surface-variant));
-  background: rgba(var(--v-theme-surface-variant), 0.4);
-  border: 1px solid var(--cs-border-subtle);
-  border-radius: var(--cs-radius-pill);
-  white-space: nowrap;
-}
-
-.dup-stat strong {
-  font-size: 14px;
-  color: rgb(var(--v-theme-on-surface));
-}
-
-.dup-progress {
-  margin-top: 12px;
-}
-
-.dup-progress-text {
-  font-size: 12px;
-  color: rgb(var(--v-theme-on-surface-variant));
-}
-
-.dup-progress-track {
-  height: 4px;
-  margin-top: 6px;
-  overflow: hidden;
-  background: rgba(var(--v-theme-surface-variant), 0.5);
-  border-radius: var(--cs-radius-pill);
-}
-
-.dup-progress-fill {
-  height: 100%;
-  background: rgb(var(--v-theme-primary));
-  border-radius: var(--cs-radius-pill);
-  transition: width 0.2s ease;
-}
-
-.dup-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.dup-actions .v-btn {
-  min-height: 36px;
-}
-
-.dup-intro {
-  margin: 0 0 12px;
-  font-size: 13px;
-  line-height: 1.7;
-  color: rgb(var(--v-theme-on-surface-variant));
-}
-
-.dup-alert {
-  margin-bottom: 12px;
-}
-
-.dup-empty {
-  padding: 32px 16px;
-  font-size: 14px;
-  text-align: center;
-  color: rgb(var(--v-theme-on-surface-variant));
-  border: 1px dashed var(--cs-border-default);
-  border-radius: var(--cs-radius-lg);
-}
-
-/* 分组卡片 */
-.dup-group {
-  margin-bottom: 12px;
-}
-
-.dup-group-head {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-  padding: 14px 16px 0;
-}
-
-.dup-group-titles {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.dup-group-title {
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 1.4;
-  word-break: break-all;
-}
-
-.dup-group-sub {
-  margin-top: 2px;
-  font-size: 12px;
-  color: rgb(var(--v-theme-on-surface-variant));
-}
-
-.dup-group-chips {
-  display: flex;
-  flex: 0 0 auto;
-  gap: 6px;
-}
-
-.dup-group-body {
-  padding: 4px 16px 16px;
-}
-
-.dup-note {
-  margin: 8px 0 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: rgb(var(--v-theme-on-surface-variant));
-}
-
-.dup-radios {
-  margin: 0;
-  padding: 0;
-}
-
-/* 每份一行：整行可点选，选中态用强调色边框 + 底色 + “保留” chip */
-.dup-item {
-  display: flex;
-  gap: 10px;
-  padding: 10px 12px;
-  margin-top: 8px;
-  cursor: pointer;
-  border: 1px solid var(--cs-border-subtle);
-  border-radius: var(--cs-radius-md);
-  transition:
-    border-color 0.15s ease,
-    background-color 0.15s ease;
-}
-
-.dup-item:hover {
-  border-color: var(--cs-border-active);
-}
-
-.dup-item--kept {
-  background: rgba(var(--v-theme-primary), 0.08);
-  border-color: rgba(var(--v-theme-primary), 0.45);
-}
-
-.dup-item-radio {
-  flex: 0 0 auto;
-  margin-top: 2px;
-}
-
-.dup-item-main {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.dup-item-name {
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.5;
-  word-break: break-all;
-}
-
-.dup-keep-chip {
-  margin-left: 6px;
-  vertical-align: 1px;
-}
-
-.dup-item-video {
-  margin-top: 2px;
-  overflow: hidden;
-  font-size: 12px;
-  line-height: 1.5;
-  color: rgb(var(--v-theme-on-surface-variant));
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.dup-item-meta {
-  margin-top: 2px;
-  font-size: 12px;
-  line-height: 1.6;
-  color: rgb(var(--v-theme-on-surface-variant));
-  word-break: break-all;
-}
-
-/* 底部固定 toast：结果提示的第二落点，扫描/重扫不清它 */
-.dup-toast {
-  position: fixed;
-  right: 12px;
-  bottom: calc(76px + env(safe-area-inset-bottom, 0px));
-  left: 12px;
-  z-index: 100;
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 12px 14px;
-  font-size: 13px;
-  line-height: 1.5;
-  background: rgb(var(--v-theme-surface));
-  border: 1px solid var(--cs-border-default);
-  border-left: 3px solid var(--cs-status-success);
-  border-radius: var(--cs-radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
-}
-
-.dup-toast--error {
-  border-left-color: var(--cs-status-error);
-}
-
-.dup-toast-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  word-break: break-word;
-}
-
-.dup-toast-close {
-  flex: 0 0 auto;
-  padding: 0 4px;
-  font-size: 18px;
-  line-height: 1.2;
-  color: rgb(var(--v-theme-on-surface-variant));
-  cursor: pointer;
-  background: none;
-  border: none;
-}
-
-@media (min-width: 640px) {
-  .dup-toast {
-    right: auto;
-    bottom: 24px;
-    left: 50%;
-    width: min(560px, calc(100vw - 24px));
-    transform: translateX(-50%);
+// v1.31.6 回收站恢复：先按事发窗口列出候选（默认全选），用户勾选确认后
+// 一键还原；还原后逐项重查回收站核对，还原成功的从列表里移除，失败的
+// 留在下方失败列表里。还原只认这份清单，不做“全部还原”。
+async function listRestoreCandidates() {
+  restoreListing.value = true
+  error.value = ""
+  try {
+    const result = unwrap(
+      await props.api.post(`plugin/${props.pluginId}/recyclebin/list`, {
+        window_start: RESTORE_WINDOW_START,
+        window_end: RESTORE_WINDOW_END,
+      }),
+    )
+    if (result && result.success === false) throw new Error(result.message || "查找失败")
+    const data = result || {}
+    restoreCandidates.value = data.candidates || []
+    selectedRestoreRids.value = restoreCandidates.value.map((candidate) => candidate.rid)
+    restoreFailed.value = []
+    restoreListed.value = true
+    if (restoreCandidates.value.length) {
+      message.value = `找到 ${restoreCandidates.value.length} 条可恢复的记录（共扫 ${data.scanned || 0} 条），请勾选确认后一键还原`
+    } else {
+      message.value = "该窗口内没有找到可恢复的记录"
+    }
+  } catch (err) {
+    setError(err && err.message ? err.message : String(err))
+  } finally {
+    restoreListing.value = false
   }
 }
-</style>
+
+async function revertSelectedRestore() {
+  const selected = restoreCandidates.value.filter((candidate) =>
+    selectedRestoreRids.value.includes(candidate.rid),
+  )
+  if (!selected.length) return
+  error.value = ""
+  message.value = ""
+  const lines = [
+    `确定还原选中的 ${selected.length} 条记录吗？`,
+    "还原回 115 里的原位置；还原后逐项重查回收站核对。",
+    ...selected.slice(0, 10).map((candidate) => `· ${candidate.name || candidate.rid}`),
+    ...(selected.length > 10 ? [`· ……等 ${selected.length} 条`] : []),
+  ]
+  if (!window.confirm(lines.join("\n"))) return
+  restoring.value = true
+  try {
+    const result = unwrap(
+      await props.api.post(`plugin/${props.pluginId}/recyclebin/revert`, {
+        items: selected.map((candidate) => ({
+          rid: candidate.rid,
+          name: candidate.name,
+          original_path: candidate.original_path || null,
+        })),
+        window_start: RESTORE_WINDOW_START,
+        window_end: RESTORE_WINDOW_END,
+      }),
+    )
+    if (result && result.success === false) throw new Error(result.message || "还原失败")
+    const data = result || {}
+    const restored = data.restored || []
+    const failed = data.failed || []
+    restoreFailed.value = failed
+    if (restored.length) {
+      const restoredRids = new Set(restored.map((item) => item.rid))
+      restoreCandidates.value = restoreCandidates.value.filter(
+        (candidate) => !restoredRids.has(candidate.rid),
+      )
+      selectedRestoreRids.value = selectedRestoreRids.value.filter((rid) => !restoredRids.has(rid))
+    }
+    if (failed.length) {
+      setError(`还原完成：还原 ${restored.length} 条，${failed.length} 条失败（见下方列表）`)
+    } else {
+      setMessage(`还原完成：还原 ${restored.length} 条；丢的 .strm 可用 STRM 全量校准重建`)
+    }
+  } catch (err) {
+    setError(err && err.message ? err.message : String(err))
+  } finally {
+    restoring.value = false
+  }
+}
+</script>

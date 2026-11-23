@@ -531,6 +531,23 @@ class MoviePilotRegistration(OwnerDelegator):
                 "auth": "bear",
                 "summary": "重复扫描状态读取：离开页面回来恢复上次扫描结果",
             },
+            # v1.31.6 回收站恢复：2026-11-23 批量删除误删的 115 视频
+            # （48 个文件 + 32 个目录）从回收站还原。先列窗口内候选给用户
+            # 确认，再只还原确认过的 rid，逐项重查回收站核对。
+            {
+                "path": "/recyclebin/list",
+                "endpoint": self.api_vue_recyclebin_list,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "回收站恢复：按删除时间窗口列出可还原的回收站记录",
+            },
+            {
+                "path": "/recyclebin/revert",
+                "endpoint": self.api_vue_recyclebin_revert,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "回收站恢复：只还原前端确认过的 rid 清单，逐项核对",
+            },
             {
                 "path": "/tg/transfer",
                 "endpoint": self.api_vue_tg_transfer,

@@ -45,6 +45,7 @@ from .matching import FileMatchingService
 from .media_refresh import MediaRefreshMixin
 from .media_targets import MediaTargetsService
 from .mp_organize import MpOrganizeMixin
+from .recyclebin_restore import RecyclebinRestoreService
 from .strm_duplicates import StrmDuplicatesService
 from .strm_ops import StrmOpsMixin
 from .transfer_ops import TransferOpsMixin
@@ -95,6 +96,8 @@ from ...utils import (
     StrmTemplateError,
 )
 from ...utils.cache import create_platform_ttl_cache
+from ...utils.path_map import map_local_to_server_path
+from ...utils.strm_deletion_suppression import StrmDeletionSuppression
 
 # Phase 5（v1.19.0）：显式组合——26 个职责组件以具名服务字段持有。
 # 构造顺序沿用旧 _COMPONENT_TYPES（顺序本身不再有解析语义，删掉
@@ -131,6 +134,7 @@ COMPONENT_FIELDS = (
     ("history_backfill", HistoryBackfillService),
     ("funnel", FunnelService),
     ("strm_duplicates", StrmDuplicatesService),
+    ("recyclebin_restore", RecyclebinRestoreService),
 )
 
 
@@ -151,6 +155,11 @@ class SyncHandler:
     _FINALIZE_LOCATE_TIMEOUT_SECONDS = 120.0
     _FILE_FINALIZE_TIMEOUT = 30 * 60
     _OFFLINE_MONITOR_LEASE_SECONDS = 15 * 60
+    # v1.31.6：插件自删 .strm 的深度删除屏蔽 TTL（秒）与表上限。
+    # Emby 事件延迟实测最长约 11 分钟，30 分钟留足余量；过期即恢复
+    # 正常删除（见 utils/strm_deletion_suppression 模块注释）。
+    _STRM_DELETION_SUPPRESSION_TTL_SECONDS = 30 * 60
+    _STRM_DELETION_SUPPRESSION_MAX_ENTRIES = 1000
     # v1.26.0：待后处理记录的绝对过期（自首次出现起算）。created_at 会被
     # 重登记重置（_build_pending_record 的 fresh_attempt），不能当作时钟；
     # first_seen_at 在重登记时保留（见 _build_pending_record），只增不减。
@@ -235,6 +244,13 @@ class SyncHandler:
         self._init_cloud_paths(cloud_transfer_path, cloud_media_root, cloud_transfer_paths, cloud_media_paths)
         self._init_strm_media_server(_get_val)
         self._init_locks_caches()
+        # v1.31.6：插件自删 .strm 的短期屏蔽表（防 Emby 深度删除连锁）。
+        # 删除动作都在本处理器侧组件里，登记经下面两个方法；webhook
+        # 处理器经 self._sync_handler 查表。
+        self._strm_deletion_suppression = StrmDeletionSuppression(
+            ttl_seconds=self._STRM_DELETION_SUPPRESSION_TTL_SECONDS,
+            max_entries=self._STRM_DELETION_SUPPRESSION_MAX_ENTRIES,
+        )
 
     def _init_host_handles(self, cloud_drive, search_handler, subscribe_handler, chain):
         """Phase 5 第 3 项（v1.20.0）：宿主句柄：网盘/搜索/订阅处理器与 MediaChain，缺省时从插件上取。原 __init__ 第 213-233 行原样搬移，行为不变。"""
@@ -778,6 +794,38 @@ class SyncHandler:
     def delete_by_media_server_paths(self, paths: List[str]) -> Dict[str, int]:
         return self.history_cleanup.delete_by_media_server_paths(paths)
 
+    def suppress_strm_deletion(self, local_path: Any) -> bool:
+        """登记一条插件主动删除的本地 .strm（防 Emby 深度删除连锁）。
+
+        本地路径先按 ``media_server_path_mappings`` 翻译成媒体服务器口径
+        （如 ``/strm/...`` → ``/media/strm/...``，与 webhook 传来的
+        ``item_path`` 同口径），同时登记翻译后与原始两条——映射未配时
+        webhook 也可能直接带本地口径。登记失败只记 debug，不抛错。
+        """
+        table = self.__dict__.get("_strm_deletion_suppression")
+        if table is None:
+            return False
+        try:
+            text = str(local_path or "").strip()
+            if not text:
+                return False
+            mappings = str(getattr(self, "_media_server_path_mappings", "") or "")
+            server_path = map_local_to_server_path(text, mappings)
+            return table.suppress_many([server_path, text]) > 0
+        except Exception as error:  # noqa: BLE001 - 登记失败不影响删除主流程
+            logger.debug(f"登记 STRM 删除屏蔽失败：{local_path}，{error}", exc_info=True)
+            return False
+
+    def is_strm_deletion_suppressed(self, server_path: Any) -> bool:
+        """该媒体服务器路径是否在插件自删 STRM 屏蔽期内；表缺失按未屏蔽走。"""
+        table = self.__dict__.get("_strm_deletion_suppression")
+        if table is None:
+            return False
+        try:
+            return bool(table.is_suppressed(server_path))
+        except Exception:  # noqa: BLE001 - 查表失败按未屏蔽走
+            return False
+
     def delete_pending_finalize_tasks(self, pending_keys: Set[str], task_ids: Optional[Set[str]]=None) -> int:
         return self.postprocess.delete_pending_finalize_tasks(pending_keys, task_ids)
 
@@ -914,6 +962,14 @@ class SyncHandler:
     def duplicates_delete_batch(self, items) -> Dict[str, Any]:
         """v1.31.3 重复扫描：批量删除重复组（逐组复用单组删除校验）。"""
         return self.strm_duplicates.duplicates_delete_batch(items)
+
+    def restore_list_candidates(self, window_start=None, window_end=None) -> Dict[str, Any]:
+        """v1.31.6 回收站恢复：按删除时间窗口列出可还原的回收站记录。"""
+        return self.recyclebin_restore.restore_list_candidates(window_start, window_end)
+
+    def restore_revert(self, items, window_start=None, window_end=None) -> Dict[str, Any]:
+        """v1.31.6 回收站恢复：只还原调用方确认过的 rid，逐项核对。"""
+        return self.recyclebin_restore.restore_revert(items, window_start, window_end)
 
     def funnel_run_scan_dry_run(self, trigger: str = "手动") -> Dict[str, Any]:
         """v1.30.0 阶段 4：04:00 扫描对账（默认 dry-run，只分类记日志）。"""

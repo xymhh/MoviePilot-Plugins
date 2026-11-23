@@ -16,6 +16,7 @@ from .search import SearchApi
 from .sync import SyncApi
 from .tg import TgMonitorApi
 from .funnel import FunnelApi
+from .recyclebin_restore import RecyclebinRestoreApi
 from .strm_duplicates import StrmDuplicatesApi
 
 __all__ = [
@@ -35,5 +36,6 @@ __all__ = [
     "SyncApi",
     "TgMonitorApi",
     "FunnelApi",
+    "RecyclebinRestoreApi",
     "StrmDuplicatesApi",
 ]

@@ -13,6 +13,7 @@ from app.schemas.types import MediaType
 from ...core import OwnerDelegator
 from ...core.episode_parse import VIDEO_SUFFIXES
 from ...core.media import list_subscribes_by_tmdb_id
+from ...utils.strm_deletion_suppression import suppress_deleted_strm_path
 
 
 class HistoryCleanupService(OwnerDelegator):
@@ -435,6 +436,10 @@ class HistoryCleanupService(OwnerDelegator):
                 )
                 if strm_path.is_file():
                     strm_path.unlink()
+                    # v1.31.6：深度删除自己清掉的本地 STRM 也会再触发
+                    # Emby library.deleted，登记屏蔽防循环触发（否则
+                    # 同集另一份视频可能被按季集匹配再删一次）。
+                    suppress_deleted_strm_path(self, strm_path)
                     strm_deleted += 1
                 self._delete_local_metadata_for_stem(strm_path)
                 local_directory = strm_path.parent
@@ -598,6 +603,10 @@ class HistoryCleanupService(OwnerDelegator):
             return 0
         try:
             removed = sum(1 for item in resolved.rglob("*") if item.is_file())
+            # v1.31.6：整目录删掉前先登记目录下全部 .strm 的屏蔽，
+            # 防 Emby 事件回流再触发深度删除。
+            for strm_path in resolved.rglob("*.strm"):
+                suppress_deleted_strm_path(self, strm_path)
             shutil.rmtree(resolved)
         except Exception as error:
             logger.warning(f"深度删除兜底：清理本地媒体目录失败 {resolved} - {error}")
@@ -653,6 +662,9 @@ class HistoryCleanupService(OwnerDelegator):
                 )
                 if strm_path.is_file():
                     strm_path.unlink()
+                    # v1.31.6：历史删除联动清掉的本地 STRM 同样登记屏蔽，
+                    # 防 Emby 事件回流再触发深度删除。
+                    suppress_deleted_strm_path(self, strm_path)
                     strm_deleted += 1
                 self._delete_local_metadata_for_stem(strm_path)
                 local_directory = strm_path.parent
@@ -791,6 +803,10 @@ class HistoryCleanupService(OwnerDelegator):
                     result["cloud_handled"].update(id(entry["record"]) for entry in entries)
                     result["cloud_files_deleted"] += len(entries)
                     result["cloud_directories_deleted"] += 1
+                # v1.31.6：整目录删掉前先登记目录下全部 .strm 的屏蔽，
+                # 防 Emby 事件回流再触发深度删除。
+                for strm_path in current_strms:
+                    suppress_deleted_strm_path(self, strm_path)
                 shutil.rmtree(media_directory)
                 result["local_handled"].update(id(entry["record"]) for entry in entries)
                 result["local_directories_deleted"] += 1
@@ -820,6 +836,10 @@ class HistoryCleanupService(OwnerDelegator):
                     )
                     result["cloud_files_deleted"] += len(season_entries)
                     result["cloud_directories_deleted"] += 1
+                # v1.31.6：整季目录删掉前先登记目录下全部 .strm 的屏蔽
+                # （rmtree 递归删，glob 只取顶层不够，用 rglob 全取）。
+                for strm_path in season_directory.rglob("*.strm"):
+                    suppress_deleted_strm_path(self, strm_path)
                 shutil.rmtree(season_directory)
                 result["local_handled"].update(
                     id(entry["record"]) for entry in season_entries

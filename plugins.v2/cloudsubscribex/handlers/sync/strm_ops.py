@@ -19,6 +19,7 @@ from ...utils import (
     rebuild_strm_by_export_tree,
     rebuild_strm_tree,
 )
+from ...utils.strm_deletion_suppression import suppress_deleted_strm_path
 from ...utils.legacy_strm import iter_strm_files, migrate_strm_content
 from .strm_duplicates import cleanup_sibling_strms
 
@@ -149,6 +150,9 @@ class StrmOpsMixin(OwnerDelegator):
             try:
                 if target.exists():
                     target.unlink()
+                    # v1.31.6：插件主动删的分享 .strm 同样会触发 Emby
+                    # library.deleted，登记屏蔽防深度删除连锁。
+                    suppress_deleted_strm_path(self, target)
                     removed += 1
                     removed_paths.append(target)
                 else:
@@ -370,7 +374,11 @@ class StrmOpsMixin(OwnerDelegator):
             # 这里是最后一道。洗版时旧版 .strm 会比 _delete_upgrade_old_strm
             # 早一步被清掉，终态与洗版成功时一致（见 strm_duplicates 模块注释）。
             try:
-                cleanup_sibling_strms(strm_path.parent, strm_path)
+                deleted = cleanup_sibling_strms(strm_path.parent, strm_path)
+                # v1.31.6：清理掉的旧兄弟 .strm 也会触发 Emby
+                # library.deleted，逐条登记屏蔽，防深度删除连锁误删视频。
+                for sibling in deleted or []:
+                    suppress_deleted_strm_path(self, sibling)
             except Exception as error:  # noqa: BLE001 - 清理失败不影响生成
                 logger.warning(f"清理同集旧 STRM 失败：{strm_path}，{error}")
             return strm_path

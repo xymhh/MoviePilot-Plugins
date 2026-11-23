@@ -124,6 +124,14 @@ class P115FileQuery:
     def find_file_strict(self, path: str, file_name: str) -> CloudFile | None:
         return cloud_file(self.manager.find_file_for_delete(path, file_name))
 
+    def list_recyclebin(self, limit: int = 100, offset: int = 0) -> List[dict]:
+        """读一页 115 回收站记录（v1.31.6 一键恢复用）。"""
+        return self.manager.list_recyclebin(limit=limit, offset=offset)
+
+    def recyclebin_info(self, rid: Any) -> dict:
+        """取一条回收站记录的详情（v1.31.6：还原前尽量拿到原路径）。"""
+        return self.manager.recyclebin_info(rid)
+
     def get_cached_file(self, path: str, file_name: str) -> CloudFile | None:
         return cloud_file(self.manager.get_cached_target_file(path, file_name))
 
@@ -182,6 +190,10 @@ class P115FileMutation:
 
     def delete_file(self, file_id: str) -> bool:
         return self.manager.delete_file(file_id)
+
+    def revert_recyclebin(self, rids: Any) -> bool:
+        """还原回收站记录（v1.31.6 一键恢复用，只还原调用方确认过的 rid）。"""
+        return self.manager.revert_recyclebin(rids)
 
 
 @dataclass(frozen=True)
@@ -987,6 +999,105 @@ class P115FileService(OwnerDelegator):
         except Exception as error:
             logger.error(f"批量删除115文件失败：数量={len(file_ids)}，错误：{error}")
             return set()
+
+    def list_recyclebin(self, limit: int = 100, offset: int = 0) -> List[dict]:
+        """读一页 115 回收站记录（v1.31.6 一键恢复用）。
+
+        调 p115client 的 web 口径 ``recyclebin_list``（GET webapi.115.com/rb，
+        aid=7）；按删除时间倒序取（o=dtime, asc=0 是尽力请求，调用方不依赖
+        顺序做正确性判断）。fail-open：客户端未就绪或接口异常记日志返回空
+        列表，不抛到调用方主流程之外。只做列表，绝不做永久删除/清空操作。
+        """
+        if not self.client:
+            return []
+        try:
+            response = self._rate_limited_call(
+                self.client.recyclebin_list,
+                {"limit": max(1, int(limit or 100)), "offset": max(0, int(offset or 0)),
+                "o": "dtime", "asc": 0},
+            )
+        except Exception as error:
+            logger.warning(f"读取115回收站失败：{error}")
+            return []
+        if isinstance(response, list):
+            return [dict(item) for item in response if isinstance(item, dict)]
+        if not isinstance(response, dict):
+            logger.warning(f"读取115回收站返回异常格式：{type(response)}")
+            return []
+        if response.get("state") is False:
+            logger.warning(f"读取115回收站被服务端拒绝：{response.get('error')}")
+            return []
+        items = (
+            response.get("data") or response.get("list")
+            or response.get("items") or []
+        )
+        if not isinstance(items, list):
+            return []
+        return [dict(item) for item in items if isinstance(item, dict)]
+
+    def recyclebin_info(self, rid: Any) -> dict:
+        """取一条回收站记录的详情（v1.31.6：还原前尽量拿到原路径）。
+
+        调 p115client 的 web 口径 ``recyclebin_info``（POST webapi.115.com/
+        rb/rb_info）。fail-open：取不到返回空 dict，调用方跳过原路径核对。
+        """
+        if not self.client or rid in (None, ""):
+            return {}
+        try:
+            response = self._rate_limited_call(
+                self.client.recyclebin_info, str(rid),
+            )
+        except Exception as error:
+            logger.debug(f"读取115回收站记录详情失败：rid={rid}，{error}")
+            return {}
+        if isinstance(response, dict):
+            data = response.get("data")
+            if isinstance(data, dict):
+                return data
+            return response
+        return {}
+
+    def revert_recyclebin(self, rids: Any) -> bool:
+        """还原回收站记录回原位置（v1.31.6 一键恢复用）。
+
+        调 p115client 的 web 口径 ``recyclebin_revert``（POST webapi.115.com/
+        rb/revert），一次提交全部 rid（115 要求还原操作不并发）。只还原调用
+        方确认过的 rid；还原成功后清路径缓存（还原回来的文件要能马上被查到）。
+        fail-open：客户端未就绪或接口异常记日志返回 False。只做还原，绝不
+        做永久删除/清空操作。
+        """
+        if not self.client:
+            return False
+        normalized = list(dict.fromkeys(
+            str(rid).strip() for rid in (rids or [])
+            if rid not in (None, "") and str(rid).strip()
+        ))
+        if not normalized:
+            return False
+        try:
+            response = self._rate_limited_call(
+                self.client.recyclebin_revert, normalized,
+            )
+        except Exception as error:
+            logger.error(f"还原115回收站失败：{len(normalized)} 条，{error}")
+            return False
+        if isinstance(response, dict):
+            if response.get("state") is False:
+                logger.error(
+                    f"还原115回收站被服务端拒绝：{response.get('error')}",
+                )
+                return False
+            errno = response.get("errno")
+            if errno not in (None, 0, "0"):
+                logger.error(f"还原115回收站失败：errno={errno}")
+                return False
+        try:
+            self._target_file_cache.clear()
+            self.path_cache.clear()
+        except Exception as error:  # noqa: BLE001 - 缓存清理失败不影响还原结果
+            logger.debug(f"还原后清理115缓存失败：{error}", exc_info=True)
+        logger.warning(f"115回收站已还原：{len(normalized)} 条")
+        return True
 
     def find_file_for_delete(self, dir_path: str, file_name: str) -> Optional[dict]:
         """严格查询待删除文件，避免把115接口异常误判为文件不存在。"""

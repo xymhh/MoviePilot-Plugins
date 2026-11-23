@@ -30,6 +30,7 @@ from app.schemas.types import MediaType
 
 from ...core import OwnerDelegator
 from ...core.media import list_subscribes_by_tmdb_id, tmdb_id_of
+from ...utils.strm_deletion_suppression import suppress_deleted_strm_path
 
 #: 漏斗 worker 的调度任务 id（复用离线监控的“有待处理才建 job、
 #: 队列空即停 job”模式，见 core/services/offline.py）。
@@ -2146,6 +2147,12 @@ class FunnelService(OwnerDelegator):
         try:
             if path.is_file():
                 path.unlink()
+                # v1.31.6：插件主动删的孤儿 .strm 同样登记屏蔽。
+                # 注意：本函数目前调不到 unlink——local_path 要求
+                # local_root 非空，这里传 "" 会直接抛错返回 False；
+                # 登记行是防御性的，待该路径计算修好后自动生效，
+                # 本次不顺手改它（行为变更，另案处理）。
+                suppress_deleted_strm_path(self, path)
                 logger.info(f"孤儿清理已删 .strm：{path}")
             return True
         except Exception as error:  # noqa: BLE001 - 删失败按未删

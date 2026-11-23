@@ -84,6 +84,7 @@ from ...core.episode_parse import (
     parse_season_episode,
 )
 from ...utils.strm import DEFAULT_VIDEO_EXTENSIONS
+from ...utils.strm_deletion_suppression import suppress_deleted_strm_path
 from .naming import _TMDB_TAG_RE
 
 #: .strm 内容是单行 URL；redirect 形带 pickcode，分享形带 id。
@@ -819,6 +820,24 @@ class StrmDuplicatesService(OwnerDelegator):
         strm_path = local_root / local_path
         try:
             content = strm_path.read_text(encoding="utf-8", errors="ignore")
+        except FileNotFoundError:
+            # v1.31.6：该 .strm 在读到删之间已被别处清掉（例如深度删除
+            # 连锁已删了它，或用户重复点了一次删除）。仅限不用删视频的
+            # 情形（同视频组 / 分享形）按成功计——目标状态（该 STRM
+            # 不在）已达成；不同视频组仍需删网盘视频，文件已不在无法核
+            # 对身份，按失败计、请重新扫描（宁可留着，不可误删）。仍登记
+            # 屏蔽，覆盖已在途的 Emby 删除事件。
+            if group.get("kind") == "same-video" or str(item.get("kind") or "") == "share":
+                suppress_deleted_strm_path(self, strm_path)
+                return {
+                    **base, "success": True,
+                    "message": "本地 STRM 已不存在（可能已被清理），视为已删",
+                    "already_gone": True,
+                }
+            return {
+                **base, "success": False,
+                "message": "本地 STRM 已不存在，无法核对视频身份，请重新扫描",
+            }
         except OSError as error:
             return {**base, "success": False, "message": f"本地 STRM 读不到：{error}"}
         identity = parse_strm_identity(content)
@@ -850,12 +869,18 @@ class StrmDuplicatesService(OwnerDelegator):
         nfo_deleted = False
         try:
             strm_path.unlink()
+        except FileNotFoundError:
+            # 读到删之间被别处清掉（同上），目标状态已达成，按成功计。
+            logger.debug("本地 STRM 已不在（可能已被清理）：%s", strm_path, exc_info=True)
         except OSError as error:
             return {
                 **base, "success": False,
                 "message": f"本地 STRM 删失败：{error}",
                 "video_deleted": video_deleted,
             }
+        # v1.31.6：插件主动删的 .strm 会触发 Emby library.deleted，
+        # 删成功后登记屏蔽，深度删除处理器跳过该路径（防误删网盘视频）。
+        suppress_deleted_strm_path(self, strm_path)
         nfo = nfo_path_for_strm(strm_path)
         try:
             if nfo.is_file():

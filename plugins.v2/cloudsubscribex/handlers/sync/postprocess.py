@@ -19,6 +19,7 @@ from ...core import CloudDriveCapability, OwnerDelegator
 from ...core.failure import apply_failure, failure_retryable_of
 from ...search.subs_filter import anime_file_candidates
 from ...utils import MediaFileParser
+from ...utils.strm_deletion_suppression import suppress_deleted_strm_path
 
 
 class DirectoryFileIndex(dict):
@@ -428,6 +429,10 @@ class PostprocessService(OwnerDelegator):
                 return
             if strm_path.is_file():
                 strm_path.unlink()
+                # v1.31.6：洗版清掉的旧版 .strm 也会触发 Emby
+                # library.deleted，登记屏蔽——否则连锁会按季集匹配把
+                # 刚入库的新版视频也删掉。
+                suppress_deleted_strm_path(self, strm_path)
                 logger.debug(f"洗版清理旧 STRM：{strm_path}")
         except (OSError, ValueError) as error:
             logger.debug(f"洗版清理旧 STRM 失败：{old_dir}/{old_name}，{error}", exc_info=True)

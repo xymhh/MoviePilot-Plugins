@@ -1,7 +1,7 @@
 """Phase 5（v1.19.0）：SyncHandler 显式组合的回归测试。
 
 删掉 ``SyncHandler.__getattr__`` + ``resolve_component`` 的隐式解析后：
-- 28 个职责组件以 COMPONENT_FIELDS 的具名服务字段持有（v1.29.7 加 funnel；v1.31.0 加 strm_duplicates）；
+- 29 个职责组件以 COMPONENT_FIELDS 的具名服务字段持有（v1.29.7 加 funnel；v1.31.0 加 strm_duplicates；v1.31.6 加 recyclebin_restore）；
 - 插件宿主与 core/api、core/hook 经 ``self._sync_handler`` 调用的 35 个
   组件方法，由 SyncHandler 上的显式转发方法承接（调用方不用改）；
 - 组件间调用走 ``self.<字段>.<方法>``（组件内走 ``self._owner.<字段>.<方法>``）；
@@ -67,6 +67,7 @@ EXPECTED_FIELDS = {
     "pt_upgrade", "metadata", "naming", "notifications", "subscribe_flow",
     "platform_history", "media_refresh", "mp_organize", "strm_ops",
     "transfer_ops", "history_backfill", "funnel", "strm_duplicates",
+    "recyclebin_restore",
 }
 
 # （转发方法，具名服务字段，组件类名，调用参数）
@@ -100,7 +101,7 @@ class ExplicitCompositionTests(unittest.TestCase):
         # “是真实类”由 test_component_wiring 与全量套件覆盖。
         fields = dict(_service_module.COMPONENT_FIELDS)
         self.assertEqual(set(fields), EXPECTED_FIELDS)
-        self.assertEqual(len(_service_module.COMPONENT_FIELDS), 28)
+        self.assertEqual(len(_service_module.COMPONENT_FIELDS), 29)
         for field_name, component_type in _service_module.COMPONENT_FIELDS:
             self.assertIsNotNone(component_type, field_name)
 

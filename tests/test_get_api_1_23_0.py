@@ -152,9 +152,11 @@ ALLOWLIST = {
 # 状态保存/读取加 2 条（/duplicates/save-state|load-state，前端
 # DuplicatesQueue.vue 的挂载恢复/每批保存调用，不进 ALLOWLIST）；v1.31.3
 # 批量删除加 1 条（/duplicates/delete-batch，前端 DuplicatesQueue.vue
-# 的“批量删除同视频组”按钮调用，不进 ALLOWLIST）。
-EXPECTED_REGISTERED_ENTRIES = 95
-EXPECTED_REGISTERED_PAIRS = 96
+# 的“批量删除同视频组”按钮调用，不进 ALLOWLIST）；v1.31.6 回收站恢复
+# 加 2 条（/recyclebin/list|revert，前端 DuplicatesQueue.vue 的“回收站
+# 恢复”卡片调用，不进 ALLOWLIST）。
+EXPECTED_REGISTERED_ENTRIES = 97
+EXPECTED_REGISTERED_PAIRS = 98
 
 # 第 5 项：7 个服务层方法的新签名（去掉 apikey 后的剩余参数名）。
 SERVICE_METHOD_PARAMS = {
@@ -205,6 +207,7 @@ _REAL_MODULES = (
     ("cloudsubscribex.core.api.tg", "plugins.v2/cloudsubscribex/core/api/tg.py"),
     ("cloudsubscribex.core.api.funnel", "plugins.v2/cloudsubscribex/core/api/funnel.py"),
     ("cloudsubscribex.core.api.strm_duplicates", "plugins.v2/cloudsubscribex/core/api/strm_duplicates.py"),
+    ("cloudsubscribex.core.api.recyclebin_restore", "plugins.v2/cloudsubscribex/core/api/recyclebin_restore.py"),
     ("cloudsubscribex.core.api.runtime", "plugins.v2/cloudsubscribex/core/api/runtime.py"),
     ("cloudsubscribex.core.api.registration", "plugins.v2/cloudsubscribex/core/api/registration.py"),
 )
@@ -228,6 +231,7 @@ _COMPONENT_MODULE_CLASSES = (
     ("cloudsubscribex.core.api.tg", "TgMonitorApi"),
     ("cloudsubscribex.core.api.funnel", "FunnelApi"),
     ("cloudsubscribex.core.api.strm_duplicates", "StrmDuplicatesApi"),
+    ("cloudsubscribex.core.api.recyclebin_restore", "RecyclebinRestoreApi"),
     ("cloudsubscribex.core.services.runtime", "SyncRuntimeService"),
     ("cloudsubscribex.core.services.offline", "OfflineTaskService"),
     ("cloudsubscribex.core.services.platform", "PlatformIntegrationService"),

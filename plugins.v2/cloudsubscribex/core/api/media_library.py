@@ -16,6 +16,7 @@ from app.log import logger
 from sqlalchemy import func
 
 from ...utils.notify_template import render_template, resolve_template
+from ...utils.strm_deletion_suppression import is_deleted_strm_suppressed
 from ..delegation import OwnerDelegator
 from ...utils.deep_delete_dedupe import DeepDeleteDeduplicator
 from ...utils.deep_delete_match import media_display_name
@@ -135,6 +136,25 @@ class MediaLibraryApi(OwnerDelegator):
         if not paths:
             logger.warning("深度删除通知缺少有效媒体路径 (Item Path)，已跳过")
             return False
+        # v1.31.6：先过滤插件自己删的 .strm（重复清理、单组删除、旧版
+        # 清理等都会触发 Emby library.deleted，2026-11-23 因此误删了
+        # 47 次）。过滤在去重 claim 之前：被屏蔽的路径不消耗去重窗口、
+        # 不删、不发通知，只记一条 debug 日志；全部被屏蔽时直接返回。
+        remaining: List[str] = []
+        suppressed: List[str] = []
+        for path in paths:
+            if is_deleted_strm_suppressed(self._sync_handler, path):
+                suppressed.append(path)
+            else:
+                remaining.append(path)
+        if suppressed:
+            logger.debug(
+                f"深度删除已跳过插件自删 STRM 的屏蔽路径：{suppressed}"
+            )
+        if not remaining:
+            logger.debug("深度删除事件全部命中插件自删 STRM 屏蔽，本次不处理也不再发通知")
+            return False
+        paths = remaining
         paths, duplicates = self._deep_delete_dedup.claim(paths)
         if duplicates:
             logger.debug(
