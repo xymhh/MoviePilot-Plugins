@@ -21,6 +21,17 @@
         >
           重新核对大小
         </v-btn>
+        <v-btn
+          v-if="sameVideoGroups.length"
+          size="small"
+          variant="tonal"
+          color="error"
+          :loading="batchDeleting"
+          :disabled="scanning || enriching"
+          @click="deleteSameVideoBatch"
+        >
+          批量删除同视频组（{{ sameVideoGroups.length }} 组）
+        </v-btn>
       </v-card-title>
       <v-card-text class="pt-0 text-medium-emphasis">
         扫描递归走 .strm 根目录，只读本地文件，不访问网盘；三种文件名算同一集
@@ -104,7 +115,7 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from "vue";
+import { computed, onMounted, ref } from "vue";
 
 const props = defineProps({
   api: { type: [Object, Function], default: () => ({}) },
@@ -119,6 +130,7 @@ const enriching = ref(false);
 const enrichDone = ref(0);
 const enrichTotal = ref(0);
 const deletingKey = ref("");
+const batchDeleting = ref(false);
 const error = ref("");
 const message = ref("");
 const groups = ref([]);
@@ -156,6 +168,12 @@ function kindColor(group) {
   if (group.kind === "different-video") return "warning";
   return "error";
 }
+
+// v1.31.3：批量删除只针对同视频组——删的只是多余 STRM + 同名 NFO，
+// 视频不动，最安全的一批；不同视频组要逐组确认保留哪一份，不批量。
+const sameVideoGroups = computed(() =>
+  groups.value.filter((group) => group.kind === "same-video"),
+);
 
 function formatSavedAt(seconds) {
   const value = Number(seconds) || 0;
@@ -202,8 +220,8 @@ function buildState() {
   };
 }
 
-async function saveState() {
-  if (!scanned.value || !groups.value.length) return;
+async function saveState(force = false) {
+  if (!scanned.value || (!groups.value.length && !force)) return;
   try {
     const result = unwrap(
       await props.api.post(`plugin/${props.pluginId}/duplicates/save-state`, {
@@ -360,6 +378,55 @@ async function deleteGroup(group) {
     error.value = err && err.message ? err.message : String(err);
   } finally {
     deletingKey.value = "";
+  }
+}
+
+// v1.31.3：批量删除全部同视频组——一次请求发给批量接口，后端逐组
+// 复用单组删除校验（重读 STRM 核对 pickcode、find_file_strict、
+// playback 核对），单组失败不中断整批。成功删掉的组直接从列表里
+// 移除并保存状态（不重扫整库）；失败的组留在列表里，原因写进提示。
+async function deleteSameVideoBatch() {
+  const targets = sameVideoGroups.value;
+  if (!targets.length) return;
+  error.value = "";
+  message.value = "";
+  const lines = [
+    `确定批量删除 ${targets.length} 组同视频重复吗？`,
+    "只删多余 STRM + 同名 NFO，视频不动；保留选择按每组当前选中的那一份。",
+    "删后不可恢复。",
+  ];
+  if (!window.confirm(lines.join("\n"))) return;
+  batchDeleting.value = true;
+  try {
+    const items = targets.map((group) => ({
+      group,
+      keep_index: keepByKey.value[group.key] ?? group.suggested_keep ?? 0,
+    }));
+    const result = unwrap(
+      await props.api.post(`plugin/${props.pluginId}/duplicates/delete-batch`, { items }),
+    );
+    const data = result || {};
+    const results = data.results || [];
+    const deletedKeys = results.filter((item) => item.success).map((item) => item.key);
+    const failed = results.filter((item) => !item.success);
+    if (deletedKeys.length) {
+      groups.value = groups.value.filter((group) => !deletedKeys.includes(group.key));
+      for (const key of deletedKeys) delete keepByKey.value[key];
+      // 组删空了也强制保存一次空状态，否则 saveState 的非空守卫会让
+      // 下次打开页面恢复出已删掉的旧组。
+      await saveState(!groups.value.length);
+    }
+    if (failed.length) {
+      error.value = `批量删除完成：删 ${deletedKeys.length} 组，${failed.length} 组失败：${failed
+        .map((item) => `${item.title || item.key}（${item.message}）`)
+        .join("；")}`;
+    } else {
+      message.value = `批量删除完成：删 ${deletedKeys.length} 组同视频重复`;
+    }
+  } catch (err) {
+    error.value = err && err.message ? err.message : String(err);
+  } finally {
+    batchDeleting.value = false;
   }
 }
 </script>

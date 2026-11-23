@@ -642,6 +642,9 @@ class FunnelService(OwnerDelegator):
                 if state == "succeeded":
                     repo.mark_held(row_id, reason="租约过期：MP 整理已成功，需人工确认")
                     logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：MP 整理已成功")
+                    # v1.31.3：同 _fail_row 挂起分支——行已终态，顺手弹出
+                    # 待终态记录，否则成孤儿（任务卡永久 95%）。
+                    self._pop_pending_record(pending_key)
                     stats["held"] += 1
                 elif state in {"failed", "queued", "running", "missing"}:
                     repo.requeue_lease_expired(now=now)
@@ -650,6 +653,7 @@ class FunnelService(OwnerDelegator):
                 else:
                     repo.mark_held(row_id, reason="租约过期：MP 整理状态查不到，需人工确认")
                     logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：MP 整理状态不可用")
+                    self._pop_pending_record(pending_key)
                     stats["held"] += 1
                 continue
             # 无 MP 整理身份：严格落盘实查。
@@ -658,15 +662,20 @@ class FunnelService(OwnerDelegator):
             if landed is None:
                 repo.mark_held(row_id, reason="租约过期：落盘实查不可用，需人工确认")
                 logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：落盘实查不可用")
+                # v1.31.3：同上，挂起即终态，弹出待终态记录防孤儿。
+                self._pop_pending_record(pending_key)
                 stats["held"] += 1
             elif landed:
                 repo.mark_held(row_id, reason="租约过期：文件已落盘，需人工确认")
                 logger.warning(f"漏斗行 #{row_id} 租约过期回收转挂起：文件已落盘")
+                self._pop_pending_record(pending_key)
                 stats["held"] += 1
             else:
                 repo.requeue_lease_expired(now=now)
                 logger.info(f"漏斗行 #{row_id} 租约过期回收重回队列（文件未落盘）")
                 stats["requeued"] += 1
+        if stats["held"]:
+            self._notify_pending_changed()
         return stats
 
     def _strict_landed_check(
@@ -820,6 +829,26 @@ class FunnelService(OwnerDelegator):
                 save(pending)
         except Exception as error:  # noqa: BLE001 - 弹出失败只记日志
             logger.debug(f"漏斗弹出待终态记录失败：{error}", exc_info=True)
+
+    def _notify_pending_changed(self) -> None:
+        """待终态记录增减后通知宿主刷新任务卡与监控（fail-open）。
+
+        宿主按 count_offline_monitor_pending 口径（漏斗行不计入）重算
+        并调 _update_offline_monitor：无待终态项的订阅任务随即翻成
+        已完成，下载页卡片 10 分钟保留期后消失。宿主方法缺失时静默
+        跳过——下一次同步轮次结束或监控更新时同样会刷新。
+        """
+        try:
+            owner = getattr(self, "_owner", None)
+            notify = getattr(owner, "_notify_offline_pending_changed", None)
+            counter = getattr(owner, "count_offline_monitor_pending", None)
+            get_data = getattr(self, "_get_data", None)
+            if not callable(notify) or not callable(counter) or not callable(get_data):
+                return
+            pending = get_data(self._OFFLINE_PENDING_KEY) or {}
+            notify(int(counter(pending)))
+        except Exception as error:  # noqa: BLE001 - 通知失败不影响记账
+            logger.debug(f"漏斗通知待终态变化失败：{error}", exc_info=True)
 
     def _restore_media(self, row: Dict[str, Any], item: Dict[str, Any]):
         media_data = row.get("media_data") or item.get("mediainfo")
@@ -1199,6 +1228,15 @@ class FunnelService(OwnerDelegator):
         if attempts + 1 >= max_attempts:
             repo.mark_held(row_id, reason)
             logger.warning(f"漏斗行 #{row_id} 失败 {attempts + 1} 次已挂起：{reason}")
+            # v1.31.3：挂起即终态——顺手弹出该行对应的待终态记录。
+            # 不弹它就成孤儿：离线监控跳过漏斗记录、worker 不管挂起行、
+            # 6 小时绝对过期也到不了它，所属订阅的任务卡永久停在 95%。
+            # 只在转 held 的分支清；重试分支（attempts 未满）绝不能清，
+            # 行还要靠这条记录重跑。
+            pending_key = str(row.get("pending_key") or "")
+            if pending_key:
+                self._pop_pending_record(pending_key)
+                self._notify_pending_changed()
             if item is not None:
                 self._sync_row_outcome_to_monitor(item, False, reason)
             return "held"
@@ -1513,6 +1551,59 @@ class FunnelService(OwnerDelegator):
         except Exception as error:  # noqa: BLE001 - 查不到按无行处理
             logger.debug(f"漏斗按终态键查行失败：{error}", exc_info=True)
             return None
+
+    def repair_orphan_pending_records(self) -> int:
+        """启动修复（v1.31.3）：清掉漏斗孤儿待终态记录。
+
+        孤儿 = 待终态记录带 funnel_route、但对应的漏斗行已挂起/已完成/
+        不存在：离线监控跳过漏斗记录、worker 不管挂起行、6 小时绝对过期
+        也到不了它们，记录永不结算，所属订阅的任务卡永久停在 95%。
+        只动孤儿：queued/processing/failed 行的记录不动（worker 还在
+        驱动），非漏斗记录不动（归离线监控）。阶段 1 关闭时不扫（那时
+        漏斗记录归监控驱动，不是孤儿）。逐键 fail-closed（查行异常
+        时跳过该键、不弹），整体 fail-open；幂等，返回清掉的条数。
+        """
+        if not self._phase1_enabled:
+            return 0
+        try:
+            repo = self._repository()
+            if repo is None:
+                return 0
+            get_data = getattr(self, "_get_data", None)
+            if not callable(get_data):
+                return 0
+            pending = get_data(self._OFFLINE_PENDING_KEY) or {}
+            if not isinstance(pending, dict) or not pending:
+                return 0
+            orphan_keys = []
+            for key, item in pending.items():
+                if not isinstance(item, dict) or not item.get("funnel_route"):
+                    continue
+                # 直接调仓储方法（不用 FunnelService.find_row_by_pending_key：
+                # 它把异常吞成 None，会把“查不到”等同于“行不存在”而误删；
+                # 这里异常要跳过该键，fail-closed）。
+                try:
+                    row = repo.find_row_by_pending_key(str(key))
+                except Exception as error:  # noqa: BLE001 - 查行异常跳过该键
+                    logger.debug(f"孤儿扫描查行失败，跳过 {key}：{error}", exc_info=True)
+                    continue
+                if row is None or str(row.get("status") or "") in {"held", "done"}:
+                    orphan_keys.append(str(key))
+            if not orphan_keys:
+                return 0
+            for key in orphan_keys:
+                pending.pop(key, None)
+            save = getattr(self, "_save_offline_pending", None)
+            if callable(save):
+                save(pending)
+            logger.info(
+                f"启动修复：清掉 {len(orphan_keys)} 条孤儿待终态记录"
+                "（漏斗行已挂起/已完成/不存在）"
+            )
+            return len(orphan_keys)
+        except Exception as error:  # noqa: BLE001 - 修复失败不挡启动
+            logger.warning(f"清孤儿待终态记录失败：{error}", exc_info=True)
+            return 0
 
     # ------------------------------------------------------------------
     # 阶段 4（v1.30.0）：扫描对账 dry-run、轮次历史、held 认领、孤儿清理

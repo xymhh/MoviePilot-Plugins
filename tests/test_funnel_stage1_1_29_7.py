@@ -1357,7 +1357,15 @@ class FunnelQueueBatchRoutingTests(unittest.TestCase):
         """funnel_route=True 的项：调入队、pending 记录带标记。"""
         handler, store = self._handler()
         calls = []
-        handler.enqueue_funnel_from_pending = lambda *args, **kwargs: calls.append((args, kwargs))
+
+        def _enqueue(*args, **kwargs):
+            calls.append((args, kwargs))
+            return {"id": 1}, True
+
+        # v1.31.3：桩返回合法的 (行, 是否新建) 元组——生产里
+        # enqueue_from_pending 只返回二元组，裸 None 会在解包处抛错、
+        # 被当作入队失败（funnel_route 会被清掉）。
+        handler.enqueue_funnel_from_pending = _enqueue
         result = handler._queue_file_finalize_batch(
             [self._item(funnel_route=True)], None, season=1, sub_key=""
         )
@@ -1961,7 +1969,12 @@ class FunnelOfflineMonitorCountTests(unittest.TestCase):
         handler = self._handler()
         notified = []
         handler._offline_pending_changed = lambda count: notified.append(count)
-        handler.enqueue_funnel_from_pending = lambda item, key, media: None
+        # v1.31.3：桩返回合法的 (行, 是否新建) 元组——生产里
+        # enqueue_from_pending 只返回二元组，裸 None 会在解包处抛错、
+        # 被当作入队失败（funnel_route 会被清掉，通知计数就不是 0）。
+        # 桩必须接受真实调用签名（item, key, media, subscribe_id=, season=），
+        # 否则 TypeError 同样进失败分支。
+        handler.enqueue_funnel_from_pending = lambda *args, **kwargs: ({"id": 1}, True)
         handler._queue_file_finalize_batch(
             [self._item("k1", funnel_route=True)], None, season=1, sub_key=""
         )

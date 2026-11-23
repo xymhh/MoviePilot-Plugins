@@ -679,6 +679,89 @@ class StrmDuplicatesService(OwnerDelegator):
             "data": {"results": results},
         }
 
+    def duplicates_delete_batch(self, items: Any) -> Dict[str, Any]:
+        """批量删除重复组（v1.31.3）：逐组复用单组删除逻辑。
+
+        每组都走 duplicates_delete 的完整校验（重读磁盘 .strm 核对
+        pickcode、find_file_strict、playback 核对）；单组失败不中断
+        整批，逐组收集结果。只删单组删除会删的东西，不多删。
+        返回：{"success": 全组成功, "message": ..., "data":
+        {"deleted": 成功组数, "failed": [失败组...],
+        "total": 组数, "results": [逐组结果...]}}，逐组结果含
+        key/title/success/message/deleted（该组删掉的份数）。
+        """
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            return {"success": False, "message": "批量删除参数错误"}
+        results: List[Dict[str, Any]] = []
+        for entry in items:
+            if not isinstance(entry, dict) or not isinstance(entry.get("group"), dict):
+                results.append({
+                    "key": "",
+                    "success": False,
+                    "message": "组格式错误",
+                    "deleted": 0,
+                })
+                continue
+            group = entry["group"]
+            key = str(group.get("key") or "")
+            keep_index = entry.get("keep_index")
+            if keep_index is None:
+                # 前端一般会显式传 keep_index；没传时用核对给出的建议。
+                keep_index = group.get("suggested_keep")
+            try:
+                outcome = self.duplicates_delete(group, keep_index)
+            except Exception as error:  # noqa: BLE001 - 单组异常记失败，继续下一组
+                results.append({
+                    "key": key,
+                    "title": str(group.get("title") or ""),
+                    "success": False,
+                    "message": f"删除异常：{error}",
+                    "deleted": 0,
+                })
+                continue
+            item_results = ((outcome or {}).get("data") or {}).get("results") or []
+            deleted = sum(
+                1 for result in item_results
+                if isinstance(result, dict)
+                and result.get("success") and not result.get("kept")
+            )
+            message = str(outcome.get("message") or "")
+            if not outcome.get("success"):
+                # 组失败时用首个失败项的具体原因（例如“网盘里找不到该视频”），
+                # 而不是汇总文案——前端展示失败原因时才有意义。
+                failed_items = [
+                    result for result in item_results
+                    if isinstance(result, dict) and not result.get("success")
+                ]
+                if failed_items:
+                    message = str(
+                        failed_items[0].get("message") or message
+                    )
+            results.append({
+                "key": key,
+                "title": str(group.get("title") or ""),
+                "success": bool(outcome.get("success")),
+                "message": message,
+                "deleted": deleted,
+            })
+        deleted_groups = sum(1 for result in results if result.get("success"))
+        failed = [result for result in results if not result.get("success")]
+        return {
+            "success": not failed,
+            "message": (
+                f"批量删除完成：删 {deleted_groups} 组"
+                + (f"，{len(failed)} 组失败" if failed else "")
+            ),
+            "data": {
+                "deleted": deleted_groups,
+                "failed": failed,
+                "total": len(results),
+                "results": results,
+            },
+        }
+
     def _delete_duplicate_item(
             self,
             group: Dict[str, Any],

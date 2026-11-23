@@ -835,6 +835,10 @@ class SyncHandler:
     def repair_backfill_registrations(self) -> int:
         return self.history_backfill.repair_invalid_registrations()
 
+    def repair_orphan_pending_records(self) -> int:
+        """v1.31.3 启动修复：清掉漏斗孤儿待终态记录（行已挂起/已完成/不存在）。"""
+        return self.funnel.repair_orphan_pending_records()
+
     def enqueue_funnel_from_pending(self, item, pending_key, mediainfo, subscribe_id=None, season=None):
         return self.funnel.enqueue_from_pending(item, pending_key, mediainfo, subscribe_id=subscribe_id, season=season)
 
@@ -906,6 +910,10 @@ class SyncHandler:
     def duplicates_load_state(self) -> Dict[str, Any]:
         """v1.31.2 重复扫描：读取上次扫描状态（无保存时返回空）。"""
         return self.strm_duplicates.duplicates_load_state()
+
+    def duplicates_delete_batch(self, items) -> Dict[str, Any]:
+        """v1.31.3 重复扫描：批量删除重复组（逐组复用单组删除校验）。"""
+        return self.strm_duplicates.duplicates_delete_batch(items)
 
     def funnel_run_scan_dry_run(self, trigger: str = "手动") -> Dict[str, Any]:
         """v1.30.0 阶段 4：04:00 扫描对账（默认 dry-run，只分类记日志）。"""
@@ -2388,6 +2396,14 @@ class SyncHandler:
                             f"手动提交入队整理队列失败（走旧流水线）：{error}",
                             exc_info=True,
                         )
+                    if funnel_row is None:
+                        # v1.31.3：没建成行（抛错，或存储不可用返回
+                        # (None, False)）就没有行驱动这条记录；funnel_route
+                        # 留 True 会被离线监控跳过，成孤儿后任务卡永久 95%。
+                        # 清掉后走旧流水线，离线监控接手。
+                        record = pending.get(pending_key)
+                        if isinstance(record, dict):
+                            record["funnel_route"] = False
                 if funnel_row is not None and not funnel_created:
                     keep_second = self._resolve_funnel_duplicate_enqueue(
                         funnel_row, item, pending_key, pending, mediainfo,

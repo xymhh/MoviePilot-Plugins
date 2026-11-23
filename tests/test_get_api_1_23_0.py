@@ -150,9 +150,11 @@ ALLOWLIST = {
 # 重复扫描加 3 条（/duplicates/scan|enrich|delete，前端
 # DuplicatesQueue.vue 的扫描/核对大小/删除调用，不进 ALLOWLIST）；v1.31.2
 # 状态保存/读取加 2 条（/duplicates/save-state|load-state，前端
-# DuplicatesQueue.vue 的挂载恢复/每批保存调用，不进 ALLOWLIST）。
-EXPECTED_REGISTERED_ENTRIES = 94
-EXPECTED_REGISTERED_PAIRS = 95
+# DuplicatesQueue.vue 的挂载恢复/每批保存调用，不进 ALLOWLIST）；v1.31.3
+# 批量删除加 1 条（/duplicates/delete-batch，前端 DuplicatesQueue.vue
+# 的“批量删除同视频组”按钮调用，不进 ALLOWLIST）。
+EXPECTED_REGISTERED_ENTRIES = 95
+EXPECTED_REGISTERED_PAIRS = 96
 
 # 第 5 项：7 个服务层方法的新签名（去掉 apikey 后的剩余参数名）。
 SERVICE_METHOD_PARAMS = {

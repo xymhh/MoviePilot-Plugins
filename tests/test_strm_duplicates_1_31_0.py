@@ -864,6 +864,25 @@ class ApiDelegationTests(unittest.TestCase):
         self.assertEqual(api.api_vue_duplicates_save_state({"state": {}}), failure)
         self.assertEqual(api.api_vue_duplicates_load_state(), failure)
 
+    def test_delete_batch_delegates(self):
+        calls = {}
+        handler = SimpleNamespace(
+            duplicates_delete_batch=lambda items: calls.setdefault(
+                "batch", {"success": True},
+            ),
+        )
+        api = self._api(handler=handler)
+        self.assertEqual(
+            api.api_vue_duplicates_delete_batch({"items": []}),
+            {"success": True},
+        )
+        self.assertEqual(set(calls), {"batch"})
+
+    def test_delete_batch_missing_handler_returns_failure(self):
+        failure = {"success": False, "message": "同步服务未就绪"}
+        api = self._api(handler=None, failure=failure)
+        self.assertEqual(api.api_vue_duplicates_delete_batch({"items": []}), failure)
+
 
 class MediaRootMappingTests(_MetaInfoTestCase):
     """线上口径：_local_resource_path 就是 .strm 根（/strm/115网盘），
@@ -1278,6 +1297,184 @@ class DuplicatesStateTests(_MetaInfoTestCase):
                 {"groups": [], "keep_by_key": [1]},
             )["success"]
         )
+
+
+class BatchDeleteServiceTests(_MetaInfoTestCase):
+    """v1.31.3 批量删除：逐组复用单组删除校验，单组失败不中断整批。
+
+    夹具用线上布局（见 MediaRootMappingTests）：_local_resource_path
+    就是 .strm 根，_CLOUD_MEDIA_ROOT 另设。
+    """
+
+    MEDIA_ROOT = "/Alist/影视/moviepilot/媒体库"
+
+    def setUp(self):
+        super().setUp()
+        self.strm_root = self.root / "115网盘"
+        season_dir = (
+            self.strm_root / "剧集" / "国产剧" / "两京十五日" / "Season 1"
+        )
+        # E06 同视频：两份 .strm 指向同一 pickcode，只删多余指针。
+        self.e06_tagged = _write_strm(
+            season_dir / "两京十五日 {tmdb-203483} - S01E06 - 第6集.strm",
+            _redirect_content(
+                "pc-e06", "两京十五日 {tmdb-203483} - S01E06 - 第6集.mkv",
+            ),
+        )
+        self.e06_plain = _write_strm(
+            season_dir / "两京十五日 - S01E06 - 第6集.strm",
+            _redirect_content("pc-e06", "两京十五日 - S01E06 - 第6集.mkv"),
+        )
+        for stem in (
+            "两京十五日 {tmdb-203483} - S01E06 - 第6集",
+            "两京十五日 - S01E06 - 第6集",
+        ):
+            (season_dir / f"{stem}.nfo").write_text("<nfo/>", encoding="utf-8")
+        # E07 不同视频：tagged 1GB，plain 2GB，留大应保留 plain。
+        self.e07_tagged = _write_strm(
+            season_dir / "两京十五日 {tmdb-203483} - S01E07 - 第7集.strm",
+            _redirect_content(
+                "pc-e07-tagged",
+                "两京十五日 {tmdb-203483} - S01E07 - 第7集.mkv",
+            ),
+        )
+        self.e07_plain = _write_strm(
+            season_dir / "两京十五日 - S01E07 - 第7集.strm",
+            _redirect_content("pc-e07-plain", "两京十五日 - S01E07 - 第7集.mkv"),
+        )
+        self.cloud_dir = self.MEDIA_ROOT + "/剧集/国产剧/两京十五日/Season 1"
+        self.query = _FakeCloudQuery({
+            (self.cloud_dir, "两京十五日 {tmdb-203483} - S01E07 - 第7集.mkv"):
+                _FakeCloudFile("fid-e07-tagged", "x", 1_000_000_000, "pc-e07-tagged"),
+            (self.cloud_dir, "两京十五日 - S01E07 - 第7集.mkv"):
+                _FakeCloudFile("fid-e07-plain", "x", 2_000_000_000, "pc-e07-plain"),
+        })
+
+    def _service(self, query=None, mutations=None):
+        return _duplicates_service(
+            self.strm_root, query=query, mutations=mutations,
+            media_root=self.MEDIA_ROOT,
+        )
+
+    def _groups(self, query=None):
+        groups = self._service().duplicates_scan()["data"]["groups"]
+        self.assertEqual(len(groups), 2)
+        enriched = self._service(query=query).duplicates_enrich(groups)
+        self.assertTrue(enriched["success"], enriched)
+        return enriched["data"]["groups"]
+
+    @staticmethod
+    def _group_for(groups, episode):
+        for group in groups:
+            if any(
+                f"E{episode:02d}" in str(item.get("local_path") or "")
+                for item in group["items"]
+            ):
+                return group
+        raise AssertionError(f"no group for E{episode:02d}: {groups}")
+
+    def test_batch_deletes_mixed_groups(self):
+        """同视频组 + 不同视频组混合：两组都删，视频只删被丢的那一份。"""
+        groups = self._groups(query=self.query)
+        e06 = self._group_for(groups, 6)
+        e07 = self._group_for(groups, 7)
+        keep_e07 = next(
+            i for i, item in enumerate(e07["items"])
+            if item.get("video_size") == 2_000_000_000
+        )
+        mutations = _FakeMutations()
+        service = self._service(query=self.query, mutations=mutations)
+        result = service.duplicates_delete_batch([
+            {"group": e06, "keep_index": e06["suggested_keep"]},
+            {"group": e07, "keep_index": keep_e07},
+        ])
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["data"]["deleted"], 2)
+        self.assertEqual(result["data"]["failed"], [])
+        self.assertEqual(result["data"]["total"], 2)
+        self.assertEqual(
+            [item["deleted"] for item in result["data"]["results"]], [1, 1],
+        )
+        # 只删了 E07 被丢那份视频；E06 同视频组视频不动。
+        self.assertEqual(mutations.deleted, ["fid-e07-tagged"])
+        # E06：保留的那份 .strm + .nfo 在，被删那份的 .strm + .nfo 没了。
+        # local_path 是相对 .strm 根的路径，断言前拼上 strm_root。
+        kept_e06 = e06["items"][e06["suggested_keep"]]["local_path"]
+        dropped_e06 = next(
+            item["local_path"] for item in e06["items"]
+            if item["local_path"] != kept_e06
+        )
+        self.assertTrue((self.strm_root / kept_e06).exists())
+        self.assertFalse((self.strm_root / dropped_e06).exists())
+        self.assertTrue(
+            (self.strm_root / str(kept_e06).replace(".strm", ".nfo")).exists()
+        )
+        self.assertFalse(
+            (self.strm_root / str(dropped_e06).replace(".strm", ".nfo")).exists()
+        )
+        # E07：保留 plain，tagged 的 .strm 没了。
+        self.assertTrue(self.e07_plain.exists())
+        self.assertFalse(self.e07_tagged.exists())
+
+    def test_batch_failure_does_not_stop_batch(self):
+        """E07 网盘里找不到视频 → 该组失败；E06 照常删，结果里有失败记录。"""
+        groups = self._groups(query=_FakeCloudQuery({}))
+        e06 = self._group_for(groups, 6)
+        e07 = self._group_for(groups, 7)
+        keep_e07 = next(
+            i for i, item in enumerate(e07["items"])
+            if "第7集" in str(item.get("local_path") or "")
+            and "{tmdb-" not in str(item.get("local_path") or "")
+        )
+        mutations = _FakeMutations()
+        service = self._service(query=_FakeCloudQuery({}), mutations=mutations)
+        result = service.duplicates_delete_batch([
+            {"group": e07, "keep_index": keep_e07},
+            {"group": e06, "keep_index": e06["suggested_keep"]},
+        ])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["data"]["deleted"], 1)
+        self.assertEqual(result["data"]["total"], 2)
+        self.assertEqual(len(result["data"]["failed"]), 1)
+        self.assertEqual(result["data"]["failed"][0]["key"], e07["key"])
+        self.assertIn("找不到", result["data"]["failed"][0]["message"])
+        self.assertEqual(mutations.deleted, [])
+        # 失败组两份 .strm 都还在；成功组已删。
+        self.assertTrue(self.e07_tagged.exists())
+        self.assertTrue(self.e07_plain.exists())
+        self.assertEqual(
+            sum(1 for p in (self.e06_tagged, self.e06_plain) if p.exists()), 1,
+        )
+
+    def test_batch_empty_list_returns_zero(self):
+        result = self._service().duplicates_delete_batch([])
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["data"]["deleted"], 0)
+        self.assertEqual(result["data"]["failed"], [])
+        self.assertEqual(result["data"]["total"], 0)
+
+    def test_batch_rejects_bad_entry(self):
+        result = self._service().duplicates_delete_batch([{"group": None}])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["data"]["deleted"], 0)
+        self.assertEqual(len(result["data"]["failed"]), 1)
+        self.assertIn("格式错误", result["data"]["failed"][0]["message"])
+
+    def test_batch_keep_index_defaults_to_suggested(self):
+        """不传 keep_index 时用每组的 suggested_keep（前端就这么调）。"""
+        groups = self._groups(query=self.query)
+        e06 = self._group_for(groups, 6)
+        e07 = self._group_for(groups, 7)
+        mutations = _FakeMutations()
+        service = self._service(query=self.query, mutations=mutations)
+        result = service.duplicates_delete_batch([
+            {"group": e06}, {"group": e07},
+        ])
+        self.assertTrue(result["success"], result)
+        self.assertEqual(result["data"]["deleted"], 2)
+        self.assertEqual(mutations.deleted, ["fid-e07-tagged"])
+        self.assertTrue(self.e07_plain.exists())
+        self.assertFalse(self.e07_tagged.exists())
 
 
 if __name__ == "__main__":

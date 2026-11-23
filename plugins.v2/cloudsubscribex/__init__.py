@@ -201,7 +201,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.31.2"
+    plugin_version = "1.31.3"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -908,6 +908,15 @@ class CloudSubscribeX(_PluginBase):
                 self._sync_handler.repair_backfill_registrations()
             except Exception as error:  # noqa: BLE001 - 修复失败不得影响插件主流程
                 logger.warning(f"修复补写 registration 失败（不影响启动）：{error}")
+            # v1.31.3：清漏斗孤儿待终态记录（行已挂起/已完成/不存在，
+            # 离线监控跳过漏斗记录、worker 不管挂起行，记录成孤儿后
+            # 任务卡永久 95%）。幂等、只动孤儿记录、失败不挡启动。
+            # 必须在下面 _update_offline_monitor 之前跑，否则任务卡
+            # 刷新用的计数还是旧的。
+            try:
+                self._sync_handler.repair_orphan_pending_records()
+            except Exception as error:  # noqa: BLE001 - 修复失败不得影响插件主流程
+                logger.warning(f"清孤儿待终态记录失败（不影响启动）：{error}")
         self._update_offline_monitor(
             self._sync_handler.count_offline_monitor_pending(
                 self._sync_handler.get_pending_finalize_tasks()

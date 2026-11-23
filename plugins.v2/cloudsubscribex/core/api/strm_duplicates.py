@@ -46,6 +46,16 @@ class StrmDuplicatesApi(OwnerDelegator):
         except Exception as error:  # noqa: BLE001 - 删除异常返回失败
             return {"success": False, "message": f"删除重复失败：{error}"}
 
+    def api_vue_duplicates_delete_batch(self, payload: Dict[str, Any] = None) -> dict:
+        """批量删除重复组（v1.31.3）：逐组复用单组删除校验，单组失败不中断整批。"""
+        handler, failure = self._sync_handler_or_error("duplicates_delete_batch")
+        if handler is None:
+            return failure
+        try:
+            return handler.duplicates_delete_batch((payload or {}).get("items"))
+        except Exception as error:  # noqa: BLE001 - 批量删除异常返回失败
+            return {"success": False, "message": f"批量删除重复失败：{error}"}
+
     def api_vue_duplicates_save_state(self, payload: Dict[str, Any] = None) -> dict:
         """保存重复扫描状态（扫描结果 + 核对进度 + 保留选择）。"""
         handler, failure = self._sync_handler_or_error("duplicates_save_state")
