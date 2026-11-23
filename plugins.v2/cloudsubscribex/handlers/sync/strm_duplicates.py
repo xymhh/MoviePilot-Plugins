@@ -609,12 +609,25 @@ class StrmDuplicatesService(OwnerDelegator):
     def _suggest_keep(group: Dict[str, Any]) -> Optional[int]:
         """留大：不同视频组保留视频最大的那份；同视频组保留规范名那份。
 
-        大小全未知时返回 None（请人工选）；大小并列时优先带标记名。
+        规范名 = 视频当前在网盘里的名字：核对时按 video_name 查到、
+        video_size 为 int 的那份（名字已作废的那份查不到大小）。多份
+        都能查到时按现有顺序取第一份（带标记优先的排序已在
+        group_strm_files 里做好）；一份都查不到时回落到 items[0]
+        （旧行为）。不同视频组大小全未知时返回 None（请人工选）；
+        大小并列时优先带标记名。
         """
         items = group.get("items") or []
         if not items:
             return None
         if group.get("kind") == "same-video":
+            # v1.31.4：保留名字当前在网盘里存在的那份——只删多余
+            # STRM 指针时，删掉的那份若名字还对得上视频当前文件名，
+            # 下次 STRM 全量校准会按视频名把它重建回来；保留存在的那
+            # 份才不会再生。旧实现直接 return 0（默认带标记的第一份），
+            # 但带标记不等于规范名：视频改名后旧名那份可能正是带标记的。
+            for index, item in enumerate(items):
+                if isinstance(item.get("video_size"), int):
+                    return index
             return 0
         if group.get("kind") != "different-video":
             return None
@@ -657,6 +670,20 @@ class StrmDuplicatesService(OwnerDelegator):
                 "success": False,
                 "message": "该组无法确认视频身份（读不到 pickcode），请人工核对后手动删除",
             }
+        adjusted_keep = None
+        if group.get("kind") == "same-video":
+            # v1.31.4：同视频组保留规范名那份——传入的 keep 指向的
+            # 名字在网盘已不存在（video_size 为 None）、而组里另一份
+            # 能查到大小时，纠正到能查到的那份；否则删掉的那份会在下
+            # 次 STRM 全量校准时按视频当前文件名重建回来。没有任何一
+            # 份能查到大小时不纠正，按传入的 keep 走。不同视频组永远
+            # 不纠正（留大按传入的 keep 删）。
+            if not isinstance(items[keep].get("video_size"), int):
+                for index, item in enumerate(items):
+                    if isinstance(item.get("video_size"), int):
+                        adjusted_keep = {"from": keep, "to": index}
+                        keep = index
+                        break
         results: List[Dict[str, Any]] = []
         for index, item in enumerate(items):
             if index == keep:
@@ -670,13 +697,22 @@ class StrmDuplicatesService(OwnerDelegator):
             ))
         deleted = sum(1 for result in results if result.get("success") and not result.get("kept"))
         failed = [result for result in results if not result.get("success")]
+        message = (
+            f"删除完成：删 {deleted} 份"
+            + (f"，{len(failed)} 份失败" if failed else "")
+            + (
+                f"；保留项已按规范名调整为第 {keep + 1} 份"
+                f"（原选第 {adjusted_keep['from'] + 1} 份的名称在网盘已不存在）"
+                if adjusted_keep else ""
+            )
+        )
+        data: Dict[str, Any] = {"results": results}
+        if adjusted_keep is not None:
+            data["adjusted_keep"] = adjusted_keep
         return {
             "success": not failed,
-            "message": (
-                f"删除完成：删 {deleted} 份"
-                + (f"，{len(failed)} 份失败" if failed else "")
-            ),
-            "data": {"results": results},
+            "message": message,
+            "data": data,
         }
 
     def duplicates_delete_batch(self, items: Any) -> Dict[str, Any]:
@@ -702,6 +738,7 @@ class StrmDuplicatesService(OwnerDelegator):
                     "success": False,
                     "message": "组格式错误",
                     "deleted": 0,
+                    "adjusted_keep": False,
                 })
                 continue
             group = entry["group"]
@@ -719,6 +756,7 @@ class StrmDuplicatesService(OwnerDelegator):
                     "success": False,
                     "message": f"删除异常：{error}",
                     "deleted": 0,
+                    "adjusted_keep": False,
                 })
                 continue
             item_results = ((outcome or {}).get("data") or {}).get("results") or []
@@ -745,6 +783,10 @@ class StrmDuplicatesService(OwnerDelegator):
                 "success": bool(outcome.get("success")),
                 "message": message,
                 "deleted": deleted,
+                # v1.31.4：单组删除纠正过保留项时透传，供前端计数。
+                "adjusted_keep": bool(
+                    ((outcome or {}).get("data") or {}).get("adjusted_keep")
+                ),
             })
         deleted_groups = sum(1 for result in results if result.get("success"))
         failed = [result for result in results if not result.get("success")]

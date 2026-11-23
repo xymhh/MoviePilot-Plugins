@@ -364,6 +364,7 @@ async function deleteGroup(group) {
     if (result && result.success === false) throw new Error(result.message || "删除失败");
     const data = result || {};
     const results = data.results || [];
+    const adjustedKeep = data.adjusted_keep || null;
     const failed = results.filter((item) => !item.success);
     const deletedCount = results.filter((item) => item.success && !item.kept).length;
     if (failed.length) {
@@ -374,6 +375,12 @@ async function deleteGroup(group) {
       message.value = `已删除 ${deletedCount} 份重复`;
     }
     await scanNow();
+    // v1.31.4：单组删除也可能纠正保留项（同视频组、原选名字已作废）；
+    // scanNow 会清掉上面的提示，纠正说明接在扫描完成提示后面才看得到。
+    if (adjustedKeep) {
+      const note = `保留项已按规范名调整为第 ${adjustedKeep.to + 1} 份（原选第 ${adjustedKeep.from + 1} 份的名称在网盘已不存在）`;
+      message.value = message.value ? `${message.value}；${note}` : note;
+    }
   } catch (err) {
     error.value = err && err.message ? err.message : String(err);
   } finally {
@@ -421,7 +428,12 @@ async function deleteSameVideoBatch() {
         .map((item) => `${item.title || item.key}（${item.message}）`)
         .join("；")}`;
     } else {
-      message.value = `批量删除完成：删 ${deletedKeys.length} 组同视频重复`;
+      // v1.31.4：同视频组保留项被纠正过的组（原选名字已作废，改保留
+      // 规范名那份）计个数写进提示。
+      const adjustedCount = results.filter((item) => item.adjusted_keep).length;
+      message.value =
+        `批量删除完成：删 ${deletedKeys.length} 组同视频重复` +
+        (adjustedCount ? `，其中 ${adjustedCount} 组保留项已按规范名调整` : "");
     }
   } catch (err) {
     error.value = err && err.message ? err.message : String(err);
