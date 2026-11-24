@@ -400,6 +400,13 @@ class UIConfig:
             # 同一集换个来源就能再入队并真实转存（实测一小时内传了三次）；
             # 这里把「最近 N 小时已入库」也算成去重条件，0 = 关闭。
             "funnel_recent_done_window_hours": 12,
+            # 1.35.0：上传到「待整理目录」后由 CS 自己整理到媒体库（默认关，灰度）。
+            # 开 = 跨盘上传落在 organize_staging_path（空则回退 p115_transfer_path），
+            # 整理由 OrganizeService 完成，不再依赖 MP 整理链与 115 存储适配器。
+            "organize_after_upload": False,
+            "organize_staging_path": "",
+            # 整理成功后清掉待整理目录里的空子目录。
+            "organize_staging_cleanup": True,
             # v1.29.7 阶段 1：网盘整理漏斗（手动提交入队 + worker 逐行整理）。
             # 关 = 手动提交回旧流水线，队列里未处理行保留、开关再开时继续处理。
             "funnel_phase1_enabled": False,
@@ -644,6 +651,11 @@ class UIConfig:
 
         if not str(target.get("cross_transfer_download_path") or "").strip():
             target["cross_transfer_download_path"] = "/tmp"
+
+        # 1.35.0：待整理目录统一成 /a/b 形式（去尾斜杠），空串表示回退。
+        target["organize_staging_path"] = str(
+            target.get("organize_staging_path") or ""
+        ).strip().rstrip("/")
 
         # 1.33.0：同集去重时间窗，非法值回落 12 小时，clamp 0~168（0=关）。
         try:

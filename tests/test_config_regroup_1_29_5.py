@@ -51,7 +51,7 @@ SECTION_VUE = os.path.join(
 
 TASK_COUNTS = {
     "tracking": 91,
-    "transfer": 76,
+    "transfer": 79,
     "playback": 18,
     "notify": 21,
     "channels": 24,
@@ -299,8 +299,8 @@ class TestAssemblyRuntime(unittest.TestCase):
             )
         )
         self.assertEqual(data["counts"], TASK_COUNTS)
-        self.assertEqual(data["totalKeys"], 237)
-        self.assertEqual(data["uniqueKeys"], 237)
+        self.assertEqual(data["totalKeys"], 240)
+        self.assertEqual(data["uniqueKeys"], 240)
         # v1.30.0 阶段 4：organize_source_path（advanced 字段）随源目录退役
         # 删除，advanced 37→36；organize_after_transfer 不是 advanced 字段，
         # 其删除不影响该计数；新增的 funnel_enabled / funnel_scan_dry_run
@@ -404,7 +404,9 @@ class TestSearchRuntime(unittest.TestCase):
         # v1.29.8 阶段 2：funnel_phase2_enabled 的 hint 含“strm”
         # （直出 strm 路），strm 命中由 11 增至 12；转存组此前无 strm
         # 命中，本字段把它带入结果，分组数由 2 增至 3。
-        self.assertEqual(data["strmMatchCount"], 12)
+        # v1.35.0：organize_after_upload 的 hint 提到「生成 STRM」，
+        # 转存组命中再由 12 增至 13（分组数不变，仍是 3）。
+        self.assertEqual(data["strmMatchCount"], 13)
         self.assertEqual(data["strmMatchGroupCount"], 3)
         for title in data["strmGroupTitles"]:
             self.assertIn(" · ", title)

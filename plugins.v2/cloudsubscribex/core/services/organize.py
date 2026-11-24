@@ -585,6 +585,109 @@ class OrganizeService(OwnerDelegator):
             "removed_dirs": removed_dirs, "items": items,
         }
 
+    def organize_one(
+            self,
+            source_dir: str,
+            source_name: str,
+            target_dir: str,
+            target_name: str,
+            *,
+            episode: int = 0,
+            policy: str = "",
+            generate_strm: bool = True,
+    ) -> Dict[str, Any]:
+        """单文件整理：把一个文件从待整理目录搬到媒体库目标路径（1.35.0）。
+
+        供「上传到待整理目录 → CS 自己整理」这条链使用：调用方已经知道源文件
+        与目标路径（由 naming._platform_target 算好），这里只做「确保目标目录
+        存在 → 移动（含改名）→ 生成 STRM」，不扫目录、不建计划、不动其它文件。
+
+        失败一律返回 ``success=False`` 与中文原因，不抛异常——调用方（跨盘后处理）
+        按失败处理进漏斗退避，文件留在待整理目录，下一轮重试即可。
+        """
+        source_dir = str(source_dir or "").strip().rstrip("/")
+        source_name = str(source_name or "").strip()
+        target_dir = str(target_dir or "").strip().rstrip("/")
+        target_name = str(target_name or "").strip()
+        if not source_dir or not source_name or not target_dir or not target_name:
+            return {"success": False, "message": "整理参数不完整"}
+        drive = getattr(self, "_cloud_drive", None)
+        if not drive:
+            return {"success": False, "message": "网盘未就绪"}
+        try:
+            query = drive.require(CloudDriveCapability.FILE_QUERY)
+            entry = query.find_file(source_dir, source_name)
+        except Exception as error:  # noqa: BLE001 - 查不到按源文件不存在
+            logger.debug(f"单文件整理查询源文件失败：{error}", exc_info=True)
+            entry = None
+        if entry is None:
+            return {"success": False, "message": "源文件已不存在"}
+        created = self._ensure_target_dir(target_dir)
+        if not created:
+            return {"success": False, "message": f"目标目录不可用：{target_dir}"}
+        # 刚建/刚确认的目录，别用扫描期的旧名单缓存判重。
+        self._target_name_cache.pop(target_dir, None)
+        target = TargetFile(
+            file_id=str(getattr(entry, "id", "") or ""),
+            source_name=source_name,
+            source_dir=source_dir,
+            target_dir=target_dir,
+            target_name=target_name,
+            episode=int(episode or 0),
+        )
+        effective_policy = str(
+            policy or getattr(self, "_organize_conflict_policy", "skip") or "skip"
+        )
+        success, actual_name, reason = self._move_target(target, effective_policy)
+        if not success:
+            skipped = reason.startswith("skip:")
+            return {
+                "success": bool(skipped),
+                "skipped": bool(skipped),
+                "target": safe_join(target_dir, actual_name or target_name),
+                "message": reason.removeprefix("skip:") if reason else "整理失败",
+            }
+        if generate_strm:
+            self._generate_strm_for_target(target, actual_name)
+        logger.info(
+            f"单文件整理完成：{source_dir}/{source_name} -> "
+            f"{safe_join(target_dir, actual_name or target_name)}"
+        )
+        return {
+            "success": True,
+            "skipped": False,
+            "target": safe_join(target_dir, actual_name or target_name),
+            "actual_name": actual_name or target_name,
+            "message": "",
+        }
+
+    def _ensure_target_dir(self, target_dir: str) -> bool:
+        """确保目标目录存在（115 移动不会自动建目录）。"""
+        drive = getattr(self, "_cloud_drive", None)
+        if not drive:
+            return False
+        try:
+            directories = drive.require(CloudDriveCapability.DIRECTORY_READ)
+        except Exception as error:  # noqa: BLE001 - 没有目录能力按失败
+            logger.debug(f"单文件整理取目录能力失败：{error}", exc_info=True)
+            return False
+        try:
+            lookup = directories.resolve_directory(target_dir, create=True)
+        except TypeError:
+            # 能力实现不支持 create 关键字时退回「只查」。
+            try:
+                lookup = directories.resolve_directory(target_dir)
+            except Exception as error:  # noqa: BLE001
+                logger.debug(f"单文件整理解析目标目录失败：{error}", exc_info=True)
+                return False
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"单文件整理创建目标目录失败：{error}", exc_info=True)
+            return False
+        return bool(
+            getattr(lookup, "checked", False)
+            and getattr(lookup, "directory_id", None) is not None
+        )
+
     def cleanup_empty_dirs(self, source_path: str = "") -> Dict[str, Any]:
         """手动清理源目录下所有空目录（仅空目录，移入回收站）。"""
         source = str(source_path or self._organize_source_path or "").strip()

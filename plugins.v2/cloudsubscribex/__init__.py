@@ -300,6 +300,10 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_upload_breaker_threshold: int = 5
     _cross_transfer_upload_breaker_cooldown_seconds: float = 300.0
     _cross_transfer_rapid_miss_action: str = "abort"
+    # 1.35.0：上传到待整理目录后由 CS 自己整理（默认关）。
+    _organize_after_upload: bool = False
+    _organize_staging_path: str = ""
+    _organize_staging_cleanup: bool = True
     # 1.32.0：真名落盘媒体残留的保留期（小时，0=关闭）。
     _cross_transfer_real_name_retention_hours: int = 24
     # 国内中继上传（实验）：默认关闭，未配置地址时强制视为关闭。

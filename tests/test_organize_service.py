@@ -506,3 +506,140 @@ def test_cleanup_empty_dirs_scans_source_and_removes_all_empty_dirs():
     assert "/待整理/B/Season 1" not in directories.tree
     assert "/待整理/B" in directories.tree
     assert "/待整理" in directories.tree
+
+
+# ----------------------------------------------------------------------
+# 1.35.0：organize_one（上传到待整理目录后由 CS 自己整理）
+# ----------------------------------------------------------------------
+class _OneDrive:
+    """单文件整理用的最小网盘替身：查询/目录/批量移动三件套。"""
+
+    def __init__(self, found=None, existing_names=(), fail_create=False,
+                 dir_unreadable=False):
+        self.found = found
+        self.existing = set(existing_names)
+        self.fail_create = fail_create
+        self.dir_unreadable = dir_unreadable
+        self.batch = FakeBatch()
+        self.created_dirs = []
+        self.queries = []
+
+    def supports(self, capability):
+        return capability == "batch_file_mutation"
+
+    def require(self, capability):
+        return self
+
+    # file_query
+    def find_file(self, path, name):
+        self.queries.append((path, name))
+        return self.found
+
+    # directory_read
+    def resolve_directory(self, path, create=False):
+        if create:
+            self.created_dirs.append(path)
+        if self.fail_create and create:
+            raise OSError("无法创建目录")
+        if self.dir_unreadable:
+            return types.SimpleNamespace(checked=True, directory_id=None)
+        return types.SimpleNamespace(checked=True, directory_id="dir-1")
+
+    def list_directory(self, directory_id):
+        return types.SimpleNamespace(
+            checked=True,
+            files=[
+                types.SimpleNamespace(name=name, is_directory=False)
+                for name in self.existing
+            ],
+        )
+
+    # 批量改名/移动走 FakeBatch
+    def rename_files(self, path, items):
+        return self.batch.rename_files(path, items)
+
+    def move_files(self, items, target_dir):
+        return self.batch.move_files(items, target_dir)
+
+
+def make_one_service(drive, handler=None):
+    service = OrganizeService(types.SimpleNamespace())
+    service._cloud_drive = drive
+    service._organize_conflict_policy = "skip"
+    if handler is not None:
+        object.__setattr__(service, "_sync_handler", handler)
+    return service
+
+
+def test_organize_one_moves_and_reports_target():
+    drive = _OneDrive(found=FakeCloudFile("raw.mkv"))
+    service = make_one_service(drive)
+
+    result = service.organize_one(
+        "/待整理/job1", "raw.mkv", "/剧集/Show/Season 01", "Show - S01E01",
+        episode=1, generate_strm=False,
+    )
+
+    assert result["success"] is True
+    assert result["skipped"] is False
+    assert result["target"] == "/剧集/Show/Season 01/Show - S01E01.mkv"
+    assert drive.created_dirs == ["/剧集/Show/Season 01"]
+    # organize_one 查一次源文件；_move_target 的 _find_entry 再查一次（无扫描缓存时）
+    assert drive.queries[0] == ("/待整理/job1", "raw.mkv")
+    assert drive.batch.moved and drive.batch.moved[0][0] == "/剧集/Show/Season 01"
+
+
+def test_organize_one_missing_source_fails():
+    drive = _OneDrive(found=None)
+    service = make_one_service(drive)
+
+    result = service.organize_one(
+        "/待整理/job1", "raw.mkv", "/剧集/Show/Season 01", "Show - S01E01",
+        generate_strm=False,
+    )
+
+    assert result["success"] is False
+    assert "源文件已不存在" in result["message"]
+    assert drive.batch.moved == []
+
+
+def test_organize_one_unavailable_target_dir_fails():
+    drive = _OneDrive(found=FakeCloudFile("raw.mkv"), dir_unreadable=True)
+    service = make_one_service(drive)
+
+    result = service.organize_one(
+        "/待整理/job1", "raw.mkv", "/剧集/Show/Season 01", "Show - S01E01",
+        generate_strm=False,
+    )
+
+    assert result["success"] is False
+    assert "目标目录不可用" in result["message"]
+    assert drive.batch.moved == []
+
+
+def test_organize_one_existing_name_skips_without_move():
+    drive = _OneDrive(
+        found=FakeCloudFile("raw.mkv"),
+        existing_names=["Show - S01E01.mkv"],
+    )
+    service = make_one_service(drive)
+
+    result = service.organize_one(
+        "/待整理/job1", "raw.mkv", "/剧集/Show/Season 01", "Show - S01E01",
+        generate_strm=False,
+    )
+
+    assert result["success"] is True
+    assert result["skipped"] is True
+    assert "已存在" in result["message"]
+    assert drive.batch.moved == []
+
+
+def test_organize_one_requires_all_params():
+    drive = _OneDrive(found=FakeCloudFile("raw.mkv"))
+    service = make_one_service(drive)
+
+    result = service.organize_one("", "raw.mkv", "/剧集/Show", "name.mkv")
+
+    assert result["success"] is False
+    assert "参数不完整" in result["message"]
