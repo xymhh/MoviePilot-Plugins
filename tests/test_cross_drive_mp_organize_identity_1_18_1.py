@@ -488,3 +488,79 @@ class SyncApiSubmitDelegationTest(unittest.TestCase):
         if sync_api is None:
             self.skipTest("api.sync 模块未加载（全量套件里才可用）")
         self.assertTrue(hasattr(sync_api.SyncApi, "_submit_sync_operation"))
+
+
+class OrganizeAfterSaveTest(unittest.TestCase):
+    """1.35.3：同盘直存也要受开关控制（否则文件停在转存目录）。"""
+
+    class _MpOrganize:
+        def __init__(self):
+            self.calls = []
+
+        def trigger_mp_organize(self, save_dir, file_name, mediainfo=None, season=None):
+            self.calls.append((save_dir, file_name, season))
+            return True, {"reason": "accepted"}
+
+    class _Service:
+        def __init__(self, ok=True, message=""):
+            self.ok = ok
+            self.message = message
+            self.calls = []
+
+        def organize_one(self, source_dir, source_name, target_dir, target_name, **kwargs):
+            self.calls.append((source_dir, source_name, target_dir, target_name, kwargs))
+            if not self.ok:
+                return {"success": False, "message": self.message}
+            return {"success": True, "target": f"{target_dir}/{target_name}"}
+
+    def _ops(self, enabled, target_dir="/lib/S01", service=None, naming=None):
+        mp = self._MpOrganize()
+        owner = SimpleNamespace(
+            _plugin=None,
+            mp_organize=mp,
+            naming=naming or SimpleNamespace(
+                _platform_target=lambda *a, **k: (target_dir, "剧 - S01E01.mkv")
+            ),
+        )
+        ops = _OpsHarness(_organize_after_upload=enabled, _p115_media_path="/Alist/媒体库")
+        object.__setattr__(ops, "_owner", owner)
+        object.__setattr__(ops, "_organize_service", lambda: service)
+        return ops, mp
+
+    def test_switch_off_uses_mp_organize(self):
+        ops, mp = self._ops(enabled=False)
+        ok, info = ops._organize_after_save("/转存/a", "a.mkv", {"media_type": "tv"}, 1)
+
+        self.assertTrue(ok)
+        self.assertEqual(mp.calls, [("/转存/a", "a.mkv", 1)])
+
+    def test_switch_on_organizes_locally(self):
+        service = self._Service()
+        ops, mp = self._ops(enabled=True, service=service)
+
+        ok, info = ops._organize_after_save(
+            "/转存/a", "a.mkv", {"media_type": "tv", "episode": 1}, 1,
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(info["reason"], "organized")
+        self.assertEqual(service.calls[0][0], "/转存/a")
+        self.assertEqual(service.calls[0][2], "/lib/S01")
+        self.assertEqual(mp.calls, [])
+
+    def test_switch_on_without_target_falls_back(self):
+        ops, mp = self._ops(enabled=True, target_dir="")
+
+        ok, _info = ops._organize_after_save("/转存/a", "a.mkv", {"media_type": "tv"}, 1)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(mp.calls), 1)
+
+    def test_organize_failure_reports_message(self):
+        service = self._Service(ok=False, message="目标目录不可用")
+        ops, _mp = self._ops(enabled=True, service=service)
+
+        ok, info = ops._organize_after_save("/转存/a", "a.mkv", {"media_type": "tv"}, 1)
+
+        self.assertFalse(ok)
+        self.assertIn("目标目录不可用", info["message"])

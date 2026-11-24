@@ -1163,12 +1163,25 @@ class FunnelService(OwnerDelegator):
             return True, "", False
         season = int(item.get("season") or 1)
         try:
-            accepted, info = mp_organize.trigger_mp_organize(
-                item.get("cloud_dir") or "",
-                item.get("file_name") or "",
-                mediainfo=media,
-                season=season,
+            # 1.35.3：开关开时由本插件整理（同盘直存也覆盖），否则交 MP 整理。
+            helper = getattr(
+                getattr(self._owner, "transfer_ops", None),
+                "_organize_after_save", None,
             )
+            if callable(helper):
+                accepted, info = helper(
+                    item.get("cloud_dir") or "",
+                    item.get("file_name") or "",
+                    media,
+                    season,
+                )
+            else:
+                accepted, info = mp_organize.trigger_mp_organize(
+                    item.get("cloud_dir") or "",
+                    item.get("file_name") or "",
+                    mediainfo=media,
+                    season=season,
+                )
         except Exception as error:  # noqa: BLE001 - 触发异常按失败重试
             return False, f"触发 MP 整理异常：{error}", False
         info = info or {}

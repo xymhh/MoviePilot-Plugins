@@ -1007,6 +1007,48 @@ class TransferOpsMixin(OwnerDelegator):
             logger.debug(f"取整理组件失败：{error}", exc_info=True)
             return None
 
+    def _organize_after_save(
+            self,
+            save_dir: str,
+            file_name: str,
+            media: Any = None,
+            season: Any = None,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """同盘直存落盘后：开关开 → 本插件整理；否则交 MP 整理（1.35.3）。
+
+        1.35.0 只接了跨盘 download_only 分支，同盘直存（115→115）仍走
+        ``trigger_mp_organize``，线上表现为「文件都进了转存目录、没进媒体库」。
+        这里把直存路径也接上：目标路径由 ``_resolve_organize_target`` 现算，
+        算不出或整理失败才回落 MP 整理。
+        """
+        if self._organize_after_upload_enabled():
+            item_hint = {"episode": (media or {}).get("episode")}
+            target_dir, target_name = self._resolve_organize_target(
+                item_hint, media, file_name,
+            )
+            service = self._organize_service() if target_dir else None
+            if target_dir and service is not None:
+                result = service.organize_one(
+                    str(save_dir or ""), str(file_name or ""),
+                    target_dir, target_name or str(file_name or ""),
+                    episode=int((media or {}).get("episode") or 0),
+                )
+                if result.get("success"):
+                    logger.info(
+                        f"已由本插件整理入库：{result.get('target') or target_name}"
+                    )
+                    return True, {
+                        "reason": "organized",
+                        "target": str(result.get("target") or ""),
+                    }
+                return False, {
+                    "reason": "organize_failed",
+                    "message": str(result.get("message") or "整理失败"),
+                }
+        return self._owner.mp_organize.trigger_mp_organize(
+            save_dir, file_name, mediainfo=media, season=season,
+        )
+
     def _organize_uploaded_file(
             self,
             local_path: str,
@@ -1363,8 +1405,9 @@ class TransferOpsMixin(OwnerDelegator):
                                 "message": "MP 整理未触发：本地路径为空，文件未进媒体库",
                             }
                     else:
-                        ok, mp_info = self._owner.mp_organize.trigger_mp_organize(
-                            save_path, result_name, media=effective_media,
+                        # 1.35.3：直存路径同样受开关控制（开关关时行为不变）。
+                        ok, mp_info = self._organize_after_save(
+                            save_path, result_name, effective_media,
                         )
                     file_item["_mp_organized"] = bool(ok)
                     if ok:
