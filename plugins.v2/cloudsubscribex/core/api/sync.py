@@ -34,6 +34,25 @@ _RECENT_MANUAL_SUBMITS = create_platform_ttl_cache(
 
 
 class SyncApi(OwnerDelegator):
+    def _submit_sync_operation(self, *args, **kwargs):
+        """显式转发到同步执行组件（1.35.2）。
+
+        线上 2026-11-24 实测：`POST /plugin/CloudSubscribeX/sync/start` 与
+        `/sync/manual` 一律 500，异常是
+        ``AttributeError: type object 'SyncApi' has no attribute
+        '_submit_sync_operation'``——该方法是 ``SyncExecutionService`` 上的
+        私有方法，靠 OwnerDelegator 逐层委托解析，但在 API 层这条委托链
+        拿不到它（类级查找直接失败）。这里显式取组件转发，方法存在性不再
+        依赖委托；组件不可用时抛 AttributeError，与旧行为一致。
+        """
+        plugin = getattr(self, "_owner", None)
+        getter = getattr(plugin, "_get_component", None) if plugin is not None else None
+        if not callable(getter):
+            raise AttributeError("同步执行组件不可用")
+        from ...core.services.sync import SyncExecutionService
+
+        return getter(SyncExecutionService)._submit_sync_operation(*args, **kwargs)
+
     def _manual_upgrade_for_subscribe(self, subscribe) -> bool:
         """手动/频道转存应走洗版路径还是普通转存。
 

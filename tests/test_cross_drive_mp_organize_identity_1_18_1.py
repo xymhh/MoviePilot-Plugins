@@ -478,3 +478,13 @@ class OrganizeTargetResolveTest(unittest.TestCase):
             ops._resolve_organize_target({}, {"media_title": "无类型"}, "a.mkv"),
             ("", ""),
         )
+
+
+class SyncApiSubmitDelegationTest(unittest.TestCase):
+    """1.35.2：SyncApi 必须自己持有 _submit_sync_operation（类级查找）。"""
+
+    def test_class_exposes_submit_helper(self):
+        sync_api = sys.modules.get("cloudsubscribex.core.api.sync")
+        if sync_api is None:
+            self.skipTest("api.sync 模块未加载（全量套件里才可用）")
+        self.assertTrue(hasattr(sync_api.SyncApi, "_submit_sync_operation"))
