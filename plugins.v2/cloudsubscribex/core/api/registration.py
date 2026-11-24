@@ -1106,6 +1106,16 @@ class MoviePilotRegistration(OwnerDelegator):
             "func_kwargs": {"task": "retry_index_maintenance"},
             "kwargs": {},
         })
+        # 1.32.0：缓存目录体积 + 磁盘水位巡检。盘满会让 MP 的数据库、
+        # Emby 扫描、STRM 生成全线失败，必须提前一轮通知而不是撞墙后才发现。
+        services.append({
+            "id": "CloudSubscribe_CacheWatch",
+            "name": "缓存目录巡检",
+            "trigger": IntervalTrigger(hours=6),
+            "func": self._run_scheduled_task,
+            "func_kwargs": {"task": "cache_watch"},
+            "kwargs": {},
+        })
         return services
 
     def _refresh_platform_services(self) -> None:

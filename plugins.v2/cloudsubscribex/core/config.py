@@ -379,6 +379,10 @@ class UIConfig:
             # 每日真实上传字节上限（GB），硬 clamp 1..900；秒传命中 0 字节不计数
             "cross_transfer_daily_upload_limit_gb": CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_daily_upload_limit_gb"]["default"],
             "cross_transfer_residue_cleanup": True,
+            # 1.32.0：真名落盘媒体残留的保留期（小时）。1.12.1 起下载即用目标名
+            # 落盘、文件名没有 hash，旧清理规则匹配不到；这里给独立保留期，
+            # 0 = 关闭这条清理路径。合法区间 0~168。
+            "cross_transfer_real_name_retention_hours": 24,
             "subscription_concurrency": CONCURRENCY_AND_COOLDOWN_PARAMS["subscription_concurrency"]["default"],
             "batch_size": 20,
             "batch_interval": CONCURRENCY_AND_COOLDOWN_PARAMS["batch_interval"]["default"],
@@ -636,6 +640,13 @@ class UIConfig:
 
         if not str(target.get("cross_transfer_download_path") or "").strip():
             target["cross_transfer_download_path"] = "/tmp"
+
+        # 1.32.0：真名媒体残留保留期，非法值回落默认 24 小时，clamp 0~168（0=关）。
+        try:
+            real_name_hours = int(target.get("cross_transfer_real_name_retention_hours", 24))
+        except (TypeError, ValueError):
+            real_name_hours = 24
+        target["cross_transfer_real_name_retention_hours"] = max(0, min(real_name_hours, 168))
 
         online_docs = target.get("online_docs")
         if not isinstance(online_docs, list) or not online_docs:

@@ -54,6 +54,18 @@ _LEGACY_JSON_SUFFIXES = (
 
 _VARIANT_PATTERN = re.compile(r" \(\d+\)(?=\.[^./\\]+(?:\.|$))")
 
+#: 1.32.0：真名落盘的视频扩展名。1.12.1 起跨盘下载即用目标名落盘，文件名里
+#: 没有 hash，``RESIDUE_PATTERN`` 匹配不到；任务失败时这些文件会永远堆在
+#: 缓存目录里（2026-11-24 德国 VPS 堆了 38GB 就是这么来的）。
+REAL_NAME_MEDIA_SUFFIXES = frozenset({
+    ".mp4", ".mkv", ".ts", ".m2ts", ".mov", ".avi",
+    ".flv", ".webm", ".wmv", ".rmvb", ".mpg", ".mpeg",
+})
+
+#: 真名媒体残留的默认保留期：24 小时。远超漏斗 5 次重试的退避窗口，
+#: 留够人工处理时间；0 表示关闭这条清理路径。
+DEFAULT_REAL_NAME_MIN_AGE_SECONDS = 24 * 3600
+
 #: 到期保留期：6 小时内写过的缓存不动（下载中会持续刷新 mtime）。
 DEFAULT_MIN_AGE_SECONDS = 6 * 3600
 #: 磁盘压力阈值（剩余比例），低于该值触发最老优先清理；0 表示关闭。
@@ -135,6 +147,7 @@ def scan_residue(
         now: Optional[float] = None,
         disk_free_ratio: Optional[float] = None,
         protect_recent_seconds: float = DEFAULT_PROTECT_RECENT_SECONDS,
+        real_name_min_age_seconds: float = 0,
 ) -> Dict[str, object]:
     """扫描并删除残留，返回统计（不抛异常，单个文件失败记入 errors）。
 
@@ -144,6 +157,11 @@ def scan_residue(
     1.10.0 起残留清理靠它精确保护在途文件，不再只依赖修改时间。
     旧版 ``.meta.json`` / ``.parts.json`` 伴随文件直接删（新版不再写，
     见到的都是旧 litter），不进分组、不看保留期。
+
+    ``real_name_min_age_seconds``：1.32.0 起真名落盘的媒体文件也纳入清理，
+    门槛单独给（默认 24 小时，0 = 关闭）。1.12.1 起下载即用目标名落盘，
+    文件名里没有 hash，``RESIDUE_PATTERN`` 匹配不到；此前这些文件一旦
+    MP 整理失败就永远留在缓存目录里，只能人工清。
     """
     base = Path(root)
     result: Dict[str, object] = {
@@ -155,6 +173,10 @@ def scan_residue(
         "skipped_protected": 0,
         "pressure_deleted_files": 0,
         "pressure_freed_bytes": 0,
+        "real_name_deleted_files": 0,
+        "real_name_freed_bytes": 0,
+        "real_name_skipped_recent": 0,
+        "deleted_real_names": [],
         "disk_free_ratio": None,
         "disk_free_target": disk_free_ratio,
         "errors": [],
@@ -174,6 +196,11 @@ def scan_residue(
         str(key or "").strip() for key in active_keys or ()
     }
     active_key_set.discard("")
+
+    stamp = time.time() if now is None else float(now)
+    real_cutoff: Optional[float] = None
+    if float(real_name_min_age_seconds or 0) > 0:
+        real_cutoff = stamp - float(real_name_min_age_seconds)
 
     groups: Dict[str, list] = {}
     try:
@@ -218,9 +245,40 @@ def scan_residue(
             if RESIDUE_PATTERN.match(main.name):
                 groups.setdefault(f"file:{main.name}", []).append(entry)
             continue
-        # 其它文件（目标名落盘的文件、无伴随文件的普通文件）一律不碰。
+        # 1.32.0：真名落盘的媒体文件——任务失败 / MP 整理失败时没人清。
+        if real_cutoff is not None and entry.suffix.lower() in REAL_NAME_MEDIA_SUFFIXES:
+            if entry.name in active or _canonical(entry.name) in active:
+                result["skipped_active"] += 1
+                continue
+            try:
+                aria2_busy = entry.with_name(f"{entry.name}.aria2").is_file()
+            except OSError:
+                aria2_busy = False
+            if aria2_busy:
+                result["skipped_active"] += 1
+                continue
+            try:
+                entry_mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            if entry_mtime > real_cutoff:
+                result["real_name_skipped_recent"] += 1
+                continue
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                size = 0
+            if _delete_group([entry], result, pressure=False) > 0:
+                result["real_name_deleted_files"] = (
+                    int(result["real_name_deleted_files"]) + 1
+                )
+                result["real_name_freed_bytes"] = (
+                    int(result["real_name_freed_bytes"]) + int(size or 0)
+                )
+                result["deleted_real_names"].append(entry.name)
+            continue
+        # 其它文件（无伴随文件的普通文件）一律不碰。
 
-    stamp = time.time() if now is None else float(now)
     cutoff = stamp - max(0.0, float(min_age_seconds))
     remaining: Dict[str, tuple] = {}
     for key, files in groups.items():

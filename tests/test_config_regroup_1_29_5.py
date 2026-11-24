@@ -51,7 +51,7 @@ SECTION_VUE = os.path.join(
 
 TASK_COUNTS = {
     "tracking": 91,
-    "transfer": 74,
+    "transfer": 75,
     "playback": 18,
     "notify": 21,
     "channels": 24,
@@ -299,8 +299,8 @@ class TestAssemblyRuntime(unittest.TestCase):
             )
         )
         self.assertEqual(data["counts"], TASK_COUNTS)
-        self.assertEqual(data["totalKeys"], 235)
-        self.assertEqual(data["uniqueKeys"], 235)
+        self.assertEqual(data["totalKeys"], 236)
+        self.assertEqual(data["uniqueKeys"], 236)
         # v1.30.0 阶段 4：organize_source_path（advanced 字段）随源目录退役
         # 删除，advanced 37→36；organize_after_transfer 不是 advanced 字段，
         # 其删除不影响该计数；新增的 funnel_enabled / funnel_scan_dry_run

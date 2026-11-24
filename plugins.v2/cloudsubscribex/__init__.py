@@ -76,6 +76,7 @@ from .core.media_scope import configure_media_path_ignores
 from .core.services import (
     SubscriptionControlService,
     CheckinService,
+    CacheWatchService,
     OfflineTaskService,
     OrganizeService,
     PlatformIntegrationService,
@@ -137,6 +138,7 @@ _COMPONENT_TYPES = (
     CheckinService,
     OrganizeService,
     ResidueService,
+    CacheWatchService,
     AutoSubscribeService,
 )
 
@@ -203,7 +205,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.31.7"
+    plugin_version = "1.32.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -298,6 +300,8 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_upload_breaker_threshold: int = 5
     _cross_transfer_upload_breaker_cooldown_seconds: float = 300.0
     _cross_transfer_rapid_miss_action: str = "abort"
+    # 1.32.0：真名落盘媒体残留的保留期（小时，0=关闭）。
+    _cross_transfer_real_name_retention_hours: int = 24
     # 国内中继上传（实验）：默认关闭，未配置地址时强制视为关闭。
     # TG 频道监控（用户自己的 TG API 会话）：默认关闭，未配置凭据时强制视为关闭。
     _tg_monitor_enabled: bool = False
@@ -1310,6 +1314,8 @@ class CloudSubscribeX(_PluginBase):
             #（设计 §12 修订范围）：漏斗开时跑 dry-run 扫描（只分类
             # 记日志，不入队）；漏斗关时保留旧整理台定时扫描行为。
             "organize": self._run_scheduled_organize_scan,
+            # 1.32.0：缓存目录体积 + 磁盘水位巡检（6 小时一轮，越阈值发通知）。
+            "cache_watch": self._run_cache_watch,
         }
         runner = runners.get(task)
         if runner is None:
@@ -1357,6 +1363,10 @@ class CloudSubscribeX(_PluginBase):
                     + datetime.timedelta(seconds=1)
                 ),
             )
+
+    def _run_cache_watch(self) -> Any:
+        """缓存目录与磁盘水位巡检（1.32.0，MP 每 6 小时调一次）。"""
+        return self._get_component(CacheWatchService).check("定时")
 
     @staticmethod
     def _parse_period_episode_rules(value: Any) -> Dict[str, int]:
@@ -2098,6 +2108,14 @@ class CloudSubscribeX(_PluginBase):
         self._residue_cleanup = bool(
             config.get("cross_transfer_residue_cleanup", True)
         )
+        # 1.32.0：真名媒体残留保留期（小时），0 = 关闭；非法值回落 24。
+        try:
+            real_name_hours = int(
+                config.get("cross_transfer_real_name_retention_hours", 24)
+            )
+        except (TypeError, ValueError):
+            real_name_hours = 24
+        self._cross_transfer_real_name_retention_hours = max(0, min(real_name_hours, 168))
 
         self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", CONCURRENCY_AND_COOLDOWN_PARAMS["subscription_concurrency"]["default"]) or 2), 5))
         self._batch_size = int(config.get("batch_size", 20) or 20)

@@ -148,10 +148,12 @@ class TestSubsourcesSplit(unittest.TestCase):
 
 @unittest.skipIf(shutil.which("node") is None, "node 不可用")
 class TestSectionAssemblyRuntime(unittest.TestCase):
-    """真实跑一遍 createConfigSections：6 个任务分组、235 项、key 无重叠。
+    """真实跑一遍 createConfigSections：6 个任务分组、236 项、key 无重叠。
 
     v1.29.9 阶段 3 在转存组“整理队列”再加 funnel_phase3_enabled，
-    转存组 73→74、总数 234→235（高级字段数不变，本键不 advanced）。
+    转存组 73→74、总数 234→235；v1.32.0 在转存组加
+    cross_transfer_real_name_retention_hours，转存组 74→75、总数 235→236
+    （高级字段数不变，本键不 advanced）。
     """
 
     def test_sections_assemble(self):
@@ -211,7 +213,7 @@ class TestSectionAssemblyRuntime(unittest.TestCase):
             data["counts"],
             {
                 "tracking": 91,
-                "transfer": 74,
+                "transfer": 75,
                 "playback": 18,
                 "notify": 21,
                 "channels": 24,
@@ -223,8 +225,8 @@ class TestSectionAssemblyRuntime(unittest.TestCase):
             ["douban", "maoyan", "tmdb", "mikan", "bangumi", "anilist", "netflix"],
         )
         self.assertEqual(data["channelsSubtabs"], ["common"])
-        self.assertEqual(data["totalKeys"], 235)
-        self.assertEqual(data["uniqueKeys"], 235)
+        self.assertEqual(data["totalKeys"], 236)
+        self.assertEqual(data["uniqueKeys"], 236)
         # 静态高级字段：organize 8（v1.30.0 阶段 4 删 organize_source_path）
         # + upgrade 11 + strm 9 + emby 4 + checkin 4。
         self.assertEqual(data["advancedKeys"], 36)

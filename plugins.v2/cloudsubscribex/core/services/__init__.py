@@ -1,6 +1,7 @@
 """插件业务服务。"""
 
 from .checkin import CheckinService
+from .cache_watch import CacheWatchService
 from .discovery import Candidate, SubmitResult, submit_candidate
 from .mp_organize_tracker import MpOrganizeTracker
 from .offline import OfflineTaskService
@@ -24,6 +25,7 @@ __all__ = [
     "CheckinService",
     "OrganizeService",
     "ResidueService",
+    "CacheWatchService",
     "SkipStatsCollector",
     "sync_lock",
     # 候选提交值类型（discovery）：Candidate 是推送型渠道发现的候选，

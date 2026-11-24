@@ -284,6 +284,8 @@ class PluginScheduledTaskTests(unittest.TestCase):
                 "CloudSubscribe_StrmIncrement",
                 "CloudSubscribe_Organize",
                 "CloudSubscribe_RetryIndexMaintenance",
+                # 1.32.0：缓存目录体积 + 磁盘水位巡检。
+                "CloudSubscribe_CacheWatch",
             },
         )
         tasks = {key: item["func_kwargs"]["task"] for key, item in services.items()}
@@ -291,12 +293,15 @@ class PluginScheduledTaskTests(unittest.TestCase):
         self.assertEqual(tasks["CloudSubscribe_StrmIncrement"], "strm_increment")
         self.assertEqual(tasks["CloudSubscribe_Organize"], "organize")
         self.assertEqual(tasks["CloudSubscribe_RetryIndexMaintenance"], "retry_index_maintenance")
+        self.assertEqual(tasks["CloudSubscribe_CacheWatch"], "cache_watch")
         for item in services.values():
             # MP 用 func(**func_kwargs) 调用；kwargs 是 add_job 的调度参数
             self.assertEqual(getattr(item["func"], "__name__", ""), "_run_scheduled_task")
             self.assertEqual(item["kwargs"], {})
         trigger = services["CloudSubscribe_StrmIncrement"]["trigger"]
         self.assertEqual(getattr(trigger, "interval").total_seconds(), 7 * 60)
+        watch = services["CloudSubscribe_CacheWatch"]["trigger"]
+        self.assertEqual(getattr(watch, "interval").total_seconds(), 6 * 3600)
         full_scan = str(services["CloudSubscribe_StrmFullScan"]["trigger"])
         self.assertIn("hour='4'", full_scan)
         self.assertIn("minute='20'", full_scan)
@@ -308,7 +313,10 @@ class PluginScheduledTaskTests(unittest.TestCase):
             _strm_generate_enabled=False,
             _organize_schedule_enabled=False,
         )
-        self.assertEqual(set(services), {"CloudSubscribe_RetryIndexMaintenance"})
+        self.assertEqual(
+            set(services),
+            {"CloudSubscribe_RetryIndexMaintenance", "CloudSubscribe_CacheWatch"},
+        )
         # v1.30.0 阶段 4：04:00 任务注册条件改读漏斗总闸 + 阶段 1；
         # organize_source_path 已退役，不再参与判定。
         services = self._maintenance(plugin, _funnel_phase1_enabled=False)
