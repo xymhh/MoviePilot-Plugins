@@ -264,3 +264,149 @@ class ConfirmToPendingRecordTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ----------------------------------------------------------------------
+# 1.35.0：上传待整理目录 + 本插件整理（organize_after_upload）
+# ----------------------------------------------------------------------
+class _OpsHarness(TransferOpsMixin):
+    """只用来调辅助方法的最小实例（不跑 __init__）。"""
+
+    def __init__(self, **attrs):
+        for key, value in attrs.items():
+            object.__setattr__(self, key, value)
+        object.__setattr__(self, "_owner", SimpleNamespace(_plugin=None))
+
+
+class _FakeUpload:
+    def __init__(self, ok=True, error=""):
+        self.ok = ok
+        self.last_error = error
+        self.calls = []
+
+    def upload_file(self, local_path, save_path, target_name):
+        self.calls.append((local_path, save_path, target_name))
+        return self.ok
+
+
+class _FakeDrive:
+    def __init__(self, upload):
+        self.upload = upload
+
+    def require(self, capability):
+        return self.upload
+
+
+class _FakeOrganize:
+    def __init__(self, result=None):
+        self.result = result or {"success": True, "target": "/lib/S01/x.mkv"}
+        self.calls = []
+        self.cleanups = []
+
+    def organize_one(self, source_dir, source_name, target_dir, target_name, **kwargs):
+        self.calls.append((source_dir, source_name, target_dir, target_name, kwargs))
+        return dict(self.result)
+
+    def cleanup_empty_dirs(self, root):
+        self.cleanups.append(root)
+        return {"success": True}
+
+
+class OrganizeAfterUploadHelperTest(unittest.TestCase):
+    def test_missing_staging_root_fails_soft(self):
+        ops = _OpsHarness(_organize_staging_path="", _p115_transfer_path="")
+
+        ok, info = ops._organize_uploaded_file(
+            "/downloads/a.mkv", "/lib/S01", "a.mkv",
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(info["reason"], "no_staging")
+
+    def test_missing_target_dir_fails_soft(self):
+        ops = _OpsHarness(
+            _organize_staging_path="/转存", _p115_transfer_path="",
+            _cloud_drive=_FakeDrive(_FakeUpload()),
+            _organize_staging_cleanup=False,
+        )
+
+        ok, info = ops._organize_uploaded_file("/downloads/a.mkv", "", "a.mkv")
+
+        self.assertFalse(ok)
+        self.assertEqual(info["reason"], "no_target_dir")
+
+    def test_upload_failure_reports_reason(self):
+        upload = _FakeUpload(ok=False, error="115 上传熔断器开启")
+        ops = _OpsHarness(
+            _organize_staging_path="/转存", _p115_transfer_path="",
+            _cloud_drive=_FakeDrive(upload),
+            _organize_staging_cleanup=False,
+        )
+
+        ok, info = ops._organize_uploaded_file(
+            "/downloads/a.mkv", "/lib/S01", "a.mkv",
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(info["reason"], "upload_failed")
+        self.assertIn("熔断", info["message"])
+        # 没有 task_key 时用本地文件名主干当子目录，避免与别的任务撞名
+        self.assertEqual(upload.calls[0][1], "/转存/a")
+
+    def test_success_uploads_then_organizes_and_cleans(self):
+        upload = _FakeUpload()
+        organize = _FakeOrganize()
+        ops = _OpsHarness(
+            _organize_staging_path="/转存/", _p115_transfer_path="",
+            _cloud_drive=_FakeDrive(upload),
+            _organize_staging_cleanup=True,
+        )
+        object.__setattr__(ops, "_organize_service", lambda: organize)
+
+        ok, info = ops._organize_uploaded_file(
+            "/downloads/a.mkv", "/lib/S01", "a.mkv",
+            episode=7, task_key="cross:abc",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(info["reason"], "organized")
+        self.assertEqual(upload.calls[0][1], "/转存/cross-abc")
+        self.assertEqual(
+            organize.calls[0],
+            ("/转存/cross-abc", "a.mkv", "/lib/S01", "a.mkv", {"episode": 7}),
+        )
+        self.assertEqual(organize.cleanups, ["/转存"])
+
+    def test_organize_failure_propagates_message(self):
+        organize = _FakeOrganize({"success": False, "message": "源文件已不存在"})
+        ops = _OpsHarness(
+            _organize_staging_path="/转存", _p115_transfer_path="",
+            _cloud_drive=_FakeDrive(_FakeUpload()),
+            _organize_staging_cleanup=True,
+        )
+        object.__setattr__(ops, "_organize_service", lambda: organize)
+
+        ok, info = ops._organize_uploaded_file(
+            "/downloads/a.mkv", "/lib/S01", "a.mkv",
+        )
+
+        self.assertFalse(ok)
+        self.assertEqual(info["reason"], "organize_failed")
+        self.assertIn("源文件已不存在", info["message"])
+        self.assertEqual(organize.cleanups, [])
+
+    def test_default_staging_falls_back_to_p115_transfer_path(self):
+        upload = _FakeUpload()
+        ops = _OpsHarness(
+            _organize_staging_path="", _p115_transfer_path="/Alist/影视/moviepilot/转存/",
+            _cloud_drive=_FakeDrive(upload),
+            _organize_staging_cleanup=False,
+        )
+        object.__setattr__(ops, "_organize_service", lambda: _FakeOrganize())
+
+        ok, _info = ops._organize_uploaded_file(
+            "/downloads/a.mkv", "/lib/S01", "a.mkv", task_key="t1",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(upload.calls[0][1], "/Alist/影视/moviepilot/转存/t1")

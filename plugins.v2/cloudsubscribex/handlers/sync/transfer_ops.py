@@ -260,6 +260,35 @@ class TransferOpsMixin(OwnerDelegator):
                         save_target_name = (
                             item["target_name"] if organize_enabled else item["file"].get("name")
                         )
+                        # 1.35.0：开关开时先在调用方算好媒体库目标路径（这里
+                        # 手上有 mediainfo/subscribe/season，_transfer_file_impl
+                        # 里拿不到），交给下面的 download_only 分支自己整理。
+                        # 算不出来就留空，_transfer_file_impl 会回落 MP 整理。
+                        if organize_enabled and self._organize_after_upload_enabled():
+                            try:
+                                # _ingest_stage_transfer 没有 subscribe（签名
+                                # 只到 mediainfo/season）；naming 对 subscribe=None
+                                # 有降级路径（跳过订阅级自定义词与年份覆盖），
+                                # 分类仍按 mediainfo 规则算。
+                                organize_dir, organize_name = self._owner.naming._platform_target(
+                                    str(getattr(self, "_p115_media_path", "") or ""),
+                                    None,
+                                    mediainfo,
+                                    str(item["file"].get("name") or ""),
+                                    season,
+                                    item.get("episode") or item["file"].get("episode"),
+                                )
+                            except Exception as error:  # noqa: BLE001 - 算不出按回落
+                                logger.debug(
+                                    f"计算整理目标路径失败（回落 MP 整理）：{error}",
+                                    exc_info=True,
+                                )
+                                organize_dir, organize_name = "", ""
+                            if organize_dir:
+                                item["file"]["_organize_target"] = organize_dir
+                                item["file"]["_organize_name"] = (
+                                    organize_name or save_target_name
+                                )
                         success = self._transfer_file(
                             str(item["file"].get("url") or share_url),
                             item["file"],
@@ -902,6 +931,117 @@ class TransferOpsMixin(OwnerDelegator):
                 merged.append(by_file_id[file_id])
         return merged
 
+    def _organize_after_upload_enabled(self) -> bool:
+        """1.35.0：上传到待整理目录后由本插件整理（默认关）。"""
+        return bool(getattr(self, "_organize_after_upload", False))
+
+    def _staging_root(self) -> str:
+        """待整理目录：显式配置优先，空则回退 115 转存目录。"""
+        text = str(getattr(self, "_organize_staging_path", "") or "").strip()
+        if text:
+            return text.rstrip("/")
+        return str(getattr(self, "_p115_transfer_path", "") or "").strip().rstrip("/")
+
+    def _organize_service(self):
+        """取整理组件；宿主没接上时返回 None（调用方 fail-open）。"""
+        plugin = getattr(self._owner, "_plugin", None)
+        getter = getattr(plugin, "_get_component", None) if plugin is not None else None
+        if not callable(getter):
+            return None
+        try:
+            from ...core.services.organize import OrganizeService
+
+            return getter(OrganizeService)
+        except Exception as error:  # noqa: BLE001 - 取不到按不可用
+            logger.debug(f"取整理组件失败：{error}", exc_info=True)
+            return None
+
+    def _organize_uploaded_file(
+            self,
+            local_path: str,
+            target_dir: str,
+            target_name: str,
+            episode: int = 0,
+            task_key: str = "",
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """上传到待整理目录 → 由本插件整理进媒体库（1.35.0）。
+
+        与 ``trigger_mp_organize`` 同语义返回 ``(是否成功, 说明)``；失败时文件
+        留在待整理目录（不再占 /downloads），下一轮重试可复用。
+        """
+        staging_root = self._staging_root()
+        if not staging_root:
+            return False, {
+                "reason": "no_staging",
+                "message": "待整理目录未配置：请填「待整理目录」或 115 转存目录",
+            }
+        local = PurePosixPath(str(local_path or "").strip())
+        if not local.name:
+            return False, {
+                "reason": "no_source",
+                "message": "本地文件路径为空，未上传待整理目录",
+            }
+        target_dir = str(target_dir or "").strip().rstrip("/")
+        target_name = str(target_name or "").strip() or local.name
+        if not target_dir:
+            return False, {
+                "reason": "no_target_dir",
+                "message": "未解析到媒体库目标目录，文件未进媒体库",
+            }
+        drive = getattr(self, "_cloud_drive", None)
+        if drive is None:
+            return False, {
+                "reason": "unavailable",
+                "message": "网盘未就绪，文件留在本地待下轮重试",
+            }
+        staging_key = str(task_key or local.stem or "job")
+        staging_key = staging_key.replace(":", "-").replace("/", "-")[:60]
+        staging_dir = f"{staging_root}/{staging_key}"
+        try:
+            upload = drive.require(CloudDriveCapability.LOCAL_UPLOAD)
+        except Exception as error:  # noqa: BLE001 - 能力缺失按不可用
+            return False, {
+                "reason": "unavailable",
+                "message": f"目标网盘不支持本地上传：{error}",
+            }
+        try:
+            uploaded = bool(upload.upload_file(local_path, staging_dir, target_name))
+        except Exception as error:  # noqa: BLE001 - 上传异常按失败
+            logger.debug(f"上传待整理目录异常：{error}", exc_info=True)
+            uploaded = False
+        if not uploaded:
+            detail = str(getattr(upload, "last_error", "") or "").strip()
+            return False, {
+                "reason": "upload_failed",
+                "message": f"上传待整理目录失败：{detail or '目标盘未返回原因'}",
+            }
+        logger.info(f"已上传待整理目录：{staging_dir}/{target_name}")
+        service = self._organize_service()
+        if service is None:
+            return False, {
+                "reason": "unavailable",
+                "message": "整理组件未就绪，文件留在待整理目录",
+            }
+        result = service.organize_one(
+            staging_dir, target_name, target_dir, target_name,
+            episode=int(episode or 0),
+        )
+        if not result.get("success"):
+            return False, {
+                "reason": "organize_failed",
+                "message": str(result.get("message") or "整理失败"),
+            }
+        if bool(getattr(self, "_organize_staging_cleanup", True)):
+            try:
+                service.cleanup_empty_dirs(staging_root)
+            except Exception as error:  # noqa: BLE001 - 清理失败不影响整理结论
+                logger.debug(f"清理待整理空目录失败：{error}", exc_info=True)
+        return True, {
+            "reason": "organized",
+            "staging": f"{staging_dir}/{target_name}",
+            "target": str(result.get("target") or ""),
+        }
+
     def _transfer_file(
             self, share_url: str, file_item: Dict[str, Any], save_path: str,
             target_name: str, source_sha1: str = "",
@@ -1124,7 +1264,10 @@ class TransferOpsMixin(OwnerDelegator):
                     # 时文件已在 115 /转存；两种都触发 MP 整理进媒体库。
                     # 整理未接受时本项记失败（文件不在媒体库，下一轮同步
                     # 重试；本地缓存复用，不重复下载）。
-                    if not self._owner.mp_organize._mp_organize_enabled():
+                    if not (
+                            self._owner.mp_organize._mp_organize_enabled()
+                            or self._organize_after_upload_enabled()
+                    ):
                         logger.info(
                             f"MP 整理已关闭，跨盘文件留在本地待手动整理："
                             f"{result_name}"
@@ -1136,7 +1279,29 @@ class TransferOpsMixin(OwnerDelegator):
                             completed_task.get("result_local_path") or ""
                         ).strip()
                         local_parts = PurePosixPath(local_path) if local_path else None
-                        if local_parts and local_parts.name:
+                        # 1.35.0：开关开且调用方算出了媒体库目标路径时，
+                        # 上传到待整理目录并交给本插件整理；算不出目标路径
+                        # 时回落 MP 整理（不因为一个新开关把整批任务弄死）。
+                        organize_dir = str(
+                            file_item.get("_organize_target") or ""
+                        ).strip()
+                        if self._organize_after_upload_enabled() and organize_dir:
+                            ok, mp_info = self._organize_uploaded_file(
+                                local_path,
+                                organize_dir,
+                                str(file_item.get("_organize_name") or result_name),
+                                episode=int(file_item.get("episode") or 0),
+                                task_key=str(completed_task.get("id") or ""),
+                            )
+                            if ok:
+                                file_item["_mp_organized"] = True
+                                file_item["_self_organized"] = True
+                                logger.info(
+                                    f"已由本插件整理入库："
+                                    f"{mp_info.get('target') or result_name}"
+                                )
+                                return True
+                        elif local_parts and local_parts.name:
                             ok, mp_info = self._owner.mp_organize.trigger_mp_organize(
                                 str(local_parts.parent), local_parts.name,
                                 media=effective_media,
