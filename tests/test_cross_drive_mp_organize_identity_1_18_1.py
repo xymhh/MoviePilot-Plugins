@@ -410,3 +410,71 @@ class OrganizeAfterUploadHelperTest(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(upload.calls[0][1], "/Alist/影视/moviepilot/转存/t1")
+
+
+class OrganizeTargetResolveTest(unittest.TestCase):
+    """1.35.0 修：历史重试路径没有预算目标时，_resolve_organize_target 兜底算。"""
+
+    def _ops(self, enabled=True, naming=None, media_path="/Alist/媒体库"):
+        owner = SimpleNamespace(
+            _plugin=None,
+            naming=naming or SimpleNamespace(),
+        )
+        ops = _OpsHarness(
+            _organize_after_upload=enabled,
+            _p115_media_path=media_path,
+        )
+        # _OpsHarness.__init__ 会写一个默认 _owner，这里覆盖成带 naming 的宿主。
+        object.__setattr__(ops, "_owner", owner)
+        return ops
+
+    def test_switch_off_returns_empty(self):
+        ops = self._ops(enabled=False)
+        self.assertEqual(ops._resolve_organize_target({}, {}, "a.mkv"), ("", ""))
+
+    def test_stashed_target_wins(self):
+        ops = self._ops()
+        item = {"_organize_target": "/lib/S01", "_organize_name": "a - S01E01.mkv"}
+        self.assertEqual(
+            ops._resolve_organize_target(item, {}, "raw.mkv"),
+            ("/lib/S01", "a - S01E01.mkv"),
+        )
+
+    def test_fallback_uses_naming_service(self):
+        import sys
+
+        utils_module = sys.modules.get("cloudsubscribex.handlers.sync.utils")
+        if utils_module is None:
+            self.skipTest("utils 模块未加载（全量套件里才可用）")
+        calls = {}
+
+        def _platform_target(root, subscribe, mediainfo, source_name, season, episode):
+            calls.update(root=root, source=source_name, season=season, episode=episode)
+            return "/lib/S02", "剧 - S02E05.mkv"
+
+        original = utils_module.resolve_effective_mediainfo
+        utils_module.resolve_effective_mediainfo = (
+            lambda mediainfo=None, media=None, subscribe=None, enrich=None: SimpleNamespace(
+                title="剧", type="tv", tmdb_id=1, year=2026,
+            )
+        )
+        try:
+            ops = self._ops(naming=SimpleNamespace(_platform_target=_platform_target))
+            media = {"media_type": "tv", "media_title": "剧", "season": 2, "tmdb_id": 1}
+            target_dir, target_name = ops._resolve_organize_target(
+                {"episode": 5}, media, "raw.mkv",
+            )
+        finally:
+            utils_module.resolve_effective_mediainfo = original
+
+        self.assertEqual((target_dir, target_name), ("/lib/S02", "剧 - S02E05.mkv"))
+        self.assertEqual(calls["root"], "/Alist/媒体库")
+        self.assertEqual(calls["season"], 2)
+        self.assertEqual(calls["episode"], 5)
+
+    def test_unresolvable_media_falls_back(self):
+        ops = self._ops()
+        self.assertEqual(
+            ops._resolve_organize_target({}, {"media_title": "无类型"}, "a.mkv"),
+            ("", ""),
+        )

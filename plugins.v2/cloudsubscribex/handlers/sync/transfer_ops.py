@@ -935,6 +935,57 @@ class TransferOpsMixin(OwnerDelegator):
         """1.35.0：上传到待整理目录后由本插件整理（默认关）。"""
         return bool(getattr(self, "_organize_after_upload", False))
 
+    def _resolve_organize_target(
+            self,
+            file_item: Any,
+            media: Any,
+            target_name: str,
+    ) -> Tuple[str, str]:
+        """算媒体库目标路径（开关开时用；调用方没预算过就这里兜底）。
+
+        1.35.0：历史重试 / 字幕等路径不经过 ``_ingest_stage_transfer``，
+        拿不到预存的 ``_organize_target``，之前就整批回落 MP 整理（线上
+        2026-11-25 实测：所有文件都进了转存目录、没进媒体库）。这里用
+        ``file_item`` 自带的媒体身份拼最小 MediaInfo 再算一次。
+        """
+        if not self._organize_after_upload_enabled():
+            return "", ""
+        stashed_dir = str((file_item or {}).get("_organize_target") or "").strip()
+        if stashed_dir:
+            return stashed_dir, str(
+                (file_item or {}).get("_organize_name") or target_name
+            ).strip()
+        try:
+            from .utils import resolve_effective_mediainfo
+
+            mediainfo = resolve_effective_mediainfo(None, media)
+            if mediainfo is None:
+                logger.warning(
+                    "整理目标未解析：缺少媒体类型/标题，本次回落 MP 整理"
+                )
+                return "", ""
+            season = media.get("season") if isinstance(media, dict) else None
+            episode = (file_item or {}).get("episode")
+            if episode in (None, "") and isinstance(media, dict):
+                episode = media.get("episode")
+            target_dir, final_name = self._owner.naming._platform_target(
+                str(getattr(self, "_p115_media_path", "") or ""),
+                None,
+                mediainfo,
+                str(target_name or ""),
+                season,
+                episode,
+            )
+        except Exception as error:  # noqa: BLE001 - 算不出按回落
+            logger.warning(f"整理目标计算失败（回落 MP 整理）：{error}")
+            return "", ""
+        if not target_dir:
+            logger.warning(
+                "整理目标未解析：命名服务未给出目录，本次回落 MP 整理"
+            )
+            return "", ""
+        return str(target_dir), str(final_name or target_name).strip()
+
     def _staging_root(self) -> str:
         """待整理目录：显式配置优先，空则回退 115 转存目录。"""
         text = str(getattr(self, "_organize_staging_path", "") or "").strip()
@@ -1282,14 +1333,14 @@ class TransferOpsMixin(OwnerDelegator):
                         # 1.35.0：开关开且调用方算出了媒体库目标路径时，
                         # 上传到待整理目录并交给本插件整理；算不出目标路径
                         # 时回落 MP 整理（不因为一个新开关把整批任务弄死）。
-                        organize_dir = str(
-                            file_item.get("_organize_target") or ""
-                        ).strip()
-                        if self._organize_after_upload_enabled() and organize_dir:
+                        organize_dir, organize_name = self._resolve_organize_target(
+                            file_item, effective_media, result_name or target_name,
+                        )
+                        if organize_dir:
                             ok, mp_info = self._organize_uploaded_file(
                                 local_path,
                                 organize_dir,
-                                str(file_item.get("_organize_name") or result_name),
+                                organize_name or result_name,
                                 episode=int(file_item.get("episode") or 0),
                                 task_key=str(completed_task.get("id") or ""),
                             )
