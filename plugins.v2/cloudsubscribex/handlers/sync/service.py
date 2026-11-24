@@ -2496,6 +2496,17 @@ class SyncHandler:
                 f"漏斗重复入队：同 pending_key 重提交，保留记录（行 #{row_id}）"
             )
             return True
+        if str((row or {}).get("status") or "") == "done":
+            # 1.33.0：同集在去重窗口内已经入库（仓储按 find_recent_done 返回
+            # 这条 done 行）。第二份不再下载/上传——实测同一集一小时内被
+            # 传了三次（4694MB + 4820MB + 272MB），白占带宽还可能留多份视频。
+            logger.info(
+                f"同集近期已入库（行 #{row_id}，"
+                f"完成于 {time.strftime('%m-%d %H:%M', time.localtime(int(row.get('updated_at') or 0)))}），"
+                f"第二份 {item.get('file_name')} 跳过转存"
+            )
+            pending.pop(pending_key, None)
+            return False
         if bool(item.get("upgrade")) and self._funnel_duplicate_is_better(row, item):
             replaced = False
             try:

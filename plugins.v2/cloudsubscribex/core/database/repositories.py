@@ -977,11 +977,53 @@ class FunnelQueueRepository(DbOper):
         ).first()
         return row.to_dict() if row is not None else None
 
+    @db_query
+    def find_recent_done(
+            self,
+            media_type: str,
+            tmdb_id: Optional[int],
+            season: int = 0,
+            episode: int = 0,
+            within_seconds: int = 0,
+            file_id: str = "",
+            db: Session = None,
+    ) -> Optional[Dict[str, Any]]:
+        """同集在 ``within_seconds`` 内已经 done 的行（1.33.0 去重时间窗）。
+
+        终态 done 会释放入队去重键，于是同一集换个来源又能再入队并真实转存
+        （2026-11-24 实测：无声的回响 S01E07 一小时内被传了三次）。这里给出
+        「最近已完成」的判据，调用方据此跳过重复转存。窗口 <= 0 表示关闭。
+        """
+        window = int(within_seconds or 0)
+        if window <= 0:
+            return None
+        cutoff = int(time.time()) - window
+        row = db.scalars(
+            select(FunnelQueueRow)
+            .where(
+                *self._key_filter(
+                    media_type, tmdb_id, season, episode, file_id,
+                ),
+                FunnelQueueRow.status == "done",
+                FunnelQueueRow.updated_at >= cutoff,
+            )
+            .order_by(FunnelQueueRow.updated_at.desc())
+            .limit(1)
+        ).first()
+        return row.to_dict() if row is not None else None
+
     @db_update
     def enqueue(
-            self, payload: Dict[str, Any], db: Session = None
+            self,
+            payload: Dict[str, Any],
+            db: Session = None,
+            recent_done_window_seconds: int = 0,
     ) -> "tuple[Dict[str, Any], bool]":
-        """入队；同键已有在途行时返回旧行（不重复建行）。
+        """入队；同键已有在途行、或窗口内同集已 done 时返回旧行。
+
+        1.33.0：``recent_done_window_seconds`` > 0 且本次不是洗版时，
+        同集在窗口内已完成过的直接返回那条 done 行（``created=False``），
+        调用方按「同集近期已入库」跳过，不再重复下载/上传。
 
         :return: ``(行字典, 是否新建)``。
         """
@@ -1012,6 +1054,18 @@ class FunnelQueueRepository(DbOper):
         values["last_error"] = ""
         values["created_at"] = now
         values["updated_at"] = now
+        if not values["is_upgrade"]:
+            done_row = self.find_recent_done(
+                values["media_type"],
+                values["tmdb_id"],
+                values["season"],
+                values["episode"],
+                within_seconds=int(recent_done_window_seconds or 0),
+                file_id=str(values.get("file_id") or ""),
+                db=db,
+            )
+            if done_row is not None:
+                return done_row, False
         existing = self.find_active_by_key(
             values["media_type"],
             values["tmdb_id"],

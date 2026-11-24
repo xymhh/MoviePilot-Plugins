@@ -469,6 +469,16 @@ export function createTransferSection(options) {
             cols: 4,
           },
           {
+            key: "funnel_recent_done_window_hours",
+            label: "同集去重时间窗（小时）",
+            type: "number",
+            min: 0,
+            max: 168,
+            default: 12,
+            hint: "同一集在这么多小时内已入库过，再来一个来源只做比较、不再重复下载上传；0 = 关闭。升级替换与手动提交不受影响",
+            cols: 4,
+          },
+          {
             key: "funnel_phase1_enabled",
             label: "整理队列（阶段 1）",
             type: "switch",

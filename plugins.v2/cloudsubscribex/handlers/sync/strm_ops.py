@@ -295,7 +295,7 @@ class StrmOpsMixin(OwnerDelegator):
                 and self._local_resource_path and self._cloud_drive):
             return {
                 "directories": 0, "files": 0, "created": 0,
-                "updated": 0, "skipped": 0, "errors": 0,
+                "updated": 0, "skipped": 0, "errors": 0, "orphans": 0,
             }
         return rebuild_strm_by_export_tree(
             provider=self._cloud_drive,
@@ -310,6 +310,9 @@ class StrmOpsMixin(OwnerDelegator):
                 f"STRM 增量进度：新增 {stats['created']}，"
                 f"已检查 {stats['files']} 个视频"
             ),
+            # 1.33.0：清掉的陈旧 .strm 同样登记 Emby 删除屏蔽，
+            # 防深度删除连锁误删网盘视频（同 1.31.6 的兄弟清理）。
+            on_strm_deleted=lambda path: suppress_deleted_strm_path(self, path),
         )
 
     def _generate_strm(

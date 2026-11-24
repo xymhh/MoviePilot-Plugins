@@ -334,7 +334,10 @@ class FunnelService(OwnerDelegator):
             item, pending_key, mediainfo,
             subscribe_id=subscribe_id, season=season,
         )
-        row, created = repo.enqueue(payload)
+        row, created = repo.enqueue(
+            payload,
+            recent_done_window_seconds=self._recent_done_window_seconds(),
+        )
         if created:
             via = str(item.get("discovered_via") or "").strip()
             producer = str(item.get("funnel_producer") or "").strip().lower()
@@ -350,6 +353,22 @@ class FunnelService(OwnerDelegator):
             )
             self.ensure_worker()
         return row, created
+
+    def _recent_done_window_seconds(self) -> int:
+        """同集去重时间窗（秒）；0 = 关闭（1.33.0）。
+
+        终态 done 会释放入队去重键，同一集换个来源就能再入队并真实转存，
+        实测一小时内传了三份。这里把「最近 N 小时已入库」也当成去重条件，
+        洗版（is_upgrade）与手动提交由仓储/调用方另行放行。
+        """
+        raw = getattr(self, "_funnel_recent_done_window_hours", 12)
+        try:
+            hours = float(raw)
+        except (TypeError, ValueError):
+            hours = 12.0
+        if hours <= 0:
+            return 0
+        return int(min(hours, 168.0) * 3600)
 
     def replace_row_with_pending(
             self,

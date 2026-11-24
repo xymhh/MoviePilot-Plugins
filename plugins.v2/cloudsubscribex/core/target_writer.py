@@ -108,6 +108,9 @@ class TargetWriter:
                 "unknown", reason=f"目标查询失败：{type(error).__name__}"
             )
         if found is None:
+            sibling = self._probe_same_stem(plan, service)
+            if sibling is not None:
+                return sibling
             return TargetResult("not_written")
         if self._file_matches(plan, found):
             return TargetResult(
@@ -124,6 +127,56 @@ class TargetWriter:
             actual_size=int(getattr(found, "size", 0) or 0),
             reason="目标已存在但内容不匹配",
         )
+
+    def _probe_same_stem(self, plan: TargetPlan, service) -> Optional[TargetResult]:
+        """精确名未命中时，按「去扩展名的同名主干」再查一次（1.33.0）。
+
+        同一集可能以不同扩展名各落一份（.mp4 与 .mkv）——实测无声的回响
+        S01E07 一小时内三个来源各传一次，精确名 probe 看不见前一份。这里只在
+        已有同主干文件「同大小或更大」时判 ``reused``（不重复上传、不降级
+        覆盖）；只找到更小的则记 warning 后继续上传，**不自动删任何云盘
+        文件**（删视频一律留给重复扫描页人工确认）。
+        """
+        lister = getattr(service, "list_files_recursive", None)
+        if not callable(lister):
+            return None
+        try:
+            listing = lister(_normalize_path(plan.path)) or []
+        except Exception as error:  # noqa: BLE001 - 查不到按未命中处理
+            logger.debug(f"同集主干查询失败：{error}", exc_info=True)
+            return None
+        name = _normalize_name(plan.name)
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if not stem:
+            return None
+        plan_size = int(plan.size or 0)
+        smaller: Optional[tuple] = None
+        for item in listing:
+            item_name = str(getattr(item, "name", "") or "")
+            if not item_name or bool(getattr(item, "is_directory", False)):
+                continue
+            item_stem = (
+                item_name.rsplit(".", 1)[0] if "." in item_name else item_name
+            )
+            if item_stem.casefold() != stem.casefold():
+                continue
+            size = int(getattr(item, "size", 0) or 0)
+            if plan_size > 0 and size >= plan_size:
+                return TargetResult(
+                    "reused",
+                    file=item,
+                    actual_name=item_name,
+                    actual_size=size,
+                    reason="同集已有同大小或更大版本",
+                )
+            if smaller is None:
+                smaller = (item_name, size)
+        if smaller is not None:
+            logger.warning(
+                f"同集已有更小版本：{smaller[0]}（{smaller[1]} 字节），"
+                f"本次上传 {name}（{plan_size} 字节）"
+            )
+        return None
 
     def probe(self, plan: TargetPlan) -> TargetResult:
         """只查目标，不写；目录查询异常返回 unknown，不抛异常。"""

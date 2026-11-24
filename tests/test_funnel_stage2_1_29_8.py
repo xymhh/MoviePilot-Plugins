@@ -474,6 +474,10 @@ class FunnelTgIntegrationTests(_DbMixin):
         self.assertEqual(dispatch_calls, ["pk-tg-09"])
         # 订阅路第二份：TG 行已终态，注册表放行新建行；但落盘前实查看到
         # TG 那份已在库，整行拦截。
+        # 1.33.0：入队时间窗会先把这种「同集窗口内已 done」的再来一份挡在
+        # 入队处；本用例要验的是第二道防线（落盘前实查），故这里把窗口关掉。
+        # 窗口本身由 test_funnel_recent_done_1_33_0.py 与文末用例覆盖。
+        self.owner._funnel_recent_done_window_hours = 0
         self.owner.episode_dedup = _FakeDedup(versions={9: [{
             "file_id": "f-tg-09",
             "file_name": _TV_FILE,
@@ -491,6 +495,18 @@ class FunnelTgIntegrationTests(_DbMixin):
         self.assertEqual(fetched["status"], "done")
         self.assertIn("已在库", fetched["skip_reason"])
         self.assertEqual(len(self.owner.mp_organize.calls), 1)
+        # 1.33.0：窗口打开时，同集再来一份直接在入队处挡掉（不进队列、
+        # 不下载、不上传），返回的是那条已完成的行。
+        self.owner._funnel_recent_done_window_hours = 12
+        third = _tv_item(result_key="f-sub-09-c", funnel_route=True)
+        self.owner._pending["pk-sub-09-c"] = dict(third)
+        third_row, third_created = self.service.enqueue_from_pending(
+            third, "pk-sub-09-c", _tv_media(),
+        )
+        self.assertFalse(third_created)
+        self.assertEqual(third_row["status"], "done")
+        # 注：本用例直接调 service.enqueue_from_pending，不经过
+        # SyncHandler 的重复入队收尾（弹 pending），故不断言 pending 被清。
         self.assertEqual(dispatch_calls, ["pk-tg-09"])
         self.assertNotIn("pk-sub-09", self.owner._pending)
 

@@ -72,6 +72,72 @@ def _directory_ops(provider):
     return provider
 
 
+def sweep_orphan_strms(
+        generator,
+        local_root: str,
+        cloud_root: str,
+        expected_local: Iterable,
+        *,
+        max_ratio: float = 0.3,
+        min_sample: int = 20,
+) -> List[Path]:
+    """删掉「本地有 .strm、但 115 目录树里已经没有对应视频」的陈旧指针。
+
+    1.33.0：增量扫描对已存在的 .strm 直接跳过，兄弟清理只在写新文件时触发，
+    所以历史上因改名/换代（带不带 ``{tmdb-id}``、原始发布名 vs 模板名）
+    留下的重复 .strm 永远不会自愈——现网 85 组重复里 46 组至少一份已对不上
+    任何 115 视频（Emby 里就是同一集多出几个条目）。
+
+    只删本地指针文件，不动网盘视频；一次要删的比例超过 ``max_ratio`` 时判定
+    目录树导出不完整，整轮放弃（宁可不删）。返回被删的路径列表。
+    """
+    deleted: List[Path] = []
+    try:
+        base = Path(
+            generator.local_path(local_root, cloud_root, cloud_root, "probe.mp4")
+        ).parent
+    except Exception as error:  # noqa: BLE001 - 算不出镜像根就放弃
+        logger.debug(f"陈旧 STRM 清扫：算镜像根失败（{error}）", exc_info=True)
+        return deleted
+    if not base.is_dir():
+        return deleted
+    expected = {str(item) for item in expected_local or () if str(item or "")}
+    if not expected:
+        return deleted
+    try:
+        local_strms = [
+            path for path in base.rglob("*.strm") if path.is_file()
+        ]
+    except OSError as error:  # noqa: BLE001 - 列不出目录不删
+        logger.debug(f"陈旧 STRM 清扫：遍历失败（{error}）", exc_info=True)
+        return deleted
+    if not local_strms:
+        return deleted
+    orphans = [path for path in local_strms if str(path.resolve()) not in expected]
+    if not orphans:
+        return deleted
+    ratio = len(orphans) / len(local_strms)
+    if len(local_strms) >= int(min_sample or 0) and ratio > max_ratio:
+        logger.warning(
+            f"陈旧 STRM 清扫已放弃：待删 {len(orphans)}/{len(local_strms)} "
+            f"（{ratio * 100:.0f}% 超过 {max_ratio * 100:.0f}% 安全阀，"
+            "疑似目录树导出不完整）"
+        )
+        return deleted
+    for path in orphans:
+        try:
+            path.unlink()
+            deleted.append(path)
+        except OSError as error:  # noqa: BLE001 - 单个失败不影响其余
+            logger.debug(f"陈旧 STRM 删除失败：{path}（{error}）", exc_info=True)
+    if deleted:
+        logger.info(
+            f"陈旧 STRM 已清理：{len(deleted)} 份（115 里已无对应视频，"
+            f"检查本地 {len(local_strms)} 份）"
+        )
+    return deleted
+
+
 def rebuild_strm_by_export_tree(
         provider,
         generator,
@@ -83,6 +149,7 @@ def rebuild_strm_by_export_tree(
         overwrite: bool = False,
         timeout_seconds: float = 600.0,
         progress: Optional[Callable[[Dict[str, int]], None]] = None,
+        on_strm_deleted: Optional[Callable[[Path], None]] = None,
 ) -> Dict[str, int]:
     """用导出目录树比对本地 STRM，只补缺失（或按需覆盖）。"""
     stats: Dict[str, int] = {
@@ -93,6 +160,7 @@ def rebuild_strm_by_export_tree(
         "skipped": 0,
         "errors": 0,
         "exported": 0,
+        "orphans": 0,
     }
     from ..core.cloud import CloudDriveCapability
 
@@ -136,6 +204,7 @@ def rebuild_strm_by_export_tree(
 
     # 第一遍：只算差异，不产生网盘请求
     pending: Dict[str, List[str]] = {}
+    expected_local: List[str] = []
     for raw_path in tree_paths:
         relative = str(raw_path or "").replace("\\", "/").strip()
         if not relative:
@@ -164,10 +233,35 @@ def rebuild_strm_by_export_tree(
             logger.debug(f"STRM 增量：路径计算失败 {cloud_dir}/{name}（{error}）")
             stats["errors"] += 1
             continue
+        try:
+            expected_local.append(str(target.resolve()))
+        except OSError:
+            expected_local.append(str(target))
         if target.exists() and not overwrite:
             stats["skipped"] += 1
             continue
         pending.setdefault(cloud_dir, []).append(name)
+
+    # 1.33.0：顺手清掉「本地有、115 已无」的陈旧指针（存量重复自愈）。
+    # 放在补齐之前：本轮的期望集合已经算全，新写的文件天然在集合里。
+    try:
+        swept = sweep_orphan_strms(
+            generator, local_root, cloud_root, expected_local,
+        )
+    except Exception as error:  # noqa: BLE001 - 清扫失败不影响补齐
+        swept = []
+        logger.debug(f"陈旧 STRM 清扫异常（忽略）：{error}", exc_info=True)
+    if swept:
+        stats["orphans"] = len(swept)
+        if on_strm_deleted is not None:
+            for path in swept:
+                try:
+                    on_strm_deleted(path)
+                except Exception as error:  # noqa: BLE001 - 登记失败不影响主流程
+                    logger.debug(
+                        f"陈旧 STRM 删除登记失败：{path}（{error}）",
+                        exc_info=True,
+                    )
 
     if not pending:
         logger.info(
@@ -233,6 +327,7 @@ def rebuild_strm_by_export_tree(
     logger.info(
         f"STRM 增量完成：新增 {stats['created']}，更新 {stats['updated']}，"
         f"跳过 {stats['skipped']}，失败 {stats['errors']}，"
+        f"清陈旧指针 {stats.get('orphans', 0)}，"
         f"耗时 {time.monotonic() - started:.1f} 秒"
     )
     return stats

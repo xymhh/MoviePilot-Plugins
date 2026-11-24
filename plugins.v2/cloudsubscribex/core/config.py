@@ -396,6 +396,10 @@ class UIConfig:
             # 记录；队列行保留在 DB，开关再开时继续处理，不丢。
             # 开 = 行为与此前一致（阶段 1 为总闸，阶段 2/3 各自生效）。
             "funnel_enabled": True,
+            # 1.33.0：同集去重时间窗（小时）。终态 done 会释放入队去重键，
+            # 同一集换个来源就能再入队并真实转存（实测一小时内传了三次）；
+            # 这里把「最近 N 小时已入库」也算成去重条件，0 = 关闭。
+            "funnel_recent_done_window_hours": 12,
             # v1.29.7 阶段 1：网盘整理漏斗（手动提交入队 + worker 逐行整理）。
             # 关 = 手动提交回旧流水线，队列里未处理行保留、开关再开时继续处理。
             "funnel_phase1_enabled": False,
@@ -640,6 +644,15 @@ class UIConfig:
 
         if not str(target.get("cross_transfer_download_path") or "").strip():
             target["cross_transfer_download_path"] = "/tmp"
+
+        # 1.33.0：同集去重时间窗，非法值回落 12 小时，clamp 0~168（0=关）。
+        try:
+            recent_done_hours = int(
+                target.get("funnel_recent_done_window_hours", 12)
+            )
+        except (TypeError, ValueError):
+            recent_done_hours = 12
+        target["funnel_recent_done_window_hours"] = max(0, min(recent_done_hours, 168))
 
         # 1.32.0：真名媒体残留保留期，非法值回落默认 24 小时，clamp 0~168（0=关）。
         try:

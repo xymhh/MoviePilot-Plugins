@@ -560,6 +560,9 @@ class FunnelSubscribeIntegrationTests(_DbMixin):
             "file_name": _TV_FILE,
             "file_size": _TV_SIZE,
         }]})
+        # 1.33.0：入队时间窗会先把「同集窗口内已 done」的再来一份挡掉；
+        # 本用例验的是第二道防线（落盘前实查），故这里把窗口关掉。
+        self.owner._funnel_recent_done_window_hours = 0
         snapshot.clear()
         snapshot.update({_TV_FILE: {"file_id": "f-sub-09"}})
         sub_item = self._sub_pending(
