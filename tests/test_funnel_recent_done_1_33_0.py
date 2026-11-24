@@ -72,6 +72,37 @@ class FunnelRecentDoneWindowTest(_DbMixin):
 
         self.assertTrue(created_again)
 
+    def test_list_recent_done_episodes_returns_window_episodes(self):
+        """1.34.0 下载前挡：同剧同季窗口内已 done 的集号集合。"""
+        row, created = self.repo.enqueue(_payload())
+        self.assertTrue(created)
+        self.assertTrue(self.repo.mark_done(int(row["id"])))
+
+        episodes = self.repo.list_recent_done_episodes(
+            "tv", _payload()["tmdb_id"], 1, WINDOW,
+        )
+
+        self.assertEqual(episodes, [_payload()["episode"]])
+
+    def test_list_recent_done_episodes_window_zero_returns_empty(self):
+        row, _created = self.repo.enqueue(_payload())
+        self.repo.mark_done(int(row["id"]))
+
+        self.assertEqual(
+            self.repo.list_recent_done_episodes("tv", _payload()["tmdb_id"], 1, 0),
+            [],
+        )
+
+    def test_list_recent_done_episodes_ignores_in_flight(self):
+        self.repo.enqueue(_payload())
+
+        self.assertEqual(
+            self.repo.list_recent_done_episodes(
+                "tv", _payload()["tmdb_id"], 1, WINDOW,
+            ),
+            [],
+        )
+
     def test_in_flight_row_still_wins_over_done_window(self):
         """在途行优先：同集已有 queued 行时仍返回在途行（语义不变）。"""
         first, created = self.repo.enqueue(_payload())

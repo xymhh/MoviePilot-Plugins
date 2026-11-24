@@ -280,7 +280,9 @@ class CacheWatchTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             big = _touch(tmp, REAL_NAME, 1, size=4096)
             service, owner = self._service(tmp, tmp)
-            with mock.patch.object(cache_watch_module, "CACHE_DIR_ALERT_BYTES", 1024):
+            healthy = SimpleNamespace(total=1000, free=800, used=200)
+            with mock.patch.object(cache_watch_module, "CACHE_DIR_ALERT_BYTES", 1024), \
+                    mock.patch.object(cache_watch_module.shutil, "disk_usage", return_value=healthy):
                 service.check("测试")
                 big.unlink()
                 result = service.check("测试")
@@ -293,7 +295,9 @@ class CacheWatchTest(unittest.TestCase):
     def test_first_healthy_run_does_not_notify(self):
         with TemporaryDirectory() as tmp:
             service, owner = self._service(tmp, tmp)
-            result = service.check("测试")
+            healthy = SimpleNamespace(total=1000, free=800, used=200)
+            with mock.patch.object(cache_watch_module.shutil, "disk_usage", return_value=healthy):
+                result = service.check("测试")
 
             self.assertEqual(result["level"], "ok")
             self.assertFalse(result["notified"])

@@ -978,6 +978,38 @@ class FunnelQueueRepository(DbOper):
         return row.to_dict() if row is not None else None
 
     @db_query
+    def list_recent_done_episodes(
+            self,
+            media_type: str,
+            tmdb_id: Optional[int],
+            season: int = 0,
+            within_seconds: int = 0,
+            db: Session = None,
+    ) -> List[int]:
+        """同剧同季在窗口内已经 done 的集号集合（1.34.0 下载前挡）。
+
+        候选阶段判断「这集缺不缺」时用的是云端目录快照与 Emby 缺集，
+        上传后快照可能还没刷新，于是同一集被再判为缺集、重新下载
+        （2026-11-24 实测 S01E07 一小时内下载/上传三次）。这里把「最近
+        N 小时内已 done 的集」也算成已有，从**下载之前**就挡住。
+        窗口 <= 0 或 tmdb_id 为空时返回空集合。
+        """
+        window = int(within_seconds or 0)
+        if window <= 0 or tmdb_id is None:
+            return []
+        cutoff = int(time.time()) - window
+        rows = db.scalars(
+            select(FunnelQueueRow.episode).where(
+                FunnelQueueRow.media_type == str(media_type or "").strip().lower(),
+                FunnelQueueRow.tmdb_id == int(tmdb_id),
+                FunnelQueueRow.season == int(season or 0),
+                FunnelQueueRow.status == "done",
+                FunnelQueueRow.updated_at >= cutoff,
+            )
+        ).all()
+        return sorted({int(value or 0) for value in rows if int(value or 0) > 0})
+
+    @db_query
     def find_recent_done(
             self,
             media_type: str,

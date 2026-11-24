@@ -354,6 +354,29 @@ class FunnelService(OwnerDelegator):
             self.ensure_worker()
         return row, created
 
+    def recent_done_episodes(self, mediainfo: Any, season: int) -> set:
+        """同剧同季在去重窗口内已 done 的集号集合（1.34.0 下载前挡）。
+
+        候选阶段用云端目录快照判断缺集，上传后快照可能还没刷新，同一集
+        就会被再判为缺集、重新下载（2026-11-24 实测 S01E07 一小时内三次）。
+        这里把窗口内已完成的集交回候选阶段并入「已有」，从下载之前挡住。
+        """
+        window = self._recent_done_window_seconds()
+        if window <= 0:
+            return set()
+        repository = self._repository()
+        if repository is None:
+            return set()
+        tmdb_id = getattr(mediainfo, "tmdb_id", None)
+        try:
+            episodes = repository.list_recent_done_episodes(
+                "tv", tmdb_id, season, window,
+            )
+        except Exception as error:  # noqa: BLE001 - 取不到按无保护处理
+            logger.debug(f"读取去重窗口内已入库集失败：{error}", exc_info=True)
+            return set()
+        return {int(value) for value in episodes or () if int(value or 0) > 0}
+
     def _recent_done_window_seconds(self) -> int:
         """同集去重时间窗（秒）；0 = 关闭（1.33.0）。
 

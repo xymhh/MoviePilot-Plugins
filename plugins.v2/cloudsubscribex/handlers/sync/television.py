@@ -396,6 +396,37 @@ class TelevisionSyncProcessor(OwnerDelegator):
                     cloud_matched -= unaired_episodes
                 # 以当前目标网盘实际存在的剧集为准计算缺集，彻底解耦外部媒体库可能残留的旧源索引
                 existing_episodes_in_resources = set(cloud_matched)
+                # 1.34.0（下载前挡）：去重窗口内已 done 的集也算已有——云端目录
+                # 快照可能还没刷新（上传后要等下一轮导出树），不并入就会把同一集
+                # 再判为缺集、重新下载（实测 S01E07 一小时内下载/上传三次）。
+                recent_done: Set[int] = set()
+                try:
+                    raw_recent = self._owner.funnel.recent_done_episodes(
+                        mediainfo, season,
+                    )
+                    # 只认真实集合：测试替身/宿主缺组件时拿到的是 Mock，
+                    # 直接参与集合运算会把 existing 污染成 Mock。
+                    if isinstance(raw_recent, (set, frozenset, list, tuple)):
+                        for value in raw_recent:
+                            try:
+                                episode_value = int(value)
+                            except (TypeError, ValueError):
+                                continue
+                            if episode_value > 0:
+                                recent_done.add(episode_value)
+                except Exception as error:  # noqa: BLE001 - 取不到按原逻辑
+                    logger.debug(f"读取去重窗口集失败（忽略）：{error}", exc_info=True)
+                if recent_done:
+                    window_added = (
+                        recent_done & expected_episodes
+                    ) - existing_episodes_in_resources
+                    if window_added:
+                        existing_episodes_in_resources |= window_added
+                        logger.info(
+                            f"{mediainfo.title_year} S{season:02d} "
+                            f"{self._format_episode_ranges(window_added)} "
+                            "在去重窗口内已入库，本轮按已有处理（不再重复下载）"
+                        )
                 existing_episodes_for_manual = set(cloud_episodes) if discover_manual_episodes else set()
                 logger.debug(
                     f"{cloud_label} 实际存在剧集："
