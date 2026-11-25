@@ -205,7 +205,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.35.7"
+    plugin_version = "1.36.0"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -300,6 +300,8 @@ class CloudSubscribeX(_PluginBase):
     _cross_transfer_upload_breaker_threshold: int = 5
     _cross_transfer_upload_breaker_cooldown_seconds: float = 300.0
     _cross_transfer_rapid_miss_action: str = "abort"
+    # 1.36.0：Lite 模式（只留搜索/转存/签到/榜单，整理交给 P115StrmHelper）。
+    _cs_lite_mode: bool = False
     # 1.35.0：上传到待整理目录后由 CS 自己整理（默认关）。
     _organize_after_upload: bool = False
     _organize_staging_path: str = ""
@@ -875,6 +877,23 @@ class CloudSubscribeX(_PluginBase):
                     logger.warning(f"忽略未知插件配置键：{key}（未进白名单）")
                     continue
                 setattr(self, f"_{key}", val)
+            # 1.36.0：Lite 模式——把整理/STRM/MP 整理/漏斗全部压掉，
+            # 并让 _register_u115cs_storage 不注册存储适配器（避免与
+            # P115StrmHelper 抢「115网盘Plus」存储）。
+            if bool(getattr(self, "_cs_lite_mode", False)):
+                self._cs_lite_mode = True
+                self._organize_after_upload = False
+                self._organize_after_transfer = False
+                self._mp_organize_after_share_save = False
+                self._strm_generate_enabled = False
+                self._strm_full_scan_enabled = False
+                self._strm_increment_enabled = False
+                self._organize_schedule_enabled = False
+                self._funnel_enabled = False
+                logger.info(
+                    "CS Lite 模式：不注册 115网盘CS版 存储，整理/STRM/MP 整理/漏斗全部停用"
+                )
+
             # v1.30.0 阶段 4：funnel_enabled 总闸生效（kill-switch）。
             # 插件实例属性是上面白名单循环写的原始值，各处读到的必须
             # 是“总闸 AND 原始值”，否则只改一处关不掉 API 侧/运行侧的
@@ -2338,6 +2357,10 @@ class CloudSubscribeX(_PluginBase):
             logger.debug(f"注入 115 上传熔断配置失败：{error}", exc_info=True)
 
     def _register_u115cs_storage(self) -> None:
+        if bool(getattr(self, "_cs_lite_mode", False)):
+            # Lite 模式不注册存储：MP 的存储模块继续用「115网盘Plus」，
+            # 整理由 P115StrmHelper 接管；本插件只负责搜索/转存/签到/榜单。
+            return
         """绑定 115 提供方并把“115网盘CS版”注册进 MP 存储。
 
         插件每次初始化与每次保存配置后都调一次：MP 配置重载会把

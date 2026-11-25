@@ -5,6 +5,7 @@
 > 撤下那次的文档仍保留，用于回溯决策轨迹；恢复原因见 [恢复 P115 分叉并重新发布 2.8.77](summary/2026-10-11-恢复P115分叉并重新发布2.8.77.md)。
 
 - `plan/` 计划（面向未来，完成后保留并标注状态）
+  - [2026-11-25-CS-Lite模式-调研与架构.md](plan/2026-11-25-CS-Lite模式-调研与架构.md) — 1.36.0：换回 115 助手后只缺搜索/转存、签到、榜单订阅三块；对比「新插件 vs Lite 开关」后选 Lite——不注册 115网盘CS版 存储、压掉整理/STRM/MP 整理/漏斗，保留其余；含关掉/保留清单与验收标准
   - [2026-11-24-CS内建整理链-第一步实施记录.md](test/2026-11-24-CS内建整理链-第一步实施记录.md) — 1.35.0 第一步：`OrganizeService.organize_one` 单文件整理（建目录→移动改名→STRM）+ 三个配置（`organize_after_upload` 默认关）；5 条单测、反证 5 failed、全量 3008 passed / 13 存量失败；第二步「接线」清单与回滚路径同文
   - [2026-11-24-CS内建整理链-调研.md](plan/2026-11-24-CS内建整理链-调研.md) — 用户要求「在 CS 里实现 P115StrmHelper 的整理功能」：读线上 P115StrmHelper 3.0.2 源码（pan_transfer_paths / TransferIntercept / RenameBuild / OverwriteCheck / TransferComplete 生成 STRM，接管要求存储模块 115网盘Plus）后对比 CS 自带整理台，结论=不装不接管，复用 CS 的 OrganizeService 接线（状态：已立项 → [架构](plan/2026-11-24-CS内建整理链-架构.md)）
   - [2026-11-24-CS内建整理链-架构.md](plan/2026-11-24-CS内建整理链-架构.md) — 目标流程（下载→上传待整理目录→整理台 move→STRM→Emby）、6 处接缝（task[target_path] / postprocess / organize_one / strm_ops / TargetWriter 幂等 / 漏斗退避）、3 个新配置（organize_after_upload 默认关）、回滚与验收标准、约 1 个工作日

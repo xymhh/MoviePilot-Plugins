@@ -479,6 +479,14 @@ export function createTransferSection(options) {
             cols: 4,
           },
           {
+            key: "cs_lite_mode",
+            label: "Lite 模式（只留搜索/转存/签到/榜单）",
+            type: "switch",
+            default: false,
+            hint: "只保留搜索渠道与跨盘转存、渠道签到、榜单订阅；开启后不注册 115 网盘CS版 存储、不做整理、不生成播放指针，媒体整理交给另一个 115 助手插件",
+            cols: 4,
+          },
+          {
             key: "organize_after_upload",
             label: "上传到待整理目录后由本插件整理",
             type: "switch",
