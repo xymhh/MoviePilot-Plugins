@@ -337,10 +337,21 @@ class OrganizeService(OwnerDelegator):
         for candidate in package.videos:
             episode = int(candidate.episode or 0) if package.is_tv else 0
             try:
-                naming = getattr(self, "_sync_handler", None)
-                if not naming:
+                # 1.35.5：`_platform_target` 在命名服务（SyncNamingService）上，
+                # 不在 SyncHandler 上——1.30.0 整理台退役后没人走这条路径，
+                # 一键整理一转存目录就暴露：7/9 组「目标路径生成失败：
+                # 'SyncHandler' object has no attribute '_platform_target'」。
+                handler = getattr(self, "_sync_handler", None)
+                if not handler:
                     raise RuntimeError("同步服务尚未初始化")
-                media_root = getattr(naming, "_CLOUD_MEDIA_ROOT", "/") or "/"
+                naming = getattr(handler, "naming", None)
+                if naming is None:
+                    raise RuntimeError("命名服务尚未初始化")
+                media_root = (
+                    str(getattr(self, "_p115_media_path", "") or "").strip()
+                    or str(getattr(handler, "_CLOUD_MEDIA_ROOT", "") or "")
+                    or "/"
+                )
                 target_dir, target_name = naming._platform_target(  # noqa: SLF001
                     media_root,
                     None,

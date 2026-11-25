@@ -201,7 +201,10 @@ def test_group_plan_uses_sync_handler_for_platform_target():
             return "/媒体库/剧集/Show (2020)/Season 01", "Show - S01E01.mkv"
 
     naming = FakeNaming()
-    service._sync_handler = naming
+    # 1.35.5：`_platform_target` 在命名服务上，handler 通过 .naming 暴露它
+    service._sync_handler = types.SimpleNamespace(
+        naming=naming, _CLOUD_MEDIA_ROOT="/媒体库",
+    )
 
     entry = plan.OrganizeEntry(
         file_id="1", name="Show.S01E01.mkv", size=100,
@@ -643,3 +646,41 @@ def test_organize_one_requires_all_params():
 
     assert result["success"] is False
     assert "参数不完整" in result["message"]
+
+
+def test_build_group_plan_uses_naming_service(monkeypatch=None):
+    """1.35.5：目标路径必须取自命名服务（不在 SyncHandler 上）。"""
+    calls = {}
+
+    def _platform_target(root, subscribe, media, source_name, season=None, episode=None):
+        calls.update(root=root, source=source_name, season=season, episode=episode)
+        return "/媒体库/剧集/Show (2026)/Season 1", "Show {tmdb-1} - S01E01.mkv"
+
+    naming = types.SimpleNamespace(_platform_target=_platform_target)
+    handler = types.SimpleNamespace(naming=naming, _CLOUD_MEDIA_ROOT="/媒体库")
+    service = OrganizeService(types.SimpleNamespace())
+    object.__setattr__(service, "_sync_handler", handler)
+    object.__setattr__(service, "_p115_media_path", "/媒体库")
+    object.__setattr__(service, "_recognize_package", lambda package: types.SimpleNamespace(
+        title="Show", year=2026, tmdb_id=1,
+    ))
+    video = types.SimpleNamespace(
+        entry=types.SimpleNamespace(
+            name="Show.S01E01.mkv", path="/转存/job1/Show.S01E01.mkv",
+            file_id="f1", parent_path="/转存/job1",
+        ),
+        season=1, episode=1, subtitles=[],
+    )
+    package = types.SimpleNamespace(
+        key="k1", pack_name="Show", is_tv=True, videos=[video],
+        ignored=[], duplicates=[],
+    )
+
+    plan = service._build_group_plan(package, 0)
+
+    assert plan.group.get("status") == "ready", plan.group.get("reason")
+    assert calls["root"] == "/媒体库"
+    assert calls["season"] == 1
+    assert calls["episode"] == 1
+    assert plan.targets[0].target_dir == "/媒体库/剧集/Show (2026)/Season 1"
+    assert plan.targets[0].target_name == "Show {tmdb-1} - S01E01.mkv"
