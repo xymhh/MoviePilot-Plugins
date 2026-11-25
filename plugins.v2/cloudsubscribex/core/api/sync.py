@@ -35,31 +35,26 @@ _RECENT_MANUAL_SUBMITS = create_platform_ttl_cache(
 
 class SyncApi(OwnerDelegator):
     def _submit_sync_operation(self, *args, **kwargs):
-        """显式转发到同步执行组件（1.35.2）。
+        """显式取同步执行组件并转发（1.35.7）。
 
-        线上 2026-11-24 实测：`POST /plugin/CloudSubscribeX/sync/start` 与
-        `/sync/manual` 一律 500，异常是
-        ``AttributeError: type object 'SyncApi' has no attribute
-        '_submit_sync_operation'``——该方法是 ``SyncExecutionService`` 上的
-        私有方法，靠 OwnerDelegator 逐层委托解析，但在 API 层这条委托链
-        拿不到它（类级查找直接失败）。这里显式取组件转发，方法存在性不再
-        依赖委托；组件不可用时抛 AttributeError，与旧行为一致。
+        1.35.2/1.35.4 用 `getattr(owner, ...)` 逐层委托都失败：owner 是
+        SyncHandler，委托到插件后 `resolve_component` 又会找到**本类**
+        （SyncApi 自己也有同名方法），形成无限递归——线上实测
+        `TG 频道自动转存失败：提交转存任务失败：maximum recursion depth
+        exceeded`。这里改成直取插件上的组件缓存，绕过属性委托链。
         """
-        # 1.35.4：不假设 owner 是插件——逐个尝试委托解析（owner 可能是
-        # SyncHandler，它自己会再委托到插件/组件）。1.35.2 直接取
-        # `_get_component` 在线上报「同步执行组件不可用」，说明 owner 不是插件。
-        candidates = []
         owner = getattr(self, "_owner", None)
-        if owner is not None:
-            candidates.append(owner)
-            deeper = getattr(owner, "_owner", None)
-            if deeper is not None:
-                candidates.append(deeper)
-        for candidate in candidates:
-            handler = getattr(candidate, "_submit_sync_operation", None)
-            if callable(handler):
-                return handler(*args, **kwargs)
-        raise AttributeError("同步执行组件不可用")
+        plugin = getattr(owner, "_plugin", None) or owner
+        getter = getattr(plugin, "_get_component", None)
+        if not callable(getter):
+            raise AttributeError("同步执行组件不可用")
+        from ...core.services.sync import SyncExecutionService
+
+        service = getter(SyncExecutionService)
+        runner = getattr(service, "_submit_sync_operation", None)
+        if not callable(runner) or service is self:
+            raise AttributeError("同步执行组件缺少 _submit_sync_operation")
+        return runner(*args, **kwargs)
 
     def _manual_upgrade_for_subscribe(self, subscribe) -> bool:
         """手动/频道转存应走洗版路径还是普通转存。

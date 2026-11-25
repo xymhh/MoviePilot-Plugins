@@ -567,28 +567,31 @@ class OrganizeAfterSaveTest(unittest.TestCase):
 
 
 class SyncApiSubmitDelegationOwnerTest(unittest.TestCase):
-    """1.35.4：_submit_sync_operation 不再假设 owner 是插件。"""
+    """1.35.7：直取插件组件缓存转发，不再走属性委托（会递归到自己）。"""
 
     def _api_module(self):
         return sys.modules.get("cloudsubscribex.core.api.sync")
 
-    def test_owner_plugin_getattr_delegation(self):
+    def test_uses_plugin_component_cache(self):
         mod = self._api_module()
         if mod is None:
             self.skipTest("api.sync 未加载")
         calls = []
 
-        class _Plugin:
+        class _Exec:
             def _submit_sync_operation(self, *args, **kwargs):
-                calls.append(args)
+                calls.append((args, kwargs))
                 return "ok"
 
-        api = mod.SyncApi(SimpleNamespace(_submit_sync_operation=None, _owner=_Plugin()))
-        # owner 自己没有 → 往下一层（_owner）找
-        self.assertEqual(api._submit_sync_operation({"a": 1}), "ok")
-        self.assertEqual(calls, [({"a": 1},)])
+        class _Plugin:
+            def _get_component(self, component_type):
+                return _Exec()
 
-    def test_missing_everywhere_raises(self):
+        api = mod.SyncApi(SimpleNamespace(_plugin=_Plugin()))
+        self.assertEqual(api._submit_sync_operation({"a": 1}), "ok")
+        self.assertEqual(calls[0][0], ({"a": 1},))
+
+    def test_missing_component_raises(self):
         mod = self._api_module()
         if mod is None:
             self.skipTest("api.sync 未加载")
