@@ -1,0 +1,751 @@
+"""媒体文件命名、目标分类路径计算与资源扫描服务。"""
+
+import re
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+from app.core.context import MediaInfo
+from app.core.metainfo import MetaInfo
+from app.log import logger
+from app.modules.filemanager import FileManagerModule
+from app.modules.filemanager.transhandler import TransHandler
+from app.schemas.types import MediaType
+
+#: MP 文件名识别能解析的 TMDB 标记（app/domain/metainfo.py 的
+#: _EMBY_TMDB_RE_LIST）：{tmdb-123}、[tmdb-123]、{tmdbid-123} 等。
+_TMDB_TAG_RE = re.compile(r"[\[{]tmdb(?:id)?-\d+[\]}]", re.IGNORECASE)
+#: 标题后紧跟的年份，如“ (2026)”；标记插在年份后面。
+_YEAR_SUFFIX_RE = re.compile(r" \((\d{4})\)")
+
+
+def _with_tmdb_tag(file_name: str, mediainfo: MediaInfo) -> str:
+    """目标文件名里加上 ``{tmdb-<id>}`` 标记，供 MP 识别用。
+
+    MP 的文件名识别会解析 ``{tmdb-...}`` 标记并直接用该 id 认媒体，
+    不靠标题猜——同名多版本才不会认错（2026-11-16 实测：凡人修仙传
+    S01E200 没加标记时被认成 2025 年电视剧版 tmdb-243224，而插件认
+    的是 2020 年国漫版 tmdb-106449，此前 S01E193–S01E199 都是按
+    106449 成功入库的）。标记插在标题（与年份）后面、集数前面：
+    “凡人修仙传 {tmdb-106449} - S01E200 - 第200集.mkv”；
+    电影则是“片名 (2026) {tmdb-1}.mkv”。
+
+    只有文件名以媒体标题开头时才注入，改不明白的自定义模板不动；
+    已有标记、没有可用 tmdb_id 时原样返回。
+    """
+    tmdb_id = getattr(mediainfo, "tmdb_id", None)
+    try:
+        tmdb_number = int(tmdb_id) if tmdb_id is not None else 0
+    except (TypeError, ValueError):
+        return file_name
+    if tmdb_number <= 0:
+        return file_name
+    if _TMDB_TAG_RE.search(file_name):
+        return file_name
+    title = str(getattr(mediainfo, "title", "") or "").strip()
+    if not title or not file_name.startswith(title):
+        return file_name
+    rest = file_name[len(title):]
+    year_match = _YEAR_SUFFIX_RE.match(rest)
+    if year_match:
+        head = title + year_match.group(0)
+        rest = rest[len(year_match.group(0)):]
+    else:
+        head = title
+    return f"{head} {{tmdb-{tmdb_number}}}{rest}"
+
+from .utils import normalize_season
+
+try:
+    from app.helper.directory import DirectoryHelper
+except Exception:
+    try:
+        from app.application.directory import DirectoryHelper
+    except Exception:
+        DirectoryHelper = None
+
+try:
+    from app.sdk.classification import classify_media
+except Exception:
+    classify_media = None
+
+try:
+    from app.modules.themoviedb.category import CategoryHelper
+except Exception:
+    CategoryHelper = None
+
+from ...core import CloudFile, OwnerDelegator
+from ...core.episode_parse import parse_season_episode
+from ...core.media import media_identity
+from ...utils import FileMatcher, MediaFileParser
+from ...utils.share_recognize import episode_from_name, rescue_tail_episodes_from_names
+from .baseline import normalize_platform_cache_key
+from .utils import format_episode_ranges
+
+
+class SyncNamingService(OwnerDelegator):
+    """负责媒体分类根目录、重命名路径生成以及本地和网盘资源目录扫描。"""
+
+    def _platform_classified_root(
+            self,
+            root_path: str,
+            subscribe,
+            mediainfo: MediaInfo,
+    ) -> Optional[Path]:
+        """缓存分类根目录，避免逐集重复执行相同目录规则。"""
+        media_source, media_id = media_identity(mediainfo)
+        type_folder = self._type_folder_name(mediainfo)
+        key = (
+            str(root_path),
+            type_folder,
+            media_source,
+            media_id,
+            getattr(mediainfo, "tmdb_id", None),
+            getattr(mediainfo, "title", None),
+            getattr(mediainfo, "year", None),
+            getattr(mediainfo, "type", None),
+            getattr(mediainfo, "category", None),
+            getattr(subscribe, "id", None),
+            getattr(subscribe, "media_category", None),
+        )
+        cache_key = normalize_platform_cache_key(key)
+        platform_root_lock = getattr(self, "_platform_root_lock", None)
+        platform_root_cache = getattr(self, "_platform_root_cache", None)
+
+        if platform_root_lock and platform_root_cache and cache_key in platform_root_cache:
+            return platform_root_cache.get(cache_key)
+
+        category_name = self._resolve_classification_category(subscribe, mediainfo)
+        if category_name:
+            if not getattr(mediainfo, "category", None):
+                mediainfo.category = category_name
+            if not getattr(mediainfo, "library_category", None):
+                mediainfo.library_category = category_name
+
+        directory = DirectoryHelper().get_dir(media=mediainfo, include_unsorted=False) if DirectoryHelper else None
+        resolved = None
+        if directory:
+            updates = {"library_path": root_path}
+            if hasattr(directory, "model_copy"):
+                target_directory = directory.model_copy(deep=True, update=updates)
+            else:
+                target_directory = directory.copy(deep=True, update=updates)
+            classified_root = TransHandler().get_dest_dir(
+                mediainfo=mediainfo,
+                target_dir=target_directory,
+            )
+            if classified_root:
+                resolved = Path(classified_root)
+                # 关键守护：当目录启用了按类别建目录（library_category_folder），且媒体识别出二级分类时，
+                # 若 TransHandler 返回的路径末级未包含该二级分类，自动追加该分类，防止直接堆积在一级目录
+                if getattr(target_directory, "library_category_folder", True) and category_name:
+                    resolved_posix = resolved.as_posix().rstrip("/")
+                    cat_posix = category_name.strip("/")
+                    if not resolved_posix.endswith(cat_posix):
+                        resolved = resolved / cat_posix
+        if resolved is None:
+            media_type_value = getattr(
+                getattr(mediainfo, "type", None), "value", None
+            )
+            if media_type_value in {
+                MediaType.MOVIE.value,
+                MediaType.TV.value,
+            }:
+                resolved = Path(str(root_path or "/"))
+                # 启用媒体类型一级目录时，一级目录名以插件配置为准（以免出现 剧集/电视剧 叠层）
+                if not type_folder:
+                    resolved = resolved / media_type_value
+                if category_name:
+                    resolved = resolved / category_name.strip("/")
+
+        if resolved is not None:
+            resolved = self._with_type_folder(resolved, root_path, type_folder)
+
+        if platform_root_lock and platform_root_cache:
+            with platform_root_lock:
+                platform_root_cache.set(cache_key, resolved)
+        return resolved
+
+    def _type_folder_name(self, mediainfo: MediaInfo) -> str:
+        """按媒体类型返回媒体库一级目录名；未启用该功能或类型未知时返回空串。
+
+        目录名由插件配置提供（默认 电影 / 剧集），与宿主「设定 → 目录」配置无关，
+        因此打开本开关只影响网盘媒体库与本地 STRM 的目录层级，不改变平台整理行为。
+        """
+        if not getattr(self, "_type_folder_enabled", False):
+            return ""
+        media_type = getattr(mediainfo, "type", None)
+        if media_type == MediaType.MOVIE:
+            name = getattr(self, "_type_folder_movie", "")
+        elif media_type == MediaType.TV:
+            name = getattr(self, "_type_folder_tv", "")
+        else:
+            return ""
+        return str(name or "").strip().strip("/")
+
+    @staticmethod
+    def _with_type_folder(resolved: Path, root_path: str, type_folder: str) -> Path:
+        """在媒体库根目录下插入媒体类型一级目录，重复调用保持幂等。"""
+        if not type_folder:
+            return resolved
+        base = Path(str(root_path or "/"))
+        try:
+            relative = resolved.relative_to(base)
+        except ValueError:
+            return resolved
+        if relative.parts and relative.parts[0] == type_folder:
+            return resolved
+        return base / type_folder / relative
+
+    def _platform_rename_path(
+            self,
+            root_path: str,
+            subscribe,
+            mediainfo: MediaInfo,
+            source_name: str,
+            season: int = None,
+            episode: int = None,
+    ) -> Optional[Path]:
+        """使用当前分类目录和重命名模板生成完整目标路径。"""
+        effective_media = self._effective_mediainfo(subscribe, mediainfo)
+        classified_root = self._platform_classified_root(
+            root_path, subscribe, effective_media
+        )
+        if not classified_root:
+            return None
+        custom_words_list = None
+        if subscribe and getattr(subscribe, "custom_words", None):
+            cw = subscribe.custom_words
+            custom_words_list = [w for w in (cw.split("\n") if isinstance(cw, str) else list(cw)) if w.strip()]
+        meta = MetaInfo(source_name, custom_words=custom_words_list)
+        meta.type = effective_media.type
+        meta.year = getattr(subscribe, "year", None) or effective_media.year
+        if season is not None:
+            meta.begin_season = season
+        if episode is not None:
+            if hasattr(meta, "set_episode"):
+                meta.set_episode(episode)
+            else:
+                meta.begin_episode = episode
+        relative_name = FileManagerModule.recommend_name(meta, effective_media)
+        if not relative_name:
+            clean_title = effective_media.title or getattr(subscribe, "name", "") or "Unknown"
+            clean_year = getattr(subscribe, "year", None) or effective_media.year or ""
+            year_part = f" ({clean_year})" if clean_year else ""
+            source_suffix = Path(source_name).suffix or ".mp4"
+            if effective_media.type == MediaType.TV:
+                s_num = normalize_season(season)
+                e_num = max(1, int(episode or 1))
+                relative_name = f"{clean_title}{year_part}/Season {s_num}/{clean_title} - S{s_num:02d}E{e_num:02d}{source_suffix}"
+            else:
+                relative_name = f"{clean_title}{year_part}/{clean_title}{year_part}{source_suffix}"
+        # 文件名里带上 {tmdb-<id>} 标记：MP 识别直接用该 id，不靠标题猜
+        # 多版本；只改文件名部分，目录部分不动。
+        relative_path = Path(relative_name)
+        tagged_name = _with_tmdb_tag(relative_path.name, effective_media)
+        if tagged_name != relative_path.name:
+            relative_path = relative_path.with_name(tagged_name)
+        return classified_root / relative_path
+
+    def _platform_target_file(
+            self,
+            root_path: str,
+            subscribe,
+            mediainfo: MediaInfo,
+            source_name: str,
+            season: int = None,
+            episode: int = None,
+    ) -> Optional[Path]:
+        """生成平台目标文件路径。"""
+        return self._platform_rename_path(
+            root_path, subscribe, mediainfo, source_name, season, episode
+        )
+
+    def _platform_target(
+            self,
+            root_path: str,
+            subscribe,
+            mediainfo: MediaInfo,
+            source_name: str,
+            season: int = None,
+            episode: int = None,
+    ) -> Tuple[str, str]:
+        """生成平台分类后的目标目录和规范文件名。"""
+        full_path = self._platform_target_file(
+            root_path, subscribe, mediainfo, source_name, season, episode
+        )
+        if not full_path:
+            return "", ""
+        parent_posix = full_path.parent.as_posix()
+        if not parent_posix.startswith("/"):
+            parent_posix = "/" + parent_posix.lstrip("/")
+        return parent_posix, full_path.name
+
+    @classmethod
+    def _match_category_from_yaml(cls, mediainfo: MediaInfo) -> str:
+        """从 /config/category.yaml 读取并匹配分类规则兜底。"""
+        yaml_path = Path("/config/category.yaml")
+        if not yaml_path.exists():
+            return ""
+        try:
+            import yaml
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            return ""
+        if not isinstance(data, dict):
+            return ""
+
+        media_type = getattr(mediainfo, "type", None)
+        type_key = "tv" if media_type == MediaType.TV else ("movie" if media_type == MediaType.MOVIE else None)
+        if not type_key or type_key not in data:
+            return ""
+
+        type_rules = data.get(type_key) or {}
+        if not isinstance(type_rules, dict):
+            return ""
+
+        origin_countries = [str(c).strip().upper() for c in (getattr(mediainfo, "origin_country", None) or [])]
+        prod_countries = [str(c).strip().upper() for c in (getattr(mediainfo, "production_countries", None) or [])]
+        all_countries = set(origin_countries + prod_countries)
+
+        original_language = str(getattr(mediainfo, "original_language", "") or "").strip().lower()
+
+        genre_ids = {str(gid) for gid in (getattr(mediainfo, "genre_ids", None) or [])}
+        for g in getattr(mediainfo, "genres", None) or []:
+            if isinstance(g, dict) and g.get("id"):
+                genre_ids.add(str(g["id"]))
+
+        for cat_name, conditions in type_rules.items():
+            if not conditions:
+                return str(cat_name).strip()
+            if not isinstance(conditions, dict):
+                continue
+            matched = True
+            if "genre_ids" in conditions:
+                expected_genres = {str(item).strip() for item in str(conditions["genre_ids"]).split(",") if
+                                   item.strip()}
+                if not (genre_ids & expected_genres):
+                    matched = False
+            country_cond = conditions.get("origin_country") or conditions.get("production_countries")
+            if country_cond and matched:
+                expected_countries = {str(item).strip().upper() for item in str(country_cond).split(",") if
+                                      item.strip()}
+                if not (all_countries & expected_countries):
+                    matched = False
+            if "original_language" in conditions and matched:
+                expected_langs = {str(item).strip().lower() for item in str(conditions["original_language"]).split(",")
+                                  if item.strip()}
+                if original_language not in expected_langs:
+                    matched = False
+            if matched:
+                return str(cat_name).strip()
+        return ""
+
+    @classmethod
+    def _resolve_classification_category(
+            cls,
+            subscribe,
+            mediainfo: MediaInfo,
+    ) -> str:
+        """多级解析当前媒体的二级分类：
+        1. 订阅显式指定的分类；
+        2. 媒体已有有效分类；
+        3. 宿主 v3 统一分类服务 (classify_media)；
+        4. 宿主门面 (CategoryHelper)；
+        5. 本地 /config/category.yaml 规则兜底。
+        """
+        sub_cat = getattr(subscribe, "media_category", None) or getattr(subscribe, "media_category_id", None)
+        if sub_cat and str(sub_cat).strip():
+            return str(sub_cat).strip()
+
+        invalid_categories = {"电影", "电视剧", "tv", "movie", "未知", "default", "none"}
+        for attr in ("library_category", "category"):
+            val = getattr(mediainfo, attr, None)
+            if val and str(val).strip() and str(val).strip().lower() not in invalid_categories:
+                return str(val).strip()
+
+        if classify_media:
+            try:
+                classified = classify_media(mediainfo)
+                for attr in ("library_category", "category"):
+                    val = getattr(classified, attr, None)
+                    if val and str(val).strip() and str(val).strip().lower() not in invalid_categories:
+                        return str(val).strip()
+            except Exception:
+                logger.debug("_resolve_classification_category 分支忽略异常", exc_info=True)
+
+        if CategoryHelper:
+            try:
+                cat_helper = CategoryHelper()
+                tmdb_info = getattr(mediainfo, "tmdb_info", None)
+                if not tmdb_info and hasattr(mediainfo, "to_dict"):
+                    try:
+                        tmdb_info = mediainfo.to_dict()
+                    except Exception:
+                        tmdb_info = None
+                if tmdb_info and isinstance(tmdb_info, dict):
+                    media_type = getattr(mediainfo, "type", None)
+                    cat = ""
+                    if media_type == MediaType.TV:
+                        cat = cat_helper.get_tv_category(tmdb_info)
+                    elif media_type == MediaType.MOVIE:
+                        cat = cat_helper.get_movie_category(tmdb_info)
+                    if cat and str(cat).strip() and str(cat).strip().lower() not in invalid_categories:
+                        return str(cat).strip()
+            except Exception:
+                logger.debug("_resolve_classification_category 分支忽略异常", exc_info=True)
+
+        cat_from_yaml = cls._match_category_from_yaml(mediainfo)
+        if cat_from_yaml and cat_from_yaml.lower() not in invalid_categories:
+            return cat_from_yaml
+
+        return ""
+
+    @classmethod
+    def _enrich_mediainfo_with_subscribe(
+            cls, subscribe, mediainfo: MediaInfo
+    ) -> MediaInfo:
+        """用订阅卡片的展示信息覆盖媒体副本（标题/年份/分类）。
+
+        由唯一实现 ``resolve_effective_mediainfo`` 在深拷贝后调用；
+        不直接改调用方传入的 mediainfo。
+        """
+        subscribe_title = str(getattr(subscribe, "name", "") or "").strip()
+        if subscribe_title:
+            mediainfo.title = subscribe_title
+        subscribe_year = getattr(subscribe, "year", None)
+        if subscribe_year:
+            mediainfo.year = subscribe_year
+
+        cat = cls._resolve_classification_category(subscribe, mediainfo)
+        if cat:
+            mediainfo.category = cat
+            mediainfo.library_category = cat
+            if classify_media and getattr(mediainfo, "classification", None) is None:
+                try:
+                    c = classify_media(mediainfo)
+                    if getattr(c, "classification", None) is not None:
+                        mediainfo.classification = c.classification
+                except Exception:
+                    logger.debug("_effective_mediainfo 分支忽略异常", exc_info=True)
+        return mediainfo
+
+    @classmethod
+    def _effective_mediainfo(cls, subscribe, mediainfo: MediaInfo) -> MediaInfo:
+        """使用订阅卡片的展示信息与平台分类生成整理专用媒体副本。
+
+        薄适配：唯一实现见 ``handlers/sync/utils.py`` 的
+        ``resolve_effective_mediainfo``（Phase 3a 第 6 项）。
+        """
+        from .utils import resolve_effective_mediainfo
+
+        return resolve_effective_mediainfo(
+            mediainfo=mediainfo,
+            subscribe=subscribe,
+            enrich=cls._enrich_mediainfo_with_subscribe,
+        )
+
+    def _resolve_resource_season_dir(
+            self,
+            resource_root: str,
+            subscribe,
+            mediainfo: MediaInfo,
+            season: int
+    ) -> Optional[Path]:
+        """使用平台的目录分类和命名规则生成媒体季目录。"""
+        if not resource_root or not mediainfo:
+            return None
+
+        media_type = getattr(getattr(mediainfo, "type", None), "value", None)
+        media_source, media_id = media_identity(mediainfo)
+        cache_key = (
+            str(resource_root),
+            media_type or str(getattr(mediainfo, "type", "") or ""),
+            media_source,
+            media_id,
+            getattr(mediainfo, "tmdb_id", None),
+            getattr(mediainfo, "title", None),
+            getattr(mediainfo, "year", None),
+            getattr(mediainfo, "category", None),
+            getattr(subscribe, "id", None),
+            getattr(subscribe, "name", None),
+            getattr(subscribe, "year", None),
+            getattr(subscribe, "media_category", None),
+            int(season or 0),
+        )
+        platform_cache_key = normalize_platform_cache_key(cache_key)
+        season_lock = getattr(self, "_resource_season_dir_lock", None)
+        season_cache = getattr(self, "_resource_season_dir_cache", None)
+
+        if season_lock and season_cache:
+            with season_lock:
+                if platform_cache_key in season_cache:
+                    return season_cache.get(platform_cache_key)
+
+        resolved = None
+        try:
+            rename_path = self._platform_rename_path(
+                root_path=resource_root,
+                subscribe=subscribe,
+                mediainfo=mediainfo,
+                source_name=getattr(subscribe, "name", None) or mediainfo.title,
+                season=season,
+                episode=1,
+            )
+            if rename_path:
+                resolved = rename_path.parent
+        except Exception as error:
+            logger.debug(f"资源路径解析失败：{mediainfo.title_year}，{error}", exc_info=True)
+
+        if season_lock and season_cache:
+            with season_lock:
+                season_cache.set(platform_cache_key, resolved)
+        return resolved
+
+    def _get_local_resource_files(
+            self,
+            subscribe,
+            mediainfo: MediaInfo,
+            season: int
+    ) -> List[Path]:
+        """获取平台规则生成的季目录中的本地或挂载媒体文件。"""
+        season_dir = self._resolve_resource_season_dir(
+            getattr(self, "_local_resource_path", ""), subscribe, mediainfo, season
+        )
+        if not season_dir or not season_dir.is_dir():
+            return []
+        try:
+            allowed_extensions = set(MediaFileParser.VIDEO_EXTENSIONS) | {".strm"}
+            return [
+                item for item in season_dir.iterdir()
+                if item.is_file() and item.suffix.lower() in allowed_extensions
+            ]
+        except OSError as error:
+            logger.debug(f"资源季目录读取失败 {season_dir}: {error}")
+            return []
+
+    def _scan_local_resource_episodes(
+            self,
+            subscribe,
+            mediainfo: MediaInfo,
+            season: int,
+            start_episode: Optional[int] = None,
+            total_episode: Optional[int] = None
+    ) -> Set[int]:
+        """按元数据解析器识别已落盘或已挂载的剧集。"""
+        resource_files = self._get_local_resource_files(subscribe, mediainfo, season)
+        found_episodes = self._parse_resource_episode_names(
+            (resource_file.name for resource_file in resource_files),
+            season=season,
+            start_episode=start_episode,
+            total_episode=total_episode,
+            subscribe=subscribe,
+        )
+        if found_episodes:
+            logger.info(
+                f"媒体路径检查：{getattr(subscribe, 'name', '?')} S{season:02d} "
+                f"识别到 {len(found_episodes)} 集"
+            )
+        return found_episodes
+
+    @staticmethod
+    def _parse_resource_episode_names(
+            file_names,
+            season: int,
+            start_episode: Optional[int] = None,
+            total_episode: Optional[int] = None,
+            subscribe: Any = None,
+    ) -> Set[int]:
+        """使用元数据解析器从文件名提取目标季集数，支持订阅卡片的自定义词与偏移规则。"""
+        found_episodes = set()
+        custom_words_list = None
+        if subscribe and getattr(subscribe, "custom_words", None):
+            cw = subscribe.custom_words
+            custom_words_list = [w for w in (cw.split("\n") if isinstance(cw, str) else list(cw)) if w.strip()]
+
+        for file_name in file_names:
+            # 季集解析唯一入口：MetaInfo 口径 + 单文件兜底（见
+            # core/episode_parse.parse_season_episode）。
+            file_season, episodes = parse_season_episode(
+                Path(str(file_name)).stem,
+                custom_words_list,
+                season=season,
+            )
+            if file_season != season:
+                continue
+            for episode in episodes:
+                if start_episode is not None and episode < start_episode:
+                    continue
+                if total_episode and episode > total_episode:
+                    continue
+                found_episodes.add(int(episode))
+        return found_episodes
+
+    def _scan_cloud_resource_episode_files(
+            self,
+            subscribe,
+            mediainfo: MediaInfo,
+            season: int,
+            start_episode: int,
+            total_episode: int,
+    ) -> Tuple[bool, Dict[int, CloudFile], str]:
+        """一次读取目标季目录，返回真实存在的逐集网盘文件。
+
+        Phase 3a 第 4 项：列目录走 ``_season_dir_files``（与
+        ``_collect_episode_versions`` / ``_build_episode_baseline`` 共用
+        ``_season_listing_cache``，同一季只列一次目录）。返回的仍是
+        ``CloudFile``（按 ``file_id``/``file_name``/``file_size`` 重建），
+        调用方（upgrade / pt_upgrade / ``_scan_cloud_resource_episodes``）
+        只读 ``.name``/``.size``/``.id``，行为不变。
+        """
+        verified, cloud_path, files = self._owner.episode_dedup._season_dir_files(
+            subscribe, mediainfo, season
+        )
+        if not verified:
+            return False, {}, cloud_path
+        episode_files: Dict[int, CloudFile] = {}
+        upgrade_mode = getattr(self, "_upgrade_mode", "largest")
+        for item in files:
+            name = str(item.get("file_name") or "")
+            if not MediaFileParser.is_video(name):
+                continue
+            episodes = self._parse_resource_episode_names(
+                [name], season, start_episode, total_episode, subscribe=subscribe
+            )
+            candidate = CloudFile(
+                id=str(item.get("file_id") or ""),
+                name=name,
+                is_directory=False,
+                size=int(item.get("file_size") or 0),
+            )
+            for episode in episodes:
+                current = episode_files.get(episode)
+                if not current:
+                    episode_files[episode] = candidate
+                    continue
+                current_size = int(getattr(current, "size", 0) or 0)
+                candidate_size = int(getattr(candidate, "size", 0) or 0)
+                prefer_candidate = (
+                    candidate_size < current_size
+                    if upgrade_mode == "smallest"
+                    else candidate_size > current_size
+                )
+                if prefer_candidate:
+                    episode_files[episode] = candidate
+        return True, episode_files, cloud_path
+
+    def _cloud_drive_name(self) -> str:
+        """当前目标网盘名称，未获取到时回退为通用称呼。"""
+        return str(getattr(getattr(self, "_cloud_drive", None), "name", "") or "网盘")
+
+    def _scan_cloud_resource_episodes(
+            self,
+            subscribe,
+            mediainfo: MediaInfo,
+            season: int,
+            start_episode: int,
+            total_episode: int,
+    ) -> Tuple[bool, Set[int], str]:
+        """扫描平台规则生成的网盘季目录；目录不存在时不创建。"""
+        valid, episode_files, cloud_path = self._scan_cloud_resource_episode_files(
+            subscribe=subscribe,
+            mediainfo=mediainfo,
+            season=season,
+            start_episode=start_episode,
+            total_episode=total_episode,
+        )
+        drive_name = self._cloud_drive_name()
+        label = f"{drive_name}媒体路径 {cloud_path}" if cloud_path else f"{drive_name}媒体路径"
+        return valid, set(episode_files), label
+
+    def _find_cloud_movie_file(
+            self,
+            subscribe,
+            mediainfo: MediaInfo,
+    ) -> Optional[Tuple[str, str, CloudFile]]:
+        """检查平台规则生成的网盘电影目录，不递归扫描其他路径。
+
+        1.6.48：目录内任一视频文件即视为已有版本（不再要求文件名与模板一致），
+        避免命名模板变更后同一电影被重复转存。
+        """
+        cloud_media_root = getattr(self, "_CLOUD_MEDIA_ROOT", "/")
+        try:
+            cloud_dir, expected_name = self._platform_target(
+                cloud_media_root,
+                subscribe,
+                mediainfo,
+                f"{getattr(subscribe, 'name', None) or mediainfo.title}.mkv",
+            )
+        except Exception as error:
+            logger.debug(
+                f"{self._cloud_drive_name()}电影目标路径计算失败：{mediainfo.title_year}，{error}"
+            )
+            return None
+        cloud_directories = getattr(self, "_cloud_directories", None)
+        if not cloud_directories:
+            return None
+        lookup = cloud_directories.resolve_directory(cloud_dir)
+        if not lookup.checked or lookup.directory_id is None:
+            return None
+        expected_stem = Path(expected_name).stem
+        listing = cloud_directories.list_directory(lookup.directory_id)
+        if not listing.checked:
+            return None
+        fallback: Optional[Tuple[str, str, CloudFile]] = None
+        for item in listing.files:
+            if item.is_directory:
+                continue
+            name = item.name
+            path = Path(name)
+            if not MediaFileParser.is_video(name):
+                continue
+            if path.stem == expected_stem:
+                return cloud_dir, name, item
+            if fallback is None:
+                fallback = (cloud_dir, name, item)
+        return fallback
+
+    @staticmethod
+    def _summarize_share_episodes(
+            files: List[dict], season: int, mediainfo: Optional[MediaInfo] = None
+    ) -> Tuple[int, Set[int]]:
+        """递归统计分享中的实际视频数量和目标季集数。"""
+        video_count = 0
+        episodes = set()
+        unresolved: List[str] = []
+
+        def walk(items: List[dict]):
+            nonlocal video_count
+            for item in items or []:
+                if item.get("is_dir"):
+                    walk(item.get("children") or [])
+                    continue
+                name = str(item.get("name") or "")
+                if not MediaFileParser.is_video(name):
+                    continue
+                video_count += 1
+                episode = FileMatcher.episode_from_file(item, season, mediainfo)
+                if episode is not None:
+                    episodes.add(episode)
+                else:
+                    unresolved.append(name)
+
+        walk(files)
+        if not episodes:
+            # 识别阶段已有兜底，转存阶段也必须走同一套，否则计划 ready 仍会在此处判无集号。
+            episodes = rescue_tail_episodes_from_names(unresolved)
+        elif unresolved:
+            # 2026-11-13：识别计划（classify_path）用「开头数字 + 空格 + 画质词」口径，
+            # 例如 `14 DV.mkv → E14`；FileMatcher 认不出时不能只在「整批都无集号」时才兜底，
+            # 否则计划 ready 选中的 E14 会在此处凭空消失（share_episodes 只到 E13）。
+            # 单文件补判复用同源解析，仍排除年份/分辨率；rescue 的 3 集门槛保持不动。
+            for name in unresolved:
+                episode = episode_from_name(name, season)
+                if episode is not None:
+                    episodes.add(episode)
+        return video_count, episodes
+
+    @staticmethod
+    def _format_episode_ranges(episodes: Set[int]) -> str:
+        """把集数集合压缩为 E01-E03、E05 形式，优先使用平台工具。"""
+        return format_episode_ranges(episodes)
