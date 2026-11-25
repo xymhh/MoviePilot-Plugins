@@ -43,12 +43,12 @@
 
 <script setup>
 defineProps({
-  node: {type: Object, required: true},
-  selectedPath: {type: String, default: "/"},
-  depth: {type: Number, default: 0},
-  disabled: {type: Boolean, default: false},
+  node: { type: Object, required: true },
+  selectedPath: { type: String, default: "/" },
+  depth: { type: Number, default: 0 },
+  disabled: { type: Boolean, default: false },
 })
-defineEmits(["select", "toggle"]);
+defineEmits(["select", "toggle"])
 </script>
 
 <style scoped>

@@ -106,67 +106,69 @@
 </template>
 
 <script setup>
-import {computed, onMounted, onUnmounted, ref, watch} from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue"
+import { createPluginApi } from "../../api"
 
 const props = defineProps({
-  api: {type: Object, default: () => ({})},
-  config: {type: Object, default: () => ({attrs: {}})},
-  allowRefresh: {type: Boolean, default: true},
-  refreshInterval: {type: Number, default: 0},
-  pluginId: {type: String, default: "CloudSubscribeX"},
+  api: { type: Object, default: () => ({}) },
+  config: { type: Object, default: () => ({ attrs: {} }) },
+  allowRefresh: { type: Boolean, default: true },
+  refreshInterval: { type: Number, default: 0 },
 })
 
-const loading = ref(false);
-const loaded = ref(false);
-const error = ref("");
-const refreshedAt = ref(0);
-const overview = ref({summary: {}, schedule: {}, channels: []});
-let refreshTimer = null;
+const pluginApi = createPluginApi(props.api, () => props.pluginId)
 
-const attrs = computed(() => props.config?.attrs || {});
-const cardTitle = computed(() => attrs.value.title || "签到概览");
-const cardSubtitle = computed(() => attrs.value.subtitle || "多渠道每日签到与积分");
-const cardFlat = computed(() => attrs.value.border === false);
+const loading = ref(false)
+const loaded = ref(false)
+const error = ref("")
+const refreshedAt = ref(0)
+const overview = ref({ summary: {}, schedule: {}, channels: [] })
+let refreshTimer = null
+
+const attrs = computed(() => props.config?.attrs || {})
+const cardTitle = computed(() => attrs.value.title || "签到概览")
+const cardSubtitle = computed(() => attrs.value.subtitle || "多渠道每日签到与积分")
+const cardFlat = computed(() => attrs.value.border === false)
 const refreshSeconds = computed(() => {
-  const value = Number(props.refreshInterval || attrs.value.refresh || 0);
-  return Number.isFinite(value) ? value : 0;
+  const value = Number(props.refreshInterval || attrs.value.refresh || 0)
+  return Number.isFinite(value) ? value : 0
 })
-const summary = computed(() => overview.value.summary || {});
-const channels = computed(() => overview.value.channels || []);
+const summary = computed(() => overview.value.summary || {})
+const channels = computed(() => overview.value.channels || [])
 const overallStatus = computed(() => {
-  if (overview.value.running) return {label: "签到中", color: "primary"};
-  if (!summary.value.ready) return {label: "未配置", color: "warning"};
-  if (summary.value.today_failed) return {label: "有失败", color: "error"};
+  if (overview.value.running) return { label: "签到中", color: "primary" }
+  if (!summary.value.ready) return { label: "未配置", color: "warning" }
+  if (summary.value.today_failed) return { label: "有失败", color: "error" }
   if (summary.value.today_success >= summary.value.ready) {
-    return {label: "今日完成", color: "success"};
+    return { label: "今日完成", color: "success" }
   }
-  return {label: "待签到", color: "warning"};
+  return { label: "待签到", color: "warning" }
 })
 const scheduleText = computed(() => {
-  const schedule = overview.value.schedule || {};
-  if (!schedule.auto_retry) return "失败后不自动重试";
-  return `失败自动重试 ${schedule.retry_count || 0} 次`;
+  const schedule = overview.value.schedule || {}
+  if (!schedule.auto_retry) return "失败后不自动重试"
+  return `失败自动重试 ${schedule.retry_count || 0} 次`
 })
 const refreshedText = computed(() =>
   refreshedAt.value
     ? `更新于 ${new Date(refreshedAt.value).toLocaleTimeString("zh-CN", {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-    })}`
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`
     : "",
 )
 
 function signedNumber(value) {
-  const number = Number(value || 0);
-  return `${number > 0 ? "+" : ""}${number}`;
+  const number = Number(value || 0)
+  return `${number > 0 ? "+" : ""}${number}`
 }
 
 function numberTone(value) {
-  const number = Number(value || 0);
-  if (number > 0) return "text-success";
-  if (number < 0) return "text-error";
-  return "text-medium-emphasis";
+  const number = Number(value || 0)
+  if (number > 0) return "text-success"
+  if (number < 0) return "text-error"
+  return "text-medium-emphasis"
 }
 
 function statusColor(tone) {
@@ -181,76 +183,77 @@ function statusColor(tone) {
   )
 }
 
-function modeLabel(mode) {
-  return {gambler: "赌狗签到", lucky: "运气签到"}[mode] || "普通签到";
+function modeLabel(mode, label) {
+  // 模式文案由渠道自描述（后端下发 mode_label），前端不再维护映射表
+  return String(label || "").trim() || String(mode || "").trim() || "签到"
 }
 
 function channelMeta(channel) {
-  const executedAt = channel.today?.executed_at || channel.latest?.executed_at;
-  if (!executedAt) return modeLabel(channel.mode);
-  const date = new Date(executedAt);
+  const executedAt = channel.today?.executed_at || channel.latest?.executed_at
+  if (!executedAt) return modeLabel(channel.mode, channel.mode_label)
+  const date = new Date(executedAt)
   const time = Number.isNaN(date.getTime())
     ? String(executedAt)
     : date.toLocaleTimeString("zh-CN", {
         hour12: false,
         hour: "2-digit",
         minute: "2-digit",
-    })
-  return `${modeLabel(channel.mode)} · ${time}`;
+      })
+  return `${modeLabel(channel.mode, channel.mode_label)} · ${time}`
 }
 
 function balanceText(channel) {
-  const value = channel.today?.points_after ?? channel.latest?.points_after;
-  return value === null || value === undefined ? "余额 —" : `余额 ${value}`;
+  const value = channel.today?.points_after ?? channel.latest?.points_after
+  return value === null || value === undefined ? "余额 —" : `余额 ${value}`
 }
 
 function pointsText(channel) {
-  const value = channel.today?.points_change;
-  return value === null || value === undefined ? "今日积分 —" : `今日积分 ${signedNumber(value)}`;
+  const value = channel.today?.points_change
+  return value === null || value === undefined ? "今日积分 —" : `今日积分 ${signedNumber(value)}`
 }
 
 function lotteryText(channel) {
-  const record = channel.today;
-  if (!record?.lottery_target_count) return "";
-  return `转盘 ${record.lottery_executed || 0}/${record.lottery_target_count}`;
+  const record = channel.today
+  if (!record?.lottery_target_count) return ""
+  return `转盘 ${record.lottery_executed || 0}/${record.lottery_target_count}`
 }
 
 function displayTimeline(channel) {
-  return [...(channel.timeline || [])].reverse();
+  return [...(channel.timeline || [])].reverse()
 }
 
 async function loadOverview() {
-  if (!props.api?.get || loading.value) return;
-  loading.value = true;
-  error.value = "";
+  if (!props.api?.get || loading.value) return
+  loading.value = true
+  error.value = ""
   try {
-    const result = await props.api.get(`plugin/${props.pluginId}/checkin/overview?days=7`);
-    if (!result?.success) throw new Error(result?.message || "获取签到数据失败");
-    overview.value = result.data || {summary: {}, schedule: {}, channels: []};
-    loaded.value = true;
-    refreshedAt.value = Date.now();
+    const result = await pluginApi.checkin.overview(7)
+    if (!result?.success) throw new Error(result?.message || "获取签到数据失败")
+    overview.value = result.data || { summary: {}, schedule: {}, channels: [] }
+    loaded.value = true
+    refreshedAt.value = Date.now()
   } catch (e) {
-    error.value = e?.message || "获取签到数据失败";
+    error.value = e?.message || "获取签到数据失败"
   } finally {
-    loading.value = false;
+    loading.value = false
   }
 }
 
 function clearRefreshTimer() {
   if (refreshTimer !== null) {
-    window.clearTimeout(refreshTimer);
-    refreshTimer = null;
+    window.clearTimeout(refreshTimer)
+    refreshTimer = null
   }
 }
 
 function scheduleRefresh() {
-  clearRefreshTimer();
-  if (refreshSeconds.value <= 0 || document.visibilityState === "hidden") return;
+  clearRefreshTimer()
+  if (refreshSeconds.value <= 0 || document.visibilityState === "hidden") return
   refreshTimer = window.setTimeout(
     async () => {
-      refreshTimer = null;
-      await loadOverview();
-      scheduleRefresh();
+      refreshTimer = null
+      await loadOverview()
+      scheduleRefresh()
     },
     Math.max(1000, refreshSeconds.value * 1000),
   )
@@ -258,22 +261,22 @@ function scheduleRefresh() {
 
 function handleVisibilityChange() {
   if (document.visibilityState === "hidden") {
-    clearRefreshTimer();
-    return;
+    clearRefreshTimer()
+    return
   }
-  void loadOverview().finally(scheduleRefresh);
+  void loadOverview().finally(scheduleRefresh)
 }
 
-watch(refreshSeconds, scheduleRefresh);
+watch(refreshSeconds, scheduleRefresh)
 
 onMounted(() => {
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-  void loadOverview().finally(scheduleRefresh);
+  document.addEventListener("visibilitychange", handleVisibilityChange)
+  void loadOverview().finally(scheduleRefresh)
 })
 
 onUnmounted(() => {
-  document.removeEventListener("visibilitychange", handleVisibilityChange);
-  clearRefreshTimer();
+  document.removeEventListener("visibilitychange", handleVisibilityChange)
+  clearRefreshTimer()
 })
 </script>
 

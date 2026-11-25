@@ -70,38 +70,41 @@
 </template>
 
 <script setup>
-import {computed, onMounted, onUnmounted, ref, watch} from "vue";
-import {connectRuntimeStream} from "../utils/runtimeStream.js";
-import CheckinDashboard from "./dashboard/CheckinDashboard.vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue"
+import { connectRuntimeStream } from "../utils/runtimeStream.js"
+import CheckinDashboard from "./dashboard/CheckinDashboard.vue"
+import { createPluginApi } from "../api"
 
 const props = defineProps({
-  api: {type: Object, default: () => ({})},
-  config: {type: Object, default: () => ({attrs: {}})},
-  allowRefresh: {type: Boolean, default: true},
-  refreshInterval: {type: Number, default: 0},
+  api: { type: Object, default: () => ({}) },
+  config: { type: Object, default: () => ({ attrs: {} }) },
+  allowRefresh: { type: Boolean, default: true },
+  refreshInterval: { type: Number, default: 0 },
 })
 
-const loading = ref(false);
-const loaded = ref(false);
-const error = ref("");
-const refreshedAt = ref(0);
-const overview = ref({runtime: {}, stats: [], recent_history: []});
-let refreshTimer = null;
-let runtimeStream = null;
-let runtimeStreamFailures = 0;
-let runtimeStreamDisabled = false;
+const pluginApi = createPluginApi(props.api, () => props.pluginId)
 
-const attrs = computed(() => props.config?.attrs || {});
-const dashboardType = computed(() => props.config?.key || attrs.value.dashboard || "overview");
-const isCheckinDashboard = computed(() => dashboardType.value === "checkin");
-const cardTitle = computed(() => attrs.value.title || "网盘订阅助手");
-const cardSubtitle = computed(() => attrs.value.subtitle || "订阅任务与转存概览");
-const cardFlat = computed(() => attrs.value.border === false);
+const loading = ref(false)
+const loaded = ref(false)
+const error = ref("")
+const refreshedAt = ref(0)
+const overview = ref({ runtime: {}, stats: [], recent_history: [] })
+let refreshTimer = null
+let runtimeStream = null
+let runtimeStreamFailures = 0
+let runtimeStreamDisabled = false
+
+const attrs = computed(() => props.config?.attrs || {})
+const dashboardType = computed(() => props.config?.key || attrs.value.dashboard || "overview")
+const isCheckinDashboard = computed(() => dashboardType.value === "checkin")
+const cardTitle = computed(() => attrs.value.title || "网盘订阅助手")
+const cardSubtitle = computed(() => attrs.value.subtitle || "订阅任务与转存概览")
+const cardFlat = computed(() => attrs.value.border === false)
 const refreshSeconds = computed(() => {
-  const value = Number(props.refreshInterval || attrs.value.refresh || 0);
-  return Number.isFinite(value) ? value : 0;
+  const value = Number(props.refreshInterval || attrs.value.refresh || 0)
+  return Number.isFinite(value) ? value : 0
 })
-const recentHistory = computed(() => (overview.value.recent_history || []).slice(0, 3));
+const recentHistory = computed(() => (overview.value.recent_history || []).slice(0, 3))
 const activeTaskCount = computed(
   () =>
     (overview.value.runtime?.tasks || []).filter((task) =>
@@ -125,139 +128,141 @@ const statusText = computed(() =>
 const refreshedText = computed(() =>
   refreshedAt.value
     ? `更新于 ${new Date(refreshedAt.value).toLocaleTimeString("zh-CN", {
-      hour12: false,
-      hour: "2-digit",
-      minute: "2-digit",
-    })}`
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`
     : "",
 )
 
 function historyKey(item) {
-  return [item.time, item.file_name, item.share_url].join("|");
+  return [item.time, item.file_name, item.share_url].join("|")
 }
 
 async function loadOverview() {
-  if (isCheckinDashboard.value || !props.api?.get || loading.value) return;
-  loading.value = true;
-  error.value = "";
+  if (isCheckinDashboard.value || !props.api?.get || loading.value) return
+  loading.value = true
+  error.value = ""
   try {
-    const result = await props.api.get("plugin/CloudSubscribeX/overview?include_runtime=false");
-    if (!result?.success) throw new Error(result?.message || "获取数据失败");
+    const result = await pluginApi.runtime.overview({ include_runtime: false })
+    if (!result?.success) throw new Error(result?.message || "获取数据失败")
     overview.value = {
       ...overview.value,
       ...(result.data || {}),
     }
-    loaded.value = true;
-    refreshedAt.value = Date.now();
+    loaded.value = true
+    refreshedAt.value = Date.now()
   } catch (e) {
-    error.value = e?.message || "获取数据失败";
+    error.value = e?.message || "获取数据失败"
   } finally {
-    loading.value = false;
+    loading.value = false
   }
 }
 
 function runtimeIsActive(value) {
   return (
     ["starting", "running", "stopping"].includes(value?.status) ||
-    (value?.tasks || []).some((task) => ["queued", "running", "stopping", "downloading", "transferring", "postprocessing"].includes(task.status))
+    (value?.tasks || []).some((task) =>
+      ["queued", "running", "stopping", "downloading", "transferring", "postprocessing"].includes(task.status),
+    )
   )
 }
 
 function isPageVisible() {
-  return document.visibilityState !== "hidden";
+  return document.visibilityState !== "hidden"
 }
 
 function clearRefreshTimer() {
   if (refreshTimer !== null) {
-    window.clearTimeout(refreshTimer);
-    refreshTimer = null;
+    window.clearTimeout(refreshTimer)
+    refreshTimer = null
   }
 }
 
 function closeRuntimeStream() {
   if (runtimeStream) {
-    runtimeStream.close();
-    runtimeStream = null;
+    runtimeStream.close()
+    runtimeStream = null
   }
 }
 
 function stopAutoRefresh() {
-  clearRefreshTimer();
-  closeRuntimeStream();
+  clearRefreshTimer()
+  closeRuntimeStream()
 }
 
 function scheduleFallbackRefresh(delay = refreshSeconds.value * 1000) {
-  clearRefreshTimer();
-  if (refreshSeconds.value <= 0 || !isPageVisible()) return;
+  clearRefreshTimer()
+  if (refreshSeconds.value <= 0 || !isPageVisible()) return
   refreshTimer = window.setTimeout(
     async () => {
-      refreshTimer = null;
-      await loadOverview();
-      scheduleFallbackRefresh();
+      refreshTimer = null
+      await loadOverview()
+      scheduleFallbackRefresh()
     },
     Math.max(1000, Number(delay) || 0),
   )
 }
 
 function openRuntimeStream() {
-  if (runtimeStreamDisabled || runtimeStream || refreshSeconds.value <= 0) return false;
-  const source = connectRuntimeStream("CloudSubscribeX", {
+  if (runtimeStreamDisabled || runtimeStream || refreshSeconds.value <= 0) return false
+  const source = connectRuntimeStream("CloudSubscribe", {
     onOpen() {
-      runtimeStreamFailures = 0;
-      clearRefreshTimer();
+      runtimeStreamFailures = 0
+      clearRefreshTimer()
     },
     onRuntime(nextRuntime) {
-      const wasActive = runtimeIsActive(overview.value.runtime);
-      overview.value = {...overview.value, runtime: nextRuntime};
-      loaded.value = true;
-      refreshedAt.value = Date.now();
-      if (wasActive && !runtimeIsActive(nextRuntime)) void loadOverview();
+      const wasActive = runtimeIsActive(overview.value.runtime)
+      overview.value = { ...overview.value, runtime: nextRuntime }
+      loaded.value = true
+      refreshedAt.value = Date.now()
+      if (wasActive && !runtimeIsActive(nextRuntime)) void loadOverview()
     },
     onError() {
-      runtimeStreamFailures += 1;
-      if (runtimeStreamFailures < 2) return;
-      closeRuntimeStream();
-      runtimeStreamDisabled = true;
-      scheduleFallbackRefresh(1000);
+      runtimeStreamFailures += 1
+      if (runtimeStreamFailures < 2) return
+      closeRuntimeStream()
+      runtimeStreamDisabled = true
+      scheduleFallbackRefresh(1000)
     },
   })
-  if (!source) return false;
-  runtimeStream = source;
-  return true;
+  if (!source) return false
+  runtimeStream = source
+  return true
 }
 
 function startAutoRefresh() {
-  stopAutoRefresh();
-  if (isCheckinDashboard.value || refreshSeconds.value <= 0 || !isPageVisible()) return;
-  if (!openRuntimeStream()) scheduleFallbackRefresh();
+  stopAutoRefresh()
+  if (isCheckinDashboard.value || refreshSeconds.value <= 0 || !isPageVisible()) return
+  if (!openRuntimeStream()) scheduleFallbackRefresh()
 }
 
 function handleVisibilityChange() {
   if (!isPageVisible()) {
-    stopAutoRefresh();
-    return;
+    stopAutoRefresh()
+    return
   }
-  runtimeStreamDisabled = false;
-  runtimeStreamFailures = 0;
-  void loadOverview().finally(startAutoRefresh);
+  runtimeStreamDisabled = false
+  runtimeStreamFailures = 0
+  void loadOverview().finally(startAutoRefresh)
 }
 
 watch(refreshSeconds, () => {
-  if (isCheckinDashboard.value) return;
-  runtimeStreamDisabled = false;
-  runtimeStreamFailures = 0;
-  startAutoRefresh();
+  if (isCheckinDashboard.value) return
+  runtimeStreamDisabled = false
+  runtimeStreamFailures = 0
+  startAutoRefresh()
 })
 
 onMounted(() => {
-  if (isCheckinDashboard.value) return;
-  document.addEventListener("visibilitychange", handleVisibilityChange);
-  void loadOverview().finally(startAutoRefresh);
+  if (isCheckinDashboard.value) return
+  document.addEventListener("visibilitychange", handleVisibilityChange)
+  void loadOverview().finally(startAutoRefresh)
 })
 
 onUnmounted(() => {
-  document.removeEventListener("visibilitychange", handleVisibilityChange);
-  stopAutoRefresh();
+  document.removeEventListener("visibilitychange", handleVisibilityChange)
+  stopAutoRefresh()
 })
 </script>
 

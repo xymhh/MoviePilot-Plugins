@@ -32,7 +32,7 @@
             @click="toggleOption(opt.key)">
             <v-icon
               :icon="isOptionActive(opt.key) ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline'"
-              :color="isOptionActive(opt.key) ? (opt.color || 'primary') : 'default'"
+              :color="isOptionActive(opt.key) ? opt.color || 'primary' : 'default'"
               size="20"
               class="flex-shrink-0" />
             <div class="ml-3 flex-grow-1 min-w-0">
@@ -51,12 +51,7 @@
           class="mt-3 text-caption rounded-lg">
           {{ alertText }}
         </v-alert>
-        <v-alert
-          v-if="errorText"
-          type="error"
-          variant="tonal"
-          density="compact"
-          class="mt-3 text-caption rounded-lg">
+        <v-alert v-if="errorText" type="error" variant="tonal" density="compact" class="mt-3 text-caption rounded-lg">
           {{ errorText }}
         </v-alert>
       </v-card-text>
@@ -93,78 +88,78 @@
 </template>
 
 <script setup>
-import {computed, ref, watch} from "vue";
+import { computed, ref, watch } from "vue"
 
 const props = defineProps({
   modelValue: Boolean,
   /** 弹窗标题 */
-  title: {type: String, default: "确认"},
+  title: { type: String, default: "确认" },
   /** 左侧图标 */
-  icon: {type: String, default: ""},
+  icon: { type: String, default: "" },
   /** 图标颜色 */
-  iconColor: {type: String, default: "primary"},
+  iconColor: { type: String, default: "primary" },
   /** 正文文字（也可用默认插槽覆盖） */
-  body: {type: String, default: ""},
+  body: { type: String, default: "" },
   /**
    * 选项列表
    * [{ key: string, label: string, desc?: string, color?: string }]
    */
-  options: {type: Array, default: () => []},
+  options: { type: Array, default: () => [] },
   /** 默认选中的 keys 数组 */
-  defaultSelected: {type: Array, default: () => []},
+  defaultSelected: { type: Array, default: () => [] },
   /** 是否显示全选/取消全选按钮 */
-  showSelectAll: {type: Boolean, default: false},
+  showSelectAll: { type: Boolean, default: false },
   /** 是否在确认按钮上显示选中项数量 */
-  showSelectedCount: {type: Boolean, default: false},
+  showSelectedCount: { type: Boolean, default: false },
   /** 内嵌 alert 文字 */
-  alertText: {type: String, default: ""},
+  alertText: { type: String, default: "" },
   /** alert 类型 */
-  alertType: {type: String, default: "info"},
+  alertType: { type: String, default: "info" },
   /** 错误提示文字 */
-  errorText: {type: String, default: ""},
+  errorText: { type: String, default: "" },
   /** 确认按钮文字 */
-  confirmText: {type: String, default: "确认"},
+  confirmText: { type: String, default: "确认" },
   /** 确认按钮颜色 */
-  confirmColor: {type: String, default: "primary"},
+  confirmColor: { type: String, default: "primary" },
   /** 强制禁用确认按钮 */
-  confirmDisabled: {type: Boolean, default: false},
+  confirmDisabled: { type: Boolean, default: false },
   /** 是否 loading */
-  loading: {type: Boolean, default: false},
+  loading: { type: Boolean, default: false },
   /** persistent（点击外部不关闭） */
-  persistent: {type: Boolean, default: false},
-});
+  persistent: { type: Boolean, default: false },
+})
 
-const emit = defineEmits(["update:modelValue", "confirm"]);
+const emit = defineEmits(["update:modelValue", "confirm"])
 
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit("update:modelValue", v),
-});
+})
 
 /** 当前选中的 key 列表 */
-const selectedKeys = ref([]);
+const selectedKeys = ref([])
 
 function isOptionActive(key) {
-  return selectedKeys.value.includes(key);
+  return selectedKeys.value.includes(key)
 }
 
 function toggleOption(key) {
   if (selectedKeys.value.includes(key)) {
-    selectedKeys.value = selectedKeys.value.filter((k) => k !== key);
+    selectedKeys.value = selectedKeys.value.filter((k) => k !== key)
   } else {
-    selectedKeys.value = [...selectedKeys.value, key];
+    selectedKeys.value = [...selectedKeys.value, key]
   }
 }
 
 const allSelected = computed(() => {
-  return props.options.length > 0 && selectedKeys.value.length === props.options.length;
-});
+  return props.options.length > 0 && selectedKeys.value.length === props.options.length
+})
 
 function toggleSelectAll() {
   if (allSelected.value) {
-    selectedKeys.value = [];
+    selectedKeys.value = []
   } else {
-    selectedKeys.value = props.options.map((opt) => opt.key);
+    selectedKeys.value = props.options.map((opt) => opt.key)
   }
 }
 
@@ -173,35 +168,35 @@ watch(
   () => props.modelValue,
   (val) => {
     if (val) {
-      selectedKeys.value = [...(props.defaultSelected || [])];
+      selectedKeys.value = [...(props.defaultSelected || [])]
     }
   },
-  {immediate: true},
-);
+  { immediate: true },
+)
 
 const isConfirmDisabled = computed(() => {
-  if (props.confirmDisabled) return true;
-  if (props.showSelectAll && props.options.length && !selectedKeys.value.length) return true;
-  return false;
-});
+  if (props.confirmDisabled) return true
+  if (props.showSelectAll && props.options.length && !selectedKeys.value.length) return true
+  return false
+})
 
 const displayConfirmText = computed(() => {
   if (props.showSelectedCount && selectedKeys.value.length > 0) {
-    return `${props.confirmText} (${selectedKeys.value.length})`;
+    return `${props.confirmText} (${selectedKeys.value.length})`
   }
-  return props.confirmText;
-});
+  return props.confirmText
+})
 
 function handleConfirm() {
   if (props.options.length) {
-    const map = {};
+    const map = {}
     for (const opt of props.options) {
-      map[opt.key] = selectedKeys.value.includes(opt.key);
+      map[opt.key] = selectedKeys.value.includes(opt.key)
     }
     // 同时派发 map 字典和选中的 keys 数组，完美适配两类接收方式
-    emit("confirm", map, [...selectedKeys.value]);
+    emit("confirm", map, [...selectedKeys.value])
   } else {
-    emit("confirm");
+    emit("confirm")
   }
 }
 </script>

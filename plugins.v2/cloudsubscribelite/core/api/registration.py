@@ -822,63 +822,18 @@ class MoviePilotRegistration(OwnerDelegator):
         )
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
+        # Lite 直接使用上游 1.7.x 的 UI：两个入口（网盘订阅 / 网盘资源）。
         if not self._enabled or not self._show_sidebar_nav:
             return []
-        # 1.10.3：插件 UI 按流程复用 MP 界面——追更列表走 MP 订阅页、网盘资源走
-        # MP 探索页；历史记录没有 MP 代替，独立成侧栏导航。
-        # 1.10.4：网盘整理不新增导航（1.10.3 的 organize 入口已撤），整理设置
-        # 只留在配置页（organize 分组，高级设置里），整理台随导航一起删除。
-        # 1.13.2：渠道页拆三导航——频道监控（TgMonitor）从渠道页独立出来，
-        # 渠道页只留 ChannelManager；签到不新增导航（主页 checkin widget 已有）。
-        navs = [
+        return [
             {
-                "nav_key": "channels",
-                "title": "渠道管理",
-                "icon": "mdi-hub-outline",
-                "section": "system",
-                "permission": "manage",
+                "nav_key": "main",
+                "title": "网盘订阅",
+                "icon": "mdi-cloud-sync-outline",
+                "section": "subscribe",
+                "permission": "subscribe",
                 "order": 30,
             },
-            {
-                "nav_key": "tg-monitor",
-                "title": "频道监控",
-                "icon": "mdi-telegram",
-                "section": "system",
-                "permission": "manage",
-                "order": 31,
-            },
-            {
-                "nav_key": "history",
-                "title": "失败记录",
-                "icon": "mdi-clipboard-text-clock-outline",
-                "section": "system",
-                "permission": "manage",
-                "order": 32,
-            },
-            # v1.29.7 阶段 1：整理队列（网盘整理漏斗）独立成主侧栏导航。
-            {
-                "nav_key": "funnel",
-                "title": "整理队列",
-                "icon": "mdi-filter-check-outline",
-                "section": "system",
-                "permission": "manage",
-                "order": 33,
-            },
-            # v1.31.0：重复扫描（同集多份 .strm）独立成主侧栏导航。
-            {
-                "nav_key": "duplicates",
-                "title": "重复扫描",
-                "icon": "mdi-content-duplicate",
-                "section": "system",
-                "permission": "manage",
-                "order": 34,
-            },
-        ]
-        # Lite：不提供「整理队列」「重复扫描」两个入口。
-        hidden = {"funnel", "duplicates"}
-        return [
-            item for item in navs
-            if str(item.get("nav_key") or "") not in hidden
         ]
 
     def get_actions(self) -> List[Dict[str, Any]]:

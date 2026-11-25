@@ -60,6 +60,17 @@
         </div>
       </div>
       <v-btn
+        v-if="rebuildable"
+        class="account-rebuild"
+        icon="mdi-database-refresh-outline"
+        color="warning"
+        variant="text"
+        size="small"
+        :disabled="loading || disabled"
+        title="清空重建索引"
+        aria-label="清空重建索引"
+        @click="emit('rebuild')" />
+      <v-btn
         v-if="refreshable"
         class="account-refresh"
         icon="mdi-refresh"
@@ -76,28 +87,37 @@
 </template>
 
 <script setup>
-import {computed} from "vue";
+import { computed } from "vue"
 
 const props = defineProps({
   account: { type: Object, default: () => ({}) },
   compact: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   refreshable: { type: Boolean, default: false },
+  rebuildable: { type: Boolean, default: false },
   disabled: { type: Boolean, default: false },
 })
-const emit = defineEmits(["refresh"])
+const emit = defineEmits(["refresh", "rebuild"])
 const user = computed(() => props.account.user || {})
 const storage = computed(() => props.account.storage || {})
 const points = computed(() => props.account.points || {})
 const details = computed(() => {
-  const list = Array.isArray(props.account.details) ? props.account.details : [];
+  const list = Array.isArray(props.account.details) ? props.account.details : []
   return list
-    .filter((item) => item && typeof item === "object" && item.label && item.value !== undefined && item.value !== null && item.value !== "")
+    .filter(
+      (item) =>
+        item &&
+        typeof item === "object" &&
+        item.label &&
+        item.value !== undefined &&
+        item.value !== null &&
+        item.value !== "",
+    )
     .map((item) => ({
       ...item,
       value: formatDetailValue(item.value),
-    }));
-});
+    }))
+})
 const hasLoadedInfo = computed(() => Boolean(props.account?.connected || props.account?.refreshed_at))
 const hasPoints = computed(() => points.value.available !== undefined && points.value.available !== null)
 const hasStorageInfo = computed(() => Boolean(storage.value.used || storage.value.total || storage.value.remaining))
@@ -117,22 +137,22 @@ const vipText = computed(() => {
 })
 
 function formatDetailValue(val) {
-  if (val === null || val === undefined) return "";
-  const text = String(val).trim();
+  if (val === null || val === undefined) return ""
+  const text = String(val).trim()
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(text)) {
-    const d = new Date(text);
+    const d = new Date(text)
     if (!isNaN(d.getTime())) {
-      const pad = (n) => String(n).padStart(2, "0");
-      const y = d.getFullYear();
-      const m = pad(d.getMonth() + 1);
-      const day = pad(d.getDate());
-      const h = pad(d.getHours());
-      const min = pad(d.getMinutes());
-      const s = pad(d.getSeconds());
-      return `${y}-${m}-${day} ${h}:${min}:${s}`;
+      const pad = (n) => String(n).padStart(2, "0")
+      const y = d.getFullYear()
+      const m = pad(d.getMonth() + 1)
+      const day = pad(d.getDate())
+      const h = pad(d.getHours())
+      const min = pad(d.getMinutes())
+      const s = pad(d.getSeconds())
+      return `${y}-${m}-${day} ${h}:${min}:${s}`
     }
   }
-  return text;
+  return text
 }
 </script>
 
@@ -210,6 +230,12 @@ function formatDetailValue(val) {
   position: absolute;
   top: 7px;
   right: 7px;
+}
+
+.account-rebuild {
+  position: absolute;
+  top: 7px;
+  right: 40px;
 }
 
 .account-points {

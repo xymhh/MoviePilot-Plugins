@@ -95,9 +95,7 @@
         </v-alert>
       </v-card-text>
       <v-card-actions class="px-4 py-3 border-t bg-surface-variant-opacity">
-        <span class="text-caption text-medium-emphasis text-truncate mr-2">
-          选中：{{ currentPath }}
-        </span>
+        <span class="text-caption text-medium-emphasis text-truncate mr-2">选中：{{ currentPath }}</span>
         <v-spacer />
         <v-btn color="grey" variant="text" size="small" @click="visible = false">取消</v-btn>
         <v-btn color="primary" variant="flat" size="small" :disabled="!currentPath || loading" @click="selectDirectory">
@@ -130,8 +128,12 @@
       <v-card-actions class="px-4 pb-3">
         <v-spacer />
         <v-btn variant="text" :disabled="createLoading" @click="closeCreateDirectoryDialog">取消</v-btn>
-        <v-btn color="primary" variant="flat" :loading="createLoading" :disabled="!newDirectoryName.trim()"
-               @click="createDirectory">
+        <v-btn
+          color="primary"
+          variant="flat"
+          :loading="createLoading"
+          :disabled="!newDirectoryName.trim()"
+          @click="createDirectory">
           创建
         </v-btn>
       </v-card-actions>
@@ -140,38 +142,40 @@
 </template>
 
 <script setup>
-import {computed, ref, watch} from "vue";
-import DirectoryTreeNode from "./DirectoryTreeNode.vue";
+import { computed, ref, watch } from "vue"
+import { createPluginApi } from "../../api"
+import DirectoryTreeNode from "./DirectoryTreeNode.vue"
 
 const props = defineProps({
-  modelValue: {type: Boolean, default: false},
-  api: {type: [Object, Function], required: true},
-  mode: {type: String, default: "cloud"}, // "cloud" 或 "local"
-  provider: {type: String, default: ""},
-  targetProvider: {type: String, default: ""},
-  initialPath: {type: String, default: "/"},
-  pluginId: {type: String, default: "CloudSubscribeX"},
-  title: {type: String, default: ""},
-  allowCreate: {type: Boolean, default: true},
-  providers: {type: Array, default: () => []},
+  modelValue: { type: Boolean, default: false },
+  api: { type: [Object, Function], required: true },
+  mode: { type: String, default: "cloud" }, // "cloud" 或 "local"
+  provider: { type: String, default: "" },
+  targetProvider: { type: String, default: "" },
+  initialPath: { type: String, default: "/" },
+  pluginId: { type: String, default: "CloudSubscribe" },
+  title: { type: String, default: "" },
+  allowCreate: { type: Boolean, default: true },
+  providers: { type: Array, default: () => [] },
 })
-const emit = defineEmits(["update:modelValue", "select"]);
-const isLocalMode = computed(() => props.mode === "local");
+const emit = defineEmits(["update:modelValue", "select"])
+const pluginApi = createPluginApi(props.api, () => props.pluginId)
+const isLocalMode = computed(() => props.mode === "local")
 const dialogTitle = computed(() => {
-  if (props.title) return props.title;
-  return isLocalMode.value ? "选择本地存储目录" : "选择网盘转存路径";
-});
-const currentPath = ref("/");
-const selectedProvider = ref("");
-const loading = ref(false);
-const errorMessage = ref("");
-const createDirectoryVisible = ref(false);
-const newDirectoryName = ref("");
-const createDirectoryError = ref("");
-const createLoading = ref(false);
+  if (props.title) return props.title
+  return isLocalMode.value ? "选择本地存储目录" : "选择网盘转存路径"
+})
+const currentPath = ref("/")
+const selectedProvider = ref("")
+const loading = ref(false)
+const errorMessage = ref("")
+const createDirectoryVisible = ref(false)
+const newDirectoryName = ref("")
+const createDirectoryError = ref("")
+const createLoading = ref(false)
 
 function directoryNode(source = {}, fallbackPath = "/") {
-  const rootLabel = isLocalMode.value ? "本地根目录" : "网盘根目录";
+  const rootLabel = isLocalMode.value ? "本地根目录" : "网盘根目录"
   return {
     id: String(source.id || source.path || fallbackPath),
     name: String(source.name || (fallbackPath === "/" ? rootLabel : fallbackPath.split("/").pop())),
@@ -183,76 +187,68 @@ function directoryNode(source = {}, fallbackPath = "/") {
   }
 }
 
-const treeRoot = ref(directoryNode({}, "/"));
+const treeRoot = ref(directoryNode({}, "/"))
 
 const visible = computed({
   get: () => props.modelValue,
   set: (value) => emit("update:modelValue", value),
 })
 const providerItems = computed(() => {
-  if (isLocalMode.value) return [];
-  if (Array.isArray(props.providers) && props.providers.length) return props.providers;
-  return props.provider ? [{title: props.provider, value: props.provider}] : [];
+  if (isLocalMode.value) return []
+  if (Array.isArray(props.providers) && props.providers.length) return props.providers
+  return props.provider ? [{ title: props.provider, value: props.provider }] : []
 })
-
-function unwrap(raw) {
-  if (raw?.data && typeof raw.data === "object" && "success" in raw.data) return raw.data;
-  return raw || {};
-}
 
 function normalizePath(path) {
   const parts = String(path || "/")
     .replace(/\\/g, "/")
     .split("/")
-    .filter(Boolean);
-  return parts.length ? `/${parts.join("/")}` : "/";
+    .filter(Boolean)
+  return parts.length ? `/${parts.join("/")}` : "/"
 }
 
 function findTreeNode(path, node = treeRoot.value) {
-  const normalized = normalizePath(path);
-  if (node.path === normalized) return node;
+  const normalized = normalizePath(path)
+  if (node.path === normalized) return node
   for (const child of node.children) {
-    const matched = findTreeNode(normalized, child);
-    if (matched) return matched;
+    const matched = findTreeNode(normalized, child)
+    if (matched) return matched
   }
-  return null;
+  return null
 }
 
 function ensureTreePath(path) {
-  const normalized = normalizePath(path);
-  let node = treeRoot.value;
-  let current = "";
+  const normalized = normalizePath(path)
+  let node = treeRoot.value
+  let current = ""
   for (const part of normalized.split("/").filter(Boolean)) {
-    current = `${current}/${part}`;
-    let child = node.children.find((item) => item.path === current);
+    current = `${current}/${part}`
+    let child = node.children.find((item) => item.path === current)
     if (!child) {
-      child = directoryNode({name: part, path: current}, current);
-      node.children.push(child);
+      child = directoryNode({ name: part, path: current }, current)
+      node.children.push(child)
     }
-    node.expanded = true;
-    node = child;
+    node.expanded = true
+    node = child
   }
-  return node;
+  return node
 }
 
 async function loadTreeNode(node, force = false) {
-  if (!node || node.loading || (!force && node.loaded)) return;
-  loading.value = true;
-  node.loading = true;
-  errorMessage.value = "";
+  if (!node || node.loading || (!force && node.loaded)) return
+  loading.value = true
+  node.loading = true
+  errorMessage.value = ""
   try {
-    const query = new URLSearchParams({
+    const response = await pluginApi.drive.directories({
+      local: isLocalMode.value,
       path: node.path,
+      provider: selectedProvider.value || props.provider || "",
+      refresh: force,
     })
-    if (!isLocalMode.value) {
-      query.set("provider", selectedProvider.value || props.provider || "");
-    }
-    if (force) query.set("refresh", "true");
-    const endpoint = isLocalMode.value ? "local/directories" : "cloud/directories";
-    const response = unwrap(await props.api.get(`plugin/${props.pluginId}/${endpoint}?${query}`));
-    if (response.success === false) throw new Error(response.message || "读取目录失败");
-    const data = response.data?.data || response.data || response;
-    const previous = new Map(node.children.map((item) => [item.path, item]));
+    if (response.success === false) throw new Error(response.message || "读取目录失败")
+    const data = response.data?.data || response.data || response
+    const previous = new Map(node.children.map((item) => [item.path, item]))
     node.children = (Array.isArray(data.directories) ? data.directories : [])
       .sort((left, right) =>
         String(left.name || "").localeCompare(String(right.name || ""), undefined, {
@@ -261,111 +257,106 @@ async function loadTreeNode(node, force = false) {
         }),
       )
       .map((item) => previous.get(item.path) || directoryNode(item, item.path))
-    node.loaded = true;
+    node.loaded = true
   } catch (error) {
-    errorMessage.value = error.message || String(error);
+    errorMessage.value = error.message || String(error)
   } finally {
-    node.loading = false;
-    loading.value = false;
+    node.loading = false
+    loading.value = false
   }
 }
 
 async function loadDirectories(path, force = false) {
-  const normalized = normalizePath(path);
-  if (!treeRoot.value.loaded) await loadTreeNode(treeRoot.value);
-  const node = findTreeNode(normalized) || ensureTreePath(normalized);
-  currentPath.value = normalized;
-  node.expanded = true;
-  await loadTreeNode(node, force);
+  const normalized = normalizePath(path)
+  if (!treeRoot.value.loaded) await loadTreeNode(treeRoot.value)
+  const node = findTreeNode(normalized) || ensureTreePath(normalized)
+  currentPath.value = normalized
+  node.expanded = true
+  await loadTreeNode(node, force)
 }
 
 function refreshDirectories() {
-  const node = findTreeNode(currentPath.value) || treeRoot.value;
-  loadTreeNode(node, true);
+  const node = findTreeNode(currentPath.value) || treeRoot.value
+  loadTreeNode(node, true)
 }
 
 function selectTreeNode(node) {
-  currentPath.value = normalizePath(node?.path);
+  currentPath.value = normalizePath(node?.path)
 }
 
 async function toggleTreeNode(node) {
-  if (!node || node.loading) return;
-  node.expanded = !node.expanded;
-  if (node.expanded) await loadTreeNode(node);
+  if (!node || node.loading) return
+  node.expanded = !node.expanded
+  if (node.expanded) await loadTreeNode(node)
 }
 
 function selectProvider(provider) {
-  const value = String(provider || "").trim();
-  if (!value || value === selectedProvider.value || loading.value) return;
-  selectedProvider.value = value;
-  currentPath.value = "/";
-  treeRoot.value = directoryNode({}, "/");
-  loadDirectories("/");
+  const value = String(provider || "").trim()
+  if (!value || value === selectedProvider.value || loading.value) return
+  selectedProvider.value = value
+  currentPath.value = "/"
+  treeRoot.value = directoryNode({}, "/")
+  loadDirectories("/")
 }
 
 function openCreateDirectoryDialog() {
-  newDirectoryName.value = "";
-  createDirectoryError.value = "";
-  createDirectoryVisible.value = true;
+  newDirectoryName.value = ""
+  createDirectoryError.value = ""
+  createDirectoryVisible.value = true
 }
 
 function closeCreateDirectoryDialog() {
-  if (createLoading.value) return;
-  createDirectoryVisible.value = false;
+  if (createLoading.value) return
+  createDirectoryVisible.value = false
 }
 
 async function createDirectory() {
-  if (createLoading.value) return;
-  const folderName = newDirectoryName.value.trim();
+  if (createLoading.value) return
+  const folderName = newDirectoryName.value.trim()
   if (!folderName) {
-    createDirectoryError.value = "文件夹名称不能为空";
-    return;
+    createDirectoryError.value = "文件夹名称不能为空"
+    return
   }
-  createLoading.value = true;
-  createDirectoryError.value = "";
-  const directoryPath = currentPath.value || "/";
+  createLoading.value = true
+  createDirectoryError.value = ""
+  const directoryPath = currentPath.value || "/"
   try {
-    const endpoint = isLocalMode.value ? "local/directories/create" : "cloud/directories/create";
-    const payload = {
+    const response = await pluginApi.drive.createDirectory({
+      local: isLocalMode.value,
       path: directoryPath,
       name: folderName,
-    };
-    if (!isLocalMode.value) {
-      payload.provider = selectedProvider.value || props.provider || "";
-    }
-    const response = unwrap(
-      await props.api.post(`plugin/${props.pluginId}/${endpoint}`, payload),
-    )
-    if (response.success === false) throw new Error(response.message || "创建文件夹失败");
-    createDirectoryVisible.value = false;
-    newDirectoryName.value = "";
-    await loadDirectories(directoryPath, true);
+      provider: selectedProvider.value || props.provider || "",
+    })
+    if (response.success === false) throw new Error(response.message || "创建文件夹失败")
+    createDirectoryVisible.value = false
+    newDirectoryName.value = ""
+    await loadDirectories(directoryPath, true)
   } catch (error) {
-    createDirectoryError.value = error.message || String(error);
+    createDirectoryError.value = error.message || String(error)
   } finally {
-    createLoading.value = false;
+    createLoading.value = false
   }
 }
 
 function selectDirectory() {
-  emit("select", currentPath.value || "/", selectedProvider.value || props.provider || "");
+  emit("select", currentPath.value || "/", selectedProvider.value || props.provider || "")
 }
 
 watch(
   () => props.modelValue,
   (value) => {
     if (value) {
-      selectedProvider.value = String(props.provider || providerItems.value[0]?.value || "").trim();
-      currentPath.value = String(props.initialPath || "/").trim() || "/";
-      treeRoot.value = directoryNode({}, "/");
-      loadDirectories(currentPath.value);
+      selectedProvider.value = String(props.provider || providerItems.value[0]?.value || "").trim()
+      currentPath.value = String(props.initialPath || "/").trim() || "/"
+      treeRoot.value = directoryNode({}, "/")
+      loadDirectories(currentPath.value)
     } else {
-      createDirectoryVisible.value = false;
-      newDirectoryName.value = "";
-      createDirectoryError.value = "";
+      createDirectoryVisible.value = false
+      newDirectoryName.value = ""
+      createDirectoryError.value = ""
     }
   },
-  {immediate: true},
+  { immediate: true },
 )
 </script>
 

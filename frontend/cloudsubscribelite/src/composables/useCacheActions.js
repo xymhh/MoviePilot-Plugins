@@ -1,3 +1,5 @@
+import { createPluginApi } from "../api"
+
 export const CACHE_CATEGORIES = [
   {
     key: "search",
@@ -24,14 +26,14 @@ export const CACHE_CATEGORIES = [
     label: "概览与智能体缓存",
     desc: "概览统计和智能体候选资源",
   },
-];
+]
 
-export function useCacheActions(api, pluginId = "CloudSubscribeX") {
+export function useCacheActions(api, pluginId = "CloudSubscribe") {
+  const pluginApi = createPluginApi(api, pluginId)
+
   async function clearCache(categories) {
-    const list = Array.isArray(categories)
-      ? categories
-      : Object.keys(categories || {}).filter((k) => categories[k]);
-    const result = await api.post(`plugin/${pluginId}/cache/clear`, {
+    const list = Array.isArray(categories) ? categories : Object.keys(categories || {}).filter((k) => categories[k])
+    const result = await pluginApi.config.clearCache({
       categories: list,
     })
     if (!result?.success) throw new Error(result?.message || "清理缓存失败")

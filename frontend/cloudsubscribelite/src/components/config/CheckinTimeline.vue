@@ -104,52 +104,51 @@
 </template>
 
 <script>
-import {reactive, ref} from "vue";
+import { reactive, ref } from "vue"
 
 // 模块级单例缓存，跨组件生命周期与 Tab 切换保持，彻底避免每次进入签到重复发接口
-const cachedCheckinHistories = reactive({});
-const checkinRefreshing = ref(false);
+const cachedCheckinHistories = reactive({})
+const checkinRefreshing = ref(false)
 </script>
 
 <script setup>
-import {computed, onMounted, ref, watch} from "vue";
+import { computed, onMounted, ref, watch } from "vue"
+import { createPluginApi } from "../../api"
 
 const props = defineProps({
   api: { type: [Object, Function], required: true },
   providers: { type: Array, default: () => [] },
   config: { type: Object, required: true },
 })
+const pluginApi = createPluginApi(props.api, () => props.pluginId)
 const emit = defineEmits(["result"])
-const histories = cachedCheckinHistories;
+const histories = cachedCheckinHistories
 const runningProvider = ref("")
 
 const dateColumns = computed(() => buildDateColumns())
-const enabledProviders = computed(() => props.providers.filter(providerEnabled));
+const enabledProviders = computed(() => props.providers.filter(providerEnabled))
 
 // 渠道视图一次性预算好：模板里逐列调用只读取结果，避免每次重渲染都扫描全部历史。
 const providerViews = computed(() => {
-  const views = {};
+  const views = {}
   enabledProviders.value.forEach((provider) => {
     views[provider.key] = {
       days: buildTimelineDays(provider),
       signinDays: buildSigninDays(provider),
       points: buildPoints(provider),
-    };
-  });
-  return views;
-});
+    }
+  })
+  return views
+})
 
 function providerView(provider) {
-  return providerViews.value[provider.key] || {
-    days: [],
-    signinDays: "—",
-    points: "—",
-  };
-};
-
-function unwrapResponse(raw) {
-  if (raw?.data && typeof raw.data === "object" && "success" in raw.data) return raw.data
-  return raw || {}
+  return (
+    providerViews.value[provider.key] || {
+      days: [],
+      signinDays: "—",
+      points: "—",
+    }
+  )
 }
 
 function localDateKey(value) {
@@ -189,7 +188,7 @@ function providerEnabled(provider) {
 
 function providerConfigured(provider) {
   if (provider.key === "p115") {
-    return Boolean(String(props.config.cookies || "").trim());
+    return Boolean(String(props.config.cookies || "").trim())
   }
   if (provider.key === "hdhive") {
     if (String(props.config.hdhive_query_mode || "web") === "api") {
@@ -203,7 +202,7 @@ function providerConfigured(provider) {
   if (provider.key === "hdhaven") {
     return Boolean(
       String(props.config.hdhaven_username || "").trim() && String(props.config.hdhaven_password || "").trim(),
-    );
+    )
   }
   return provider.credentialKeys.every((key) => Boolean(String(props.config[key] || "").trim()))
 }
@@ -222,7 +221,7 @@ function providerStatus(provider) {
   }
   const today = dateColumns.value[0]?.key
   const record = historyState(provider).items.find((item) => {
-    return String(item.executed_at || "").slice(0, 10) === today;
+    return String(item.executed_at || "").slice(0, 10) === today
   })
   if (!record) return null
   const already =
@@ -250,71 +249,71 @@ function latestMetric(provider, key, suffix = "") {
 }
 
 function latestSigninDays(provider) {
-  return providerView(provider).signinDays;
+  return providerView(provider).signinDays
 }
 
 function buildSigninDays(provider) {
   if (provider.trackDays === false) {
-    return "—";
+    return "—"
   }
   // 签到天数完全由后端统一计算下发，前端不处理时间计算
-  const topDays = histories[provider.key]?.signin_days;
+  const topDays = histories[provider.key]?.signin_days
   if (topDays !== undefined && topDays !== null && topDays !== "") {
-    const val = Number(topDays);
+    const val = Number(topDays)
     if (Number.isFinite(val) && val > 0) {
-      return `${val}天`;
+      return `${val}天`
     }
   }
 
-  const items = historyState(provider).items || [];
+  const items = historyState(provider).items || []
   for (const item of items) {
     if (item?.signin_days !== undefined && item?.signin_days !== null && item?.signin_days !== "") {
-      const val = Number(item.signin_days);
+      const val = Number(item.signin_days)
       if (Number.isFinite(val) && val > 0) {
-        return `${val}天`;
+        return `${val}天`
       }
     }
   }
-  return "—";
+  return "—"
 }
 
 function latestPoints(provider) {
-  return providerView(provider).points;
+  return providerView(provider).points
 }
 
 function formatProviderPoints(provider, rawPoints) {
-  if (rawPoints === null || rawPoints === undefined || rawPoints === "") return "—";
-  const str = String(rawPoints).trim();
-  if (provider.key === "pinglian" || provider.pointsLabel === "配额") {
-    const match = str.match(/^(\d+)\/(\d+)\s*(次|配额)?$/);
+  if (rawPoints === null || rawPoints === undefined || rawPoints === "") return "—"
+  const str = String(rawPoints).trim()
+  if (provider.pointsLabel === "配额") {
+    const match = str.match(/^(\d+)\/(\d+)\s*(次|配额)?$/)
     if (match) {
-      const used = Number(match[1]);
-      const limit = Number(match[2]);
+      const used = Number(match[1])
+      const limit = Number(match[2])
       if (Number.isFinite(used) && Number.isFinite(limit)) {
-        const remaining = Math.max(0, limit - used);
-        return `${remaining} 次`;
+        const remaining = Math.max(0, limit - used)
+        return `${remaining} 次`
       }
     }
   }
-  return str;
+  return str
 }
 
 function buildPoints(provider) {
-  const currentPoints = histories[provider.key]?.current_points;
+  const currentPoints = histories[provider.key]?.current_points
   if (currentPoints !== null && currentPoints !== undefined && currentPoints !== "") {
-    return formatProviderPoints(provider, currentPoints);
+    return formatProviderPoints(provider, currentPoints)
   }
-  const items = historyState(provider).items || [];
+  const items = historyState(provider).items || []
   for (const item of items) {
     if (item.points_after !== null && item.points_after !== undefined && item.points_after !== "") {
-      return formatProviderPoints(provider, item.points_after);
+      return formatProviderPoints(provider, item.points_after)
     }
   }
-  const record = latestRecord(provider);
+  const record = latestRecord(provider)
   if (record && record.points_after !== null && record.points_after !== undefined) {
-    return formatProviderPoints(provider, record.points_after);
+    return formatProviderPoints(provider, record.points_after)
   }
-  return "—";
+  return "—"
 }
 
 function canCheckin(provider, day) {
@@ -348,14 +347,14 @@ function checkinFromDay(provider, day) {
 }
 
 function timelineDays(provider) {
-  return providerView(provider).days;
+  return providerView(provider).days
 }
 
 function buildTimelineDays(provider) {
   const recordsByDay = new Map()
   for (const item of historyState(provider).items) {
-    const key = String(item.executed_at || "").slice(0, 10);
-    if (!key) continue;
+    const key = String(item.executed_at || "").slice(0, 10)
+    if (!key) continue
     if (!recordsByDay.has(key)) recordsByDay.set(key, [])
     recordsByDay.get(key).push(item)
   }
@@ -415,35 +414,37 @@ function buildTimelineDays(provider) {
         none: "mdi-minus",
       }[status],
       pointsDetail: (() => {
-        const isQuota = provider.key === "pinglian" || provider.pointsLabel === "配额" || latest?.points_label === "配额";
+        const isQuota = provider.pointsLabel === "配额" || latest?.points_label === "配额"
         if (isQuota) {
-          const quotaStr = formatProviderPoints(provider, latest?.points_after);
-          return quotaStr && quotaStr !== "—" ? `剩余配额 ${quotaStr}` : "";
+          const quotaStr = formatProviderPoints(provider, latest?.points_after)
+          return quotaStr && quotaStr !== "—" ? `剩余配额 ${quotaStr}` : ""
         }
-        const lbl = provider.pointsLabel || latest?.points_label || "积分";
+        const lbl = provider.pointsLabel || latest?.points_label || "积分"
         const gainedPoints = records.reduce((maxPts, item) => {
-          const change = Number(item.points_change);
-          const signin = Number(item.signin_points);
-          const val = Number.isFinite(change) && change > 0 ? change : (Number.isFinite(signin) && signin > 0 ? signin : 0);
-          return Math.max(maxPts, val);
-        }, 0);
+          const change = Number(item.points_change)
+          const signin = Number(item.signin_points)
+          const val =
+            Number.isFinite(change) && change > 0 ? change : Number.isFinite(signin) && signin > 0 ? signin : 0
+          return Math.max(maxPts, val)
+        }, 0)
 
         if (gainedPoints > 0) {
-          return `${lbl} +${gainedPoints}`;
+          return `${lbl} +${gainedPoints}`
         }
         if (pointsChange !== null && pointsChange > 0) {
-          return `${lbl} +${pointsChange}`;
+          return `${lbl} +${pointsChange}`
         }
         if (pointsChange !== null && pointsChange < 0) {
-          return `${lbl} ${formatSignedNumber(pointsChange)}`;
+          return `${lbl} ${formatSignedNumber(pointsChange)}`
         }
         if (status === "already" || status === "success") {
-          const defaultGain = provider.key === "woniu" ? 10 : (provider.key === "juying" ? 5 : (provider.key === "hdhaven" ? 5 : 0));
+          const defaultGain =
+            provider.key === "woniu" ? 10 : provider.key === "juying" ? 5 : provider.key === "hdhaven" ? 5 : 0
           if (defaultGain > 0) {
-            return `${lbl} +${defaultGain}`;
+            return `${lbl} +${defaultGain}`
           }
         }
-        return "";
+        return ""
       })(),
       lotteryDetail: latest?.lottery_target_count
         ? `转盘 ${latest.lottery_executed || 0}/${latest.lottery_target_count} 次`
@@ -477,16 +478,14 @@ function formatOptionalNumber(value, suffix = "") {
 }
 
 async function loadProviderHistory(provider, force = false) {
-  const existing = histories[provider.key];
+  const existing = histories[provider.key]
   if (!force && existing?.loaded) {
-    return;
+    return
   }
   try {
-    const response = unwrapResponse(
-      await props.api.get("plugin/CloudSubscribeX/checkin/" + encodeURIComponent(provider.key) + "/history?limit=60"),
-    )
+    const response = await pluginApi.checkin.providerHistory(provider.key, 60)
     if (response.success === false) throw new Error(response.message || "读取签到记录失败")
-    applyHistory(provider.key, response.data?.data || response.data || {});
+    applyHistory(provider.key, response.data?.data || response.data || {})
   } catch (error) {
     histories[provider.key] = {
       total: existing?.total || 0,
@@ -506,44 +505,42 @@ function applyHistory(providerKey, data) {
     signin_days: data.signin_days ?? null,
     loaded: true,
     error: "",
-  };
+  }
 }
 
 async function loadAllHistories() {
-  const response = unwrapResponse(
-    await props.api.get("plugin/CloudSubscribeX/checkin/history?limit=60"),
-  );
-  if (response.success === false) throw new Error(response.message || "读取签到记录失败");
-  const data = response.data?.data || response.data || {};
-  const channels = Array.isArray(data.channels) ? data.channels : [];
-  const returned = new Set();
+  const response = await pluginApi.checkin.history(60)
+  if (response.success === false) throw new Error(response.message || "读取签到记录失败")
+  const data = response.data?.data || response.data || {}
+  const channels = Array.isArray(data.channels) ? data.channels : []
+  const returned = new Set()
   channels.forEach((channel) => {
-    const key = String(channel.provider || "");
-    if (!key) return;
-    returned.add(key);
-    applyHistory(key, channel);
-  });
+    const key = String(channel.provider || "")
+    if (!key) return
+    returned.add(key)
+    applyHistory(key, channel)
+  })
   enabledProviders.value.forEach((provider) => {
-    if (!returned.has(provider.key)) applyHistory(provider.key, {});
-  });
+    if (!returned.has(provider.key)) applyHistory(provider.key, {})
+  })
 }
 
 async function loadHistories(force = false) {
-  const targets = enabledProviders.value;
-  if (!targets.length) return;
-  if (!force && targets.every((provider) => histories[provider.key]?.loaded)) return;
-  checkinRefreshing.value = true;
+  const targets = enabledProviders.value
+  if (!targets.length) return
+  if (!force && targets.every((provider) => histories[provider.key]?.loaded)) return
+  checkinRefreshing.value = true
   try {
     try {
       // 一次请求取回全部渠道历史（单次快照读取），失败时回退到逐渠道读取。
-      await loadAllHistories();
-      return;
+      await loadAllHistories()
+      return
     } catch (error) {
-      void error;
+      void error
     }
-    await Promise.all(targets.map((provider) => loadProviderHistory(provider, force)));
+    await Promise.all(targets.map((provider) => loadProviderHistory(provider, force)))
   } finally {
-    checkinRefreshing.value = false;
+    checkinRefreshing.value = false
   }
 }
 
@@ -559,7 +556,7 @@ function wait(delay) {
 async function waitForProviderResult(provider, previousRecordId) {
   for (let attempt = 0; attempt < 90; attempt += 1) {
     await wait(attempt === 0 ? 500 : 2000)
-    await loadProviderHistory(provider, true);
+    await loadProviderHistory(provider, true)
     const record = latestRecord(provider)
     if (record?.id && record.id !== previousRecordId) return record
   }
@@ -571,11 +568,9 @@ async function runCheckin(provider) {
   runningProvider.value = provider.key
   const previousRecordId = latestRecord(provider)?.id || ""
   try {
-    const response = unwrapResponse(
-      await props.api.post("plugin/CloudSubscribeX/checkin/" + encodeURIComponent(provider.key), {
-        mode: providerMode(provider),
-      }),
-    )
+    const response = await pluginApi.checkin.runProvider(provider.key, {
+      mode: providerMode(provider),
+    })
     let success = response.success !== false
     let message = response.message || (success ? "签到完成" : "签到失败")
     if (success && response.data?.running) {
@@ -601,13 +596,16 @@ async function runCheckin(provider) {
       message: error.message || String(error),
     })
   } finally {
-    await loadProviderHistory(provider, true);
+    await loadProviderHistory(provider, true)
     runningProvider.value = ""
   }
 }
 
-watch(() => props.providers.map((provider) => `${provider.key}:${providerEnabled(provider)}`).join(","), () => loadHistories(false));
-onMounted(() => loadHistories(false));
+watch(
+  () => props.providers.map((provider) => `${provider.key}:${providerEnabled(provider)}`).join(","),
+  () => loadHistories(false),
+)
+onMounted(() => loadHistories(false))
 </script>
 
 <style scoped>

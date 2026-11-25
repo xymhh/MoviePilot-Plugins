@@ -1,5 +1,5 @@
 export function createDriveSection(options = {}) {
-  const dynamicSchemas = Array.isArray(options.driverSchemas) ? options.driverSchemas : [];
+  const dynamicSchemas = Array.isArray(options.driverSchemas) ? options.driverSchemas : []
 
   return {
     value: "drive",
@@ -7,5 +7,5 @@ export function createDriveSection(options = {}) {
     icon: "mdi-cloud-cog-outline",
     subtabs: dynamicSchemas.map((s) => s.subtab).filter(Boolean),
     groups: dynamicSchemas.flatMap((s) => (Array.isArray(s.groups) ? s.groups : [])),
-  };
+  }
 }

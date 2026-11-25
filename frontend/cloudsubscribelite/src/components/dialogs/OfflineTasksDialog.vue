@@ -105,7 +105,10 @@
                   :value="taskSelectionKey(task)"
                   density="compact"
                   aria-label="选择离线任务" />
-                <v-icon :icon="taskIcon(task)" :color="statusColor(task.state, task.failed, task.finalized)" size="20" />
+                <v-icon
+                  :icon="taskIcon(task)"
+                  :color="statusColor(task.state, task.failed, task.finalized)"
+                  size="20" />
               </div>
               <div class="task-copy">
                 <div class="task-heading">
@@ -176,8 +179,7 @@
           density="compact"
           hide-details
           class="mt-2"
-          label="同时删除网盘原文件"
-        />
+          label="同时删除网盘原文件" />
       </v-card-text>
       <v-card-actions>
         <v-spacer />
@@ -189,48 +191,49 @@
 </template>
 
 <script setup>
-import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { createPluginApi } from "../../api"
 
 const props = defineProps({
   modelValue: Boolean,
-  api: {type: [Object, Function], required: true},
-  pluginId: { type: String, default: "CloudSubscribeX" },
+  api: { type: [Object, Function], required: true },
 })
-const emit = defineEmits(["update:modelValue"]);
-const tasks = ref([]);
-const quota = ref({});
-const updatedAt = ref(0);
-const loading = ref(false);
-const deleting = ref(false);
-const error = ref("");
-const success = ref("");
-const confirmVisible = ref(false);
-const pendingTask = ref(null);
-const selectedKeys = ref([]);
-const retrying = ref(false);
-const retryingKey = ref("");
-const batchDeleting = ref(false);
-const deleteSourceFile = ref(false);
-let refreshTimer = null;
-let loadRequest = null;
+const emit = defineEmits(["update:modelValue"])
+const pluginId = "CloudSubscribe"
+const pluginApi = createPluginApi(props.api, () => pluginId)
+const tasks = ref([])
+const quota = ref({})
+const updatedAt = ref(0)
+const loading = ref(false)
+const deleting = ref(false)
+const error = ref("")
+const success = ref("")
+const confirmVisible = ref(false)
+const pendingTask = ref(null)
+const selectedKeys = ref([])
+const retrying = ref(false)
+const retryingKey = ref("")
+const batchDeleting = ref(false)
+const deleteSourceFile = ref(false)
+let refreshTimer = null
+let loadRequest = null
 
-const updatedText = computed(() => (updatedAt.value ? new Date(updatedAt.value * 1000).toLocaleString() : "尚未检查"));
-const selectableKeys = computed(() => tasks.value.map(taskSelectionKey).filter(Boolean));
+const selectableKeys = computed(() => tasks.value.map(taskSelectionKey).filter(Boolean))
 const allSelected = computed(
   () => selectableKeys.value.length > 0 && selectableKeys.value.every((key) => selectedKeys.value.includes(key)),
 )
 const selectedTasks = computed(() => {
-  const keys = new Set(selectedKeys.value);
-  return tasks.value.filter((task) => keys.has(taskSelectionKey(task)));
+  const keys = new Set(selectedKeys.value)
+  return tasks.value.filter((task) => keys.has(taskSelectionKey(task)))
 })
-const selectedHashes = computed(() => selectedTasks.value.map((task) => String(task.id || "").trim()).filter(Boolean));
+const selectedHashes = computed(() => selectedTasks.value.map((task) => String(task.id || "").trim()).filter(Boolean))
 const selectedPendingKeys = computed(() =>
   selectedTasks.value.map((task) => String(task.pending_key || "").trim()).filter(Boolean),
 )
 const selectedRetryKeys = computed(() =>
   selectedKeys.value.filter((key) => {
-    const task = tasks.value.find((item) => taskSelectionKey(item) === key);
-    return task && canRetry(task);
+    const task = tasks.value.find((item) => taskSelectionKey(item) === key)
+    return task && canRetry(task)
   }),
 )
 const quotaPercent = computed(() =>
@@ -241,219 +244,204 @@ const deleteConfirmText = computed(() =>
     ? `确认删除所选 ${selectedKeys.value.length} 个任务？已下载文件默认会保留。`
     : `确认删除${
         pendingTask.value?.finalize_pending ? "后处理任务" : "离线任务"
-    }“${pendingTask.value?.name || "未命名任务"}”？已下载文件默认会保留。`,
+      }“${pendingTask.value?.name || "未命名任务"}”？已下载文件默认会保留。`,
 )
 
-function unwrapResponse(raw) {
-  if (raw?.data && typeof raw.data === "object" && "success" in raw.data) {
-    return raw.data;
-  }
-  return raw || {};
-}
-
 function formatSize(bytes) {
-  let value = Number(bytes || 0);
+  let value = Number(bytes || 0)
   for (const unit of ["B", "KB", "MB", "GB", "TB"]) {
-    if (value < 1024 || unit === "TB") return `${value.toFixed(1)} ${unit}`;
-    value /= 1024;
+    if (value < 1024 || unit === "TB") return `${value.toFixed(1)} ${unit}`
+    value /= 1024
   }
 }
 
 function formatPercent(value) {
-  return `${Number(value || 0).toFixed(1)}%`;
+  return `${Number(value || 0).toFixed(1)}%`
 }
 
 function formatTime(timestamp) {
-  return Number(timestamp) > 0 ? new Date(Number(timestamp) * 1000).toLocaleString() : "未知";
+  return Number(timestamp) > 0 ? new Date(Number(timestamp) * 1000).toLocaleString() : "未知"
 }
 
 function statusColor(state, failed = false, finalized = false) {
-  if (failed) return "error";
-  if (finalized) return "success";
-  return state === "completed" ? "success" : state === "retrying" ? "warning" : "info";
+  if (failed) return "error"
+  if (finalized) return "success"
+  return state === "completed" ? "success" : state === "retrying" ? "warning" : "info"
 }
 
 function taskIcon(task) {
-  if (task?.failed) return "mdi-alert-circle-outline";
-  if (task?.finalized) return "mdi-check-circle-outline";
-  if (task?.finalize_pending && task?.completed) return "mdi-file-sync-outline";
-  if (task?.state === "completed") return "mdi-check-circle-outline";
-  return "mdi-drive-download-outline";
+  if (task?.failed) return "mdi-alert-circle-outline"
+  if (task?.finalized) return "mdi-check-circle-outline"
+  if (task?.finalize_pending && task?.completed) return "mdi-file-sync-outline"
+  if (task?.state === "completed") return "mdi-check-circle-outline"
+  return "mdi-drive-download-outline"
 }
 
 function taskStatusText(task) {
-  if (task?.finalize_pending && task?.completed) return "待整理";
-  if (task?.finalized) return task.finalized_text || "已入库";
-  return task?.status_text || "未知状态";
+  if (task?.finalize_pending && task?.completed) return "待整理"
+  if (task?.finalized) return task.finalized_text || "已入库"
+  return task?.status_text || "未知状态"
 }
 
 function progressValue(task) {
-  if (task?.finalized) return 100;
-  if (task?.completed && !task?.failed) return 100;
-  return Math.max(0, Math.min(100, Number(task?.percent || 0)));
+  if (task?.finalized) return 100
+  if (task?.completed && !task?.failed) return 100
+  return Math.max(0, Math.min(100, Number(task?.percent || 0)))
 }
 
 function isStreamingState(task) {
-  if (task?.finalized || task?.completed) return false;
-  return ["queued", "running", "retrying", "processing"].includes(task?.state);
+  if (task?.finalized || task?.completed) return false
+  return ["queued", "running", "retrying", "processing"].includes(task?.state)
 }
 
 async function load(force = false) {
-  if (loadRequest) return loadRequest;
-  stopAutoRefresh();
+  if (loadRequest) return loadRequest
+  stopAutoRefresh()
   loadRequest = (async () => {
-    loading.value = true;
-    error.value = "";
+    loading.value = true
+    error.value = ""
     try {
-      const response = unwrapResponse(
-        force
-          ? await props.api.post(`plugin/${props.pluginId}/offline/refresh`)
-          : await props.api.get(`plugin/${props.pluginId}/offline`),
-      )
+      const response = force ? await pluginApi.offline.refresh() : await pluginApi.offline.list()
       if (response.success === false) {
-        throw new Error(response.message || "加载失败");
+        throw new Error(response.message || "加载失败")
       }
-      const snapshot = response.data?.data || response.data || response;
-      tasks.value = Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.tasks) ? snapshot.tasks : [];
-      updatedAt.value = Number(snapshot?.updated_at || 0);
-      quota.value = snapshot?.quota && typeof snapshot.quota === "object" ? snapshot.quota : {};
-      const availableKeys = new Set(tasks.value.map(taskSelectionKey).filter(Boolean));
-      selectedKeys.value = selectedKeys.value.filter((key) => availableKeys.has(key));
+      const snapshot = response.data?.data || response.data || response
+      tasks.value = Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.tasks) ? snapshot.tasks : []
+      updatedAt.value = Number(snapshot?.updated_at || 0)
+      quota.value = snapshot?.quota && typeof snapshot.quota === "object" ? snapshot.quota : {}
+      const availableKeys = new Set(tasks.value.map(taskSelectionKey).filter(Boolean))
+      selectedKeys.value = selectedKeys.value.filter((key) => availableKeys.has(key))
     } catch (loadError) {
-      error.value = loadError.message || "加载失败";
+      error.value = loadError.message || "加载失败"
     } finally {
-      loading.value = false;
-      loadRequest = null;
-      scheduleAutoRefresh();
+      loading.value = false
+      loadRequest = null
+      scheduleAutoRefresh()
     }
   })()
-  return loadRequest;
+  return loadRequest
 }
 
 async function refreshAll() {
-  success.value = "";
-  await load(true);
+  success.value = ""
+  await load(true)
 }
 
 function hasPendingTasks() {
-  return tasks.value.some((task) => task?.finalize_pending || (!task?.completed && !task?.failed));
+  return tasks.value.some((task) => task?.finalize_pending || (!task?.completed && !task?.failed))
 }
 
 function scheduleAutoRefresh() {
-  stopAutoRefresh();
-  if (!props.modelValue || document.visibilityState === "hidden") return;
-  const delay = hasPendingTasks() ? 30000 : 120000;
+  stopAutoRefresh()
+  if (!props.modelValue || document.visibilityState === "hidden") return
+  const delay = hasPendingTasks() ? 30000 : 120000
   refreshTimer = window.setTimeout(() => {
-    refreshTimer = null;
-    void load(false);
+    refreshTimer = null
+    void load(false)
   }, delay)
 }
 
 function stopAutoRefresh() {
-  if (refreshTimer === null) return;
-  window.clearTimeout(refreshTimer);
-  refreshTimer = null;
+  if (refreshTimer === null) return
+  window.clearTimeout(refreshTimer)
+  refreshTimer = null
 }
 
 function handleVisibilityChange() {
   if (document.visibilityState === "hidden") {
-    stopAutoRefresh();
+    stopAutoRefresh()
   } else if (props.modelValue) {
-    void load(false);
+    void load(false)
   }
 }
 
 async function retryTasks(pendingKeys) {
-  const keys = [...new Set((pendingKeys || []).filter(Boolean))];
-  if (!keys.length) return;
-  retrying.value = keys.length > 1;
-  retryingKey.value = keys.length === 1 ? keys[0] : "";
-  error.value = "";
+  const keys = [...new Set((pendingKeys || []).filter(Boolean))]
+  if (!keys.length) return
+  retrying.value = keys.length > 1
+  retryingKey.value = keys.length === 1 ? keys[0] : ""
+  error.value = ""
   try {
-    const response = unwrapResponse(
-      await props.api.post(`plugin/${props.pluginId}/offline/retry`, {
-        pending_keys: keys.filter((key) => key.startsWith("pending:")).map((key) => key.slice(8)),
-        task_ids: keys.filter((key) => key.startsWith("offline:")).map((key) => key.slice(8)),
-      }),
-    )
+    const response = await pluginApi.offline.retry({
+      pending_keys: keys.filter((key) => key.startsWith("pending:")).map((key) => key.slice(8)),
+      task_ids: keys.filter((key) => key.startsWith("offline:")).map((key) => key.slice(8)),
+    })
     if (response.success === false) {
-      throw new Error(response.message || "重试失败");
+      throw new Error(response.message || "重试失败")
     }
-    await load(true);
+    await load(true)
   } catch (retryError) {
-    error.value = retryError.message || "重试失败";
+    error.value = retryError.message || "重试失败"
   } finally {
-    retrying.value = false;
-    retryingKey.value = "";
+    retrying.value = false
+    retryingKey.value = ""
   }
 }
 
 function canRetry(task) {
-  return Boolean(task?.failed || (task?.finalize_pending && task?.completed));
+  return Boolean(task?.failed || (task?.finalize_pending && task?.completed))
 }
 
 function taskRetryKey(task) {
-  if (task?.failed && task?.id) return `offline:${task.id}`;
-  if (task?.finalize_pending && task?.pending_key) return `pending:${task.pending_key}`;
-  return "";
+  if (task?.failed && task?.id) return `offline:${task.id}`
+  if (task?.finalize_pending && task?.pending_key) return `pending:${task.pending_key}`
+  return ""
 }
 
 function taskSelectionKey(task) {
-  if (task?.id) return `offline:${task.id}`;
-  if (task?.pending_key) return `pending:${task.pending_key}`;
-  return "";
+  if (task?.id) return `offline:${task.id}`
+  if (task?.pending_key) return `pending:${task.pending_key}`
+  return ""
 }
 
 function toggleSelectAll() {
-  selectedKeys.value = allSelected.value ? [] : [...selectableKeys.value];
+  selectedKeys.value = allSelected.value ? [] : [...selectableKeys.value]
 }
 
 function askDelete(task) {
-  batchDeleting.value = false;
-  pendingTask.value = task;
-  deleteSourceFile.value = false;
-  confirmVisible.value = true;
+  batchDeleting.value = false
+  pendingTask.value = task
+  deleteSourceFile.value = false
+  confirmVisible.value = true
 }
 
 function askDeleteSelected() {
-  if (!selectedKeys.value.length) return;
-  batchDeleting.value = true;
-  pendingTask.value = null;
-  deleteSourceFile.value = false;
-  confirmVisible.value = true;
+  if (!selectedKeys.value.length) return
+  batchDeleting.value = true
+  pendingTask.value = null
+  deleteSourceFile.value = false
+  confirmVisible.value = true
 }
 
 async function deleteTask() {
-  if (!pendingTask.value && !batchDeleting.value) return;
-  deleting.value = true;
-  success.value = "";
+  if (!pendingTask.value && !batchDeleting.value) return
+  deleting.value = true
+  success.value = ""
   try {
-    const response = unwrapResponse(
-      batchDeleting.value
-        ? await props.api.post(`plugin/${props.pluginId}/offline/delete_batch`, {
+    const response = batchDeleting.value
+      ? await pluginApi.offline.removeBatch({
           task_ids: selectedHashes.value,
           pending_keys: selectedPendingKeys.value,
           delete_source_file: deleteSourceFile.value,
         })
-        : await props.api.post(`plugin/${props.pluginId}/offline/delete`, {
+      : await pluginApi.offline.remove({
           task_id: pendingTask.value.id,
           pending_key: pendingTask.value.pending_key,
           delete_source_file: deleteSourceFile.value,
-        }),
-    )
+        })
     if (response.success === false) {
-      throw new Error(response.message || "删除失败");
+      throw new Error(response.message || "删除失败")
     }
-    confirmVisible.value = false;
-    pendingTask.value = null;
-    selectedKeys.value = [];
-    batchDeleting.value = false;
-    await load(false);
-    success.value = response.message || "任务已删除";
+    confirmVisible.value = false
+    pendingTask.value = null
+    selectedKeys.value = []
+    batchDeleting.value = false
+    await load(false)
+    success.value = response.message || "任务已删除"
   } catch (deleteError) {
-    error.value = deleteError.message || "删除失败";
+    error.value = deleteError.message || "删除失败"
   } finally {
-    deleting.value = false;
+    deleting.value = false
   }
 }
 
@@ -461,18 +449,18 @@ watch(
   () => props.modelValue,
   (value) => {
     if (value) {
-      void load(false);
+      void load(false)
     } else {
-      stopAutoRefresh();
+      stopAutoRefresh()
     }
   },
-  {immediate: true},
+  { immediate: true },
 )
 
-onMounted(() => document.addEventListener("visibilitychange", handleVisibilityChange));
+onMounted(() => document.addEventListener("visibilitychange", handleVisibilityChange))
 onBeforeUnmount(() => {
-  document.removeEventListener("visibilitychange", handleVisibilityChange);
-  stopAutoRefresh();
+  document.removeEventListener("visibilitychange", handleVisibilityChange)
+  stopAutoRefresh()
 })
 </script>
 

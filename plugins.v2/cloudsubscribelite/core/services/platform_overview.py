@@ -38,9 +38,15 @@ class PlatformOverviewMixin:
             return result
 
         today = datetime.datetime.now(pytz.timezone(settings.TZ)).strftime("%Y-%m-%d")
-        database_overview = self._get_data_store().history_overview(
-            today, recent_limit=20
-        )
+        # Lite：本分支没有 history_overview 聚合（历史走 MP 自己的整理历史），
+        # 缺这个方法会让 /overview 直接 500、上游 UI 打开即报错。
+        # 这里按能力探测降级为空统计，界面显示 0 而不是崩。
+        try:
+            database_overview = self._get_data_store().history_overview(
+                today, recent_limit=20
+            )
+        except AttributeError:
+            database_overview = {}
         history_count = int(database_overview.get("total") or 0)
         transferred_today = int(database_overview.get("today") or 0)
         success = int(database_overview.get("success") or 0)

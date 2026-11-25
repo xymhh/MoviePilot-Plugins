@@ -6,7 +6,7 @@
       :label="field.label"
       :hint="field.hint"
       :persistent-hint="Boolean(field.hint)"
-      :placeholder="selectedList.length === 0 ? (field.placeholder || '点击选择...') : ''"
+      :placeholder="selectedList.length === 0 ? field.placeholder || '点击选择...' : ''"
       :disabled="disabled"
       readonly
       density="compact"
@@ -53,9 +53,7 @@
           </button>
 
           <!-- 总数量徽标 -->
-          <span v-if="selectedList.length > 0" class="echo-count-pill">
-            {{ selectedList.length }} 项
-          </span>
+          <span v-if="selectedList.length > 0" class="echo-count-pill">{{ selectedList.length }} 项</span>
 
           <!-- 下拉小箭头 -->
           <v-icon
@@ -73,10 +71,7 @@
         <!-- 弹窗顶部 Header：高光渐变顶板、微阴影凸起图标底座、药丸徽标与细腻关闭按钮 -->
         <div class="dialog-header d-flex align-center px-4 py-3 border-b">
           <div class="dialog-header-icon mr-3">
-            <v-icon
-              :icon="field.icon || 'mdi-checkbox-multiple-marked-outline'"
-              size="18"
-              color="primary" />
+            <v-icon :icon="field.icon || 'mdi-checkbox-multiple-marked-outline'" size="18" color="primary" />
           </div>
           <div class="flex-grow-1 overflow-hidden">
             <div class="dialog-header-title text-subtitle-1 font-weight-bold text-truncate">
@@ -86,8 +81,11 @@
               {{ field.hint || (field.allowCustom ? "支持勾选与回车自定义添加" : "支持多选，点击卡片直接勾选或取消") }}
             </div>
           </div>
-          <v-chip size="small" variant="tonal" color="primary"
-                  class="font-weight-medium px-2 mr-1 flex-shrink-0 dialog-count-badge">
+          <v-chip
+            size="small"
+            variant="tonal"
+            color="primary"
+            class="font-weight-medium px-2 mr-1 flex-shrink-0 dialog-count-badge">
             已选择 {{ tempSelection.length }} / {{ normalizedItems.length }} 项
           </v-chip>
           <v-btn
@@ -132,9 +130,7 @@
               </template>
             </v-text-field>
           </div>
-          <div v-else class="text-caption text-medium-emphasis">
-            共 {{ normalizedItems.length }} 项可选
-          </div>
+          <div v-else class="text-caption text-medium-emphasis">共 {{ normalizedItems.length }} 项可选</div>
 
           <!-- 批量操作微胶囊组 -->
           <div class="toolbar-actions d-flex align-center ga-1 flex-shrink-0">
@@ -187,10 +183,14 @@
             <div class="text-caption">正在加载选项</div>
           </div>
           <div v-else-if="filteredItems.length === 0" class="text-center py-8 text-medium-emphasis">
-            <v-icon :icon="field.loadError ? 'mdi-alert-circle-outline' : 'mdi-file-search-outline'" size="36"
-                    class="mb-2 opacity-40" />
+            <v-icon
+              :icon="field.loadError ? 'mdi-alert-circle-outline' : 'mdi-file-search-outline'"
+              size="36"
+              class="mb-2 opacity-40" />
             <div class="text-caption">
-              {{ field.loadError || (field.allowCustom && searchKeyword ? `无匹配项，可按回车添加 "${formattedCustomInput}"` : "没有可选项")
+              {{
+                field.loadError ||
+                (field.allowCustom && searchKeyword ? `无匹配项，可按回车添加 "${formattedCustomInput}"` : "没有可选项")
               }}
             </div>
             <v-btn
@@ -227,12 +227,7 @@
                     :class="{ 'text-primary font-weight-bold': isTempSelected(item.value) }">
                     {{ item.title }}
                   </div>
-                  <v-chip
-                    v-if="item.isCustom"
-                    size="x-small"
-                    variant="tonal"
-                    color="secondary"
-                    class="px-1 custom-tag">
+                  <v-chip v-if="item.isCustom" size="x-small" variant="tonal" color="secondary" class="px-1 custom-tag">
                     自定义
                   </v-chip>
                 </div>
@@ -260,18 +255,13 @@
         <!-- 底部操作栏 -->
         <v-card-actions class="px-4 py-2">
           <div class="text-caption text-medium-emphasis">
-            已勾选 <span class="font-weight-bold text-primary">{{ tempSelection.length }}</span> 项
+            已勾选
+            <span class="font-weight-bold text-primary">{{ tempSelection.length }}</span>
+            项
           </div>
           <v-spacer />
-          <v-btn variant="text" size="small" class="px-4" @click="dialogVisible = false">
-            取消
-          </v-btn>
-          <v-btn
-            color="primary"
-            variant="flat"
-            size="small"
-            class="px-5 font-weight-medium"
-            @click="applySelection">
+          <v-btn variant="text" size="small" class="px-4" @click="dialogVisible = false">取消</v-btn>
+          <v-btn color="primary" variant="flat" size="small" class="px-5 font-weight-medium" @click="applySelection">
             确定
           </v-btn>
         </v-card-actions>
@@ -281,7 +271,7 @@
 </template>
 
 <script setup>
-import {computed, ref} from "vue";
+import { computed, ref } from "vue"
 
 const props = defineProps({
   modelValue: {
@@ -296,133 +286,131 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
-});
+})
 
-const emit = defineEmits(["update:modelValue", "load-options", "refresh-options"]);
+const emit = defineEmits(["update:modelValue", "load-options", "refresh-options"])
 
-const dialogVisible = ref(false);
-const searchKeyword = ref("");
-const tempSelection = ref([]);
-const customItems = ref([]);
+const dialogVisible = ref(false)
+const searchKeyword = ref("")
+const tempSelection = ref([])
+const customItems = ref([])
 
 // 规范化配置自带的候选项目为标准格式 [{ title, value, hint, isCustom: false }]
 const baseItems = computed(() => {
-  const items = props.field?.items || [];
-  if (!Array.isArray(items)) return [];
+  const items = props.field?.items || []
+  if (!Array.isArray(items)) return []
 
   return items.map((item) => {
     if (typeof item === "string" || typeof item === "number") {
-      return {title: String(item), value: item, hint: "", isCustom: false};
+      return { title: String(item), value: item, hint: "", isCustom: false }
     }
     if (item && typeof item === "object") {
-      const title = item.title ?? item.label ?? item.name ?? String(item.value ?? "");
-      const value = item.value ?? item.title ?? item.label ?? "";
-      const hint = item.hint ?? item.subtitle ?? item.desc ?? "";
-      return {title, value, hint, isCustom: false};
+      const title = item.title ?? item.label ?? item.name ?? String(item.value ?? "")
+      const value = item.value ?? item.title ?? item.label ?? ""
+      const hint = item.hint ?? item.subtitle ?? item.desc ?? ""
+      return { title, value, hint, isCustom: false }
     }
-    return {title: String(item), value: item, hint: "", isCustom: false};
-  });
-});
+    return { title: String(item), value: item, hint: "", isCustom: false }
+  })
+})
 
 // 合并配置候选项与用户添加的自定义项
 const normalizedItems = computed(() => {
-  const combined = [...baseItems.value];
-  const seen = new Set(combined.map((i) => String(i.value).toLowerCase()));
+  const combined = [...baseItems.value]
+  const seen = new Set(combined.map((i) => String(i.value).toLowerCase()))
   for (const item of customItems.value) {
-    const key = String(item.value).toLowerCase();
+    const key = String(item.value).toLowerCase()
     if (!seen.has(key)) {
-      seen.add(key);
-      combined.push(item);
+      seen.add(key)
+      combined.push(item)
     }
   }
-  return combined;
-});
+  return combined
+})
 
 // 已选项目的对象列表
 const selectedList = computed(() => {
-  const current = Array.isArray(props.modelValue)
-    ? props.modelValue
-    : (props.modelValue ? [props.modelValue] : []);
-  const map = new Map(normalizedItems.value.map((i) => [String(i.value).toLowerCase(), i]));
+  const current = Array.isArray(props.modelValue) ? props.modelValue : props.modelValue ? [props.modelValue] : []
+  const map = new Map(normalizedItems.value.map((i) => [String(i.value).toLowerCase(), i]))
   return current.map((val) => {
-    const s = String(val).toLowerCase();
-    return map.get(s) || {title: String(val), value: val, isCustom: true};
-  });
-});
+    const s = String(val).toLowerCase()
+    return map.get(s) || { title: String(val), value: val, isCustom: true }
+  })
+})
 
 // 触发器中自适应单行紧凑展示（默认最多 8 个），充分利用宽屏横向空间
-const maxVisible = computed(() => Number(props.field?.maxChips) || 8);
-const visibleChips = computed(() => selectedList.value.slice(0, maxVisible.value));
-const remainingCount = computed(() => Math.max(0, selectedList.value.length - maxVisible.value));
+const maxVisible = computed(() => Number(props.field?.maxChips) || 8)
+const visibleChips = computed(() => selectedList.value.slice(0, maxVisible.value))
+const remainingCount = computed(() => Math.max(0, selectedList.value.length - maxVisible.value))
 
 // 是否展示搜索/自定义输入栏
 const showSearch = computed(() => {
-  return (
-    Boolean(props.field?.allowCustom) ||
-    normalizedItems.value.length > 8 ||
-    Boolean(props.field?.searchable)
-  );
-});
+  return Boolean(props.field?.allowCustom) || normalizedItems.value.length > 8 || Boolean(props.field?.searchable)
+})
 
 // 搜索栏 Placeholder
 const searchPlaceholder = computed(() => {
-  if (props.field?.customPlaceholder) return props.field.customPlaceholder;
+  if (props.field?.customPlaceholder) return props.field.customPlaceholder
   if (props.field?.allowCustom) {
-    return props.field.isExtension
-      ? "过滤选项或输入扩展名(如 .ts)回车添加..."
-      : "过滤选项或输入回车直接添加自定义...";
+    return props.field.isExtension ? "过滤选项或输入扩展名(如 .ts)回车添加..." : "过滤选项或输入回车直接添加自定义..."
   }
-  return "快速过滤选项...";
-});
+  return "快速过滤选项..."
+})
 
 // 格式化用户输入的自定义值（若是扩展名自动规范为以点开头的全小写）
 function formatCustomValue(raw) {
-  let val = String(raw || "").trim();
+  let val = String(raw || "").trim()
   if (props.field?.isExtension) {
     if (!val.startsWith(".")) {
-      val = "." + val;
+      val = "." + val
     }
-    val = val.toLowerCase();
+    val = val.toLowerCase()
   }
-  return val;
+  return val
 }
 
-const formattedCustomInput = computed(() => formatCustomValue(searchKeyword.value));
+const formattedCustomInput = computed(() => formatCustomValue(searchKeyword.value))
 
 // 是否可触发自定义添加
 const canAddCustom = computed(() => {
-  if (!props.field?.allowCustom) return false;
-  const val = formattedCustomInput.value;
-  if (!val || (props.field?.isExtension && val === ".")) return false;
-  return true;
-});
+  if (!props.field?.allowCustom) return false
+  const val = formattedCustomInput.value
+  if (!val || (props.field?.isExtension && val === ".")) return false
+  return true
+})
 
 // 过滤后的候选项目
 const filteredItems = computed(() => {
-  const kw = String(searchKeyword.value || "").trim().toLowerCase();
-  if (!kw) return normalizedItems.value;
+  const kw = String(searchKeyword.value || "")
+    .trim()
+    .toLowerCase()
+  if (!kw) return normalizedItems.value
   return normalizedItems.value.filter((item) => {
     return (
-      String(item.title || "").toLowerCase().includes(kw) ||
-      String(item.value || "").toLowerCase().includes(kw) ||
-      String(item.hint || "").toLowerCase().includes(kw)
-    );
-  });
-});
+      String(item.title || "")
+        .toLowerCase()
+        .includes(kw) ||
+      String(item.value || "")
+        .toLowerCase()
+        .includes(kw) ||
+      String(item.hint || "")
+        .toLowerCase()
+        .includes(kw)
+    )
+  })
+})
 
 function openDialog() {
-  if (props.disabled) return;
-  const current = Array.isArray(props.modelValue)
-    ? props.modelValue
-    : (props.modelValue ? [props.modelValue] : []);
-  tempSelection.value = [...current];
-  searchKeyword.value = "";
+  if (props.disabled) return
+  const current = Array.isArray(props.modelValue) ? props.modelValue : props.modelValue ? [props.modelValue] : []
+  tempSelection.value = [...current]
+  searchKeyword.value = ""
 
   // 自动从当前已选值中识别不在配置 baseItems 里的自定义项，补入 customItems 中以正常显示
   if (props.field?.allowCustom) {
-    const baseSet = new Set(baseItems.value.map((i) => String(i.value).toLowerCase()));
+    const baseSet = new Set(baseItems.value.map((i) => String(i.value).toLowerCase()))
     for (const val of current) {
-      const sVal = String(val).trim();
+      const sVal = String(val).trim()
       if (sVal && !baseSet.has(sVal.toLowerCase())) {
         if (!customItems.value.some((c) => String(c.value).toLowerCase() === sVal.toLowerCase())) {
           customItems.value.push({
@@ -430,53 +418,53 @@ function openDialog() {
             value: sVal,
             hint: "自定义扩展名",
             isCustom: true,
-          });
+          })
         }
       }
     }
   }
 
-  dialogVisible.value = true;
+  dialogVisible.value = true
   if (props.field?.dynamicOptions) {
-    emit("load-options", props.field.dynamicOptions);
+    emit("load-options", props.field.dynamicOptions)
   }
 }
 
 function refreshOptions() {
   if (props.field?.dynamicOptions) {
-    emit("refresh-options", props.field.dynamicOptions);
+    emit("refresh-options", props.field.dynamicOptions)
   }
 }
 
 function isTempSelected(val) {
-  const target = String(val).toLowerCase();
-  return tempSelection.value.some((v) => String(v).toLowerCase() === target);
+  const target = String(val).toLowerCase()
+  return tempSelection.value.some((v) => String(v).toLowerCase() === target)
 }
 
 function toggleItem(val) {
-  const target = String(val).toLowerCase();
-  const index = tempSelection.value.findIndex((v) => String(v).toLowerCase() === target);
+  const target = String(val).toLowerCase()
+  const index = tempSelection.value.findIndex((v) => String(v).toLowerCase() === target)
   if (index !== -1) {
-    tempSelection.value.splice(index, 1);
+    tempSelection.value.splice(index, 1)
   } else {
-    tempSelection.value.push(val);
+    tempSelection.value.push(val)
   }
 }
 
 function removeTempItem(val) {
-  const target = String(val).toLowerCase();
-  const index = tempSelection.value.findIndex((v) => String(v).toLowerCase() === target);
+  const target = String(val).toLowerCase()
+  const index = tempSelection.value.findIndex((v) => String(v).toLowerCase() === target)
   if (index !== -1) {
-    tempSelection.value.splice(index, 1);
+    tempSelection.value.splice(index, 1)
   }
 }
 
 function addCustomItem() {
-  if (!canAddCustom.value) return;
-  const val = formattedCustomInput.value;
+  if (!canAddCustom.value) return
+  const val = formattedCustomInput.value
 
-  const existsInBase = baseItems.value.some((i) => String(i.value).toLowerCase() === val.toLowerCase());
-  const existsInCustom = customItems.value.some((i) => String(i.value).toLowerCase() === val.toLowerCase());
+  const existsInBase = baseItems.value.some((i) => String(i.value).toLowerCase() === val.toLowerCase())
+  const existsInCustom = customItems.value.some((i) => String(i.value).toLowerCase() === val.toLowerCase())
 
   if (!existsInBase && !existsInCustom) {
     customItems.value.push({
@@ -484,70 +472,70 @@ function addCustomItem() {
       value: val,
       hint: "自定义扩展名",
       isCustom: true,
-    });
+    })
   }
 
   if (!tempSelection.value.some((v) => String(v).toLowerCase() === val.toLowerCase())) {
-    tempSelection.value.push(val);
+    tempSelection.value.push(val)
   }
 
-  searchKeyword.value = "";
+  searchKeyword.value = ""
 }
 
 function removeCustomItem(val) {
-  const target = String(val).toLowerCase();
-  const cIndex = customItems.value.findIndex((i) => String(i.value).toLowerCase() === target);
+  const target = String(val).toLowerCase()
+  const cIndex = customItems.value.findIndex((i) => String(i.value).toLowerCase() === target)
   if (cIndex !== -1) {
-    customItems.value.splice(cIndex, 1);
+    customItems.value.splice(cIndex, 1)
   }
-  removeTempItem(val);
+  removeTempItem(val)
 }
 
 function selectAll() {
-  const allValues = filteredItems.value.map((i) => i.value);
-  const currentSet = new Set(tempSelection.value.map((v) => String(v).toLowerCase()));
+  const allValues = filteredItems.value.map((i) => i.value)
+  const currentSet = new Set(tempSelection.value.map((v) => String(v).toLowerCase()))
   for (const val of allValues) {
-    currentSet.add(String(val).toLowerCase());
+    currentSet.add(String(val).toLowerCase())
   }
   tempSelection.value = normalizedItems.value
     .filter((i) => currentSet.has(String(i.value).toLowerCase()))
-    .map((i) => i.value);
+    .map((i) => i.value)
 }
 
 function invertSelection() {
-  const visibleValues = new Set(filteredItems.value.map((i) => String(i.value).toLowerCase()));
-  const currentSet = new Set(tempSelection.value.map((v) => String(v).toLowerCase()));
-  const newSet = new Set();
+  const visibleValues = new Set(filteredItems.value.map((i) => String(i.value).toLowerCase()))
+  const currentSet = new Set(tempSelection.value.map((v) => String(v).toLowerCase()))
+  const newSet = new Set()
 
   for (const v of tempSelection.value) {
     if (!visibleValues.has(String(v).toLowerCase())) {
-      newSet.add(String(v).toLowerCase());
+      newSet.add(String(v).toLowerCase())
     }
   }
   for (const i of filteredItems.value) {
-    const key = String(i.value).toLowerCase();
+    const key = String(i.value).toLowerCase()
     if (!currentSet.has(key)) {
-      newSet.add(key);
+      newSet.add(key)
     }
   }
 
   tempSelection.value = normalizedItems.value
     .filter((i) => newSet.has(String(i.value).toLowerCase()))
-    .map((i) => i.value);
+    .map((i) => i.value)
 }
 
 function clearTemp() {
-  tempSelection.value = [];
+  tempSelection.value = []
 }
 
 function applySelection() {
-  emit("update:modelValue", [...tempSelection.value]);
-  dialogVisible.value = false;
+  emit("update:modelValue", [...tempSelection.value])
+  dialogVisible.value = false
 }
 
 function clearSelection() {
-  if (props.disabled) return;
-  emit("update:modelValue", []);
+  if (props.disabled) return
+  emit("update:modelValue", [])
 }
 </script>
 
@@ -677,7 +665,9 @@ function clearSelection() {
 
 .echo-chevron-icon {
   color: rgba(var(--v-theme-on-surface), 0.35);
-  transition: transform 0.22s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s ease;
+  transition:
+    transform 0.22s cubic-bezier(0.4, 0, 0.2, 1),
+    color 0.2s ease;
 }
 
 .echo-chevron-icon--open {

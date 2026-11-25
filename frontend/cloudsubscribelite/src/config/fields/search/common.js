@@ -1,12 +1,19 @@
-import {enabled} from "../helpers.js";
+import { enabled } from "../helpers.js"
 
-export function createCommonSearchGroups(resourceTypeItems) {
+export function createCommonSearchGroups(resourceTypeItems, sourceItems = []) {
   return [
     {
       tab: "common",
       title: "搜索顺序",
       icon: "mdi-sort",
       fields: [
+        {
+          key: "search_source_order",
+          label: "搜索资源优先级",
+          type: "priority-order",
+          items: sourceItems,
+          cols: 12,
+        },
         {
           key: "resource_type_order",
           label: "资源类型优先级",
@@ -46,6 +53,27 @@ export function createCommonSearchGroups(resourceTypeItems) {
           label: "代理密码",
           type: "password",
           cols: 6,
+        },
+      ],
+    },
+    {
+      tab: "common",
+      title: "Cloudflare 过盾服务",
+      icon: "mdi-shield-check",
+      fields: [
+        {
+          key: "cf_solver_url",
+          label: "外部求解服务地址",
+          hint: "填写 Turnstile 求解网关2captcha或FlareSolverr等兼容服务地址",
+          placeholder: "https://2captcha.com/in.php",
+          cols: 12,
+        },
+        {
+          key: "cf_solver_key",
+          label: "求解服务令牌",
+          type: "password",
+          hint: "求解网关的 API Key，FlareSolverr / Byparr 无鉴权可留空",
+          cols: 12,
         },
       ],
     },

@@ -28,11 +28,7 @@ export default defineConfig({
                 "./Config": "./src/components/Config.vue",
                 "./Dashboard": "./src/components/Dashboard.vue",
                 "./AppPage": "./src/components/AppPage.vue",
-                "./AppPageHistory": "./src/components/AppPageHistory.vue",
-                "./AppPageChannels": "./src/components/AppPageChannels.vue",
-                "./AppPageTgMonitor": "./src/components/AppPageTgMonitor.vue",
-                "./AppPageFunnel": "./src/components/AppPageFunnel.vue",
-                "./AppPageDuplicates": "./src/components/AppPageDuplicates.vue",
+                "./AppPageResource": "./src/components/AppPageResource.vue",
             },
             shared: {
                 vue: {requiredVersion: false, generate: false},

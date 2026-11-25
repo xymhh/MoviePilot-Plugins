@@ -1,12 +1,8 @@
-import {enabled} from "./helpers.js";
+import { enabled } from "./helpers.js"
 
 export function createCheckinSection(options = {}) {
-  const dynamicProviders = Array.isArray(options.checkinSchemas?.providers)
-    ? options.checkinSchemas.providers
-    : [];
-  const dynamicGroups = Array.isArray(options.checkinSchemas?.groups)
-    ? options.checkinSchemas.groups
-    : [];
+  const dynamicProviders = Array.isArray(options.checkinSchemas?.providers) ? options.checkinSchemas.providers : []
+  const dynamicGroups = Array.isArray(options.checkinSchemas?.groups) ? options.checkinSchemas.groups : []
 
   const baseGroups = [
     {
@@ -57,12 +53,12 @@ export function createCheckinSection(options = {}) {
         },
       ],
     },
-  ];
+  ]
 
   return {
     value: "checkin",
     title: "签到服务",
     icon: "mdi-calendar-check-outline",
     groups: [...baseGroups, ...dynamicGroups],
-  };
+  }
 }

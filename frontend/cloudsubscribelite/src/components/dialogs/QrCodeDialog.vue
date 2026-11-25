@@ -79,19 +79,21 @@
 </template>
 
 <script setup>
-import {computed, onBeforeUnmount, onMounted, ref, watch} from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import { createPluginApi } from "../../api"
 
 const props = defineProps({
   modelValue: Boolean,
   api: { type: [Object, Function], required: true },
   provider: { type: String, default: "115" },
-  pluginId: { type: String, default: "CloudSubscribeX" },
 })
 const emit = defineEmits(["update:modelValue", "success"])
-const providerMeta = ref({});
-const channels = computed(() => Array.isArray(providerMeta.value.channels) ? providerMeta.value.channels : []);
-const providerName = computed(() => providerMeta.value.name || "网盘");
-const scanHint = computed(() => providerMeta.value.hint || "请扫描二维码完成登录");
+const pluginId = "CloudSubscribe"
+const pluginApi = createPluginApi(props.api, () => pluginId)
+const providerMeta = ref({})
+const channels = computed(() => (Array.isArray(providerMeta.value.channels) ? providerMeta.value.channels : []))
+const providerName = computed(() => providerMeta.value.name || "网盘")
+const scanHint = computed(() => providerMeta.value.hint || "请扫描二维码完成登录")
 const channel = ref("alipaymini")
 const loading = ref(false)
 const qrCode = ref("")
@@ -101,13 +103,6 @@ const session = ref(null)
 let timer = null
 let failures = 0
 let pollInterval = 3000
-
-function unwrapResponse(raw) {
-  if (raw?.data && typeof raw.data === "object" && "success" in raw.data) {
-    return raw.data
-  }
-  return raw || {}
-}
 
 function stopPolling() {
   if (timer) clearTimeout(timer)
@@ -121,8 +116,8 @@ function close() {
 }
 
 function buildStatusPayload() {
-  const {qrcode, qr_url, meta, interval, provider, ...values} = session.value || {};
-  return {provider: props.provider, ...values};
+  const { qrcode, qr_url, meta, interval, provider, ...values } = session.value || {}
+  return { provider: props.provider, ...values }
 }
 
 function schedulePolling(delay = pollInterval) {
@@ -152,9 +147,7 @@ function handleVisibilityChange() {
 async function checkStatus() {
   if (!session.value) return
   try {
-    const result = unwrapResponse(
-      await props.api.post(`plugin/${props.pluginId}/qrcode/check`, buildStatusPayload()),
-    )
+    const result = await pluginApi.drive.qrcodeCheck(buildStatusPayload())
     if (result.success === false) {
       throw new Error(result.message || "检查登录状态失败")
     }
@@ -193,27 +186,23 @@ async function loadQrCode() {
   session.value = null
   loading.value = true
   qrCode.value = ""
-  providerMeta.value = {};
+  providerMeta.value = {}
   error.value = false
   failures = 0
   statusText.value = "正在获取二维码..."
   try {
-    const query = new URLSearchParams({
-      provider: props.provider,
-      client_type: channel.value,
-    })
-    const result = unwrapResponse(await props.api.get(`plugin/${props.pluginId}/qrcode?${query}`))
+    const result = await pluginApi.drive.qrcode({ provider: props.provider, clientType: channel.value })
     if (result.success === false) {
       throw new Error(result.message || "获取二维码失败")
     }
     session.value = result.data?.data || result.data || result
-    providerMeta.value = session.value.meta || {};
+    providerMeta.value = session.value.meta || {}
     qrCode.value = session.value.qrcode || ""
     if (!qrCode.value) throw new Error("接口未返回二维码")
     pollInterval = Math.max(2, Number(session.value.interval || 3)) * 1000
     const channelName =
       session.value.channel_name || channels.value.find((item) => item.value === channel.value)?.title || "客户端"
-    statusText.value = channels.value.length ? `等待${channelName}扫码` : "等待扫码";
+    statusText.value = channels.value.length ? `等待${channelName}扫码` : "等待扫码"
     schedulePolling()
   } catch (loadError) {
     error.value = true
@@ -224,7 +213,7 @@ async function loadQrCode() {
 }
 
 watch([() => props.modelValue, () => props.provider], ([visible]) => (visible ? loadQrCode() : stopPolling()))
-watch(channel, () => props.modelValue && channels.value.length && loadQrCode());
+watch(channel, () => props.modelValue && channels.value.length && loadQrCode())
 onMounted(() => document.addEventListener("visibilitychange", handleVisibilityChange))
 onBeforeUnmount(() => {
   document.removeEventListener("visibilitychange", handleVisibilityChange)

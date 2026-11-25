@@ -84,11 +84,7 @@
               @click="onSubtabClick(tab.value)">
               <v-icon :icon="tab.icon" size="15" class="subtab-dropdown-icon" />
               <span class="subtab-dropdown-title">{{ tab.title }}</span>
-              <v-icon
-                v-if="activeSubtab === tab.value"
-                icon="mdi-check"
-                size="15"
-                class="subtab-dropdown-check" />
+              <v-icon v-if="activeSubtab === tab.value" icon="mdi-check" size="15" class="subtab-dropdown-check" />
             </button>
           </div>
         </div>
@@ -97,445 +93,475 @@
     <div class="config-section-scroll">
       <transition name="tab-fade" mode="out-in">
         <div :key="activeSubtab || 'main'" class="subtab-pane">
-          <!-- 1.10.5：分组折叠。默认只展开首组与有修改的组，点标题切换。 -->
-          <div v-if="visibleGroups.length > 1" class="group-fold-toolbar">
-            <span class="group-fold-count">{{ visibleGroups.length }} 组</span>
-            <div class="group-fold-actions">
-              <button type="button" class="group-fold-btn" @click="expandAllGroups">全部展开</button>
-              <button type="button" class="group-fold-btn" @click="collapseAllGroups">全部收起</button>
-            </div>
-          </div>
           <template v-for="(group, index) in visibleGroups" :key="group.title">
             <section class="config-group">
-              <div
-                v-if="!group.hideHeading"
-                class="group-heading group-heading--collapsible d-flex align-center justify-space-between"
-                role="button"
-                tabindex="0"
-                :aria-expanded="isGroupExpanded(group)"
-                @click="toggleGroup(group)"
-                @keydown.enter.prevent="toggleGroup(group)"
-                @keydown.space.prevent="toggleGroup(group)">
+              <div v-if="!group.hideHeading" class="group-heading d-flex align-center justify-space-between">
                 <div class="d-flex align-center min-w-0 flex-grow-1">
                   <v-icon :icon="group.icon" color="primary" size="small" class="group-heading-icon" />
                   <div class="group-heading-content">
-                <span class="group-title text-subtitle-2 font-weight-medium">
-                  {{ group.title }}
-                </span>
+                    <span class="group-title text-subtitle-2 font-weight-medium">
+                      {{ group.title }}
+                    </span>
                     <span v-if="group.hint" class="group-hint text-caption text-medium-emphasis">
-                  {{ group.hint }}
-                </span>
+                      {{ group.hint }}
+                    </span>
                   </div>
                 </div>
-                <div class="group-heading-right d-flex align-center ga-1 flex-shrink-0">
-                  <span v-if="groupHasChanges(group)" class="group-modified-dot" title="本组有修改" />
-                  <span class="group-field-count">{{ (group.fields || []).length }} 项</span>
-                  <v-btn
-                    v-if="index === 0 && canResetCurrentSubtab"
-                    variant="tonal"
-                    size="x-small"
-                    color="error"
-                    prepend-icon="mdi-restore"
-                    class="subtab-reset-btn ml-2 flex-shrink-0"
-                    :title="`仅恢复当前【${currentSubtabTitle}】配置项为默认值`"
-                    @click.stop="promptResetSubtab">
-                    恢复默认值
-                  </v-btn>
-                  <v-icon
-                    :icon="isGroupExpanded(group) ? 'mdi-chevron-down' : 'mdi-chevron-right'"
-                    size="18"
-                    class="group-fold-chevron" />
-                </div>
-          </div>
+                <v-btn
+                  v-if="index === 0 && canResetCurrentSubtab"
+                  variant="tonal"
+                  size="x-small"
+                  color="error"
+                  prepend-icon="mdi-restore"
+                  class="subtab-reset-btn ml-2 flex-shrink-0"
+                  :title="`仅恢复当前【${currentSubtabTitle}】配置项为默认值`"
+                  @click="promptResetSubtab">
+                  恢复默认值
+                </v-btn>
+              </div>
 
-              <v-row v-show="isGroupExpanded(group)" dense class="config-fields-row">
-            <template v-for="field in group.fields" :key="field.key">
-              <v-col
-                v-if="evalShowCondition(field.show, config) && !isFieldEmbedded(group, field)"
-                :cols="12"
-                :sm="field.cols || 6"
-                :md="field.cols || 6"
-                class="config-field-col">
-                <AccountInfo
-                  v-if="field.type === 'account'"
-                  :account="getAccountInfo(field)"
-                  :compact="Boolean(field.compact)"
-                  :loading="refreshingAccounts.includes(field.accountKey)"
-                  :refreshable="Boolean(field.accountKey)"
-                  @refresh="emit('refresh-account', field.accountKey)" />
-                <v-alert v-else-if="field.type === 'info'" type="info" variant="tonal" density="compact">
-                  <div class="text-body-2 font-weight-medium mb-1">
-                    {{ field.label }}
-                  </div>
-                  <div v-for="line in field.lines || []" :key="line" class="text-caption mb-1">• {{ line }}</div>
-                </v-alert>
-                <div v-else-if="field.type === 'media-library-webhook'" class="media-library-webhook">
-                  <v-alert
-                    v-if="!(field.items || []).length"
-                    type="warning"
-                    variant="tonal"
-                    density="compact"
-                    text="尚未配置 Emby 媒体服务器，暂时无法生成通知地址。" />
-                  <v-text-field
-                    v-for="item in field.items || []"
-                    v-else
-                    :key="item.value"
-                    :model-value="mediaLibraryWebhookUrl(field, item.value)"
-                    :label="`${item.title || item.value} Webhook URL`"
-                    readonly
-                    density="compact"
-                    variant="outlined"
-                    hide-details="auto">
-                    <template #append-inner>
-                      <div class="media-library-webhook__actions">
-                        <v-btn
-                          icon="mdi-content-copy"
-                          variant="text"
-                          color="primary"
-                          size="small"
-                          title="复制 Webhook URL"
-                          @click="emit('copy-text', mediaLibraryWebhookUrl(field, item.value))" />
+              <v-row dense class="config-fields-row">
+                <template v-for="field in group.fields" :key="field.key">
+                  <v-col
+                    v-if="evalShowCondition(field.show, config) && !isFieldEmbedded(group, field)"
+                    :cols="12"
+                    :sm="field.cols || 6"
+                    :md="field.cols || 6"
+                    class="config-field-col">
+                    <AccountInfo
+                      v-if="field.type === 'account'"
+                      :account="getAccountInfo(field)"
+                      :compact="Boolean(field.compact)"
+                      :loading="refreshingAccounts.includes(field.accountKey)"
+                      :refreshable="Boolean(field.accountKey)"
+                      :rebuildable="Boolean(field.rebuild)"
+                      @refresh="emit('refresh-account', field.accountKey)"
+                      @rebuild="requestRebuild(field)" />
+                    <v-alert v-else-if="field.type === 'info'" type="info" variant="tonal" density="compact">
+                      <div class="text-body-2 font-weight-medium mb-1">
+                        {{ field.label }}
                       </div>
-                    </template>
-                  </v-text-field>
-                </div>
-                <v-btn
-                  v-else-if="field.type === 'test-source' && !isFieldEmbedded(group, field)"
-                  color="primary"
-                  variant="tonal"
-                  prepend-icon="mdi-flask-outline"
-                  :loading="testingSource === field.source"
-                  :disabled="
-                    !isTestSourceConfigured(field.source) || (Boolean(testingSource) && testingSource !== field.source)
-                  "
-                  :title="testSourceTitle(field.source)"
-                  @click="emit('test-source', field.source)">
-                  {{ field.label }}
-                </v-btn>
-                <v-btn
-                  v-else-if="field.type === 'test-auto-subscribe'"
-                  color="primary"
-                  variant="tonal"
-                  prepend-icon="mdi-flask-outline"
-                  :loading="testingAutoSubscribe === field.provider"
-                  :disabled="
-                    !isAutoSubscribeConfigured(field.provider) ||
-                    (Boolean(testingAutoSubscribe) && testingAutoSubscribe !== field.provider)
-                  "
-                  :title="autoSubscribeTestTitle(field.provider)"
-                  @click="emit('test-auto-subscribe', field.provider)">
-                  {{ field.label }}
-                </v-btn>
-                <div v-else-if="field.type === 'hdhive-oauth'" class="hdhive-oauth-panel">
-                  <div class="d-flex align-center flex-wrap ga-2 mb-2">
-                    <v-chip size="small" variant="tonal" :color="config.hdhive_access_token ? 'success' : 'warning'">
-                      {{ config.hdhive_access_token ? "已获取用户 Token" : "尚未完成用户授权" }}
-                    </v-chip>
-                    <span class="text-caption text-medium-emphasis">授权范围：query unlock write</span>
-                  </div>
-                  <v-text-field
-                    v-if="config.hdhive_response_mode !== 'postmessage'"
-                    v-model="config.hdhive_oauth_callback"
-                    label="授权完成后的完整回调 URL"
-                    hint="请粘贴同时包含 code 和 state 的完整地址；插件会校验 state 后在服务端换取 Token。"
-                    persistent-hint
-                    clearable
-                    density="compact"
-                    variant="outlined"
-                    hide-details="auto"
-                    class="mb-2" />
-                  <div class="d-flex flex-wrap ga-2">
+                      <div
+                        v-for="line in resolveFieldValue(field.lines, config, [])"
+                        :key="line"
+                        class="text-caption mb-1">
+                        • {{ line }}
+                      </div>
+                    </v-alert>
+                    <div v-else-if="field.type === 'media-library-webhook'" class="media-library-webhook">
+                      <v-alert
+                        v-if="!(field.items || []).length"
+                        type="warning"
+                        variant="tonal"
+                        density="compact"
+                        text="尚未配置 Emby 媒体服务器，暂时无法生成通知地址。" />
+                      <v-text-field
+                        v-for="item in field.items || []"
+                        v-else
+                        :key="item.value"
+                        :model-value="mediaLibraryWebhookUrl(field, item.value)"
+                        :label="`${item.title || item.value} Webhook URL`"
+                        readonly
+                        density="compact"
+                        variant="outlined"
+                        hide-details="auto">
+                        <template #append-inner>
+                          <div class="media-library-webhook__actions">
+                            <v-btn
+                              icon="mdi-content-copy"
+                              variant="text"
+                              color="primary"
+                              size="small"
+                              title="复制 Webhook URL"
+                              @click="emit('copy-text', mediaLibraryWebhookUrl(field, item.value))" />
+                          </div>
+                        </template>
+                      </v-text-field>
+                    </div>
                     <v-btn
+                      v-else-if="field.type === 'test-source' && !isFieldEmbedded(group, field)"
                       color="primary"
                       variant="tonal"
-                      prepend-icon="mdi-open-in-new"
-                      :loading="hdhiveOauthAction === 'start'"
-                      :disabled="Boolean(hdhiveOauthAction) && hdhiveOauthAction !== 'start'"
-                      @click="emit('hdhive-oauth-start')">
-                      打开 HDHive 授权页
+                      prepend-icon="mdi-flask-outline"
+                      :loading="testingSource === field.source"
+                      :disabled="
+                        !isTestSourceConfigured(field.source) ||
+                        (Boolean(testingSource) && testingSource !== field.source)
+                      "
+                      :title="testSourceTitle(field.source)"
+                      @click="emit('test-source', field.source)">
+                      {{ field.label }}
                     </v-btn>
                     <v-btn
-                      v-if="config.hdhive_response_mode !== 'postmessage'"
-                      color="success"
+                      v-else-if="field.type === 'test-auto-subscribe'"
+                      color="primary"
                       variant="tonal"
-                      prepend-icon="mdi-shield-check-outline"
-                      :loading="hdhiveOauthAction === 'exchange'"
-                      :disabled="Boolean(hdhiveOauthAction) || !String(config.hdhive_oauth_callback || '').trim()"
-                      @click="emit('hdhive-oauth-exchange')">
-                      校验回调并完成授权
+                      prepend-icon="mdi-flask-outline"
+                      :loading="testingAutoSubscribe === field.provider"
+                      :disabled="
+                        !isAutoSubscribeConfigured(field.provider) ||
+                        (Boolean(testingAutoSubscribe) && testingAutoSubscribe !== field.provider)
+                      "
+                      :title="autoSubscribeTestTitle(field.provider)"
+                      @click="emit('test-auto-subscribe', field.provider)">
+                      {{ field.label }}
                     </v-btn>
-                  </div>
-                </div>
-                <div v-else-if="field.type === 'cleanup-residue'" class="d-flex align-center flex-wrap ga-2">
-                  <v-btn
-                    color="warning"
-                    variant="tonal"
-                    prepend-icon="mdi-broom"
-                    :loading="residueCleaning"
-                    :disabled="residueCleaning"
-                    @click="cleanupResidue(field)">
-                    {{ field.label }}
-                  </v-btn>
-                  <span v-if="field.hint" class="text-caption text-medium-emphasis">{{ field.hint }}</span>
-                </div>
-                <CheckinTimeline
-                  v-else-if="field.type === 'checkin-timeline'"
-                  :api="api"
-                  :providers="field.providers"
-                  :config="config"
-                  @result="emit('checkin-result', $event)" />
-                <RegionMediaMapField
-                  v-else-if="field.type === 'region-media-map' || field.type === 'priority-order'"
-                  v-model="config[field.key]"
-                  :field="field" />
-                <VCronField
-                  v-else-if="field.type === 'cron'"
-                  v-model="config[field.key]"
-                  :label="field.label"
-                  :hint="field.hint"
-                  :placeholder="field.placeholder"
-                  :persistent-hint="Boolean(field.hint)"
-                  density="compact" />
-                <v-switch
-                  v-else-if="field.type === 'switch'"
-                  v-model="config[field.key]"
-                  :label="field.label"
-                  :hint="field.hint"
-                  :persistent-hint="Boolean(field.hint)"
-                  :disabled="Boolean(field.disabled?.(config))"
-                  color="primary"
-                  density="compact"
-                  hide-details="auto"
-                  class="config-switch" />
-                <div v-else-if="field.type === 'online-documents'" class="online-documents">
-                  <div v-if="field.hint" class="text-caption text-medium-emphasis mb-3">{{ field.hint }}</div>
-                  <div
-                    v-for="(document, documentIndex) in onlineDocuments(field.key)"
-                    :key="documentIndex"
-                    class="online-document-row">
-                    <v-text-field
-                      v-model="document.url"
-                      label="文档地址"
-                      placeholder="https://docs.qq.com/..."
+                    <div v-else-if="field.type === 'hdhive-oauth'" class="hdhive-oauth-panel">
+                      <div class="d-flex align-center flex-wrap ga-2 mb-2">
+                        <v-chip
+                          size="small"
+                          variant="tonal"
+                          :color="config.hdhive_access_token ? 'success' : 'warning'">
+                          {{ config.hdhive_access_token ? "已获取用户 Token" : "尚未完成用户授权" }}
+                        </v-chip>
+                        <span class="text-caption text-medium-emphasis">授权范围：query unlock write</span>
+                      </div>
+                      <v-text-field
+                        v-if="config.hdhive_response_mode !== 'postmessage'"
+                        v-model="config.hdhive_oauth_callback"
+                        label="授权完成后的完整回调 URL"
+                        hint="请粘贴同时包含 code 和 state 的完整地址；插件会校验 state 后在服务端换取 Token。"
+                        persistent-hint
+                        clearable
+                        density="compact"
+                        variant="outlined"
+                        hide-details="auto"
+                        class="mb-2" />
+                      <div class="d-flex flex-wrap ga-2">
+                        <v-btn
+                          color="primary"
+                          variant="tonal"
+                          prepend-icon="mdi-open-in-new"
+                          :loading="hdhiveOauthAction === 'start'"
+                          :disabled="Boolean(hdhiveOauthAction) && hdhiveOauthAction !== 'start'"
+                          @click="emit('hdhive-oauth-start')">
+                          打开 HDHive 授权页
+                        </v-btn>
+                        <v-btn
+                          v-if="config.hdhive_response_mode !== 'postmessage'"
+                          color="success"
+                          variant="tonal"
+                          prepend-icon="mdi-shield-check-outline"
+                          :loading="hdhiveOauthAction === 'exchange'"
+                          :disabled="Boolean(hdhiveOauthAction) || !String(config.hdhive_oauth_callback || '').trim()"
+                          @click="emit('hdhive-oauth-exchange')">
+                          校验回调并完成授权
+                        </v-btn>
+                      </div>
+                    </div>
+                    <CheckinTimeline
+                      v-else-if="field.type === 'checkin-timeline'"
+                      :api="api"
+                      :providers="field.providers"
+                      :config="config"
+                      @result="emit('checkin-result', $event)" />
+                    <RegionMediaMapField
+                      v-else-if="field.type === 'region-media-map' || field.type === 'priority-order'"
+                      v-model="config[field.key]"
+                      :field="field" />
+                    <VCronField
+                      v-else-if="field.type === 'cron'"
+                      v-model="config[field.key]"
+                      :label="field.label"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :placeholder="resolveFieldValue(field.placeholder, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      density="compact" />
+                    <v-switch
+                      v-else-if="field.type === 'switch'"
+                      v-model="config[field.key]"
+                      :label="field.label"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      :disabled="Boolean(field.disabled?.(config))"
+                      color="primary"
+                      density="compact"
+                      hide-details="auto"
+                      class="config-switch" />
+                    <div v-else-if="field.type === 'online-documents'" class="online-documents">
+                      <div v-if="field.hint" class="text-caption text-medium-emphasis mb-3">{{ field.hint }}</div>
+                      <div
+                        v-for="(document, documentIndex) in onlineDocuments(field.key)"
+                        :key="documentIndex"
+                        class="online-document-row">
+                        <v-text-field
+                          v-model="document.url"
+                          label="文档地址"
+                          placeholder="https://docs.qq.com/..."
+                          density="compact"
+                          variant="outlined"
+                          hide-details="auto" />
+                        <v-select
+                          v-model="document.resource_types"
+                          label="资源类型"
+                          :items="onlineDocumentTypeItems(field)"
+                          item-title="title"
+                          item-value="value"
+                          multiple
+                          chips
+                          closable-chips
+                          density="compact"
+                          variant="outlined"
+                          hide-details="auto" />
+                        <v-btn
+                          icon="mdi-plus"
+                          variant="text"
+                          color="primary"
+                          title="在下方添加文档"
+                          @click="addOnlineDocument(field.key, documentIndex)" />
+                        <v-btn
+                          icon="mdi-delete-outline"
+                          variant="text"
+                          color="error"
+                          title="删除此文档"
+                          @click="removeOnlineDocument(field.key, documentIndex)" />
+                      </div>
+                    </div>
+                    <MultiSelectDialogField
+                      v-else-if="(field.type === 'select' || field.type === 'multi-select') && field.multiple"
+                      v-model="config[field.key]"
+                      :field="field"
+                      :disabled="Boolean(field.disabled?.(config))"
+                      @load-options="emit('load-options', $event)"
+                      @refresh-options="emit('refresh-options', $event)" />
+                    <v-autocomplete
+                      v-else-if="field.type === 'select' && field.searchable"
+                      v-model="config[field.key]"
+                      v-model:search="selectSearch[field.key]"
+                      :label="field.label"
+                      :items="filteredSelectItems(field)"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      :disabled="Boolean(field.disabled?.(config))"
+                      :no-filter="true"
+                      no-data-text="没有匹配的订阅"
                       density="compact"
                       variant="outlined"
                       hide-details="auto" />
                     <v-select
-                      v-model="document.resource_types"
-                      label="资源类型"
-                      :items="onlineDocumentTypeItems(field)"
-                      item-title="title"
-                      item-value="value"
-                      multiple
-                      chips
-                      closable-chips
+                      v-else-if="field.type === 'select'"
+                      v-model="config[field.key]"
+                      :label="field.label"
+                      :items="field.items"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      :disabled="Boolean(field.disabled?.(config))"
                       density="compact"
                       variant="outlined"
                       hide-details="auto" />
-                    <v-btn
-                      icon="mdi-plus"
-                      variant="text"
-                      color="primary"
-                      title="在下方添加文档"
-                      @click="addOnlineDocument(field.key, documentIndex)" />
-                    <v-btn
-                      icon="mdi-delete-outline"
-                      variant="text"
-                      color="error"
-                      title="删除此文档"
-                      @click="removeOnlineDocument(field.key, documentIndex)" />
-                  </div>
-                </div>
-                <MultiSelectDialogField
-                  v-else-if="(field.type === 'select' || field.type === 'multi-select') && field.multiple"
-                  v-model="config[field.key]"
-                  :field="field"
-                  :disabled="Boolean(field.disabled?.(config))"
-                  @load-options="emit('load-options', $event)"
-                  @refresh-options="emit('refresh-options', $event)" />
-                <v-autocomplete
-                  v-else-if="field.type === 'select' && field.searchable"
-                  v-model="config[field.key]"
-                  v-model:search="selectSearch[field.key]"
-                  :label="field.label"
-                  :items="filteredSelectItems(field)"
-                  :hint="field.hint"
-                  :persistent-hint="Boolean(field.hint)"
-                  :disabled="Boolean(field.disabled?.(config))"
-                  :no-filter="true"
-                  no-data-text="没有匹配的订阅"
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto" />
-                <v-select
-                  v-else-if="field.type === 'select'"
-                  v-model="config[field.key]"
-                  :label="field.label"
-                  :items="field.items"
-                  :hint="field.hint"
-                  :persistent-hint="Boolean(field.hint)"
-                  :disabled="Boolean(field.disabled?.(config))"
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto" />
-                <v-textarea
-                  v-else-if="field.type === 'textarea'"
-                  v-model="config[field.key]"
-                  :label="field.label"
-                  :hint="field.hint"
-                  :placeholder="field.placeholder"
-                  :persistent-hint="Boolean(field.hint)"
-                  :disabled="Boolean(field.disabled?.(config))"
-                  auto-grow
-                  rows="2"
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto" />
-                <v-combobox
-                  v-else-if="field.type === 'combobox'"
-                  v-model="config[field.key]"
-                  :label="field.label"
-                  :items="field.items || []"
-                  :hint="field.hint"
-                  :persistent-hint="Boolean(field.hint)"
-                  :loading="Boolean(field.loading)"
-                  :multiple="field.multiple !== false"
-                  :return-object="Boolean(field.returnObject)"
-                  chips
-                  closable-chips
-                  clearable
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto" />
-                <v-text-field
-                  v-else-if="field.type === 'cloud-directory' || field.type === 'local-directory'"
-                  v-model="config[field.key]"
-                  :label="field.label"
-                  :hint="field.hint"
-                  :placeholder="field.placeholder"
-                  :persistent-hint="Boolean(field.hint)"
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto">
-                  <template #append-inner>
-                    <v-btn
-                      :icon="field.type === 'local-directory' ? 'mdi-folder-open-outline' : 'mdi-folder-search-outline'"
-                      variant="text"
-                      color="primary"
-                      size="small"
-                      :title="field.type === 'local-directory' ? '浏览并选择本地目录' : '浏览网盘目录'"
-                      @click="emit('browse-directory', field.key, field.driveProvider, field.type === 'local-directory')" />
-                  </template>
-                </v-text-field>
-                <v-text-field
-                  v-else-if="field.type === 'proxy'"
-                  v-model="config[field.key]"
-                  :name="field.key"
-                  autocomplete="off"
-                  :label="field.label"
-                  :hint="field.hint"
-                  :placeholder="field.placeholder"
-                  :persistent-hint="Boolean(field.hint)"
-                  clearable
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto">
-                  <template #append-inner>
-                    <v-btn
-                      icon="mdi-lan-connect"
-                      variant="text"
-                      color="primary"
-                      size="small"
-                      title="测试代理连通性、延迟和出口"
-                      :loading="testingProxy"
-                      :disabled="testingProxy || !hasText(config[field.key])"
-                      @click="emit('test-proxy')" />
-                  </template>
-                </v-text-field>
-                <v-text-field
-                  v-else-if="field.type === 'auto-subscribe-proxy'"
-                  v-model="config[field.key]"
-                  :name="field.key"
-                  autocomplete="off"
-                  :label="field.label"
-                  :hint="field.hint"
-                  :placeholder="field.placeholder"
-                  :persistent-hint="Boolean(field.hint)"
-                  clearable
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto">
-                  <template #append-inner>
-                    <v-btn
-                      icon="mdi-lan-connect"
-                      variant="text"
-                      color="primary"
-                      size="small"
-                      title="测试榜单代理连通性和延迟"
-                      :loading="testingAutoSubscribeProxy"
-                      :disabled="testingAutoSubscribeProxy || !hasText(config[field.key])"
-                      @click="emit('test-auto-subscribe-proxy')" />
-                  </template>
-                </v-text-field>
-                <v-text-field
-                  v-else-if="field.type === 'number'"
-                  v-model.number="config[field.key]"
-                  :label="field.label"
-                  type="number"
-                  :min="field.min"
-                  :max="field.max"
-                  :suffix="field.suffix"
-                  :hint="field.hint"
-                  :placeholder="field.placeholder"
-                  :clearable="field.clearable"
-                  :persistent-hint="Boolean(field.hint)"
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto" />
-                <v-text-field
-                  v-else
-                  v-model="config[field.key]"
-                  :label="field.label"
-                  :type="field.type || 'text'"
-                  :name="field.key"
-                  :autocomplete="field.type === 'password' ? 'new-password' : field.autocomplete || 'off'"
-                  :hint="field.hint"
-                  :placeholder="field.placeholder"
-                  :persistent-hint="Boolean(field.hint)"
-                  :disabled="Boolean(field.disabled?.(config))"
-                  density="compact"
-                  variant="outlined"
-                  hide-details="auto">
-                  <template v-if="field.scanProvider || getAssociatedTestSource(group, field)" #append-inner>
-                    <v-btn
-                      v-if="field.scanProvider"
-                      icon="mdi-qrcode-scan"
-                      variant="text"
-                      color="primary"
-                      size="small"
-                      title="扫码登录"
-                      @click="emit('scan', field.scanProvider)" />
-                    <v-btn
-                      v-if="getAssociatedTestSource(group, field)"
-                      icon="mdi-flask-outline"
-                      variant="text"
-                      color="primary"
-                      size="small"
-                      :loading="testingSource === getAssociatedTestSource(group, field).source"
-                      :disabled="
-                        !isTestSourceConfigured(getAssociatedTestSource(group, field).source) ||
-                        (Boolean(testingSource) && testingSource !== getAssociatedTestSource(group, field).source)
-                      "
-                      :title="testSourceTitle(getAssociatedTestSource(group, field).source) || '测试搜索'"
-                      @click="emit('test-source', getAssociatedTestSource(group, field).source)" />
-                  </template>
-                </v-text-field>
-              </v-col>
-            </template>
-          </v-row>
-          <v-divider v-if="index < visibleGroups.length - 1" class="group-divider" />
-        </section>
-      </template>
+                    <v-textarea
+                      v-else-if="field.type === 'textarea'"
+                      v-model="config[field.key]"
+                      :label="field.label"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :placeholder="resolveFieldValue(field.placeholder, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      :disabled="Boolean(field.disabled?.(config))"
+                      :class="{ 'config-textarea--mono': Boolean(field.monospace) }"
+                      auto-grow
+                      :rows="Number(field.rows) || 2"
+                      density="compact"
+                      variant="outlined"
+                      hide-details="auto" />
+                    <v-combobox
+                      v-else-if="field.type === 'combobox'"
+                      v-model="config[field.key]"
+                      :label="field.label"
+                      :items="field.items || []"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      :loading="Boolean(field.loading)"
+                      :multiple="field.multiple !== false"
+                      :return-object="Boolean(field.returnObject)"
+                      chips
+                      closable-chips
+                      clearable
+                      density="compact"
+                      variant="outlined"
+                      hide-details="auto" />
+                    <v-text-field
+                      v-else-if="field.type === 'cloud-directory' || field.type === 'local-directory'"
+                      v-model="config[field.key]"
+                      :label="field.label"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :placeholder="resolveFieldValue(field.placeholder, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      density="compact"
+                      variant="outlined"
+                      hide-details="auto">
+                      <template #append-inner>
+                        <v-btn
+                          :icon="
+                            field.type === 'local-directory' ? 'mdi-folder-open-outline' : 'mdi-folder-search-outline'
+                          "
+                          variant="text"
+                          color="primary"
+                          size="small"
+                          :title="field.type === 'local-directory' ? '浏览并选择本地目录' : '浏览网盘目录'"
+                          @click="
+                            emit('browse-directory', field.key, field.driveProvider, field.type === 'local-directory')
+                          " />
+                      </template>
+                    </v-text-field>
+                    <v-text-field
+                      v-else-if="field.type === 'proxy-port'"
+                      v-model="config[field.key]"
+                      type="number"
+                      :class="proxyPortClass(field)"
+                      :label="field.label"
+                      :hint="proxyPortHint(field)"
+                      persistent-hint
+                      density="compact"
+                      variant="outlined"
+                      hide-details="auto"
+                      @blur="maybeCheckPort(field)">
+                      <template #append-inner>
+                        <v-progress-circular
+                          v-if="proxyPortState(field).loading"
+                          size="16"
+                          indeterminate
+                          color="primary" />
+                        <v-icon
+                          v-else-if="proxyPortState(field).available === false"
+                          icon="mdi-alert-circle-outline"
+                          color="error"
+                          size="18"
+                          :title="proxyPortState(field).error || '端口被占用'" />
+                        <v-icon
+                          v-else-if="proxyPortState(field).available === true"
+                          icon="mdi-check-circle-outline"
+                          color="success"
+                          size="18"
+                          :title="proxyPortState(field).ours ? '端口由本插件监听占用' : '端口可用'" />
+                        <v-btn
+                          icon="mdi-refresh"
+                          variant="text"
+                          color="primary"
+                          size="small"
+                          title="检测端口是否被占用"
+                          @click="emit('check-port', { key: field.key, port: config[field.key] })" />
+                      </template>
+                    </v-text-field>
+                    <v-text-field
+                      v-else-if="field.type === 'proxy'"
+                      v-model="config[field.key]"
+                      :name="field.key"
+                      autocomplete="off"
+                      :label="field.label"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :placeholder="resolveFieldValue(field.placeholder, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      clearable
+                      density="compact"
+                      variant="outlined"
+                      hide-details="auto">
+                      <template #append-inner>
+                        <v-btn
+                          icon="mdi-lan-connect"
+                          variant="text"
+                          color="primary"
+                          size="small"
+                          title="测试代理连通性、延迟和出口"
+                          :loading="testingProxy"
+                          :disabled="testingProxy || !hasText(config[field.key])"
+                          @click="emit('test-proxy')" />
+                      </template>
+                    </v-text-field>
+                    <v-text-field
+                      v-else-if="field.type === 'auto-subscribe-proxy'"
+                      v-model="config[field.key]"
+                      :name="field.key"
+                      autocomplete="off"
+                      :label="field.label"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :placeholder="resolveFieldValue(field.placeholder, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      clearable
+                      density="compact"
+                      variant="outlined"
+                      hide-details="auto">
+                      <template #append-inner>
+                        <v-btn
+                          icon="mdi-lan-connect"
+                          variant="text"
+                          color="primary"
+                          size="small"
+                          title="测试榜单代理连通性和延迟"
+                          :loading="testingAutoSubscribeProxy"
+                          :disabled="testingAutoSubscribeProxy || !hasText(config[field.key])"
+                          @click="emit('test-auto-subscribe-proxy')" />
+                      </template>
+                    </v-text-field>
+                    <v-text-field
+                      v-else-if="field.type === 'number'"
+                      v-model.number="config[field.key]"
+                      :label="field.label"
+                      type="number"
+                      :min="field.min"
+                      :max="field.max"
+                      :suffix="field.suffix"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :placeholder="resolveFieldValue(field.placeholder, config)"
+                      :clearable="field.clearable"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      density="compact"
+                      variant="outlined"
+                      hide-details="auto" />
+                    <v-text-field
+                      v-else
+                      v-model="config[field.key]"
+                      :label="field.label"
+                      :type="field.type || 'text'"
+                      :name="field.key"
+                      :autocomplete="field.type === 'password' ? 'new-password' : field.autocomplete || 'off'"
+                      :hint="resolveFieldValue(field.hint, config)"
+                      :placeholder="resolveFieldValue(field.placeholder, config)"
+                      :persistent-hint="Boolean(resolveFieldValue(field.hint, config))"
+                      :disabled="Boolean(field.disabled?.(config))"
+                      density="compact"
+                      variant="outlined"
+                      hide-details="auto">
+                      <template
+                        v-if="field.scanProvider || field.type === 'password' || getAssociatedTestSource(group, field)"
+                        #append-inner>
+                        <v-btn
+                          v-if="field.scanProvider"
+                          icon="mdi-qrcode-scan"
+                          variant="text"
+                          color="primary"
+                          size="small"
+                          title="扫码登录"
+                          @click="emit('scan', field.scanProvider)" />
+                        <v-btn
+                          v-if="field.type === 'password'"
+                          icon="mdi-content-copy"
+                          variant="text"
+                          color="primary"
+                          size="small"
+                          title="复制"
+                          :disabled="!hasText(config[field.key])"
+                          @click="emit('copy-text', String(config[field.key] || ''), field.label || 'Cookie')" />
+                        <v-btn
+                          v-if="getAssociatedTestSource(group, field)"
+                          icon="mdi-flask-outline"
+                          variant="text"
+                          color="primary"
+                          size="small"
+                          :loading="testingSource === getAssociatedTestSource(group, field).source"
+                          :disabled="
+                            !isTestSourceConfigured(getAssociatedTestSource(group, field).source) ||
+                            (Boolean(testingSource) && testingSource !== getAssociatedTestSource(group, field).source)
+                          "
+                          :title="testSourceTitle(getAssociatedTestSource(group, field).source) || '测试搜索'"
+                          @click="emit('test-source', getAssociatedTestSource(group, field).source)" />
+                      </template>
+                    </v-text-field>
+                  </v-col>
+                </template>
+              </v-row>
+              <v-divider v-if="index < visibleGroups.length - 1" class="group-divider" />
+            </section>
+          </template>
         </div>
       </transition>
     </div>
@@ -546,79 +572,107 @@
       alert-type="error"
       alert-text="仅将当前渠道的相关配置项恢复为默认值，不会影响其他渠道与全局设置。"
       @confirm="executeResetSubtab">
-      <div>确认将【<strong>{{ currentSubtabTitle }}</strong>】的所有配置项恢复为初始默认值？</div>
+      <div>
+        确认将【
+        <strong>{{ currentSubtabTitle }}</strong>
+        】的所有配置项恢复为初始默认值？
+      </div>
+    </ConfirmDialog>
+    <ConfirmDialog
+      v-model="rebuildDialogVisible"
+      title="确认清空重建索引？"
+      icon="mdi-database-refresh-outline"
+      icon-color="warning"
+      confirm-text="清空重建"
+      alert-type="warning"
+      :alert-text="pendingRebuild?.confirm || '将清空本地索引库并重新全量下载构建。'"
+      @confirm="executeRebuild">
+      <div>清空后需重新全量下载构建，期间该渠道检索将无结果。</div>
     </ConfirmDialog>
   </div>
 </template>
 
 <script setup>
-import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from "vue";
-import AccountInfo from "./AccountInfo.vue";
-import CheckinTimeline from "./CheckinTimeline.vue";
-import RegionMediaMapField from "./RegionMediaMapField.vue";
-import MultiSelectDialogField from "./MultiSelectDialogField.vue";
-import ConfirmDialog from "../dialogs/ConfirmDialog.vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
+import AccountInfo from "./AccountInfo.vue"
+import CheckinTimeline from "./CheckinTimeline.vue"
+import RegionMediaMapField from "./RegionMediaMapField.vue"
+import MultiSelectDialogField from "./MultiSelectDialogField.vue"
+import ConfirmDialog from "../dialogs/ConfirmDialog.vue"
 
 const props = defineProps({
   section: { type: Object, required: true },
   config: { type: Object, required: true },
-  options: {type: Object, default: () => ({})},
+  options: { type: Object, default: () => ({}) },
   api: { type: [Object, Function], required: true },
   refreshingAccounts: { type: Array, default: () => [] },
   testingSource: { type: String, default: "" },
-  testingAutoSubscribe: {type: String, default: ""},
+  testingAutoSubscribe: { type: String, default: "" },
   testingProxy: { type: Boolean, default: false },
-  testingAutoSubscribeProxy: {type: Boolean, default: false},
+  testingAutoSubscribeProxy: { type: Boolean, default: false },
   hdhiveOauthAction: { type: String, default: "" },
+  proxyPortStatus: { type: Object, default: () => ({}) },
 })
 
-const residueCleaning = ref(false)
-async function cleanupResidue(field) {
-  if (residueCleaning.value) return
-  residueCleaning.value = true
-  try {
-    const endpoint =
-      field?.endpoint || "plugin/CloudSubscribeX/residue/cleanup"
-    const result = await props.api.post(endpoint, {})
-    if (!result?.success) throw new Error(result?.message || "执行失败")
-    emit("notify", result.message || "已开始执行", "success")
-  } catch (error) {
-    emit(
-      "notify",
-      error?.response?.data?.message || error.message || String(error),
-      "error",
-    )
-  } finally {
-    residueCleaning.value = false
+function proxyPortState(field) {
+  const key = String(field?.key || "")
+  return props.proxyPortStatus?.[key] || {}
+}
+
+function proxyPortHint(field) {
+  const base = String(resolveFieldValue(field.hint, props.config) || "")
+  const state = proxyPortState(field)
+  const suffix = base ? `　${base}` : ""
+  if (state.loading) return `检测中…${suffix}`
+  if (state.available === false) return `端口被占用${suffix}`
+  if (state.available === true) {
+    return `${state.ours ? "本插件监听中" : "端口可用"}${suffix}`
   }
+  return base
+}
+
+function maybeCheckPort(field) {
+  const condition = field?.autoCheckWhen
+  if (condition !== undefined && !evalShowCondition(condition, props.config)) return
+  emit("check-port", { key: field.key, port: props.config[field.key] })
+}
+
+function proxyPortClass(field) {
+  const state = proxyPortState(field)
+  if (state.loading) return ""
+  if (state.available === false) return "proxy-port--error"
+  if (state.available === true) return "proxy-port--ok"
+  return ""
 }
 
 function getAccountInfo(field) {
   if (field.data && typeof field.data === "object" && Object.keys(field.data).length > 0) {
-    return field.data;
+    return field.data
   }
-  const key = String(field.accountKey || "").trim();
-  if (!key) return field.data || {};
-  const [category, source] = key.split(":", 2);
+  const key = String(field.accountKey || "").trim()
+  if (!key) return field.data || {}
+  const [category, source] = key.split(":", 2)
   if (category === "drive") {
     return (
       props.options?.accounts?.[source] ||
       (props.options?.account && props.config?.cloud_drive === source ? props.options.account : null) ||
       {}
-    );
+    )
   }
   if (category === "search") {
-    return props.options?.searchAccounts?.[source] || {};
+    return props.options?.searchAccounts?.[source] || {}
   }
-  return field.data || {};
+  return field.data || {}
 }
 const emit = defineEmits([
   "scan",
   "browse-directory",
   "test-source",
+  "source-action",
   "test-auto-subscribe",
   "test-proxy",
   "test-auto-subscribe-proxy",
+  "check-port",
   "refresh-account",
   "hdhive-oauth-start",
   "hdhive-oauth-exchange",
@@ -630,87 +684,125 @@ const emit = defineEmits([
 ])
 const hasText = (value) => Boolean(String(value || "").trim())
 
-const resetDialogVisible = ref(false);
-const isSearchSection = computed(() => props.section?.value === "channels");
+const resetDialogVisible = ref(false)
+const rebuildDialogVisible = ref(false)
+const pendingRebuild = ref(null)
+
+function requestRebuild(field) {
+  // 统一使用 ConfirmDialog，避免原生 window.confirm 破坏风格一致性
+  pendingRebuild.value = {
+    source: field?.accountKey,
+    action: "rebuild",
+    label: "清空重建索引",
+    confirm: field?.rebuild,
+  }
+  rebuildDialogVisible.value = true
+}
+
+function executeRebuild() {
+  rebuildDialogVisible.value = false
+  const payload = pendingRebuild.value
+  pendingRebuild.value = null
+  if (payload?.source) emit("source-action", payload)
+}
+
+const isSearchSection = computed(() => props.section?.value === "search")
 const currentSubtabTitle = computed(() => {
-  const current = (props.section?.subtabs || []).find((t) => t.value === activeSubtab.value);
-  return current?.title || activeSubtab.value || "该项";
-});
+  const current = (props.section?.subtabs || []).find((t) => t.value === activeSubtab.value)
+  return current?.title || activeSubtab.value || "该项"
+})
 const canResetCurrentSubtab = computed(() => {
-  if (!activeSubtab.value) return false;
-  if (isSearchSection.value && activeSubtab.value === "common") return false;
+  if (!activeSubtab.value) return false
+  if (isSearchSection.value && activeSubtab.value === "common") return false
   return visibleGroups.value.some((g) =>
     (g.fields || []).some((f) => f.key && !["account", "test-source", "hdhive-oauth"].includes(f.type)),
-  );
-});
+  )
+})
 
 function promptResetSubtab() {
-  resetDialogVisible.value = true;
+  resetDialogVisible.value = true
 }
 
 function executeResetSubtab() {
-  resetDialogVisible.value = false;
-  const fieldsToReset = [];
+  resetDialogVisible.value = false
+  const fieldsToReset = []
   visibleGroups.value.forEach((group) => {
-    (group.fields || []).forEach((field) => {
+    ;(group.fields || []).forEach((field) => {
       if (field.key && !["account", "test-source", "hdhive-oauth"].includes(field.type)) {
-        fieldsToReset.push(field);
+        fieldsToReset.push(field)
       }
-    });
-  });
+    })
+  })
 
-  let count = 0;
+  let count = 0
   fieldsToReset.forEach((field) => {
-    const defVal = fieldDefaultValue(field);
-    props.config[field.key] = JSON.parse(JSON.stringify(defVal));
-    count++;
-  });
+    let defVal = field.default
+    if (defVal === undefined || defVal === null) {
+      defVal = props.options?.defaults?.[field.key]
+    }
+    if (defVal === undefined || defVal === null) {
+      if (field.type === "switch") defVal = false
+      else if (field.type === "number") defVal = field.min ?? 0
+      else if (field.type === "cloud-directory") defVal = "/"
+      else if (field.type === "select" && Array.isArray(field.options) && field.options.length) {
+        defVal = field.options[0].value
+      } else if (["priority-order", "tags", "channels", "plugins"].includes(field.type)) {
+        defVal = []
+      } else if (field.type === "online-documents") {
+        defVal = [{ url: "", resource_types: [] }]
+      } else {
+        defVal = ""
+      }
+    }
+    props.config[field.key] = JSON.parse(JSON.stringify(defVal))
+    count++
+  })
 
-  emit("notify", `已恢复【${currentSubtabTitle.value}】默认值（共重置 ${count} 项）`);
+  emit("notify", `已恢复【${currentSubtabTitle.value}】默认值（共重置 ${count} 项）`)
 }
 function isTestSourceConfigured(source) {
   // 通用原则：前端不耦合具体渠道配置，仅检查是否配置了资源类型优先级
-  return Array.isArray(props.config.resource_type_order) && props.config.resource_type_order.length > 0;
+  return Array.isArray(props.config.resource_type_order) && props.config.resource_type_order.length > 0
 }
 
 function testSourceTitle(source) {
-  return isTestSourceConfigured(source) ? "测试当前搜索渠道" : "请先在搜索顺序中选择至少一种资源类型";
+  return isTestSourceConfigured(source) ? "测试当前搜索渠道" : "请先在搜索顺序中选择至少一种资源类型"
 }
 
 function isAutoSubscribeConfigured(provider) {
-  return Boolean(provider);
+  return Boolean(provider)
 }
 
 function autoSubscribeTestTitle(provider) {
-  return "测试抓取最多 3 条榜单示例，仅验证连通性，不创建订阅";
+  return "测试抓取最多 3 条榜单示例，仅验证连通性，不创建订阅"
 }
 
 const FALLBACK_ONLINE_DOC_TYPES = [
-  {title: "115网盘", value: "115"},
-  {title: "123网盘", value: "123"},
-  {title: "夸克网盘", value: "quark"},
-  {title: "阿里云盘", value: "alipan"},
-  {title: "百度网盘", value: "baidu"},
-  {title: "UC网盘", value: "uc"},
-  {title: "天翼云盘", value: "tianyi"},
-  {title: "移动云盘", value: "yun139"},
-  {title: "光鸭网盘", value: "guangya"},
-  {title: "迅雷网盘", value: "xunlei"},
-  {title: "磁力链接", value: "magnet"},
-  {title: "电驴链接", value: "ed2k"},
-];
+  { title: "115网盘", value: "115" },
+  { title: "123网盘", value: "123" },
+  { title: "夸克网盘", value: "quark" },
+  { title: "阿里云盘", value: "alipan" },
+  { title: "百度网盘", value: "baidu" },
+  { title: "UC网盘", value: "uc" },
+  { title: "天翼云盘", value: "tianyi" },
+  { title: "移动云盘", value: "yun139" },
+  { title: "光鸭网盘", value: "guangya" },
+  { title: "迅雷网盘", value: "xunlei" },
+  { title: "磁力链接", value: "magnet" },
+  { title: "电驴链接", value: "ed2k" },
+]
 
 function onlineDocumentTypeItems(field) {
   if (Array.isArray(props.options?.resourceTypes) && props.options.resourceTypes.length > 0) {
     return props.options.resourceTypes.map((item) => ({
       title: item.name || item.title || item.value,
       value: item.value,
-    }));
+    }))
   }
   if (Array.isArray(field?.items) && field.items.length > 0) {
-    return field.items;
+    return field.items
   }
-  return FALLBACK_ONLINE_DOC_TYPES;
+  return FALLBACK_ONLINE_DOC_TYPES
 }
 
 function onlineDocuments(key) {
@@ -732,20 +824,20 @@ function removeOnlineDocument(key, index) {
 }
 
 function getAssociatedTestSource(group, field) {
-  if (!group?.fields?.length || !field) return null;
+  if (!group?.fields?.length || !field) return null
   const isAddressField =
     field.key?.endsWith("_base_url") ||
     (field.key?.endsWith("_url") && String(field.label || "").includes("地址")) ||
-    field.testSource;
-  if (!isAddressField) return null;
+    field.testSource
+  if (!isAddressField) return null
 
-  const sourceKey = field.testSource || group.fields.find((f) => f.type === "test-source")?.source;
-  if (!sourceKey) return null;
-  return {source: sourceKey};
+  const sourceKey = field.testSource || group.fields.find((f) => f.type === "test-source")?.source
+  if (!sourceKey) return null
+  return { source: sourceKey }
 }
 
 function isFieldEmbedded(group, field) {
-  if (field.type !== "test-source") return false;
+  if (field.type !== "test-source") return false
   return Boolean(
     group.fields?.some(
       (f) =>
@@ -753,76 +845,75 @@ function isFieldEmbedded(group, field) {
         (f.key?.endsWith("_url") && String(f.label || "").includes("地址")) ||
         f.testSource,
     ),
-  );
+  )
 }
 
 const activeSubtab = ref(props.section.subtabs?.[0]?.value || "")
-const subtabScrollRef = ref(null);
-const canScrollLeft = ref(false);
-const canScrollRight = ref(false);
+const subtabScrollRef = ref(null)
+const canScrollLeft = ref(false)
+const canScrollRight = ref(false)
 
 function updateScrollState() {
-  const el = subtabScrollRef.value;
-  if (!el) return;
-  canScrollLeft.value = el.scrollLeft > 6;
-  canScrollRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 6;
+  const el = subtabScrollRef.value
+  if (!el) return
+  canScrollLeft.value = el.scrollLeft > 6
+  canScrollRight.value = el.scrollLeft + el.clientWidth < el.scrollWidth - 6
 }
 
 function onSubtabScroll() {
-  updateScrollState();
+  updateScrollState()
 }
 
 function scrollSubtabs(delta) {
   if (subtabScrollRef.value) {
-    subtabScrollRef.value.scrollBy({left: delta, behavior: "smooth"});
-    setTimeout(updateScrollState, 260);
+    subtabScrollRef.value.scrollBy({ left: delta, behavior: "smooth" })
+    setTimeout(updateScrollState, 260)
   }
 }
 
 function onSubtabWheel(event) {
   if (subtabScrollRef.value && event.deltaY !== 0) {
-    subtabScrollRef.value.scrollLeft += event.deltaY;
-    updateScrollState();
+    subtabScrollRef.value.scrollLeft += event.deltaY
+    updateScrollState()
   }
 }
 
 function onSubtabClick(val, event) {
-  activeSubtab.value = val;
+  activeSubtab.value = val
   nextTick(() => {
-    updateScrollState();
+    updateScrollState()
     if (event?.currentTarget) {
-      event.currentTarget.scrollIntoView({behavior: "smooth", inline: "center", block: "nearest"});
+      event.currentTarget.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" })
     } else if (subtabScrollRef.value) {
-      const activeEl = subtabScrollRef.value.querySelector(".subtab-item--active");
-      activeEl?.scrollIntoView({behavior: "smooth", inline: "center", block: "nearest"});
+      const activeEl = subtabScrollRef.value.querySelector(".subtab-item--active")
+      activeEl?.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" })
     }
-  });
+  })
 }
 
 onMounted(() => {
   nextTick(() => {
-    updateScrollState();
-    seedExpandedGroups();
-    window.addEventListener("resize", updateScrollState);
-  });
-});
+    updateScrollState()
+    window.addEventListener("resize", updateScrollState)
+  })
+})
 
 onBeforeUnmount(() => {
-  window.removeEventListener("resize", updateScrollState);
-});
+  window.removeEventListener("resize", updateScrollState)
+})
 
 watch(
   () => props.section,
   (newSection) => {
     if (newSection?.subtabs?.length) {
       if (!newSection.subtabs.some((t) => t.value === activeSubtab.value)) {
-        activeSubtab.value = newSection.subtabs[0].value;
+        activeSubtab.value = newSection.subtabs[0].value
       }
-      nextTick(updateScrollState);
+      nextTick(updateScrollState)
     }
   },
-  {immediate: true},
-);
+  { immediate: true },
+)
 
 const selectSearch = ref({})
 
@@ -849,175 +940,46 @@ function filteredSelectItems(field) {
   )
 }
 
+function resolveFieldValue(value, config, fallback = "") {
+  if (typeof value === "function") {
+    try {
+      return value(config)
+    } catch {
+      return fallback
+    }
+  }
+  return value === undefined || value === null ? fallback : value
+}
+
 function evalShowCondition(condition, config) {
-  if (condition === undefined || condition === null || condition === "") return true;
+  if (condition === undefined || condition === null || condition === "") return true
   if (typeof condition === "function") {
     try {
-      return Boolean(condition(config));
+      return Boolean(condition(config))
     } catch {
-      return true;
+      return true
     }
   }
-  if (typeof condition === "boolean") return condition;
+  if (typeof condition === "boolean") return condition
   if (typeof condition === "string") {
     try {
-      return Boolean(new Function("config", `"use strict"; return Boolean(${condition});`)(config));
+      return Boolean(new Function("config", `"use strict"; return Boolean(${condition});`)(config))
     } catch {
-      return true;
+      return true
     }
   }
-  return true;
+  return true
 }
 
 const availableGroups = computed(() =>
   (props.section?.groups || []).filter((group) => evalShowCondition(group.show, props.config)),
-);
+)
 const visibleGroups = computed(() => {
   const leadingGroups = availableGroups.value.filter((group) => group.beforeTabs)
   const tabGroups = availableGroups.value.filter(
     (group) => !group.beforeTabs && (!props.section.subtabs?.length || !group.tab || group.tab === activeSubtab.value),
   )
   return [...leadingGroups, ...tabGroups]
-})
-
-// ---------------------------------------------------------------- 分组折叠（1.10.5）
-// 展开状态按分组标题记在 localStorage（按 section 区分）；没存过时默认
-// 展开首组与有修改的组；首次切进某个 subtab 时若该 tab 一组都没展开，
-// 也先展开首组（之后完全按用户手动折叠的选择来）。
-const GROUP_FOLD_STORAGE_PREFIX = "csx-config-expanded-groups:"
-const expandedGroups = ref(new Set())
-const visitedSubtabs = ref(new Set())
-
-function groupFoldStorageKey() {
-  return `${GROUP_FOLD_STORAGE_PREFIX}${props.section?.value || "main"}`
-}
-
-function readStoredFoldState() {
-  try {
-    const raw = window.localStorage.getItem(groupFoldStorageKey())
-    if (!raw) return null
-    const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((t) => typeof t === "string") : null
-  } catch {
-    return null
-  }
-}
-
-function saveFoldState() {
-  try {
-    window.localStorage.setItem(groupFoldStorageKey(), JSON.stringify([...expandedGroups.value]))
-  } catch {
-    // 隐私模式等写不进 localStorage 时只记内存状态。
-  }
-}
-
-function seedExpandedGroups() {
-  const stored = readStoredFoldState()
-  const next = new Set(stored || [])
-  if (!stored) {
-    const visible = visibleGroups.value
-    if (visible.length) next.add(visible[0].title)
-    for (const group of visible) {
-      if (groupHasChanges(group)) next.add(group.title)
-    }
-  }
-  expandedGroups.value = next
-  visitedSubtabs.value = new Set([activeSubtab.value || "main"])
-}
-
-function isGroupExpanded(group) {
-  return expandedGroups.value.has(group?.title)
-}
-
-function toggleGroup(group) {
-  if (!group?.title) return
-  const next = new Set(expandedGroups.value)
-  if (next.has(group.title)) next.delete(group.title)
-  else next.add(group.title)
-  expandedGroups.value = next
-  saveFoldState()
-}
-
-function expandAllGroups() {
-  expandedGroups.value = new Set(visibleGroups.value.map((g) => g.title))
-  saveFoldState()
-}
-
-function collapseAllGroups() {
-  expandedGroups.value = new Set()
-  saveFoldState()
-}
-
-function ensureFirstGroupExpanded() {
-  const key = activeSubtab.value || "main"
-  if (visitedSubtabs.value.has(key)) return
-  visitedSubtabs.value.add(key)
-  const visible = visibleGroups.value
-  if (!visible.length) return
-  if (visible.some((g) => isGroupExpanded(g))) return
-  const next = new Set(expandedGroups.value)
-  next.add(visible[0].title)
-  expandedGroups.value = next
-}
-
-// 字段默认值：字段定义优先，其次后端下发的默认值表（Config.vue 的
-// applyOptions 会把 ui_options 的 defaults 存进 options.defaults），
-// 都没有再按类型兜底。恢复默认值与“有修改”圆点共用同一口径。
-function fieldDefaultValue(field) {
-  let defVal = field.default;
-  if (defVal === undefined || defVal === null) {
-    defVal = props.options?.defaults?.[field.key];
-  }
-  if (defVal === undefined || defVal === null) {
-    if (field.type === "switch") defVal = false;
-    else if (field.type === "number") defVal = field.min ?? 0;
-    else if (field.type === "cloud-directory") defVal = "/";
-    else if (field.type === "select" && Array.isArray(field.options) && field.options.length) {
-      defVal = field.options[0].value;
-    } else if (["priority-order", "tags", "channels", "plugins"].includes(field.type)) {
-      defVal = [];
-    } else if (field.type === "online-documents") {
-      defVal = [{url: "", resource_types: []}];
-    } else {
-      defVal = "";
-    }
-  }
-  return defVal;
-}
-
-// 按钮/信息类字段没有可比的值，不计入“有修改”。
-const NON_VALUE_FIELD_TYPES = new Set([
-  "account", "test-source", "test-auto-subscribe", "hdhive-oauth",
-  "info", "checkin-timeline", "media-library-webhook", "cleanup-residue",
-])
-
-function isFieldChanged(field) {
-  if (!field?.key || NON_VALUE_FIELD_TYPES.has(field.type)) return false
-  const current = props.config[field.key]
-  if (current === undefined || current === null) return false
-  try {
-    return JSON.stringify(current) !== JSON.stringify(fieldDefaultValue(field))
-  } catch {
-    return current !== fieldDefaultValue(field)
-  }
-}
-
-function groupHasChanges(group) {
-  return (group?.fields || []).some((field) => isFieldChanged(field))
-}
-
-watch(
-  () => props.section?.value,
-  () => {
-    nextTick(() => seedExpandedGroups())
-  },
-)
-
-watch(activeSubtab, () => {
-  nextTick(() => {
-    updateScrollState()
-    ensureFirstGroupExpanded()
-  })
 })
 
 function mediaLibraryWebhookUrl(field, serverName) {
@@ -1027,6 +989,22 @@ function mediaLibraryWebhookUrl(field, serverName) {
 </script>
 
 <style scoped>
+.proxy-port--error :deep(.v-input__details .v-messages__message) {
+  color: rgb(var(--v-theme-error));
+  font-weight: 500;
+}
+
+.proxy-port--ok :deep(.v-input__details .v-messages__message) {
+  color: rgb(var(--v-theme-success));
+  font-weight: 500;
+}
+
+.config-textarea--mono :deep(textarea) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+}
+
 .config-tab-content {
   width: 100%;
   max-width: 100%;
@@ -1181,7 +1159,8 @@ function mediaLibraryWebhookUrl(field, serverName) {
 }
 
 @keyframes pulse-dot {
-  0%, 100% {
+  0%,
+  100% {
     transform: scale(1);
     opacity: 0.9;
   }
@@ -1200,7 +1179,9 @@ function mediaLibraryWebhookUrl(field, serverName) {
   background-color: rgb(var(--v-theme-surface));
   border: 1px solid rgba(var(--v-border-color), 0.18);
   border-radius: 10px !important;
-  box-shadow: 0 10px 28px -4px rgba(0, 0, 0, 0.14), 0 2px 6px -1px rgba(0, 0, 0, 0.06);
+  box-shadow:
+    0 10px 28px -4px rgba(0, 0, 0, 0.14),
+    0 2px 6px -1px rgba(0, 0, 0, 0.06);
 }
 
 .subtab-dropdown-header {
@@ -1362,7 +1343,9 @@ function mediaLibraryWebhookUrl(field, serverName) {
 /* 二级 Tab 切换淡入淡出动画 */
 .tab-fade-enter-active,
 .tab-fade-leave-active {
-  transition: opacity 0.18s cubic-bezier(0.4, 0, 0.2, 1), transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    opacity 0.18s cubic-bezier(0.4, 0, 0.2, 1),
+    transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .tab-fade-enter-from {
@@ -1381,79 +1364,6 @@ function mediaLibraryWebhookUrl(field, serverName) {
   gap: 8px;
   margin-bottom: 12px;
   padding-bottom: 2px;
-}
-
-/* 1.10.5：分组折叠。标题整行可点，展开/收起；有修改的组标题旁有圆点。 */
-.group-heading--collapsible {
-  cursor: pointer;
-  border-radius: 8px;
-  padding: 4px 6px;
-  margin-inline: -6px;
-}
-
-.group-heading--collapsible:hover {
-  background: rgba(var(--v-theme-on-surface), 0.04);
-}
-
-.group-heading--collapsible:focus-visible {
-  outline: 2px solid rgba(var(--v-theme-primary), 0.5);
-  outline-offset: 1px;
-}
-
-.group-heading-right {
-  min-width: 0;
-}
-
-.group-modified-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: rgb(var(--v-theme-primary));
-  flex-shrink: 0;
-}
-
-.group-field-count {
-  font-size: 0.75rem;
-  color: rgba(var(--v-theme-on-surface), 0.5);
-  white-space: nowrap;
-}
-
-.group-fold-chevron {
-  color: rgba(var(--v-theme-on-surface), 0.55);
-  flex-shrink: 0;
-  transition: transform 0.2s ease;
-}
-
-.group-fold-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 10px;
-}
-
-.group-fold-count {
-  font-size: 0.75rem;
-  color: rgba(var(--v-theme-on-surface), 0.5);
-}
-
-.group-fold-actions {
-  display: flex;
-  gap: 2px;
-}
-
-.group-fold-btn {
-  border: none;
-  background: transparent;
-  color: rgb(var(--v-theme-primary));
-  font-size: 0.78rem;
-  font-weight: 500;
-  cursor: pointer;
-  padding: 2px 6px;
-  border-radius: 6px;
-}
-
-.group-fold-btn:hover {
-  background: rgba(var(--v-theme-primary), 0.08);
 }
 
 .group-heading-icon {
@@ -1497,13 +1407,13 @@ function mediaLibraryWebhookUrl(field, serverName) {
   margin-bottom: 8px;
 }
 
-/* 统一所有输入框规范：严格保证宽高、圆角、内边距绝对一致 */
-.config-field-col :deep(.v-input) {
+/* 统一单行输入框规范：严格保证宽高、圆角、内边距绝对一致（文本域除外，否则多行内容会被压扁） */
+.config-field-col :deep(.v-input:not(.v-textarea)) {
   width: 100%;
   min-width: 0;
 }
 
-.config-field-col :deep(.v-field) {
+.config-field-col :deep(.v-input:not(.v-textarea)) > .v-field {
   width: 100%;
   min-width: 0;
   height: 40px !important;
@@ -1511,7 +1421,7 @@ function mediaLibraryWebhookUrl(field, serverName) {
   border-radius: 8px !important;
 }
 
-.config-field-col :deep(.v-field__input) {
+.config-field-col :deep(.v-input:not(.v-textarea)) > .v-field > .v-field__input {
   height: 40px !important;
   min-height: 40px !important;
   padding-top: 0 !important;
@@ -1520,12 +1430,34 @@ function mediaLibraryWebhookUrl(field, serverName) {
   align-items: center;
 }
 
-.config-field-col :deep(.v-field__append-inner),
-.config-field-col :deep(.v-field__prepend-inner),
-.config-field-col :deep(.v-field__clearable) {
+.config-field-col :deep(.v-input:not(.v-textarea)) > .v-field > .v-field__append-inner,
+.config-field-col :deep(.v-input:not(.v-textarea)) > .v-field > .v-field__prepend-inner,
+.config-field-col :deep(.v-input:not(.v-textarea)) > .v-field > .v-field__clearable {
   padding-top: 0 !important;
   display: flex;
   align-items: center;
+}
+
+/* 文本域：保留多行排版，标签正常浮动，内容从顶部开始 */
+.config-field-col :deep(.v-textarea) {
+  width: 100%;
+  min-width: 0;
+}
+
+.config-field-col :deep(.v-textarea > .v-field) {
+  border-radius: 8px !important;
+  min-height: 0;
+}
+
+.config-field-col :deep(.v-textarea > .v-field > .v-field__input) {
+  align-items: flex-start;
+  padding-top: 10px !important;
+  padding-bottom: 10px !important;
+  line-height: 1.5;
+}
+
+.config-field-col :deep(.v-textarea textarea) {
+  min-height: 100%;
 }
 
 .config-field-col :deep(.v-input__details) {
@@ -1563,14 +1495,18 @@ function mediaLibraryWebhookUrl(field, serverName) {
   border-radius: 11px !important;
   opacity: 1 !important;
   background-color: rgba(var(--v-theme-on-surface), 0.18) !important;
-  box-shadow: inset 0 1.5px 3px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(var(--v-border-color), 0.12) !important;
+  box-shadow:
+    inset 0 1.5px 3px rgba(0, 0, 0, 0.2),
+    0 0 0 1px rgba(var(--v-border-color), 0.12) !important;
   transition: all 0.28s cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
 
 /* 开启状态轨道：漫溢品牌色柔和光晕 */
 .config-switch :deep(.v-selection-control--dirty .v-switch__track) {
   background-color: rgb(var(--v-theme-primary)) !important;
-  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.15), 0 2px 8px rgba(var(--v-theme-primary), 0.35) !important;
+  box-shadow:
+    inset 0 1px 2px rgba(0, 0, 0, 0.15),
+    0 2px 8px rgba(var(--v-theme-primary), 0.35) !important;
 }
 
 /* 滑块：微立体凸起（Pop-out 质感） + 物理回弹弹簧曲线 */
@@ -1579,21 +1515,28 @@ function mediaLibraryWebhookUrl(field, serverName) {
   height: 16px !important;
   border-radius: 50% !important;
   background: #ffffff !important;
-  box-shadow: 0 2px 5px rgba(0, 0, 0, 0.25), 0 0 0 0.5px rgba(255, 255, 255, 0.9) !important;
-  transition: transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1),
-  box-shadow 0.24s ease !important;
+  box-shadow:
+    0 2px 5px rgba(0, 0, 0, 0.25),
+    0 0 0 0.5px rgba(255, 255, 255, 0.9) !important;
+  transition:
+    transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1),
+    box-shadow 0.24s ease !important;
 }
 
 /* 悬停微弹出感：滑块轻微向外凸出放大 */
 .config-switch:hover :deep(.v-switch__thumb) {
   transform: scale(1.08);
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.95) !important;
+  box-shadow:
+    0 3px 8px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(255, 255, 255, 0.95) !important;
 }
 
 /* 开启态滑块质感 */
 .config-switch :deep(.v-selection-control--dirty .v-switch__thumb) {
   background: #ffffff !important;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25), 0 0 2px 1px rgba(255, 255, 255, 0.8) !important;
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.25),
+    0 0 2px 1px rgba(255, 255, 255, 0.8) !important;
 }
 
 /* 点击按压蓄力反馈：滑块微扁微缩 */
