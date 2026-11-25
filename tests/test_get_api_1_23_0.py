@@ -110,6 +110,9 @@ ALLOWLIST = {
     # 请求；前端只在 strm.js 的 hint 文案里提到，不发起调用。
     ("/redirect", "GET"): "匿名端点：STRM 播放直链 302 跳转，前端不调",
     ("/redirect", "HEAD"): "匿名端点：同上，播放器预检用 HEAD",
+    # 1.35.4：转存目录一键整理是运维入口（我用 curl 触发消化存量），前端暂无按钮。
+    ("/organize/staging", "POST"): "运维端点：一键整理待整理目录，前端暂未接入",
+    ("/organize/staging/status", "GET"): "运维端点：转存目录整理进度，前端暂未接入",
     # 匿名路由：前端经 EventSource 直连（/api/v1/plugin/.../runtime/stream），
     # 扫描器能认出这条调用；仍列入 allowlist 说明它不走 bear 鉴权的原因。
     ("/runtime/stream", "GET"): "匿名 SSE 推送：前端走 EventSource 直连，鉴权靠 resource token（见 registration.py）",
@@ -155,8 +158,10 @@ ALLOWLIST = {
 # 的“批量删除同视频组”按钮调用，不进 ALLOWLIST）；v1.31.6 回收站恢复
 # 加 2 条（/recyclebin/list|revert，前端 DuplicatesQueue.vue 的“回收站
 # 恢复”卡片调用，不进 ALLOWLIST）。
-EXPECTED_REGISTERED_ENTRIES = 97
-EXPECTED_REGISTERED_PAIRS = 98
+# v1.35.4 加 2 条运维路由（/organize/staging POST + /organize/staging/status GET，
+# 两者都在 ALLOWLIST 里写明「前端暂未接入」）。
+EXPECTED_REGISTERED_ENTRIES = 99
+EXPECTED_REGISTERED_PAIRS = 100
 
 # 第 5 项：7 个服务层方法的新签名（去掉 apikey 后的剩余参数名）。
 SERVICE_METHOD_PARAMS = {

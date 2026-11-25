@@ -564,3 +564,34 @@ class OrganizeAfterSaveTest(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertIn("目标目录不可用", info["message"])
+
+
+class SyncApiSubmitDelegationOwnerTest(unittest.TestCase):
+    """1.35.4：_submit_sync_operation 不再假设 owner 是插件。"""
+
+    def _api_module(self):
+        return sys.modules.get("cloudsubscribex.core.api.sync")
+
+    def test_owner_plugin_getattr_delegation(self):
+        mod = self._api_module()
+        if mod is None:
+            self.skipTest("api.sync 未加载")
+        calls = []
+
+        class _Plugin:
+            def _submit_sync_operation(self, *args, **kwargs):
+                calls.append(args)
+                return "ok"
+
+        api = mod.SyncApi(SimpleNamespace(_submit_sync_operation=None, _owner=_Plugin()))
+        # owner 自己没有 → 往下一层（_owner）找
+        self.assertEqual(api._submit_sync_operation({"a": 1}), "ok")
+        self.assertEqual(calls, [({"a": 1},)])
+
+    def test_missing_everywhere_raises(self):
+        mod = self._api_module()
+        if mod is None:
+            self.skipTest("api.sync 未加载")
+        api = mod.SyncApi(SimpleNamespace())
+        with self.assertRaises(AttributeError):
+            api._submit_sync_operation({})

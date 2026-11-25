@@ -45,13 +45,21 @@ class SyncApi(OwnerDelegator):
         拿不到它（类级查找直接失败）。这里显式取组件转发，方法存在性不再
         依赖委托；组件不可用时抛 AttributeError，与旧行为一致。
         """
-        plugin = getattr(self, "_owner", None)
-        getter = getattr(plugin, "_get_component", None) if plugin is not None else None
-        if not callable(getter):
-            raise AttributeError("同步执行组件不可用")
-        from ...core.services.sync import SyncExecutionService
-
-        return getter(SyncExecutionService)._submit_sync_operation(*args, **kwargs)
+        # 1.35.4：不假设 owner 是插件——逐个尝试委托解析（owner 可能是
+        # SyncHandler，它自己会再委托到插件/组件）。1.35.2 直接取
+        # `_get_component` 在线上报「同步执行组件不可用」，说明 owner 不是插件。
+        candidates = []
+        owner = getattr(self, "_owner", None)
+        if owner is not None:
+            candidates.append(owner)
+            deeper = getattr(owner, "_owner", None)
+            if deeper is not None:
+                candidates.append(deeper)
+        for candidate in candidates:
+            handler = getattr(candidate, "_submit_sync_operation", None)
+            if callable(handler):
+                return handler(*args, **kwargs)
+        raise AttributeError("同步执行组件不可用")
 
     def _manual_upgrade_for_subscribe(self, subscribe) -> bool:
         """手动/频道转存应走洗版路径还是普通转存。

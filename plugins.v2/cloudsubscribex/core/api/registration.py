@@ -411,6 +411,20 @@ class MoviePilotRegistration(OwnerDelegator):
             },
             # v1.29.7 阶段 1：整理队列（漏斗）接口。
             {
+                "path": "/organize/staging",
+                "endpoint": self.api_vue_organize_staging,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "一键整理待整理目录（execute=true 扫描并执行）",
+            },
+            {
+                "path": "/organize/staging/status",
+                "endpoint": self.api_vue_organize_staging_status,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "待整理目录整理进度",
+            },
+            {
                 "path": "/funnel/rows",
                 "endpoint": self.api_vue_funnel_rows,
                 "methods": ["GET"],

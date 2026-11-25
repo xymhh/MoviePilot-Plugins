@@ -205,7 +205,7 @@ class CloudSubscribeX(_PluginBase):
     # 插件图标
     plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
     # 插件版本
-    plugin_version = "1.35.3"
+    plugin_version = "1.35.4"
     # 插件作者
     plugin_author = "xymhh"
     # 作者主页
@@ -1367,6 +1367,37 @@ class CloudSubscribeX(_PluginBase):
                     + datetime.timedelta(seconds=1)
                 ),
             )
+
+    def organize_staging(self, execute: bool = False) -> Dict[str, Any]:
+        """一键整理「待整理目录」（1.35.4）。
+
+        复用整理台（OrganizeService.start_scan）：扫描 → 识别 → 分批移动 →
+        生成 STRM。``execute=False`` 只预览（列计划不搬文件），``True`` 扫完
+        立即执行。用于消化「已上传但没整理」的存量（1.35.3 之前落盘的文件）。
+        """
+        root = str(
+            self._organize_staging_path or self._p115_transfer_path or ""
+        ).strip().rstrip("/")
+        if not root:
+            return {"success": False, "message": "待整理目录未配置"}
+        service = self._get_component(OrganizeService)
+        result = service.start_scan(
+            source_path=root,
+            auto_execute=bool(execute),
+            trigger="转存目录一键整理",
+        )
+        if not result.get("success"):
+            return result
+        logger.info(
+            f"转存目录整理已提交：{root}（{'扫描并执行' if execute else '仅预览'}，"
+            f"scan_id={result.get('scan_id')}）"
+        )
+        return result
+
+    def organize_staging_status(self) -> Dict[str, Any]:
+        """查看转存目录整理进度（1.35.4）。"""
+        service = self._get_component(OrganizeService)
+        return service.status()
 
     def _run_cache_watch(self) -> Any:
         """缓存目录与磁盘水位巡检（1.32.0，MP 每 6 小时调一次）。"""
