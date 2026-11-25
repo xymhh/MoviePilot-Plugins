@@ -6,7 +6,7 @@ import {fileURLToPath} from "node:url";
 import fs from "node:fs";
 
 const currentDir = fileURLToPath(new URL(".", import.meta.url));
-const outputDir = resolve(currentDir, "../../plugins.v2/cloudsublite/dist/assets");
+const outputDir = resolve(currentDir, "../../plugins.v2/cloudsubscribelite/dist/assets");
 let pluginVersion = "1.9.36";
 try {
     const pkgV2 = JSON.parse(fs.readFileSync(resolve(currentDir, "../../package.v2.json"), "utf-8"));
@@ -21,7 +21,7 @@ export default defineConfig({
     plugins: [
         vue(),
         federation({
-            name: "cloudsublite",
+            name: "cloudsubscribelite",
             filename: "remoteEntry.js",
             exposes: {
                 "./Page": "./src/components/Page.vue",
