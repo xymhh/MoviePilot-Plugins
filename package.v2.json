@@ -443,7 +443,7 @@
     "author": "xymhh",
     "level": 1,
     "release": true,
-    "system_version": ">=2.14.6",
+    "system_version": ">=3.0.0",
     "history": {
       "v1.0.0": "从 CloudSubscribeX 1.36.1 拆分出的 Lite 版：只保留搜索渠道（15 源）、跨盘转存（含下载腿/上传腿/失败即删本地）、渠道签到、榜单订阅。不再注册「115网盘CS版」MP 存储适配器，不再注册 STRM / 整理 / 漏斗 定时服务，侧栏只留渠道管理、频道监控、失败记录；整理与 STRM 由 115 助手插件负责。"
     }
