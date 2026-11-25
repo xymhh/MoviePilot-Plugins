@@ -1446,6 +1446,11 @@ class PostprocessService(OwnerDelegator):
         # 停止流程本身已有「任务已停止」通知。
         if notify:
             self._notify_finalize_dead(item, pending_key)
+        # 1.35.6：失败即删本地——跨盘只下载到本地的那份不再留着等
+        # 「12 小时保留期」，否则上传卡死/整理超时会把下载盘吃满
+        # （2026-11-24 实测：13 个文件 47GB 因为「MP 整理超时」全躺在
+        # /downloads）。重试会重新下载，这是明确取舍。
+        self._remove_local_download(item, pending_key, ctx)
         ctx.pending.pop(pending_key, None)
         ctx.committed_keys.add(pending_key)
         ctx.failed += 1
@@ -1459,6 +1464,62 @@ class PostprocessService(OwnerDelegator):
                 item_failed=True,
                 postprocess_active=False,
                 postprocess_detail=f"定位失败：{reason}",
+            )
+
+    def _remove_local_download(
+            self,
+            item: Dict[str, Any],
+            pending_key: str,
+            ctx: PostprocessBatchContext,
+    ) -> None:
+        """失败即删本地下载文件（1.35.6）。
+
+        只删「跨盘缓存目录里、名字与本次任务产物一致」的那份；同一文件仍被
+        其它在途记录引用时跳过（同源多集复用同一缓存的情况）。
+        """
+        root = str(getattr(self, "_cross_transfer_download_path", "") or "").strip()
+        if not root:
+            return
+        base = Path(root)
+        if not base.is_dir():
+            return
+        names = []
+        for key in ("staging_name", "file_name"):
+            name = str((item or {}).get(key) or "").strip()
+            if name and name not in names:
+                names.append(name)
+        if not names:
+            return
+        # 其它在途记录还引用同名文件时不删（避免打断兄弟任务）。
+        for other_key, other in (ctx.pending or {}).items():
+            if other_key == pending_key or not isinstance(other, dict):
+                continue
+            for key in ("staging_name", "file_name"):
+                if str(other.get(key) or "").strip() in names:
+                    logger.info(
+                        f"整理失败，但本地文件仍被其它任务引用，暂不删除："
+                        f"{other.get(key)}"
+                    )
+                    return
+        deleted = 0
+        freed = 0
+        for name in names + [f"{name}.aria2" for name in names]:
+            target = base / name
+            try:
+                if not target.is_file():
+                    continue
+                size = int(target.stat().st_size or 0)
+                target.unlink()
+                deleted += 1
+                freed += size
+            except OSError as error:  # noqa: BLE001 - 删不掉不影响失败结算
+                logger.debug(
+                    f"删除本地下载文件失败：{target}（{error}）", exc_info=True
+                )
+        if deleted:
+            logger.info(
+                f"整理失败已删除本地下载文件 {deleted} 个，"
+                f"释放 {freed / (1024 * 1024):.1f} MB"
             )
 
     def _log_episode_telemetry(

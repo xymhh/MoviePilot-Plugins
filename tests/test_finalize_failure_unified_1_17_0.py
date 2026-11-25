@@ -154,3 +154,55 @@ class FinalizeFailureUnifiedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailedLocalCleanupTest(unittest.TestCase):
+    """1.35.6：失败即删本地下载文件（不再等 12 小时保留期）。"""
+
+    def _service(self, tmp, pending=None):
+        from types import SimpleNamespace
+
+        service = object.__new__(PostprocessService)
+        object.__setattr__(service, "_cross_transfer_download_path", tmp)
+        ctx = SimpleNamespace(pending=dict(pending or {}))
+        return service, ctx
+
+    def test_failure_deletes_local_file_and_aria2(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            name = "挖 {tmdb-290826} - S01E03 - 第3集.mkv"
+            target = Path(tmp) / name
+            target.write_bytes(b"x" * 64)
+            sidecar = Path(tmp) / f"{name}.aria2"
+            sidecar.write_bytes(b"y")
+
+            service, ctx = self._service(tmp)
+            service._remove_local_download({"file_name": name}, "pk-1", ctx)
+
+            self.assertFalse(target.exists())
+            self.assertFalse(sidecar.exists())
+
+    def test_keeps_file_referenced_by_other_pending(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            name = "挖 {tmdb-290826} - S01E04 - 第4集.mkv"
+            target = Path(tmp) / name
+            target.write_bytes(b"x" * 64)
+
+            service, ctx = self._service(
+                tmp, {"pk-2": {"file_name": name}},
+            )
+            service._remove_local_download({"file_name": name}, "pk-1", ctx)
+
+            self.assertTrue(target.exists())
+
+    def test_missing_file_is_silent(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service, ctx = self._service(tmp)
+            service._remove_local_download({"file_name": "不存在.mkv"}, "pk-1", ctx)

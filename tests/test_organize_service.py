@@ -684,3 +684,17 @@ def test_build_group_plan_uses_naming_service(monkeypatch=None):
     assert calls["episode"] == 1
     assert plan.targets[0].target_dir == "/媒体库/剧集/Show (2026)/Season 1"
     assert plan.targets[0].target_name == "Show {tmdb-1} - S01E01.mkv"
+
+
+def test_filter_quarantined_drops_quarantine_dir():
+    """1.35.6：_未识别 目录不再参与扫描，避免每轮重复报 unmatched。"""
+    entry = lambda parent: types.SimpleNamespace(parent_path=parent)  # noqa: E731
+    entries = [
+        entry("/转存/Show/Season 1"),
+        entry("/转存/_未识别/[ANi] 某剧 - 06"),
+        entry("/转存/_未识别"),
+    ]
+
+    kept = OrganizeService._filter_quarantined(entries)
+
+    assert [e.parent_path for e in kept] == ["/转存/Show/Season 1"]

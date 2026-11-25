@@ -48,6 +48,10 @@ class GroupPlan:
     subtitles: List[TargetFile] = field(default_factory=list)
 
 
+#: 识别失败的分组挪到这个子目录，避免每次扫描都重复报同一批（1.35.6）。
+QUARANTINE_DIR = "_未识别"
+
+
 class OrganizeService(OwnerDelegator):
     """整理台服务；状态只保存在当前插件进程内，重启后从历史摘要开始。"""
 
@@ -232,7 +236,7 @@ class OrganizeService(OwnerDelegator):
                     self._state["message"] = "源目录没有可整理的视频文件"
                 return
             packages = build_packages(
-                result.entries,
+                self._filter_quarantined(result.entries),
                 source,
                 video_extensions=getattr(self, "_video_extensions", None),
                 subtitle_extensions=getattr(self, "_subtitle_extensions", None),
@@ -420,6 +424,58 @@ class OrganizeService(OwnerDelegator):
             subtitles=subtitles,
         )
 
+    @staticmethod
+    def _filter_quarantined(entries):
+        """跳过 ``_未识别`` 目录下的条目（1.35.6）。"""
+        marker = f"/{QUARANTINE_DIR}/"
+        kept = []
+        for entry in entries or ():
+            parent = str(getattr(entry, "parent_path", "") or "")
+            if marker in f"{parent}/":
+                continue
+            kept.append(entry)
+        return kept
+
+    def _quarantine_unmatched(self) -> int:
+        """把识别不了的分组文件挪到 ``<源>/_未识别/<原目录名>/``（1.35.6）。
+
+        识别失败的文件原来会一直躺在待整理目录里：每次扫描都重复报 unmatched，
+        而且「整理完转存目录为空」这条硬要求永远达不到。挪到隔离目录后
+        扫描会跳过它，人可以单独处理；移动失败只记 warning，不影响其它分组。
+        """
+        source = str((self._state or {}).get("source_path") or "").strip().rstrip("/")
+        if not source:
+            return 0
+        moved = 0
+        for plan in list(self._plans.values()):
+            if str(plan.group.get("status") or "") != "unmatched":
+                continue
+            for candidate in plan.package.videos:
+                entry = candidate.entry
+                parent_name = PurePosixPath(
+                    str(entry.parent_path or "")
+                ).name or "root"
+                target = TargetFile(
+                    file_id=entry.file_id,
+                    source_name=entry.name,
+                    source_dir=entry.parent_path,
+                    target_dir=f"{source}/{QUARANTINE_DIR}/{parent_name}",
+                    target_name=entry.name,
+                )
+                ok, _actual, reason = self._move_target(target, "suffix")
+                if ok:
+                    moved += 1
+                else:
+                    logger.warning(
+                        f"未识别文件移入隔离目录失败：{entry.parent_path}/{entry.name}，"
+                        f"{reason}"
+                    )
+        if moved:
+            logger.info(
+                f"未识别文件已移入隔离目录 {moved} 个：{source}/{QUARANTINE_DIR}"
+            )
+        return moved
+
     def _recognize_package(self, package: PackagePlan):
         # 懒加载（与 v1.23.0 的 from ...core.media import recognize_media
         # 同款做法）：顶层 import 在假包名单测环境下走不通——父包是
@@ -489,6 +545,15 @@ class OrganizeService(OwnerDelegator):
                 execution["removed_dirs"] = total_removed_dirs
                 execution.setdefault("items", []).extend(result["items"][:50])
                 execution["items"] = execution["items"][:300]
+        # 1.35.6：识别失败的先挪进隔离目录，别让它们一直占着待整理目录。
+        quarantined = 0
+        if not self._stop_event.is_set():
+            try:
+                quarantined = self._quarantine_unmatched()
+            except Exception as error:  # noqa: BLE001 - 隔离失败不影响整理结论
+                logger.warning(f"未识别文件隔离失败：{error}")
+        with self._lock:
+            self._state["stats"]["quarantined"] = quarantined
         cancelled = self._stop_event.is_set()
         with self._lock:
             self._state["phase"] = "cancelled" if cancelled else "done"
