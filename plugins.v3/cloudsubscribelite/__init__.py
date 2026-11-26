@@ -573,9 +573,7 @@ class CloudSubscribeLite(
     def on_message_action(self, event: Event):
         return self._get_component(PluginEventHandler).on_message_action(event)
 
-    @staticmethod
 
-    @staticmethod
 
 
     def init_plugin(self, config: dict = None):
@@ -606,7 +604,6 @@ class CloudSubscribeLite(
             self, legacy_plugin_id=self.legacy_plugin_id
         ).migrate(config)
 
-    @staticmethod
 
 
     def _require_sync_handler(
@@ -660,14 +657,11 @@ class CloudSubscribeLite(
     _SOURCE_MISS_CACHE_LIMIT = 4000
 
 
-    @staticmethod
 
-    @staticmethod
 
     # -------------------------------------------------------------- 渠道库
 
 
-    @staticmethod
 
 
     def _init_clients(self):
