@@ -935,6 +935,10 @@ class TransferOpsMixin(OwnerDelegator):
         """1.35.0：上传到待整理目录后由本插件整理（默认关）。"""
         return bool(getattr(self, "_organize_after_upload", False))
 
+    def _upload_to_transfer_only_enabled(self) -> bool:
+        """3.0.7：下载后上传到转存目录、交由 115STRM 整理（默认关）。"""
+        return bool(getattr(self, "_upload_to_transfer_only", False))
+
     def _resolve_organize_target(
             self,
             file_item: Any,
@@ -1014,13 +1018,24 @@ class TransferOpsMixin(OwnerDelegator):
             media: Any = None,
             season: Any = None,
     ) -> Tuple[bool, Dict[str, Any]]:
-        """同盘直存落盘后：开关开 → 本插件整理；否则交 MP 整理（1.35.3）。
+        """同盘直存落盘后：新模式开 → 留在转存目录交 115STRM 整理；
+        organize_after_upload 开 → 本插件整理；否则交 MP 整理（1.35.3）。
 
         1.35.0 只接了跨盘 download_only 分支，同盘直存（115→115）仍走
         ``trigger_mp_organize``，线上表现为「文件都进了转存目录、没进媒体库」。
         这里把直存路径也接上：目标路径由 ``_resolve_organize_target`` 现算，
         算不出或整理失败才回落 MP 整理。
+        3.0.7：upload_to_transfer_only 开时文件已在转存目录（秒传命中/
+        同盘直存），直接留给 115STRM 整理，不触发 MP 整理。
         """
+        if self._upload_to_transfer_only_enabled():
+            target = (
+                f"{str(save_dir or '').rstrip('/')}/{file_name}"
+            )
+            return True, {
+                "reason": "left_in_transfer",
+                "target": target,
+            }
         if self._organize_after_upload_enabled():
             item_hint = {"episode": (media or {}).get("episode")}
             target_dir, target_name = self._resolve_organize_target(
@@ -1133,6 +1148,66 @@ class TransferOpsMixin(OwnerDelegator):
             "reason": "organized",
             "staging": f"{staging_dir}/{target_name}",
             "target": str(result.get("target") or ""),
+        }
+
+    def _upload_to_transfer_dir(
+            self,
+            local_path: str,
+            target_name: str,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """下载后上传到 115 转存目录并止步，交由 115STRM 整理（3.0.7）。
+
+        与 ``_organize_uploaded_file`` 共用上传入口（先秒传，实传走 115 上传
+        代理），区别是传完不整理、不触发 MP 整理：文件平铺在转存目录，
+        115STRM 监控到新文件后整理进媒体库。失败时文件留在本地待下轮重试。
+        """
+        transfer_dir = str(
+            getattr(self, "_p115_transfer_path", "") or ""
+        ).strip().rstrip("/")
+        if not transfer_dir:
+            transfer_dir = str(
+                getattr(self, "_cloud_transfer_path", "") or ""
+            ).strip().rstrip("/")
+        if not transfer_dir:
+            return False, {
+                "reason": "no_transfer_dir",
+                "message": "转存目录未配置：请填 115 转存目录",
+            }
+        local = PurePosixPath(str(local_path or "").strip())
+        if not local.name:
+            return False, {
+                "reason": "no_source",
+                "message": "本地文件路径为空，未上传转存目录",
+            }
+        target_name = str(target_name or "").strip() or local.name
+        drive = getattr(self, "_cloud_drive", None)
+        if drive is None:
+            return False, {
+                "reason": "unavailable",
+                "message": "网盘未就绪，文件留在本地待下轮重试",
+            }
+        try:
+            upload = drive.require(CloudDriveCapability.LOCAL_UPLOAD)
+        except Exception as error:  # noqa: BLE001 - 能力缺失按不可用
+            return False, {
+                "reason": "unavailable",
+                "message": f"目标网盘不支持本地上传：{error}",
+            }
+        try:
+            uploaded = bool(upload.upload_file(local_path, transfer_dir, target_name))
+        except Exception as error:  # noqa: BLE001 - 上传异常按失败
+            logger.debug(f"上传转存目录异常：{error}", exc_info=True)
+            uploaded = False
+        if not uploaded:
+            detail = str(getattr(upload, "last_error", "") or "").strip()
+            return False, {
+                "reason": "upload_failed",
+                "message": f"上传转存目录失败：{detail or '目标盘未返回原因'}",
+            }
+        logger.info(f"已上传到转存目录：{transfer_dir}/{target_name}")
+        return True, {
+            "reason": "uploaded_to_transfer",
+            "target": f"{transfer_dir}/{target_name}",
         }
 
     def _transfer_file(
@@ -1357,9 +1432,12 @@ class TransferOpsMixin(OwnerDelegator):
                     # 时文件已在 115 /转存；两种都触发 MP 整理进媒体库。
                     # 整理未接受时本项记失败（文件不在媒体库，下一轮同步
                     # 重试；本地缓存复用，不重复下载）。
+                    # 3.0.7：upload_to_transfer_only 开时不走这条回落，下载完
+                    # 上传到转存目录即完成，交由 115STRM 整理。
                     if not (
                             self._owner.mp_organize._mp_organize_enabled()
                             or self._organize_after_upload_enabled()
+                            or self._upload_to_transfer_only_enabled()
                     ):
                         logger.info(
                             f"MP 整理已关闭，跨盘文件留在本地待手动整理："
@@ -1372,38 +1450,66 @@ class TransferOpsMixin(OwnerDelegator):
                             completed_task.get("result_local_path") or ""
                         ).strip()
                         local_parts = PurePosixPath(local_path) if local_path else None
-                        # 1.35.0：开关开且调用方算出了媒体库目标路径时，
-                        # 上传到待整理目录并交给本插件整理；算不出目标路径
-                        # 时回落 MP 整理（不因为一个新开关把整批任务弄死）。
-                        organize_dir, organize_name = self._resolve_organize_target(
-                            file_item, effective_media, result_name or target_name,
-                        )
-                        if organize_dir:
-                            ok, mp_info = self._organize_uploaded_file(
-                                local_path,
-                                organize_dir,
-                                organize_name or result_name,
-                                episode=int(file_item.get("episode") or 0),
-                                task_key=str(completed_task.get("id") or ""),
+                        # 3.0.7：新模式优先——下载完上传到转存目录即完成，
+                        # 交由 115STRM 整理；不触发 MP 整理、不由本插件整理。
+                        if self._upload_to_transfer_only_enabled():
+                            ok, mp_info = self._upload_to_transfer_dir(
+                                local_path, result_name or target_name,
                             )
                             if ok:
+                                # 传完即完成：本地中继文件已无用，顺手删掉，
+                                # 避免 /downloads 积压、也被 MP 转移队列盯上。
+                                if local_parts and local_parts.name:
+                                    try:
+                                        Path(local_path).unlink(missing_ok=True)
+                                    except Exception as error:  # noqa: BLE001 - 删不掉不影响结论
+                                        logger.debug(
+                                            f"清理本地中继文件失败：{error}",
+                                            exc_info=True,
+                                        )
                                 file_item["_mp_organized"] = True
-                                file_item["_self_organized"] = True
+                                file_item["_uploaded_to_transfer"] = True
+                                file_item["mp_organize"] = mp_info
                                 logger.info(
-                                    f"已由本插件整理入库："
+                                    f"已上传到转存目录，交由 115STRM 整理："
                                     f"{mp_info.get('target') or result_name}"
                                 )
                                 return True
-                        elif local_parts and local_parts.name:
-                            ok, mp_info = self._owner.mp_organize.trigger_mp_organize(
-                                str(local_parts.parent), local_parts.name,
-                                media=effective_media,
-                            )
+                            # 上传失败：不回落 MP 整理，文件留在本地待下轮
+                            # 重试；落到下面统一的失败处理记失败。
                         else:
-                            ok, mp_info = False, {
-                                "reason": "no_source",
-                                "message": "MP 整理未触发：本地路径为空，文件未进媒体库",
-                            }
+                            # 1.35.0：开关开且调用方算出了媒体库目标路径时，
+                            # 上传到待整理目录并交给本插件整理；算不出目标路径
+                            # 时回落 MP 整理（不因为一个新开关把整批任务弄死）。
+                            organize_dir, organize_name = self._resolve_organize_target(
+                                file_item, effective_media, result_name or target_name,
+                            )
+                            if organize_dir:
+                                ok, mp_info = self._organize_uploaded_file(
+                                    local_path,
+                                    organize_dir,
+                                    organize_name or result_name,
+                                    episode=int(file_item.get("episode") or 0),
+                                    task_key=str(completed_task.get("id") or ""),
+                                )
+                                if ok:
+                                    file_item["_mp_organized"] = True
+                                    file_item["_self_organized"] = True
+                                    logger.info(
+                                        f"已由本插件整理入库："
+                                        f"{mp_info.get('target') or result_name}"
+                                    )
+                                    return True
+                            elif local_parts and local_parts.name:
+                                ok, mp_info = self._owner.mp_organize.trigger_mp_organize(
+                                    str(local_parts.parent), local_parts.name,
+                                    media=effective_media,
+                                )
+                            else:
+                                ok, mp_info = False, {
+                                    "reason": "no_source",
+                                    "message": "MP 整理未触发：本地路径为空，文件未进媒体库",
+                                }
                     else:
                         # 1.35.3：直存路径同样受开关控制（开关关时行为不变）。
                         ok, mp_info = self._organize_after_save(

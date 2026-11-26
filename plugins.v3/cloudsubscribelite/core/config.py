@@ -401,6 +401,12 @@ class UIConfig:
             "organize_staging_path": "",
             # 整理成功后清掉待整理目录里的空子目录。
             "organize_staging_cleanup": True,
+            # 3.0.7：下载后上传到转存目录、交由 115STRM 整理（默认关）。
+            # 开 = 跨盘文件下载完后由本插件上传到 115 转存目录（先秒传，实传
+            # 走 115 上传代理）后即完成，不触发 MP 整理、也不由本插件整理；
+            # 秒传命中的文件直接留在转存目录。115STRM 监控转存目录并整理
+            # 进媒体库。优先于 organize_after_upload。
+            "upload_to_transfer_only": False,
             # v1.29.7 阶段 1：网盘整理漏斗（手动提交入队 + worker 逐行整理）。
             # 关 = 手动提交回旧流水线，队列里未处理行保留、开关再开时继续处理。
             "funnel_phase1_enabled": False,

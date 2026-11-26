@@ -86,6 +86,14 @@ export function createTransferSection(options) {
             cols: 4,
           },
           {
+            key: "upload_to_transfer_only",
+            label: "下载后上传到转存目录，交由 115STRM 整理",
+            type: "switch",
+            default: false,
+            hint: "开后跨盘文件下载完由本插件上传到 115 转存目录后即完成，不触发 MP 整理、也不由本插件整理，交给 115STRM 整理进媒体库；秒传命中的文件直接留在转存目录；优先于「上传到待整理目录后由本插件整理」",
+            cols: 4,
+          },
+          {
             key: "skip_other_season_dirs",
             label: "跳过其他季目录",
             type: "switch",
