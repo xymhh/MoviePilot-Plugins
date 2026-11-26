@@ -71,9 +71,6 @@ class DirectoryFileIndex(dict):
             return None
         return self.by_hash.get(str(file_hash).strip().upper())
 
-    def get_by_sha1(self, sha1: str) -> Optional[Any]:
-        return self.get_by_hash(sha1)
-
     def get_by_season_episode(self, season: int, episode: int) -> Optional[Any]:
         return self.by_season_episode.get((season, episode))
 

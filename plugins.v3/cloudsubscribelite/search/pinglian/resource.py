@@ -100,19 +100,6 @@ class PinglianResourceService:
             return f"{rem} 次"
         return "—"
 
-    def format_used_quota_text(self) -> str:
-        """格式化今日已用配额显示文本（例如 '0/50 次'）。"""
-        quota = self.get_link_quota()
-        if not quota:
-            return "—"
-        if quota.get("unlimited"):
-            return "今日解锁查看不限次数"
-        used = int(quota.get("used", 0) or 0)
-        limit = quota.get("limit")
-        if limit is not None:
-            return f"{used}/{int(limit)} 次"
-        return f"{used} 次"
-
     def sync_quota_from_data(self, quota_data: Dict[str, Any]) -> None:
         """从 link-ticket 等接口返回的实时数据同步配额缓存。"""
         if isinstance(quota_data, dict) and quota_data:

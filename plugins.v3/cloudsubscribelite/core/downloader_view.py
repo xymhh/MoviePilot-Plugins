@@ -1,7 +1,7 @@
 """把网盘订阅助手的运行时任务投影成 MoviePilot 下载器任务。
 
 下载管理页按系统配置里的下载器名称分标签；本插件登记一个
-「网盘订阅助手」下载器条目（见 :meth:`CloudSubscribeX._ensure_downloader_entry`），
+「网盘订阅助手」下载器条目（见 :meth:`CloudSubscribeLite._ensure_downloader_entry`），
 实际任务由插件的 ``list_torrents`` 返回，本模块只做纯投影——
 不碰任务执行、不碰历史表、不删文件。
 
@@ -25,6 +25,10 @@ from typing import Any, Callable, Dict, List, Optional, Union
 from urllib.parse import quote
 
 from .episode_parse import EPISODE_TAG_PATTERN, parse_episodes_from_names
+from app.log import logger
+from app.schemas import DownloaderFile, DownloaderTorrent
+from app.schemas.types import SystemConfigKey, TorrentQueryStatus
+from typing import Any, Dict, List, Optional, Union
 
 # 下载管理页的标签名与下载器配置里的 type（插件类名）。
 DOWNLOADER_NAME = "网盘订阅助手"
@@ -83,6 +87,9 @@ def task_hash(task_id: str) -> str:
     还会校验 hash 必须是 40 位十六进制，所以不能直接用 ``subscribe:123``
     这类原始 id。
     """
+    # 注意：盐值 "cloudsubscribex:" 是刻意保留的历史值，不要改成 Lite。
+    # MP 可能已持久化按此盐算出的 download_hash，改盐会让已登记的任务
+    # hash 对不上（下载页启停/删除按 hash 定位任务）。
     return hashlib.sha1(f"cloudsubscribex:{task_id}".encode("utf-8")).hexdigest()
 
 
@@ -447,12 +454,6 @@ def resolve_poster_url(
             _POSTER_MISS_AT[key] = now
     return url
 
-
-def clear_poster_cache() -> None:
-    """清空海报缓存（测试与插件重载用）。"""
-    with _POSTER_CACHE_LOCK:
-        _POSTER_CACHE.clear()
-        _POSTER_MISS_AT.clear()
 
 
 def _task_tmdb_id(task: Dict[str, Any]) -> Optional[int]:
@@ -904,3 +905,238 @@ def project_tasks(
             item for item in results if float(getattr(item, "progress", 0) or 0) >= 100
         ]
     return results
+
+
+class DownloaderMixin:
+    """DownloaderMixin：从 CloudSubscribeLite 入口拆出的逻辑。
+
+    方法由重构脚本逐字搬移（行为不变），入口类通过多继承混入。
+    """
+
+    def _downloader_name(self) -> str:
+        """下载管理页的标签名。"""
+        return DOWNLOADER_NAME
+
+
+    def _ensure_downloader_entry(self) -> None:
+        """在系统下载器配置里登记本插件，让下载页出现独立标签。
+
+        MoviePilot 的下载页按系统配置里的下载器名称分标签，type 必须等于
+        插件类名（宿主按 type == 服务名匹配下载器服务），实际任务由本插件
+        自己的 list_torrents 返回。实现与网盘直链频道同款。
+        """
+        name = self._downloader_name()
+        try:
+            current = self.systemconfig.get(SystemConfigKey.Downloaders) or []
+        except Exception as error:  # noqa: BLE001 - 配置读取失败不应阻断插件
+            logger.warning(f"读取下载器配置失败：{error}")
+            return
+        updated = ensure_downloader_entry(
+            list(current), name=name, type_name=DOWNLOADER_TYPE
+        )
+        if updated == [dict(item) for item in current if isinstance(item, dict)]:
+            return
+        try:
+            self.systemconfig.set(SystemConfigKey.Downloaders, updated)
+            logger.info(f"已登记下载器条目：{name}")
+        except Exception as error:  # noqa: BLE001 - 登记失败时仅影响界面展示
+            logger.warning(f"登记下载器条目失败：{error}")
+
+
+    def _remove_downloader_entry(self) -> None:
+        """移除本插件登记的下载器条目，避免停用/卸载后下载页留一个空标签。"""
+        name = self._downloader_name()
+        try:
+            current = self.systemconfig.get(SystemConfigKey.Downloaders) or []
+        except Exception as error:  # noqa: BLE001 - 配置读取失败不阻断停机
+            logger.warning(f"读取下载器配置失败：{error}")
+            return
+        kept = remove_downloader_entry(
+            list(current), name=name, type_name=DOWNLOADER_TYPE
+        )
+        if len(kept) == len([item for item in current if isinstance(item, dict)]):
+            return
+        try:
+            self.systemconfig.set(SystemConfigKey.Downloaders, kept)
+            logger.info(f"已移除下载器条目：{name}")
+        except Exception as error:  # noqa: BLE001 - 移除失败时仅影响界面展示
+            logger.warning(f"移除下载器条目失败：{error}")
+
+
+    def _runtime_tasks_for_downloader(self) -> List[Dict[str, Any]]:
+        """取运行时任务快照；运行态未就绪时返回空列表。
+
+        再把进行中的 115 上传（进程内登记表）合并进来：MP 整理队列
+        里的整理没有对应的插件任务卡，不合并下载页就看不到上传进度。
+        合并失败时只返回原任务，绝不影响下载页。
+        """
+        try:
+            tasks = self._serialize_runtime_tasks()
+        except Exception as error:  # noqa: BLE001 - 运行态异常不影响下载页
+            logger.debug(f"读取运行时任务失败：{type(error).__name__}: {error}")
+            return []
+        merged = list(tasks or [])
+        try:
+
+            merged.extend(synthetic_upload_tasks())
+        except Exception as error:  # noqa: BLE001 - 合并失败只返回原任务
+            logger.debug(
+                f"合并上传任务失败：{type(error).__name__}: {error}",
+                exc_info=True,
+            )
+        return merged
+
+
+    def list_torrents(self, status: Optional[Union[str, TorrentQueryStatus]] = None,
+                      hashs: Optional[Union[list[str], str]] = None,
+                      downloader: Optional[str] = None,
+                      include_all_tags: bool = False) -> list[DownloaderTorrent]:
+        """把运行时任务投影成下载页的任务列表（口径与网盘直链一致）。"""
+        return project_tasks(
+            self._runtime_tasks_for_downloader(),
+            status=status,
+            hashs=hashs,
+            downloader=downloader,
+            own_name=self._downloader_name(),
+            torrent_cls=DownloaderTorrent,
+        )
+
+
+    def torrent_files(self, tid: Optional[str] = None, downloader: Optional[str] = None,
+                      **kwargs: Any) -> list[DownloaderFile]:
+        """返回任务文件清单与单文件进度；没有文件明细时返回 []。"""
+        if not tid:
+            return []
+        tasks = self._runtime_tasks_for_downloader()
+        task_id = resolve_task_id(tasks, str(tid))
+        if not task_id:
+            return []
+        task = next(
+            (item for item in tasks if str(item.get("id") or "") == task_id),
+            None,
+        )
+        if not task:
+            return []
+        return task_to_files(task, file_cls=DownloaderFile)
+
+
+    def start_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                       downloader: Optional[str] = None, **kwargs: Any) -> bool:
+        """同步任务不可续传：已停止的任务只能重新发起同步，不从下载页恢复。"""
+        return False
+
+
+    def stop_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                      downloader: Optional[str] = None, **kwargs: Any) -> bool:
+        """暂停任务：复用单任务停止逻辑（停止事件 + 跨盘子任务取消）。"""
+        if isinstance(hashs, str):
+            wanted = [hashs]
+        elif hashs:
+            wanted = list(hashs)
+        else:
+            wanted = []
+        if not wanted:
+            return False
+        tasks = self._runtime_tasks_for_downloader()
+        changed = False
+        for hash_value in wanted:
+            task_id = resolve_task_id(tasks, str(hash_value))
+            if not task_id:
+                continue
+            if task_id.startswith("upload:"):
+                # 合成上传卡：上传走 MP 整理链，没法从下载页停止。
+                continue
+            try:
+                result = self.api_stop_sync_task(task_id)
+            except Exception as error:  # noqa: BLE001 - 单任务停止失败不影响其它
+                logger.debug(f"停止任务失败：{task_id}，{type(error).__name__}")
+                continue
+            if isinstance(result, dict):
+                changed = bool(result.get("success")) or changed
+            else:
+                changed = bool(result) or changed
+        return changed
+
+
+    def remove_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                        delete_file: bool = False, downloader: Optional[str] = None,
+                        **kwargs: Any) -> bool:
+        """删除任务记录：只清内存中已终态的同步任务，不删文件、不碰历史表。
+
+        进行中的任务删不掉（先停再说）；终态任务本就不再出现在下载页，
+        这里只是清理 _sync_tasks 里残留的记录。
+        """
+        if isinstance(hashs, str):
+            wanted = [hashs]
+        elif hashs:
+            wanted = list(hashs)
+        else:
+            wanted = []
+        if not wanted:
+            return False
+
+        # 终态任务已不在运行态快照里，拿内存表里的 id 逐个算 hash 反查。
+        sync_tasks = getattr(self, "_sync_tasks", None) or {}
+        lock = getattr(self, "_sync_tasks_lock", None)
+        terminal = {"completed", "failed", "stopped", "success"}
+        changed = False
+        for hash_value in wanted:
+            wanted_hash = str(hash_value or "").strip().lower()
+            if not wanted_hash:
+                continue
+            task_id = next(
+                (
+                    key for key in sync_tasks
+                    if task_hash(str(key)) == wanted_hash
+                ),
+                "",
+            )
+            if not task_id:
+                continue
+            if lock is not None:
+                with lock:
+                    task = sync_tasks.get(task_id)
+                    if task and str(task.get("status") or "") in terminal:
+                        sync_tasks.pop(task_id, None)
+                        changed = True
+            else:
+                task = sync_tasks.get(task_id)
+                if task and str(task.get("status") or "") in terminal:
+                    sync_tasks.pop(task_id, None)
+                    changed = True
+        return changed
+
+
+    def search_torrents(self, site: Optional[dict] = None,
+                        keyword: Optional[str] = None,
+                        mtype: Optional[Any] = None,
+                        cat: Optional[str] = None,
+                        page: int = 0):
+        """MP 搜索页入口：把订阅助手的搜索候选交给搜索页展示。"""
+        from .mp_search import search_torrents as _mp_search_torrents
+
+        return _mp_search_torrents(
+            self, site=site, keyword=keyword, mtype=mtype, cat=cat, page=page
+        )
+
+
+    def download(self, content: Any, download_dir: Any,
+                 cookie: Any = None, episodes: Optional[Any] = None,
+                 category: Optional[str] = None, label: Optional[str] = None,
+                 downloader: Optional[str] = None,
+                 custom_words: Optional[str] = None):
+        """MP 下载入口：只接管本插件合成种子的任务，其余返回 None。"""
+        from .mp_search import download as _mp_download
+
+        return _mp_download(
+            self, content, download_dir, cookie=cookie, episodes=episodes,
+            category=category, label=label, downloader=downloader,
+            custom_words=custom_words,
+        )
+
+
+    def api_torrent(self, sid: str = "", sig: str = ""):
+        """按分享 id 输出合成种子（匿名端点，靠 sid + HMAC 签名鉴权）。"""
+        from .mp_search import api_torrent as _mp_api_torrent
+
+        return _mp_api_torrent(self, sid=sid, sig=sig)

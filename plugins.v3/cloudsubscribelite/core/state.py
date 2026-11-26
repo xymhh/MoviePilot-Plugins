@@ -1,8 +1,8 @@
 """转存历史状态机与阶段常量。
 
 六个中文状态是历史表、筛选和通知模板共同依赖的稳定契约，禁止改名或新增。
-所有状态写入都应经过 :func:`transition`；人工标记成功属于显式入口，走
-:func:`transition_manual`，不把「失败/跳过 → 成功」写进通用迁移表。
+所有状态写入都应经过 :func:`transition`；「失败/跳过 → 成功」不在通用
+迁移表里（Lite 未提供人工标记成功入口）。
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ STAGE_LABELS: Final = {
 
 #: 通用迁移表。终态之间互不覆盖；唯一允许的终态退出是「成功 → 待确认」
 #: （落盘自检降级），以及「失败 → 处理中/下载中」「跳过 → 处理中」这类
-#: 明确的重新执行路径。人工标记成功不在此表，见 transition_manual。
+#: 明确的重新执行路径。
 ALLOWED_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
     STATUS_PROCESSING: frozenset({
         STATUS_DOWNLOADING, STATUS_SUCCESS, STATUS_FAILED,
@@ -119,30 +119,6 @@ def transition(
     return True
 
 
-def transition_manual(
-        record: dict,
-        to: str,
-        *,
-        stage: str | None = None,
-        reason: str = "",
-        task_id: str = "",
-) -> bool:
-    """人工定案的显式入口：允许任意既有状态 → 成功，不污染通用迁移表。"""
-    if not isinstance(record, dict):
-        return False
-    current = str(record.get("status") or "")
-    resolved_stage = str(stage or "")
-    if to != STATUS_SUCCESS or current not in STATUSES:
-        return transition(
-            record, to, stage=stage, reason=reason, task_id=task_id
-        )
-    if current == to:
-        if stage:
-            record["stage"] = resolved_stage
-        return True
-    _write(record, to, stage)
-    return True
-
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -163,5 +139,4 @@ __all__ = [
     "STATUS_SUCCESS",
     "stage_label",
     "transition",
-    "transition_manual",
 ]

@@ -2,7 +2,9 @@
 
 渠道是插件的一等对象：16 个搜索源与 TG 监控频道都通过统一的
 ``channels.json`` 增删改启停。模块级只依赖标准库和宿主日志；
-搜索源定义与 TG 规则归一化在函数内延迟导入，避免导入环。
+``ChannelMixin``（入口拆出的渠道逻辑）需要在模块级导入搜索源注册表与
+搜索处理器——这两者只依赖 ``core.definitions`` / ``core``，不反向依赖
+本模块，无导入环。
 """
 
 from __future__ import annotations
@@ -17,6 +19,9 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from app.log import logger
+from typing import Any, Dict, List, Optional
+from ..handlers import SearchHandler
+from ..search.scanner import SearchSourceRegistry
 
 CHANNELS_FILE = "channels.json"
 TG_CHANNEL_TYPE = "tg_channel"
@@ -387,3 +392,172 @@ class ChannelStore:
             self._save_locked()
             self._load_error = False
             return len(migrated)
+
+
+class ChannelMixin:
+    """ChannelMixin：从 CloudSubscribeLite 入口拆出的逻辑。
+
+    方法由重构脚本逐字搬移（行为不变），入口类通过多继承混入。
+    """
+
+    def _channel_store(self) -> ChannelStore:
+        """返回渠道存储；未初始化时按当前数据目录惰性创建并迁移旧配置。"""
+        if self._channels is None:
+            self._channels = ChannelStore(self.get_data_path())
+            if self._channels.needs_migration:
+                self._migrate_channels_from_config(
+                    self._applied_config or self.get_config() or {}
+                )
+        return self._channels
+
+
+    def _migrate_channels_from_config(self, config: Dict[str, Any]) -> int:
+        """首次加载且无 channels.json 时，从旧配置生成渠道后写盘。
+
+        旧版全局 TG 配置（``tg_channels`` / ``tg_monitor_keywords`` 等）
+        在这里先展开成逐频道规则再迁移，避免后一步的
+        :meth:`_apply_tg_monitor_config` 转换完却写不进已落盘的渠道库。
+        写盘后旧配置保留，之后渠道库是唯一运行来源。
+        """
+        store = self._channel_store()
+        if not store.needs_migration:
+            return 0
+        cfg = dict(config or {})
+        rules = cfg.get("tg_channel_rules", []) or []
+        channels = self._split_multiline(cfg.get("tg_channels", ""))
+        if not rules and channels:
+            from .tg_monitor import migrate_legacy_channel_rules
+
+            try:
+                scan_limit = int(cfg.get("tg_monitor_scan_limit", 20) or 20)
+            except (TypeError, ValueError):
+                scan_limit = 20
+            rules = migrate_legacy_channel_rules(
+                [],
+                channels=channels,
+                keywords=self._split_multiline(
+                    cfg.get("tg_monitor_keywords", "")
+                ),
+                exclude_keywords=self._split_multiline(
+                    cfg.get("tg_monitor_exclude_keywords", "")
+                ),
+                scan_limit=max(1, min(scan_limit, 200)),
+            )
+            cfg["tg_channel_rules"] = rules
+        added = store.migrate_from_config(cfg)
+        if added:
+            logger.info(f"已从旧配置迁移 {added} 条渠道到 channels.json")
+        return added
+
+
+    def get_enabled_search_sources(self) -> List[str]:
+        """返回渠道库里已启用的搜索源 id（按 priority 倒序，去重）。"""
+        ordered: List[str] = []
+        for channel in self._channel_store().list():
+            if channel.get("type") == "tg_channel":
+                continue
+            if not channel.get("enabled"):
+                continue
+            source = str(channel.get("type") or "").strip().lower()
+            if source and source not in ordered:
+                ordered.append(source)
+        return ordered
+
+
+    def get_search_channel_order(self) -> List[str]:
+        """返回全部搜索渠道的展示顺序（渠道库 priority 倒序，含停用的）。"""
+        ordered: List[str] = []
+        for channel in self._channel_store().list():
+            if channel.get("type") == "tg_channel":
+                continue
+            source = str(channel.get("type") or "").strip().lower()
+            if source and source not in ordered:
+                ordered.append(source)
+        try:
+            registered = [
+                str(definition.id)
+                for definition in SearchSourceRegistry.get_definitions()
+            ]
+        except Exception as error:  # noqa: BLE001 - 注册表异常不影响已有顺序
+            logger.warning(f"读取搜索渠道注册表失败：{error}")
+            registered = []
+        for source in registered:
+            if source not in ordered:
+                ordered.append(source)
+        return ordered
+
+
+    def disable_search_channel(self, source: str) -> bool:
+        """封禁保护：停用指定搜索源的全部渠道并清搜索缓存。"""
+        source = str(source or "").strip().lower()
+        if not source:
+            return False
+        store = self._channel_store()
+        changed = False
+        for channel in store.list():
+            if channel.get("type") == source and channel.get("enabled"):
+                store.update(channel["id"], {"enabled": False})
+                changed = True
+        if changed:
+            self._search_source_order = self.get_enabled_search_sources()
+            handler = getattr(self, "_search_handler", None)
+            if handler is not None:
+                try:
+                    handler.clear_search_cache()
+                except Exception as error:
+                    logger.debug(f"停用渠道后清搜索缓存失败：{error}", exc_info=True)
+        return changed
+
+
+    def _tg_channel_rules_from_store(self) -> List[Dict[str, Any]]:
+        """把渠道库里的 tg_channel 渠道转成监控用的规则列表。"""
+        rules: List[Dict[str, Any]] = []
+        for channel in self._channel_store().list():
+            if channel.get("type") != "tg_channel":
+                continue
+            config = channel.get("config") or {}
+            rules.append({
+                "channel": str(config.get("channel") or ""),
+                "enabled": bool(channel.get("enabled", True)),
+                "keywords": list(config.get("keywords") or []),
+                "exclude_keywords": list(config.get("exclude_keywords") or []),
+                "scan_limit": int(config.get("scan_limit") or 20),
+                "auto_transfer": True,
+                "monitor_mode": "subscriptions",
+            })
+        return rules
+
+
+    def _refresh_channel_runtime(
+            self, search_config_updates: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """渠道增删改启停后刷新运行态：搜索端重读渠道、TG 监控重读规则。
+
+        搜索结果缓存一并清掉，否则开关渠道后搜同一关键词会直接命中旧结果，
+        渠道开关看起来“不生效”。只有搜索渠道的配置值真的变了才重建搜索
+        处理器（客户端在注册时按配置值固化）；只改启用/优先级时轻量刷新。
+        """
+        self._search_source_order = self.get_enabled_search_sources()
+        handler = getattr(self, "_search_handler", None)
+        if search_config_updates:
+            for key, value in search_config_updates.items():
+                setattr(self, f"_{key}", value)
+            if handler is not None:
+                try:
+                    handler.close(release_cache=True)
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(f"关闭旧搜索处理器失败：{error}", exc_info=True)
+                self._search_handler = SearchHandler(plugin=self)
+        elif handler is not None:
+            refresh = getattr(handler, "refresh_enabled_sources", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(f"刷新搜索渠道运行态失败：{error}")
+        try:
+            self._apply_tg_monitor_config(
+                dict(self._applied_config or self.get_config() or {})
+            )
+        except Exception as error:  # noqa: BLE001 - 监控刷新失败不拖垮接口
+            logger.warning(f"刷新 TG 监控运行态失败：{error}")

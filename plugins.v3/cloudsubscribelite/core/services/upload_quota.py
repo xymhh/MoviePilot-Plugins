@@ -98,9 +98,6 @@ class UploadQuota:
         value = self._read_used(date_key)
         return 0 if value is None else value
 
-    def remaining_bytes(self) -> int:
-        return max(0, self.limit_bytes - self.used_bytes())
-
     def can_start(self, size_bytes: int) -> Tuple[bool, str]:
         """任务开始前按文件大小预检；额度读写异常一律放行。"""
         size = max(0, int(size_bytes or 0))

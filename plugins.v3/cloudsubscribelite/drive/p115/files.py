@@ -575,31 +575,6 @@ class P115FileService(OwnerDelegator):
             logger.debug(f"批量转存中有 {len(unresolved)} 个文件尚未就绪，进入后处理队列")
         return ready, unresolved
 
-    def rename_file_by_exact_name(
-            self, save_path: str, current_name: str, target_name: str
-    ) -> bool:
-        """在确定的目标目录内按离线任务真实文件名执行平台重命名。"""
-        current_name = str(current_name or "").strip()
-        target_name = str(target_name or "").strip()
-        if not current_name or not target_name:
-            return False
-        if current_name == target_name:
-            return bool(
-                self.find_file_by_exact_name(save_path, target_name, attempts=1)
-            )
-
-        for item in self.list_files(save_path):
-            item_name = str(
-                item.get("name")
-                or item.get("n")
-                or item.get("file_name")
-                or ""
-            ).strip()
-            if item_name != current_name:
-                continue
-            return self.rename_file_item(save_path, item, current_name, target_name)
-        return False
-
     def rename_file_item(
             self,
             save_path: str,
@@ -1221,20 +1196,3 @@ class P115FileService(OwnerDelegator):
     def clear_path_cache(self):
         """清空路径缓存"""
         self.path_cache.clear()
-
-    def find_file_in_dir(self, dir_path: str, filename: str) -> Optional[dict]:
-        """在指定115目录下查找文件名匹配的文件
-
-        :param dir_path: 115目录路径
-        :param filename: 要查找的文件名（不含ext）
-        :return: 匹配的文件信息dict，未找到返回None
-        """
-        files = self.list_files(dir_path)
-        MEDIA_EXTS = {'.mkv', '.mp4', '.ts', '.avi', '.mov', '.wmv', '.flv', '.webm', '.iso', '.m2ts'}
-        for f in files:
-            fname = f.get("name", "")
-            name_no_ext = fname.rsplit('.', 1)[0] if '.' in fname else fname
-            ext = f".{fname.rsplit('.', 1)[-1].lower()}" if '.' in fname else ""
-            if name_no_ext == filename and ext in MEDIA_EXTS:
-                return f
-        return None

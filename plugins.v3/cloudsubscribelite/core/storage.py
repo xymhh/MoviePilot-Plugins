@@ -294,18 +294,6 @@ class CloudSubscribeDataStore:
         self.initialize()
         return RuntimeStateStore(self, namespace)
 
-    def load_scan_state(self) -> Optional[Dict[str, Any]]:
-        self.initialize()
-        return self.repositories.runtime.load("strm_scan", "state")
-
-    def save_scan_state(self, payload: Dict[str, Any]) -> bool:
-        self.initialize()
-        return self.repositories.runtime.save("strm_scan", "state", payload)
-
-    def clear_scan_state(self) -> None:
-        self.initialize()
-        self.repositories.runtime.delete("strm_scan", "state")
-
     def _migrate_legacy_json_state(self) -> None:
         """把散落的 JSON 状态文件一次性并入数据库，原文件改名留档。"""
         self._migrate_legacy_tg_monitor()

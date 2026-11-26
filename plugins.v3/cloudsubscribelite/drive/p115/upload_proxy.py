@@ -57,8 +57,3 @@ def oss_request_kwargs(proxy_url: str) -> Dict[str, Any]:
     """给 p115oss 各函数用的额外 kwargs；无代理时返回空字典。"""
     pool = proxy_manager(proxy_url)
     return {"session": pool} if pool is not None else {}
-
-
-def reset_cache() -> None:
-    """测试/配置变更用：清空连接池缓存。"""
-    _SESSIONS.clear()

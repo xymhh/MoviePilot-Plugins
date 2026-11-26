@@ -18,7 +18,7 @@
 c7944f5e27212e0bd37b761f888039eea6e5cf29342e2f86d3f0075118586432
 ```
 
-运行时插件会**先解压到 `/config/plugins/CloudSubscribeX/bin/aria2c`，再校验 sha256，最后用 `aria2c --version` 探针确认可执行**；任一环节失败即关闭内置引擎并回落插件自带下载器。
+运行时插件会**先解压到 `/config/plugins/CloudSubscribeLite/bin/aria2c`，再校验 sha256，最后用 `aria2c --version` 探针确认可执行**；任一环节失败即关闭内置引擎并回落插件自带下载器。
 
 ## 为什么用补丁版（而不是上游 1.37.0）
 

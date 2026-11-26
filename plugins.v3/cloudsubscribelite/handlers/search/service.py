@@ -263,10 +263,6 @@ class SearchHandler:
                and not (media_type == MediaType.MOVIE and source in anime_only_sources)
         ]
 
-    def get_all_search_sources(self) -> List[str]:
-        """返回所有当前已注册的搜索渠道（供网盘资源列表实时嗅探使用，无需手动启用即可搜索）。"""
-        return [provider.key for provider in self._search_registry.available()]
-
     def get_available_sources_meta(
             self,
             mediainfo: Optional[Any] = None,
@@ -533,11 +529,6 @@ class SearchHandler:
             return self._search_registry.get(source).supports(capability)
         except KeyError:
             return False
-
-    def get_source_client(self, source: str) -> Any:
-        return self._search_registry.get(source).require(
-            SearchCapability.ACCOUNT
-        )
 
     def unlock_resource(
             self,

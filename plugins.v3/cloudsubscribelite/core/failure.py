@@ -188,14 +188,6 @@ def status_label_of(status: Any, kind: Any) -> str:
     return STATUS_LABELS.get(str(kind or "").strip()) or text
 
 
-def kind_of_pseudo_status(status: Any) -> str:
-    """伪状态名反查失败类型（「秒传失败」→ ``checksum_miss``），未知返回空串。"""
-    text = str(status or "").strip()
-    for kind, label in STATUS_LABELS.items():
-        if label == text:
-            return kind
-    return ""
-
 
 def failure_label(kind: Any) -> str:
     """类型的中文展示名，未知类型返回「未分类失败」。"""
@@ -252,14 +244,3 @@ def clear_failure(record: Dict[str, Any]) -> Dict[str, Any]:
     for key in ("failure_reason", "failure_kind", "failure_retryable"):
         record.pop(key, None)
     return record
-
-
-def kinds_of(records: Iterable[Mapping[str, Any]]) -> Dict[str, int]:
-    """统计一组记录的失败类型分布（供调试与后续看板使用）。"""
-    counts: Dict[str, int] = {}
-    for record in records or ():
-        if str(record.get("status") or "") != "失败":
-            continue
-        kind = failure_kind_of(record)
-        counts[kind] = counts.get(kind, 0) + 1
-    return counts

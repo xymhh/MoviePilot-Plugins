@@ -792,63 +792,6 @@ class HDHiveClient:
         )
         return self._security_session.decode_response(response)
 
-    def signed_json_request(
-            self,
-            method: str,
-            path: str,
-            body: Optional[Dict[str, Any]],
-            *,
-            action: str = "",
-            path_template: str = "",
-            resource_slug: str = "",
-            require_login: bool = True,
-            referer: str = "",
-    ):
-        """签名 JSON 请求；动作接口在首次业务请求前取得 Action Proof。"""
-        with self._lock:
-            body_bytes = (
-                json.dumps(body, ensure_ascii=False, separators=(",", ":"))
-                .encode("utf-8") if body is not None else b""
-            )
-            base_headers = {
-                "content-type": "application/json",
-                "origin": self.BASE_URL,
-            }
-            if referer:
-                base_headers["referer"] = str(referer)
-            if action:
-                proof_headers = self._security_session.action_proof_headers(
-                    action,
-                    method,
-                    path_template or path,
-                    resource_slug,
-                    body_bytes,
-                )
-                base_headers.update(proof_headers)
-            response = self._signed_request(
-                method,
-                path,
-                body=body_bytes,
-                headers=dict(base_headers),
-                canonical_path=path,
-                require_login=require_login,
-            )
-            if not action or not needs_action_proof(response):
-                return response
-            # proof 过期时重新生成一次挑战证明；仍受普通门控约束。
-            proof_headers = self._security_session.action_proof_headers(
-                action, method, path_template or path, resource_slug, body_bytes,
-            )
-            base_headers.update(proof_headers)
-            return self._signed_request(
-                method,
-                path,
-                body=body_bytes,
-                headers=base_headers,
-                canonical_path=path,
-                require_login=require_login,
-            )
-
     def web_unlock_request(
             self,
             resource_page_path: str,

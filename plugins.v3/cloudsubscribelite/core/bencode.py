@@ -79,7 +79,7 @@ def build_torrent(name: str, files: list[dict], comment: str) -> bytes:
     """
     payload = {
         "comment": comment,
-        "created by": "MoviePilot CloudSubscribeX",
+        "created by": "MoviePilot CloudSubscribeLite",
         "encoding": "UTF-8",
         "info": info_dict(name, files),
     }

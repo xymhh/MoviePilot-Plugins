@@ -432,11 +432,6 @@ class SearchCircuitBreaker:
         """别名方法：获取剩余冷却秒数。"""
         return self.cooldown_remaining(key)
 
-    def get_reason(self, key: str) -> str:
-        normalized = str(key or "").strip().lower()
-        with self._lock:
-            return self._reasons.get(normalized, "")
-
     def record_success(self, key: str) -> None:
         normalized = str(key or "").strip().lower()
         with self._lock:

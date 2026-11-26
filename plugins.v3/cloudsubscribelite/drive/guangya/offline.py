@@ -12,8 +12,7 @@ from urllib.parse import unquote
 
 from app.log import logger
 
-from ..common import safe_int
-from ...utils.magnet import parse_magnet_metadata
+from ..common import parse_magnet_link_dict, safe_int
 
 _ED2K_RE = re.compile(
     r"ed2k://\|file\|([^|]+)\|(\d+)\|([0-9A-Fa-f]{32})\|/?", re.I
@@ -62,14 +61,6 @@ class GuangyaOfflineService:
             "POST",
             f"{self.client.API_BASE_URL}/cloudcollection/v1/create_task",
             json_data=payload,
-        )
-
-    def resolve_cloud_url(self, url: str) -> Dict[str, Any]:
-        """解析 Magnet / ED2K 离线资源信息。"""
-        return self.client.request(
-            "POST",
-            f"{self.client.API_BASE_URL}/cloudcollection/v1/resolve_res",
-            json_data={"url": url},
         )
 
     def cloud_task_list(
@@ -164,16 +155,7 @@ class GuangyaOfflineService:
     def parse_magnet_link(
             self, url: str, fetch_metadata: bool = False
     ) -> Dict[str, Any]:
-        metadata = parse_magnet_metadata(url, fetch_info=fetch_metadata)
-        if not metadata:
-            return {}
-        return {
-            "url": str(url).strip(),
-            "name": metadata.get("display_name") or metadata["info_hash"],
-            "size": safe_int(metadata.get("size")),
-            "hash": str(metadata["info_hash"]).upper(),
-            "metadata": metadata,
-        }
+        return parse_magnet_link_dict(url, fetch_metadata, empty={})
 
     def _format_task(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """格式化光鸭任务对象，直接使用原生 taskId。"""

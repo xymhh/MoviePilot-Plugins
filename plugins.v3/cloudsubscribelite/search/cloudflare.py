@@ -42,6 +42,21 @@ def browser_proxy(proxy: Any) -> Optional[Dict[str, str]]:
     return result
 
 
+def is_challenge_response(response: Any) -> bool:
+    """统一判断响应是否命中 Cloudflare 质询页（可直接用作门控挑战识别器）。
+
+    SeedHub 与 UIndex 各有一份逐字相同的实现，曾分别放在各自的 security
+    模块里，现收敛到这里。
+    """
+    if response is None:
+        return False
+    return is_cloudflare_challenge(
+        str(getattr(response, "text", "") or ""),
+        int(getattr(response, "status_code", 0) or 0),
+        getattr(response, "headers", None) or {},
+    )
+
+
 def is_cloudflare_challenge(text: str = "", status_code: int = 200,
                             headers: Optional[dict] = None) -> bool:
     headers = {str(key).lower(): str(value).lower()

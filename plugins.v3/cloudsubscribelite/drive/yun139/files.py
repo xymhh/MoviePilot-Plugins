@@ -10,6 +10,7 @@ from ..common import (
     CloudDriveFileServiceBase,
     create_directory_cache,
     create_directory_path_cache,
+    find_file_with_retry,
 )
 from ...core.cloud import CloudFile, DirectoryListing
 from ...core.transfer import HttpFileDownloadService
@@ -175,18 +176,6 @@ class Yun139FileService(CloudDriveFileServiceBase):
                 return self._find_with_retry(save_path, item.name)
         return self.find_file(save_path, target_name or item.name)
 
-    def copy_file(self, item: CloudFile, save_path: str) -> bool:
-        """复制到目标目录；移动云盘原生支持批量复制。"""
-        lookup = self.resolve_directory(save_path, create=True)
-        if not lookup.checked or lookup.directory_id is None:
-            return False
-        self.client.request("/file/batchCopy", {
-            "fileIds": [item.id],
-            "toParentFileId": lookup.directory_id,
-        })
-        self._invalidate_directory_cache()
-        return True
-
     def delete_file(self, file_id: str) -> bool:
         self.client.request(
             "/recyclebin/batchTrash", {"fileIds": [str(file_id or "")]}
@@ -241,10 +230,7 @@ class Yun139FileService(CloudDriveFileServiceBase):
 
     def _find_with_retry(self, path: str, file_name: str) -> CloudFile | None:
         """变更后目录缓存可能仍是旧数据，短暂重试直到可见。"""
-        for index in range(10):
-            self._invalidate_directory_cache()
-            if item := self.find_file(path, file_name):
-                return item
-            if index < 9:
-                time.sleep(0.5)
-        return None
+        return find_file_with_retry(
+            self.find_file, path, file_name,
+            invalidate=self._invalidate_directory_cache,
+        )

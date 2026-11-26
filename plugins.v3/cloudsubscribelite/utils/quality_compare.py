@@ -144,14 +144,3 @@ def compare_quality(
         f"{res_note}体积增益不足（{human_size(old_size)} → {human_size(new_size_value)}，"
         f"需 ≥ {human_size(need)}）",
     )
-
-
-def compare_movie_quality(
-        new_name: Any,
-        new_size: Any,
-        old_versions: Iterable[Any],
-        min_gain_percent: int = 10,
-        min_gain_mb: int = 200,
-) -> Tuple[str, str]:
-    """电影侧入口，规则与剧集一致（留作语义区分）。"""
-    return compare_quality(new_name, new_size, old_versions, min_gain_percent, min_gain_mb)

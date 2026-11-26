@@ -871,30 +871,6 @@ class SyncHandler:
     def enqueue_funnel_from_pending(self, item, pending_key, mediainfo, subscribe_id=None, season=None):
         return self.funnel.enqueue_from_pending(item, pending_key, mediainfo, subscribe_id=subscribe_id, season=season)
 
-    def funnel_has_active_rows(self, subscribe_id) -> bool:
-        """v1.29.9 阶段 3：订阅是否还有漏斗在途行（queued/processing/
-        failed）。轮次结束结算前调用：在途行未终态时绝不结算，终态成功
-        时由 _finish_pending_subscription 回写。
-
-        v1.29.10 热修复（评审 B4）：存储/组件不可用或查询异常时
-        fail-closed（返回 True，暂缓结算）。"""
-        try:
-            funnel = self.__dict__.get("funnel")
-            has_active = getattr(funnel, "has_active_rows", None)
-            if not callable(has_active):
-                logger.warning(
-                    "漏斗组件缺 has_active_rows，订阅结算暂缓："
-                    f"subscribe_id={subscribe_id}"
-                )
-                return True
-            return bool(has_active(subscribe_id))
-        except Exception as error:  # noqa: BLE001 - 查询异常暂缓结算
-            logger.warning(
-                "查询订阅漏斗在途行失败，订阅结算暂缓："
-                f"subscribe_id={subscribe_id}，{error}"
-            )
-            return True
-
     def funnel_has_unsettled_rows(self, subscribe_id) -> bool:
         """v1.29.10 热修复（评审 B4）：订阅是否还有漏斗未终态行
         （queued/processing/failed/**held**）。结算守卫用：held 行的集
@@ -916,23 +892,8 @@ class SyncHandler:
             )
             return True
 
-    def funnel_precommit_recheck(self, item, pending_key, media, ctx=None):
-        return self.funnel.precommit_recheck(item, pending_key, media, ctx)
-
     def funnel_ensure_worker(self) -> None:
         return self.funnel.ensure_worker()
-
-    def funnel_list_rows(self, statuses, limit: int = 200) -> List[Dict[str, Any]]:
-        return self.funnel.list_rows(statuses, limit=limit)
-
-    def funnel_queue_counts(self) -> Dict[str, int]:
-        return self.funnel.queue_counts()
-
-    def funnel_requeue_rows(self, row_ids) -> int:
-        return self.funnel.requeue_rows(row_ids)
-
-    def funnel_delete_rows(self, row_ids) -> int:
-        return self.funnel.delete_rows(row_ids)
 
     def funnel_mark_held_by_pending_key(self, pending_key: str, reason: str = "") -> bool:
         """提交前复查拦截时，把该 pending 记录对应的漏斗行挂起（held）。"""
@@ -1174,15 +1135,6 @@ class SyncHandler:
         except Exception as err:
             logger.debug(f"读取停止状态失败：{err}")
             return False
-
-    def check_task_alive(self) -> None:
-        """检查任务存活状态：若已取消或超时立即退出。"""
-        if hasattr(self, "_active_task_context") and self._active_task_context:
-            if hasattr(self._active_task_context, "check_alive"):
-                self._active_task_context.check_alive()
-        if self._stop_requested():
-            from ...core.exceptions import TaskAbortedError
-            raise TaskAbortedError("任务已停止")
 
     def _current_task_context(self) -> Tuple[str, Any]:
         if not self._task_context:
@@ -2710,63 +2662,3 @@ class SyncHandler:
             "missing": sorted(expected - verified),
             "updated": bool(update_data),
         }
-
-    def guardian_check(self, all_subs) -> int:
-        """
-        集数守护 & 日历修复：扫描媒体库 strm 文件，同步订阅 note/lack_episode。
-
-        修复场景：
-        - PT bypass、115直搜、洗版模式等非标准路径下载后 note 未更新
-        - 日历显示"未入库"但文件实际已在媒体库中
-        - 订阅进度与实际文件不一致
-
-        :param all_subs: 所有订阅列表（SubscribeOper().list() 结果）
-        :return: 本次完成的订阅数（新增的 lack_episode=0 的个数）
-        """
-        completed_count = 0
-
-        for subscribe in all_subs:
-            try:
-                # 只处理活跃的电视剧订阅
-                if getattr(subscribe, 'state', None) == 'D':
-                    continue
-                sub_type = getattr(subscribe, 'type', None)
-                if sub_type != MediaType.TV.value:
-                    continue
-
-                season = subscribe.season or 1
-                total_ep = subscribe.total_episode or 0
-                start_ep = subscribe.start_episode or 1
-
-                if total_ep <= 0:
-                    continue
-
-                mediainfo = self._subscribe_mediainfo(
-                    subscribe, MediaType.TV
-                )
-                if not mediainfo:
-                    continue
-
-                found_episodes = self.naming._scan_local_resource_episodes(
-                    subscribe=subscribe,
-                    mediainfo=mediainfo,
-                    season=season,
-                    start_episode=start_ep,
-                    total_episode=total_ep,
-                )
-                if not found_episodes:
-                    continue
-
-                remaining_lack = self._subscribe_handler.check_and_finish_subscribe(
-                    subscribe=subscribe,
-                    mediainfo=mediainfo,
-                    success_episodes=sorted(found_episodes),
-                )
-                if remaining_lack == 0:
-                    completed_count += 1
-
-            except Exception as e:
-                logger.debug(f"订阅完结检查异常 {getattr(subscribe, 'name', '?')}：{e}", exc_info=True)
-                logger.debug(traceback.format_exc(), exc_info=True)
-
-        return completed_count

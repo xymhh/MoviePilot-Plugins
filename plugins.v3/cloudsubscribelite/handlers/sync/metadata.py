@@ -92,14 +92,6 @@ class SyncMetadataService(OwnerDelegator):
                     return dict(entry)
                 self._subscribe_defer_cache.delete(cache_key)
         return None
-    def get_tv_subscribe_calendar(
-            self,
-            subscribe: Any,
-            tmdb_id: Optional[int] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """剧集搜索直接通过各渠道检索结果自适应感知更新，不再请求与解析 TMDB 季网页。"""
-        return None
-
     @staticmethod
     def _tmdb_id_from_media(value: Any) -> int:
         raw_id = (

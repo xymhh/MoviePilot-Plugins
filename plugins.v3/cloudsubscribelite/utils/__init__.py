@@ -24,6 +24,8 @@ from .strm import (
 # 同一线程递归拿同一把模块锁，MP 热重载时报
 # `deadlock detected by _ModuleLock('app.plugins.cloudsubscribex.core.api.sync')`
 # （2026-11-12 真机 13:51 / 16:38 两次复现，导致插件更新失败）。
+# 注：上面引用的报错原文来自 X，本插件 Lite 下对应的模块路径是
+# `app.plugins.cloudsubscribelite.core.api.sync`，死锁机理相同。
 # 需要 media_identity 的模块一律直接 `from ...core.media import media_identity`。
 
 __all__ = [

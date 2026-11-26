@@ -61,19 +61,6 @@ def season_total(
     return numbers[-1] if numbers else None
 
 
-def season_totals(
-        tmdb_id: Optional[int],
-        seasons: Iterable[int],
-        lookup: Optional[EpisodeLookup] = None,
-) -> Dict[int, int]:
-    """批量取多季集数，只保留拿得到数据的季。"""
-    totals: Dict[int, int] = {}
-    for season in seasons or []:
-        total = season_total(tmdb_id, int(season), lookup)
-        if total:
-            totals[int(season)] = total
-    return totals
-
 
 def plan_for_share(
         entries: List[Dict[str, Any]],
@@ -124,31 +111,3 @@ def entry_season(entry: Dict[str, Any]) -> Optional[int]:
     if season is None and "/" in path:
         season = MediaFileParser.path_season(path.rsplit("/", 1)[0])
     return season
-
-
-def infer_season(
-        episodes: Iterable[int],
-        totals: Dict[int, int],
-        explicit: Optional[int] = None,
-) -> Optional[int]:
-    """无季号时按集号区间反推季。
-
-    只有一个季的区间能**完整容纳**全部集号才算数；能容纳的季不止一个时，
-    取集数最小的那个（短季更可能是它自己的集号），拿不准仍返回 ``None``。
-    """
-    if explicit:
-        return int(explicit)
-    eps = {int(ep) for ep in (episodes or []) if ep}
-    if not eps or not totals:
-        return None
-    low, high = min(eps), max(eps)
-    fits = [
-        (total, season) for season, total in totals.items()
-        if total and low >= 1 and high <= int(total)
-    ]
-    if not fits:
-        return None
-    fits.sort()
-    if len(fits) > 1 and fits[0][0] == fits[1][0]:
-        return None
-    return int(fits[0][1])

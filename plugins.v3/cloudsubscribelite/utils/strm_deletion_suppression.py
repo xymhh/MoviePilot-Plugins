@@ -40,9 +40,8 @@ DEFAULT_MAX_ENTRIES = 1000
 def normalize_media_server_path(path: Any) -> str:
     """归一化媒体服务器路径：与 ``MediaLibraryApi._normalize_media_path``
     同口径（统一分隔符、压掉重复斜杠、去尾部斜杠），两侧键才能对上。
-
-    两处实现须保持一致（测试 ``test_normalize_matches_deep_delete_paths``
-    校验样例）。
+    ``handlers/sync/cleanup.py`` 的同名实现已合并到这里（测试
+    ``test_normalize_matches_deep_delete_paths`` 校验样例）。
     """
     value = str(path or "").strip().replace("\\", "/")
     while "//" in value:
@@ -105,11 +104,6 @@ class StrmDeletionSuppression:
                 return False
             return True
 
-    def prune(self) -> int:
-        """清掉全部过期项，返回清理条数。"""
-        with self._lock:
-            return self._prune_locked(time.monotonic())
-
     def _prune_locked(self, now: float) -> int:
         expired = [key for key, deadline in self._entries.items() if deadline <= now]
         for key in expired:
@@ -140,24 +134,5 @@ def suppress_deleted_strm_path(owner: Any, local_path: Any) -> bool:
         return False
     try:
         return bool(method(local_path))
-    except Exception:
-        return False
-
-
-def is_deleted_strm_suppressed(handler: Any, server_path: Any) -> bool:
-    """防御式查询：该媒体服务器路径是否在插件自删 STRM 屏蔽期内。
-
-    handler 取不到、方法缺失、或查询抛错时一律按“未屏蔽”走。
-    """
-    if handler is None:
-        return False
-    try:
-        method = getattr(handler, "is_strm_deletion_suppressed", None)
-    except Exception:
-        return False
-    if not callable(method):
-        return False
-    try:
-        return bool(method(server_path))
     except Exception:
         return False

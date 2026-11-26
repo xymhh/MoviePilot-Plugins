@@ -266,7 +266,7 @@ class DoctorApi(OwnerDelegator):
                 TMDB_PROBE_URL,
                 timeout=TMDB_PROBE_TIMEOUT,
                 proxies=proxies,
-                headers={"User-Agent": "MoviePilot-CloudSubscribeX-Doctor"},
+                headers={"User-Agent": "MoviePilot-CloudSubscribeLite-Doctor"},
             )
             elapsed = int((time.time() - started) * 1000)
             # 401/403 说明网络通、只是没带密钥，对「能不能连上」是绿灯

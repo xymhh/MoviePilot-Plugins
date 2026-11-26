@@ -115,18 +115,6 @@ class SkipStatsCollector:
             records = list(self._records.values())
         return self._summarize(records)
 
-    def is_empty(self) -> bool:
-        with self._lock:
-            return not self._records
-
-    def summary_text(self) -> str:
-        """完成日志的跳过段落；空统计返回 ``""``（日志与现状逐字一致）。"""
-        return self.format_summary(self.snapshot())
-
-    def notify_text(self) -> str:
-        """完成通知的追加行；空统计返回 ``""``（通知与现状逐字一致）。"""
-        return self.format_notify(self.snapshot())
-
     @staticmethod
     def _summarize(records: Iterable[Dict[str, str]]) -> Dict[str, Any]:
         items = list(records)

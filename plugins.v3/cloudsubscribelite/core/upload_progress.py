@@ -24,68 +24,6 @@ _ENTRIES: Dict[str, Dict[str, Any]] = {}
 _BASELINES: Dict[str, Dict[str, float]] = {}
 
 
-def report_upload_progress(
-    key: Any, file_name: Any, uploaded: Any, total: Any
-) -> None:
-    """记录一次上传进度；任何异常都静默吞掉。"""
-    try:
-        name = str(key or "").strip()
-        if not name:
-            return
-        try:
-            uploaded_value = max(0, int(uploaded or 0))
-        except (TypeError, ValueError):
-            uploaded_value = 0
-        try:
-            total_value = max(0, int(total or 0))
-        except (TypeError, ValueError):
-            total_value = 0
-        now = time.monotonic()
-        with _LOCK:
-            previous = _ENTRIES.get(name)
-            baseline = _BASELINES.get(name)
-            if (
-                previous is None
-                or baseline is None
-                or uploaded_value < int(previous.get("uploaded") or 0)
-            ):
-                # 首次记录，或整文件重传（uploaded 回落）：重置速度基线。
-                baseline = {
-                    "first_uploaded": float(uploaded_value),
-                    "first_at": now,
-                }
-                _BASELINES[name] = baseline
-            elapsed = now - baseline["first_at"]
-            if elapsed > 0:
-                speed = max(
-                    0.0,
-                    (uploaded_value - baseline["first_uploaded"]) / elapsed,
-                )
-            else:
-                speed = 0.0
-            _ENTRIES[name] = {
-                "key": name,
-                "file_name": str(file_name or ""),
-                "uploaded": uploaded_value,
-                "total": total_value,
-                "speed": speed,
-                "updated_at": now,
-            }
-    except Exception:
-        return
-
-
-def remove_upload_progress(key: Any) -> None:
-    """删除一条上传进度记录（上传完成时调用，卡片随之消失）。"""
-    try:
-        name = str(key or "").strip()
-        if not name:
-            return
-        with _LOCK:
-            _ENTRIES.pop(name, None)
-            _BASELINES.pop(name, None)
-    except Exception:
-        return
 
 
 def snapshot_upload_progress(max_age_seconds: float = 30.0) -> List[Dict[str, Any]]:
@@ -113,15 +51,6 @@ def snapshot_upload_progress(max_age_seconds: float = 30.0) -> List[Dict[str, An
     except Exception:
         return []
 
-
-def clear_upload_progress() -> None:
-    """清空登记表（测试与插件重载用）。"""
-    try:
-        with _LOCK:
-            _ENTRIES.clear()
-            _BASELINES.clear()
-    except Exception:
-        return
 
 
 def _refresh_upload_entry(name: str) -> bool:
@@ -151,65 +80,3 @@ def _refresh_upload_entry(name: str) -> bool:
             return True
     except Exception:
         return False
-
-
-def start_upload_heartbeat(
-    key: Any,
-    *,
-    interval_seconds: float = 10.0,
-    max_missing_seconds: float = 120.0,
-) -> Any:
-    """启动上传心跳：每 interval 秒刷新一次登记表条目，返回 stop()。
-
-    oss2 分片只在每片传完才报一次进度，分片 PUT 卡住（读超时 60 秒
-    + 重试）时超过 30 秒没上报，snapshot 就把条目清掉、下载页的上传
-    卡闪没了。心跳只刷新已存在的条目（上传还没开始上报时什么都不做），
-    卡住期间卡不掉、速度 honest 地衰减到 0。
-
-    上传结束（完成或失败）调用方必须调 stop()；条目连续缺失超
-    max_missing_seconds 时线程自停（防泄漏）。线程是 daemon，
-    stop() 最多等一个心跳间隔，绝不阻塞上传返回。
-    """
-    try:
-        name = str(key or "").strip()
-        interval = float(interval_seconds or 0)
-    except (TypeError, ValueError):
-        return lambda: None
-    if not name or interval <= 0:
-        return lambda: None
-    try:
-        max_missing = float(max_missing_seconds or 0)
-    except (TypeError, ValueError):
-        max_missing = 120.0
-    stop_event = threading.Event()
-
-    def _run() -> None:
-        missing_since: Any = None
-        while not stop_event.is_set():
-            if stop_event.wait(timeout=interval):
-                return
-            if _refresh_upload_entry(name):
-                missing_since = None
-            else:
-                now = time.monotonic()
-                if missing_since is None:
-                    missing_since = now
-                elif max_missing > 0 and now - missing_since > max_missing:
-                    return
-
-    try:
-        thread = threading.Thread(
-            target=_run, name=f"upload-heartbeat-{name}", daemon=True
-        )
-        thread.start()
-    except Exception:
-        return lambda: None
-
-    def _stop() -> None:
-        try:
-            stop_event.set()
-            thread.join(timeout=min(max(interval, 0.1), 2.0))
-        except Exception:
-            return
-
-    return _stop

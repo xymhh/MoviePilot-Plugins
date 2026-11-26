@@ -72,61 +72,6 @@ class OrganizeService(OwnerDelegator):
     # ------------------------------------------------------------------
     # 对外入口
     # ------------------------------------------------------------------
-    def start_scan(
-            self,
-            source_path: str = "",
-            max_files: int = 0,
-            include_subtitles: Optional[bool] = None,
-            auto_execute: bool = False,
-            trigger: str = "手动",
-    ) -> Dict[str, Any]:
-        source = str(source_path or self._organize_source_path or "").strip()
-        if not source:
-            return {"success": False, "message": "请先选择 115 待整理源目录"}
-        if not source.startswith("/"):
-            source = f"/{source}"
-        with self._lock:
-            if self._thread and self._thread.is_alive():
-                return {"success": False, "message": "已有整理任务在运行，请先等待完成或停止"}
-            scan_id = uuid.uuid4().hex[:12]
-            self._scan_id = scan_id
-            self._stop_event.clear()
-            self._plans = {}
-            self._target_name_cache = {}
-            settings = self._settings_snapshot()
-            settings["source_path"] = source
-            settings["max_files"] = self._normalize_max_files(max_files or settings["max_files"])
-            if include_subtitles is not None:
-                settings["include_subtitles"] = bool(include_subtitles)
-            self._state = {
-                "scan_id": scan_id,
-                "phase": "scanning",
-                "message": "正在扫描目录",
-                "source_path": source,
-                "trigger": trigger,
-                "settings": settings,
-                "created_at": time.time(),
-                "updated_at": time.time(),
-                "stats": {
-                    "directories": 0, "files": 0, "videos": 0, "subtitles": 0,
-                    "groups": 0, "ready": 0, "unmatched": 0, "conflict": 0,
-                    "items": 0, "done": 0, "failed": 0, "skipped": 0,
-                    "removed_dirs": 0,
-                },
-                "groups": [],
-                "errors": [],
-                "execution": {},
-                "auto_execute": bool(auto_execute),
-            }
-            self._thread = threading.Thread(
-                target=self._scan_worker,
-                args=(source, settings, auto_execute, trigger),
-                name="cloudsubscribe-organize-scan",
-                daemon=True,
-            )
-            self._thread.start()
-        return {"success": True, "scan_id": scan_id, "message": "已开始扫描"}
-
     def status(self) -> Dict[str, Any]:
         with self._lock:
             state = copy.deepcopy(self._state) if self._state else {

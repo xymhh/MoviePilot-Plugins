@@ -91,13 +91,6 @@ class RetryIndexRepository(DbOper):
         return [row.to_dict() for row in RetryIndex.list(db)]
 
     @db_query
-    def get_by_record_id(
-            self, record_id: str, db: Session = None
-    ) -> Optional[Dict[str, Any]]:
-        row = RetryIndex.get(db, str(record_id or "").strip())
-        return row.to_dict() if row is not None else None
-
-    @db_query
     def get_by_identity(
             self,
             record_time: str,

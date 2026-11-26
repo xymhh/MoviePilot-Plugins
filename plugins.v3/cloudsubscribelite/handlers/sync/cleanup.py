@@ -13,7 +13,10 @@ from app.schemas.types import MediaType
 from ...core import OwnerDelegator
 from ...core.episode_parse import VIDEO_SUFFIXES
 from ...core.media import list_subscribes_by_tmdb_id
-from ...utils.strm_deletion_suppression import suppress_deleted_strm_path
+from ...utils.strm_deletion_suppression import (
+    normalize_media_server_path,
+    suppress_deleted_strm_path,
+)
 
 
 class HistoryCleanupService(OwnerDelegator):
@@ -616,10 +619,7 @@ class HistoryCleanupService(OwnerDelegator):
     @staticmethod
     def _normalize_media_server_path(path: Any) -> str:
         """标准化用于精确比较的媒体服务器路径。"""
-        value = str(path or "").strip().replace("\\", "/")
-        while "//" in value:
-            value = value.replace("//", "/")
-        return value.rstrip("/")
+        return normalize_media_server_path(path)
 
     def _delete_history_cache(self, record: Dict[str, Any]) -> int:
         if not self._cross_transfer_manager:

@@ -133,6 +133,9 @@ except Exception:  # pragma: no cover - search.types 不可用时的兜底
 
 
 # 合成种子 comment 里的标记：CLOUDSUBSCRIBEX|<sid>|<资源类型>
+# 注意：标记串是刻意保留的历史值，不要改成 Lite——已发出的合成种子
+# comment 里写的是这个标记，render（写）与 parse（读）在同一模块内
+# 自洽；改了它，旧种子将无法识别为本插件的任务。
 MARKER = "CLOUDSUBSCRIBEX"
 # 快照 TTL：与网盘直链的缓存同量级；过期后 /torrent 与 download 都按
 # 「请重新搜索」处理，不再静默取旧分享。
@@ -929,7 +932,7 @@ def _preview_files(plugin: Any, share_url: str) -> List[Dict[str, Any]]:
     if not callable(preview):
         return []
     executor = ThreadPoolExecutor(
-        max_workers=1, thread_name_prefix="cloudsubscribex-mp-search",
+        max_workers=1, thread_name_prefix="cloudsubscribelite-mp-search",
     )
     try:
         future = executor.submit(preview, share_url)

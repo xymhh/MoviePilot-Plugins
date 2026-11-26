@@ -6,7 +6,7 @@ UIndex 正常访问无需盾；仅在直连被 Cloudflare Managed Challenge 拦�
 
 from typing import Any, Optional
 
-from ..cloudflare import fetch_cloudflare_html, is_cloudflare_challenge
+from ..cloudflare import fetch_cloudflare_html, is_challenge_response
 
 
 class UIndexSecurityError(RuntimeError):
@@ -31,13 +31,7 @@ class UIndexSecurity:
     @staticmethod
     def is_challenge(response: Any) -> bool:
         """统一判断直连响应是否命中 Cloudflare 质询页。"""
-        if response is None:
-            return False
-        return is_cloudflare_challenge(
-            str(getattr(response, "text", "") or ""),
-            int(getattr(response, "status_code", 0) or 0),
-            getattr(response, "headers", None) or {},
-        )
+        return is_challenge_response(response)
 
     def fetch_html(self, url: str) -> str:
         """穿透 Cloudflare 盾并返回渲染后的页面 HTML。"""

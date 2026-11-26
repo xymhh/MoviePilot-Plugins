@@ -22,7 +22,7 @@ MoviePilot v3 后端源码及 Release 前端产物目录。面向用户的安装
 | 115 存储 | 不注册“115 网盘 CS 版”存储适配器（`U115CSStorage` / `u115cs`，X 独有） |
 | 跨盘下载默认引擎 | 与 X 相反：Lite 默认用内置 aria2（多连接 + 断点续传），失败自动回落内置下载器；X 默认关闭内置 aria2 |
 
-**保留、但与 X 不同的细节**：转存管线内部仍会为已转存文件生成 `.strm`（供播放），走 Lite 自己的 `/redirect` 端点；生成时用的 STRM 模板已改指 `CloudSubscribeLite`（精简前写死 `CloudSubscribeX`，只装 Lite 时播不了）。转存管线内部的漏斗预检（`funnel_precommit_recheck`）与整理服务（`OrganizeService`，转存后整理上传文件用）也保留，因为删掉会断转存流程——它们不是对外暴露的整理功能。
+**保留、但与 X 不同的细节**：转存管线内部仍会为已转存文件生成 `.strm`（供播放），走 Lite 自己的 `/redirect` 端点；生成时用的 STRM 模板已改指 `CloudSubscribeLite`（精简前写死 `CloudSubscribeX`，只装 Lite 时播不了）。转存管线内部的漏斗预检（`funnel_precommit_recheck`）与整理服务（`OrganizeService`，转存后整理上传文件用）也保留，因为删掉会断转存流程——它们不是对外暴露的整理功能。同理，写 `.strm` 成功后清理同集旧兄弟 `.strm` 的小工具（`handlers/sync/strm_siblings.py`，从已删除的重复扫描模块里抽出）也保留，那是转存生成路径的最后一道去重防线。
 
 保留的能力与 X 相同：订阅缺集搜索补缺、15 个搜索源、多网盘转存与跨盘转存、秒传、TG 频道监控、榜单自动订阅（7 个渠道）、渠道签到。
 
@@ -32,7 +32,7 @@ MoviePilot v3 后端源码及 Release 前端产物目录。面向用户的安装
 
 ```text
 cloudsubscribelite/
-├── __init__.py          # 插件入口、元数据及生命周期代理
+├── __init__.py          # 插件入口：只留元数据、注册（get_api/get_service/get_state 等）与启动/停止接线
 ├── version.py           # 版本声明（VERSION，唯一事实来源）
 ├── pyproject.toml       # v3 依赖声明（dynamic = ["version"]）
 ├── requirements.txt     # v2 遗留依赖清单（v3 以 pyproject.toml 为准）
@@ -44,6 +44,20 @@ cloudsubscribelite/
 └── dist/assets/         # CI 构建后写入 Release ZIP 的 Vue 模块联邦产物
 ```
 
+入口逻辑已按功能下沉到 `core/` 的混入类（`__init__.py` 只做多继承组装，行为不变，2026-11-26 重构）：
+
+| 混入类 | 位置 | 内容 |
+| --- | --- | --- |
+| `PluginConfigMixin` | `core/plugin_config.py` | 应用配置（`_apply_*_config`、`_persist_config_values` 等） |
+| `TgMonitorConfigMixin` | `core/tg_monitor_config.py` | TG 频道监控配置与自动转存 |
+| `ChannelMixin` | `core/channels.py` | 渠道库、搜索源启用/排序 |
+| `DownloaderMixin` | `core/downloader_view.py` | 下载器登记与 torrent 列表/操作 |
+| `ScheduledTasksMixin` | `core/scheduled_tasks.py` | 定时任务、残留清理、缓存巡视 |
+| `SourceCacheMixin` | `core/source_cache.py` | 来源 SHA1 / 秒传未命中缓存 |
+| `PluginUtilsMixin` | `core/plugin_utils.py` | 纯静态工具（cron 校验、多行拆分等） |
+
+重复工具函数已合并：磁力链接解析（`drive/common.py::parse_magnet_link_dict`，光鸭/123/115 三处共用）、目录查找重试（`drive/common.py::find_file_with_retry`，天翼/139 云盘共用）、Cloudflare 质询判断（`search/cloudflare.py::is_challenge_response`，SeedHub/UIndex 共用）、媒体服务器路径归一化（`utils/strm_deletion_suppression.py::normalize_media_server_path`，清理服务复用）。
+
 ## 模块边界
 
 - `core/` 定义插件自身业务模型与服务，不放具体网盘或搜索源实现。
@@ -52,7 +66,7 @@ cloudsubscribelite/
 - `handlers/` 组合领域服务并对接事件、API、通知和任务入口。
 - `utils/` 仅保留无状态或低状态的通用辅助逻辑。
 
-与 X 的差异在 `core/api/registration.py` 的注册层与已删除的模块：`get_api()` 不再构建整理 / STRM / 重复扫描 / 回收站 / 漏斗 / 整理台路由（对应模块已删除，不再是“建好再过滤”），`get_service()` 不注册 STRM 与整理定时服务，`get_sidebar_nav()` 只返回主入口；`__init__.py` 里也不再有 Emby 反代启动、媒体库 Webhook 处理与 STRM 校准方法。
+与 X 的差异在 `core/api/registration.py` 的注册层与已删除的模块：`get_api()` 不再构建整理 / STRM / 重复扫描 / 回收站 / 漏斗 / 整理台路由（对应模块已删除，不再是“建好再过滤”），`get_service()` 不注册 STRM 与整理定时服务，`get_sidebar_nav()` 只返回主入口；入口 `__init__.py` 里也不再有 Emby 反代启动、媒体库 Webhook 处理与 STRM 校准方法，且入口逻辑已拆进 `core/` 的混入类（见上表）。
 
 ## 前端与发布
 

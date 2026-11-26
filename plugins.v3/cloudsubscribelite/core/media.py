@@ -352,24 +352,6 @@ def download_history_identity_payload(media: Any, model: Any) -> Dict[str, Any]:
     return payload
 
 
-def get_download_history_last_by(
-        oper: Any, *, mtype: str, title: Optional[str], year: Optional[str],
-        tmdb_id: Any, season: Any = None, episode: Any = None,
-) -> List[Any]:
-    method = oper.get_last_by
-    kwargs: Dict[str, Any] = {
-        "mtype": mtype,
-        "title": title,
-        "year": year,
-        "season": season,
-        "episode": episode,
-    }
-    if "media_source" in _parameters(method) and _present(tmdb_id):
-        kwargs.update({"media_source": TMDB_SOURCE, "media_id": str(tmdb_id)})
-    elif _present(tmdb_id):
-        kwargs["tmdbid"] = tmdb_id
-    return list(method(**_accepted_kwargs(method, kwargs)) or [])
-
 
 def get_transfer_history_by(
         oper: Any, *, tmdb_id: Any = None, media_source: Any = None,

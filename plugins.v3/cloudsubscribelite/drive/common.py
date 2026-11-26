@@ -22,6 +22,7 @@ from app.utils.string import StringUtils
 
 from ..core.cloud import CloudFile, DirectoryListing, DirectoryLookup
 from ..utils.cache import create_platform_ttl_cache
+from ..utils.magnet import parse_magnet_metadata
 
 if requests is not None:
     DRIVE_RETRY_EXCEPTIONS = (
@@ -117,6 +118,44 @@ class DriveRateLimiter:
         重试循环，这里只需要在每次 PUT 前等够最小间隔、平滑突发。
         """
         self._before_request()
+
+
+def parse_magnet_link_dict(
+    url: str, fetch_metadata: bool = False, *, empty=None, upper_hash: bool = True
+) -> Any:
+    """解析磁力链接为离线下载任务字典（光鸭 / 123 / 115 三处共用）。
+
+    ``empty``：元数据为空时的返回值（光鸭与 123 返回 ``{}``，115 返回
+    ``None``）；``upper_hash``：hash 是否大写（115 不大写）。
+    """
+    metadata = parse_magnet_metadata(url, fetch_info=fetch_metadata)
+    if not metadata:
+        return empty
+    info_hash = metadata["info_hash"]
+    return {
+        "url": str(url).strip(),
+        "name": metadata.get("display_name") or info_hash,
+        "size": safe_int(metadata.get("size")),
+        "hash": str(info_hash).upper() if upper_hash else info_hash,
+        "metadata": metadata,
+    }
+
+
+def find_file_with_retry(find_file, path: str, file_name: str, *, invalidate=None,
+                         tries: int = 10, interval: float = 0.5):
+    """在目录中查找文件，短暂重试直到可见。
+
+    ``invalidate``：每次尝试前调用的目录缓存失效回调（139 云盘需要，
+    天翼不需要，传 None 即不失效）。
+    """
+    for index in range(tries):
+        if invalidate is not None:
+            invalidate()
+        if item := find_file(path, file_name):
+            return item
+        if index < tries - 1:
+            time.sleep(interval)
+    return None
 
 
 def safe_int(value: Any) -> int:

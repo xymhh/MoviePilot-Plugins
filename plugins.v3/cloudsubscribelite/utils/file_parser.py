@@ -120,14 +120,6 @@ class MediaFileParser:
         return None
 
     @classmethod
-    def path_conflicts_season(cls, text: str, target_season: int) -> bool:
-        """路径显式季号存在且与目标季不一致时为 True。"""
-        season = cls.path_season(text)
-        if season is None:
-            return False
-        return season != int(target_season)
-
-    @classmethod
     def extract_season_episode(
             cls, file_name: str
     ) -> Optional[Tuple[int, int]]:

@@ -328,15 +328,6 @@ class QuarkClient:
             base_url=self.BASE_URL,
         )
 
-    def get_capacity(self) -> Dict[str, Any]:
-        member = self.get_member_info()
-        data = self.data(member)
-        if self.is_success(member) and isinstance(data, dict) and (
-                data.get("total_capacity") is not None or data.get("use_capacity") is not None
-        ):
-            return member
-        return self.request("GET", "capacity")
-
     def check_login(self) -> bool:
         return self.is_success(self.get_member_info())
 

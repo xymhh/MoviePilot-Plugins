@@ -21,7 +21,7 @@ class Aria2Settings:
     max_concurrent: int = 2
     min_split_size: str = "1M"
     disk_cache: str = "32M"
-    data_dir: Path = Path("/tmp/cloudsubscribex-aria2")
+    data_dir: Path = Path("/tmp/cloudsubscribelite-aria2")
 
 
 _SETTINGS = Aria2Settings()
@@ -41,7 +41,7 @@ def resolve_data_dir(download_path: Any, plugin_data_path: Any) -> Path:
     if root:
         return Path(root) / DATA_DIR_NAME
     text = str(plugin_data_path or "").strip()
-    return Path(text) if text else Path("/tmp/cloudsubscribex-aria2")
+    return Path(text) if text else Path("/tmp/cloudsubscribelite-aria2")
 
 
 _ENGINE: Optional[Any] = None
@@ -81,7 +81,7 @@ def configure_aria2(**kwargs) -> None:
         ),
         data_dir=Path(
             kwargs.get("data_dir", _SETTINGS.data_dir)
-            or "/tmp/cloudsubscribex-aria2"
+            or "/tmp/cloudsubscribelite-aria2"
         ),
     )
     stale = None

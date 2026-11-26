@@ -63,40 +63,6 @@ def _list_once(share_service: Any, share_url: str, log_prefix: str) -> List[Dict
     return list(files or [])
 
 
-def scan_share(
-        share_service: Any,
-        share_url: str,
-        log_prefix: str = "",
-) -> Dict[str, Any]:
-    """枚举一个分享，返回 ``{"entries", "complete", "reason", "error"}``。
-
-    ``complete=False`` 表示没拿到可信的全量（枚举失败或分享为空），
-    调用方应据此判 ``SCAN_FAILED`` / ``NO_MEDIA``，不要拿半棵树去算覆盖。
-    """
-    result: Dict[str, Any] = {
-        "entries": [],
-        "complete": False,
-        "reason": "",
-        "error": "",
-    }
-    if share_service is None:
-        result["reason"] = "NO_SERVICE"
-        result["error"] = "没有可用的分享驱动"
-        return result
-    try:
-        files = _list_once(share_service, share_url, log_prefix)
-    except Exception as error:  # noqa: BLE001 - 任何异常都只能是「没扫成」
-        result["reason"] = "SCAN_FAILED"
-        result["error"] = f"{type(error).__name__}: {error}"
-        return result
-    entries = normalize_entries(files)
-    result["entries"] = entries
-    if not entries:
-        result["reason"] = "EMPTY"
-        return result
-    result["complete"] = True
-    return result
-
 
 def recognition_mode(
         work_id: Optional[int] = None,
@@ -143,17 +109,3 @@ def summarize(entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "bytes": sum(int(e.get("size") or 0) for e in files),
         "top_dirs": len(groups),
     }
-
-
-def optional_season(entries: Optional[List[Dict[str, Any]]]) -> Optional[int]:
-    """从整棵树里取「唯一显式季号」；多个不同季号时返回 None（不猜）。"""
-    from .file_parser import MediaFileParser
-
-    seasons = set()
-    for item in entries or []:
-        if item.get("is_dir"):
-            continue
-        season = MediaFileParser.path_season(str(item.get("path") or ""))
-        if season:
-            seasons.add(int(season))
-    return seasons.pop() if len(seasons) == 1 else None

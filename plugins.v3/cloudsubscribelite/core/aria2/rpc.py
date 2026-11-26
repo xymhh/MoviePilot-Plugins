@@ -11,7 +11,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-_RPC_ID = "cloudsubscribex"
+_RPC_ID = "cloudsubscribelite"
 
 
 class Aria2Error(RuntimeError):
@@ -85,11 +85,6 @@ class Aria2Rpc:
         if keys:
             params.append(list(keys))
         return self.call("aria2.tellStatus", params) or {}
-
-    def change_uri(self, gid: str, uris: list[str]) -> list:
-        return self.call(
-            "aria2.changeUri", [str(gid), 1, [], list(uris)]
-        ) or []
 
     def force_pause(self, gid: str) -> str:
         return str(self.call("aria2.forcePause", [str(gid)]))

@@ -144,18 +144,6 @@ class SchedulerRegistry:
                 )
                 return False
 
-    def job_ids(self) -> List[str]:
-        """当前已登记的任务 id 列表。"""
-        with self._lock:
-            scheduler = self._scheduler
-            if scheduler is None:
-                return []
-            try:
-                return [job.id for job in scheduler.get_jobs()]
-            except Exception as error:  # noqa: BLE001 - 查不到按空处理
-                logger.debug(f"列出定时任务失败：{error}", exc_info=True)
-                return []
-
     @property
     def running(self) -> bool:
         """调度器是否在运行。"""

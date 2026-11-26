@@ -255,15 +255,6 @@ def _rescue_tail_episodes(groups: Dict[str, Dict[str, Any]]) -> bool:
     return True
 
 
-def episode_universe(
-        entries: Iterable[Dict[str, Any]],
-        treat_iso: bool = False,
-) -> Set[int]:
-    """整棵分享里出现过的集号集合（不看季、不看组），供身份层反推季。"""
-    raw = [e for e in (entries or []) if not e.get("is_dir")]
-    files = [classify_path(e.get("path", ""), e.get("size", 0), treat_iso) for e in raw]
-    return {int(f["ep"]) for f in files if f["kind"] == "media" and f["ep"]}
-
 
 def build_plan(
         entries: Iterable[Dict[str, Any]],

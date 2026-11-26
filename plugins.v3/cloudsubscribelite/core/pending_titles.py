@@ -215,12 +215,6 @@ class PendingTitleStore:
                 )
             return record
 
-    def peek(self) -> List[Dict[str, Any]]:
-        """返回未过期记录的副本（测试与日志用，不消费）。"""
-        with self._lock:
-            self._purge_locked(time.monotonic())
-            return [dict(record) for record in self._records]
-
     def drop(self, record_id: str) -> None:
         """主动丢弃一条记录。"""
         with self._lock:
@@ -295,11 +289,4 @@ _STORE = PendingTitleStore()
 
 def get_pending_title_store() -> PendingTitleStore:
     """返回进程内共享的片名登记表。"""
-    return _STORE
-
-
-def reset_pending_title_store() -> PendingTitleStore:
-    """重建登记表（测试用）。"""
-    global _STORE
-    _STORE = PendingTitleStore()
     return _STORE

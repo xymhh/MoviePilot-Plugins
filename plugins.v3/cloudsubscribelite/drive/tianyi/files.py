@@ -11,6 +11,7 @@ from ..common import (
     CloudDriveFileServiceBase,
     create_directory_cache,
     create_directory_path_cache,
+    find_file_with_retry,
     resolve_directory_path,
 )
 from ...core.cloud import CloudFile, DirectoryListing, DirectoryLookup
@@ -139,12 +140,7 @@ class TianyiFileService(CloudDriveFileServiceBase):
     get_cached_file = find_file
 
     def _find_with_retry(self, path: str, file_name: str) -> CloudFile | None:
-        for index in range(10):
-            if item := self.find_file(path, file_name):
-                return item
-            if index < 9:
-                time.sleep(0.5)
-        return None
+        return find_file_with_retry(self.find_file, path, file_name)
 
     def list_files_recursive(self, path: str, **kwargs):
         lookup = self.resolve_directory(path)

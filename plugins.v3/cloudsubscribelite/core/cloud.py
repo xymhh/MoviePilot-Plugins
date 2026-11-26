@@ -388,12 +388,6 @@ class CacheMaintenanceOperations(Protocol):
 class StrmExportOperations(Protocol):
     """一次导出整棵云端目录树（115「导出目录树」），用于 STRM 差异扫描。"""
 
-    def export_directory_tree(
-            self, directory_id: str, *, timeout_seconds: float = 600.0,
-    ) -> Iterator[str]:
-        """返回相对路径迭代器（目录与文件都含，路径相对 ``directory_id``）。"""
-        ...
-
 
 CAPABILITY_CONTRACTS = {
     CloudDriveCapability.AUTHENTICATION: AuthenticationOperations,

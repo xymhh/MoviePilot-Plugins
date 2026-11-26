@@ -9,7 +9,7 @@ from urllib.parse import unquote
 from app.log import logger
 
 from ...core import OwnerDelegator
-from ...utils import parse_magnet_metadata
+from ..common import parse_magnet_link_dict
 
 try:
     from p115client import check_response
@@ -481,19 +481,9 @@ class OfflineDownloadService(OwnerDelegator):
     def parse_magnet_link(
             self, url: str, fetch_metadata: bool = False
     ) -> Optional[Dict[str, Any]]:
-        metadata = parse_magnet_metadata(
-            url,
-            fetch_info=fetch_metadata,
+        return parse_magnet_link_dict(
+            url, fetch_metadata, empty=None, upper_hash=False
         )
-        if not metadata:
-            return None
-        return {
-            "url": str(url).strip(),
-            "name": metadata.get("display_name") or metadata["info_hash"],
-            "size": int(metadata.get("size") or 0),
-            "hash": metadata["info_hash"],
-            "metadata": metadata,
-        }
 
     @classmethod
     def is_offline_url(cls, url: str) -> bool:

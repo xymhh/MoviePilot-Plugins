@@ -1,4 +1,4 @@
-"""旧插件 ID（``CloudSubscribe``）→ 独立 ID（``CloudSubscribeX``）的一次性迁移。
+"""旧插件 ID（``CloudSubscribe``）→ 独立 ID（``CloudSubscribeLite``）的一次性迁移。
 
 1.6.49 起本插件改用独立 ID，与同名旧插件彻底解耦。老用户升级后不该手工搬运配置，
 于是首次启动时由本模块把旧 ID 下的三样东西搬到新 ID：

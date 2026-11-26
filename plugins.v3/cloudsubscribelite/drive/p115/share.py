@@ -176,16 +176,6 @@ class ShareService(OwnerDelegator):
                 self._discard_share_file_cache(share_url)
         return status
 
-    def is_share_valid(self, share_url: str) -> bool:
-        """
-        快速检查分享链接是否有效
-
-        :param share_url: 115 分享链接
-        :return: True 表示有效，False 表示无效或失效
-        """
-        status = self.check_share_status(share_url)
-        return status.is_valid
-
     def list_share_files(
             self,
             share_url: str,
