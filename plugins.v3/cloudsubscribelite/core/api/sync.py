@@ -203,7 +203,6 @@ class SyncApi(OwnerDelegator):
             values = values.keys()
         return sorted(positive_ints(values or []))
 
-    @classmethod
     def api_vue_start_sync(
             self,
             payload: Optional[Dict[str, Any]] = None,
