@@ -288,7 +288,7 @@ const props = defineProps({
 })
 const emit = defineEmits(["close", "switch", "action"])
 const api = props.api
-const pluginApi = createPluginApi(props.api, "CloudSubscribe")
+const pluginApi = createPluginApi(props.api, "CloudSubscribeLite")
 const rewardVisible = ref(false)
 const message = ref(""),
   messageType = ref("success"),
@@ -398,7 +398,7 @@ const {
   stopSync: stopSyncRequest,
   stopTask: stopTaskRequest,
   upgradeHistory: upgradeHistoryRequest,
-} = useRuntimeData(api, notify, "CloudSubscribe", {
+} = useRuntimeData(api, notify, "CloudSubscribeLite", {
   onSettled: scheduleHistoryRefresh,
   onHistoryChanged: scheduleHistoryRefresh,
 })

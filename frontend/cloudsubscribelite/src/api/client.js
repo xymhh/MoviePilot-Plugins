@@ -43,7 +43,7 @@ export function unwrapResponse(response) {
 
 export function createApiClient(api, pluginId) {
   const resolveApi = () => readValue(api) || {}
-  const resolvePluginId = () => String(readValue(pluginId) || "CloudSubscribe")
+  const resolvePluginId = () => String(readValue(pluginId) || "CloudSubscribeLite")
   const path = (endpoint) => `plugin/${resolvePluginId()}/${String(endpoint || "").replace(/^\//, "")}`
 
   return {

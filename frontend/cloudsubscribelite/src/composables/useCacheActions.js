@@ -28,7 +28,7 @@ export const CACHE_CATEGORIES = [
   },
 ]
 
-export function useCacheActions(api, pluginId = "CloudSubscribe") {
+export function useCacheActions(api, pluginId = "CloudSubscribeLite") {
   const pluginApi = createPluginApi(api, pluginId)
 
   async function clearCache(categories) {

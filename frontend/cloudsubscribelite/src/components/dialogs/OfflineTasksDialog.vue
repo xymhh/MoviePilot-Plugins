@@ -199,7 +199,7 @@ const props = defineProps({
   api: { type: [Object, Function], required: true },
 })
 const emit = defineEmits(["update:modelValue"])
-const pluginId = "CloudSubscribe"
+const pluginId = "CloudSubscribeLite"
 const pluginApi = createPluginApi(props.api, () => pluginId)
 const tasks = ref([])
 const quota = ref({})

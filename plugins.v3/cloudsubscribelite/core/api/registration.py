@@ -241,6 +241,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "后台并发搜索指定媒体的网盘及磁力资源",
             },
             {
+                "path": "/media/servers",
+                "endpoint": self.api_vue_media_servers,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取可用媒体服务器选项",
+            },
+            {
                 "path": "/config/save",
                 "endpoint": self.api_vue_save_config,
                 "methods": ["POST"],

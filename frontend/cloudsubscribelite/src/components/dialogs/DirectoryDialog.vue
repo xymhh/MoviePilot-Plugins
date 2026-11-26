@@ -153,7 +153,7 @@ const props = defineProps({
   provider: { type: String, default: "" },
   targetProvider: { type: String, default: "" },
   initialPath: { type: String, default: "/" },
-  pluginId: { type: String, default: "CloudSubscribe" },
+  pluginId: { type: String, default: "CloudSubscribeLite" },
   title: { type: String, default: "" },
   allowCreate: { type: Boolean, default: true },
   providers: { type: Array, default: () => [] },

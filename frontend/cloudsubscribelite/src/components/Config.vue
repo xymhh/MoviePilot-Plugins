@@ -597,7 +597,7 @@ const props = defineProps({
 })
 const emit = defineEmits(["save", "close", "switch", "layout"])
 const api = props.api
-const pluginApi = createPluginApi(api, () => props.pluginId || "CloudSubscribe")
+const pluginApi = createPluginApi(api, () => props.pluginId || "CloudSubscribeLite")
 
 const pluginDetail = ref(null)
 
@@ -643,7 +643,7 @@ async function fetchMarketPlugin(pluginId) {
 }
 
 async function fetchInstalledPluginDetail() {
-  const currentPluginId = props.pluginId || props.sourcePluginId || "CloudSubscribe"
+  const currentPluginId = props.pluginId || props.sourcePluginId || "CloudSubscribeLite"
   let detail = null
   try {
     const historyRes = await pluginApi.platform.history(currentPluginId, {
@@ -1220,7 +1220,7 @@ const {
   searchPreviewFiles,
 } = useResourcePreview({
   api: previewApi,
-  pluginId: computed(() => props.pluginId || "CloudSubscribe"),
+  pluginId: computed(() => props.pluginId || "CloudSubscribeLite"),
   showMessage: notify,
   submitDownload: async () => {},
   requestCrossTransfer: (_resource, action) => action?.(),
