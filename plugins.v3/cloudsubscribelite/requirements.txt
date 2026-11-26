@@ -1,0 +1,18 @@
+# 上限 <0.0.9.7.7：上游 0.0.9.7.7（2026-11-18 发布）在 __init__.py 用了
+# Python 3.13 才有的 Path.is_file(follow_symlinks=...)，而 MP 容器与 CI
+# 都是 Python 3.12，import 即挂（v1.18.1 的 CI 因此红了 14 个模块）；
+# 该版本 metadata 仍写 requires_python>=3.12，pip 不会拦。等上游修好
+# 再放开上限。0.0.9.7.6 已核实不含该调用。
+p115client>=0.0.9.7.2,<0.0.9.7.7
+# 本地文件上传走 oss2 自管分片（p115disk 同款）；缺失时回退 p115oss
+oss2>=2.18.0
+torf>=4.3.1
+curl_cffi>=0.15.0
+numpy>=2.0.0
+Pillow>=11.0.0
+telethon>=1.36.0
+# MoviePilot 运行时已提供；声明出来是为了让纯 CI/私有库环境也能跑账本单测
+sqlalchemy~=2.0.0
+alembic~=1.13
+# 通知模板渲染；MoviePilot 运行时已提供，声明出来让纯 CI 环境也能跑模板单测
+jinja2>=3.1.0

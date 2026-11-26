@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudsubscribelite"
+dynamic = ["version"]
+description = "MoviePilot v3 plugin: CloudSubscribe"
+requires-python = ">=3.12"
+dependencies = [
+    "p115client>=0.0.9.7.2,<0.0.9.7.7",
+    "oss2>=2.18.0",
+    "torf>=4.3.1",
+    "curl_cffi>=0.15.0",
+    "numpy>=2.0.0",
+    "Pillow>=11.0.0",
+    "telethon>=1.36.0",
+    "sqlalchemy~=2.0.0",
+    "alembic~=1.13",
+    "jinja2>=3.1.0",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.setuptools.dynamic]
+version = {attr = "version.VERSION"}

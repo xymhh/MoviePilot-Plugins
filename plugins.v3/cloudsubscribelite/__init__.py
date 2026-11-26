@@ -1,0 +1,2744 @@
+"""
+网盘订阅助手插件
+结合订阅功能，自动搜索网盘资源并同步缺失内容
+"""
+import ast
+import copy
+import datetime
+import json
+import re
+import traceback
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event as ThreadEvent, Lock, RLock, local, Thread
+from typing import Optional, Any, List, Dict, Tuple, Callable, Union
+
+import pytz
+from app.api.endpoints.plugin import register_plugin_api
+from app.core.config import settings
+from app.core.event import Event, eventmanager
+from app.log import logger
+from app.plugins import _PluginBase
+from app.schemas import DownloaderFile, DownloaderTorrent, Notification
+from app.schemas.types import (
+    ChainEventType,
+    EventType,
+    NotificationType,
+    SystemConfigKey,
+    TorrentQueryStatus,
+)
+from apscheduler.triggers.cron import CronTrigger
+
+from .version import VERSION
+from .utils.notify_template import (
+    DEFAULT_TEMPLATES,
+    apply_runtime_updates,
+    upgrade_legacy_templates,
+)
+from .core import (
+    CloudDriveCapability,
+    CloudDriveManager,
+    CloudDriveProvider,
+    CloudDriveRegistry,
+    get_component,
+    resolve_component,
+)
+from .core.aria2 import configure_aria2, resolve_data_dir, shutdown_aria2
+from .core.config import (
+    CONCURRENCY_AND_COOLDOWN_PARAMS,
+    PLUGIN_CONFIG_EXTRA_KEYS as PLUGIN_CONFIG_EXTRA_KEYS,
+    is_plugin_config_key,
+)
+from .core.api import (
+    AccountApi,
+    ChannelsApi,
+    ConfigApi,
+    CheckinApi,
+    DoctorApi,
+    MoviePilotRegistration,
+    DuplicateApi,
+    MediaLibraryApi,
+    PageApi,
+    QRCodeService,
+    RedirectApi,
+    RuntimeApi,
+    SearchApi,
+    SyncApi,
+    TgMonitorApi,
+    FunnelApi,
+    RecyclebinRestoreApi,
+    StrmDuplicatesApi,
+)
+from .core.channels import ChannelStore
+from .core.config_normalize import normalize_plugin_config
+from .core.scheduler import SchedulerRegistry
+from .core.hook import MessageRoutingHook, PluginEventHandler, SubscriptionSearchHook
+from .core.legacy_migration import LegacyIdMigrator
+from .core.media_scope import configure_media_path_ignores
+from .core.services import (
+    SubscriptionControlService,
+    CheckinService,
+    CacheWatchService,
+    OfflineTaskService,
+    OrganizeService,
+    PlatformIntegrationService,
+    ResidueService,
+    SubscriptionScoringService,
+    SyncExecutionService,
+    SyncRuntimeService,
+    SkipStatsCollector,
+)
+from .core.storage import CloudSubscribeDataStore
+from .core.downloader_view import (
+    DOWNLOADER_NAME,
+    DOWNLOADER_TYPE,
+    ensure_downloader_entry,
+    project_tasks,
+    remove_downloader_entry,
+    resolve_task_id,
+    task_to_files,
+)
+from .core.subscribe import AutoSubscribeService
+from .drive.scanner import DriverRegistry
+from .handlers import SearchHandler, SyncHandler, SubscribeHandler, WebhookHandler
+from .search.scanner import SearchSourceRegistry
+from .search.types import ensure_magnet_for_cloud_policy
+from . import subscribe  # noqa: F401 - 导入即注册自动订阅渠道
+from .utils import FileMatcher, configure_magnet_metadata_url
+from .utils.file_parser import MediaFileParser
+from .utils.http_client import build_proxy_url, validate_proxy_address
+from .core.services.upload_quota import UploadQuota, clamp_limit_gb
+
+_COMPONENT_TYPES = (
+    PageApi,
+    DoctorApi,
+    AccountApi,
+    ChannelsApi,
+    SearchApi,
+    ConfigApi,
+    CheckinApi,
+    SyncApi,
+    RuntimeApi,
+    MediaLibraryApi,
+    QRCodeService,
+    RedirectApi,
+    DuplicateApi,
+    TgMonitorApi,
+    FunnelApi,
+    RecyclebinRestoreApi,
+    StrmDuplicatesApi,
+    MessageRoutingHook,
+    PluginEventHandler,
+    MoviePilotRegistration,
+    SyncRuntimeService,
+    OfflineTaskService,
+    SyncExecutionService,
+    SubscriptionScoringService,
+    SubscriptionControlService,
+    SubscriptionSearchHook,
+    PlatformIntegrationService,
+    CheckinService,
+    OrganizeService,
+    ResidueService,
+    CacheWatchService,
+    AutoSubscribeService,
+)
+
+
+class CloudSubscribeLite(_PluginBase):
+    """网盘订阅助手插件。
+
+    使用独立插件 ID ``CloudSubscribeX``，与早期同名插件（ID ``CloudSubscribe``）
+    彻底解耦：两者可在 MoviePilot 里并存安装、各自独立升级。首次启动时会自动从旧
+    ID 迁移配置、持久化数据与私有数据库（见 :meth:`_migrate_from_legacy_plugin`）。
+    """
+
+    def post_message(
+            self,
+            channel=None,
+            mtype=None,
+            title=None,
+            text=None,
+            image=None,
+            link=None,
+            userid=None,
+            **kwargs,
+    ):
+        """发送通知，并关闭 Telegram 的网页预览卡片。
+
+        MoviePilot 默认把插件通知的 link 指向插件页；Telegram 会为这个链接
+        生成一张大预览卡，和通知正文叠在一起很占屏。这里保留「查看详情」链接，
+        但显式关闭预览。旧版基类不支持该参数时回退原逻辑。
+        """
+        if not link:
+            link = settings.MP_DOMAIN(
+                f"#/plugins?tab=installed&id={self.__class__.__name__}"
+            )
+        kwargs.setdefault("disable_web_page_preview", True)
+        try:
+            notification = Notification(
+                channel=channel,
+                mtype=mtype,
+                title=title,
+                text=text,
+                image=image,
+                link=link,
+                userid=userid,
+                **kwargs,
+            )
+        except TypeError:
+            kwargs.pop("disable_web_page_preview", None)
+            return super().post_message(
+                channel=channel,
+                mtype=mtype,
+                title=title,
+                text=text,
+                image=image,
+                link=link,
+                userid=userid,
+                **kwargs,
+            )
+        return self.chain.post_message(notification)
+
+    # 插件名称
+    plugin_name = "网盘订阅 Lite"
+    # 插件描述
+    plugin_desc = "搜索网盘资源补齐订阅缺失影视，支持跨盘转存、洗版与整理。"
+    # 插件图标
+    plugin_icon = "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png"
+    # 插件版本
+    plugin_version = VERSION
+    # 插件作者
+    plugin_author = "xymhh"
+    # 作者主页
+    author_url = "https://github.com/xymhh"
+    # 插件配置项ID前缀（保持 cloudsubscribe_ 不变，旧配置键与旧数据键无需重写）
+    plugin_config_prefix = "cloudsubscribe_"
+    # 旧插件 ID：早期版本与同名旧插件都用它，首次启动时从它迁移
+    legacy_plugin_id = "CloudSubscribe"
+    plugin_order = 21
+    auth_level = 1
+
+    # 私有变量
+    # 插件唯一的定时任务注册表（core.scheduler.SchedulerRegistry）：全部
+    # 周期/一次性任务按 id 登记在这里，stop_service 一次停掉，不再各自建调度器。
+    _job_registry: Optional[SchedulerRegistry] = None
+    _offline_scheduler_lock: RLock = RLock()
+    _offline_monitor_lock: RLock = RLock()
+    # 配置属性
+    _enabled: bool = False
+    _show_sidebar_nav: bool = True
+    _agent_enabled: bool = True
+    _direct_transfer_enabled: bool = True
+    _title_subscribe_enabled: bool = True
+    _subscribe_all_missing_seasons: bool = True
+    _subscribe_skip_season_zero: bool = True
+    _subscribe_season_limit: int = 0
+    _organize_after_transfer: bool = True
+    _organize_subtitles: bool = True
+    _subtitle_traditional_to_simplified: bool = False
+    _anime_pack_preferred: bool = True
+    _offline_timeout: int = 30
+    _cron: str = "0 18-23 * * *"
+    _auto_subscribe_enabled: bool = False
+    _auto_subscribe_onlyonce: bool = False
+    _auto_subscribe_cron: str = "0 8 * * *"
+    _notify: bool = False
+    _notification_type: NotificationType = NotificationType.Plugin
+    _webhook_enabled: bool = False
+    _webhook_url: str = ""
+    _webhook_method: str = "POST"
+    _webhook_timeout: int = 10
+    _cloud_drive_key: str = "115"
+    _resource_type_order: List[str] = ["115", "ed2k"]
+    # 订阅搜索可落地的资源类型（内部键），由 CloudDriveManager 按驱动能力回写
+    _cloud_drive_resource_types: Tuple[str, ...] = ()
+    _magnet_metadata_url_template: str = "https://itorrents.org/torrent/{info_hash}.torrent"
+
+    # 订阅过滤模式："exclude" 排除模式（处理除勾选外的全部订阅）/ "include" 指定模式（仅处理勾选的订阅）
+    _subscribe_filter_mode: str = "exclude"
+    _exclude_subscribes: List[int] = []
+    _include_subscribes: List[int] = []
+    # 搜索源优先级（按列表顺序），为空时使用已启用来源的默认顺序
+    _search_source_order: List[str] = []
+    _search_proxy: Any = ""
+    _search_proxy_address: str = ""
+    _search_proxy_username: str = ""
+    _search_proxy_password: str = ""
+    # 真实上传 115 的代理（空=直连）与每日字节额度（硬上限 900GB）
+    _cross_transfer_upload_proxy: str = ""
+    _cross_transfer_daily_upload_limit_gb: int = 900
+    _upload_quota: Any = None
+    _search_cache_enabled: bool = True
+    _search_cache_ttl_minutes: int = 30
+    _search_concurrency: int = 2
+    _search_source_timeout: int = 60
+    _search_circuit_breaker_enabled: bool = True
+    _search_circuit_breaker_threshold: int = 3
+    _search_circuit_breaker_cooldown: int = 60
+    _checkin_cron: str = "0 8 * * *"
+    _checkin_auto_retry: bool = True
+    _checkin_retry_count: int = 2
+
+    # 是否屏蔽系统订阅（True=已屏蔽系统订阅，False=已恢复系统订阅）
+    _block_system_subscribe: bool = False
+    _takeover_new_subscribes: bool = False
+    _platform_download_policy: str = "block"
+
+    _transfer_task_batch_size: int = 50
+    _cross_transfer_enabled: bool = False
+    _cross_transfer_media_types: list = ["movie", "tv"]
+    _cross_transfer_download_path: str = ""
+    _cross_transfer_download_threads: int = 16
+    _cross_transfer_max_concurrent: int = 2
+    _cross_transfer_aria2_enabled: bool = False
+    _cross_transfer_aria2_connections: int = 64
+    _cross_transfer_aria2_max_concurrent: int = 2
+    _cross_transfer_aria2_min_split_size: str = "1M"
+    _cross_transfer_aria2_disk_cache: str = "32M"
+    _cross_transfer_direct_stream: bool = True
+    _cross_transfer_upload_concurrency: int = 2
+    # 115 上传熔断器配置（Phase 3b-10）：连续失败几次后打开、冷却多久。
+    _cross_transfer_upload_breaker_threshold: int = 5
+    _cross_transfer_upload_breaker_cooldown_seconds: float = 300.0
+    _cross_transfer_rapid_miss_action: str = "abort"
+    # 1.35.0：上传到待整理目录后由 CS 自己整理（默认关）。
+    _organize_after_upload: bool = False
+    _organize_staging_path: str = ""
+    _organize_staging_cleanup: bool = True
+    # 1.32.0：真名落盘媒体残留的保留期（小时，0=关闭）。
+    _cross_transfer_real_name_retention_hours: int = 24
+    # 国内中继上传（实验）：默认关闭，未配置地址时强制视为关闭。
+    # TG 频道监控（用户自己的 TG API 会话）：默认关闭，未配置凭据时强制视为关闭。
+    _tg_monitor_enabled: bool = False
+    _tg_api_id: int = 0
+    _tg_api_hash: str = ""
+    _tg_session: str = ""
+    _tg_channels: list = []
+    _tg_channel_rules: list = []
+    _tg_monitor_keywords: list = []
+    _tg_monitor_exclude_keywords: list = []
+    _tg_monitor_scan_limit: int = 20
+    _tg_monitor_interval_minutes: int = 10
+    _tg_monitor_max_items: int = 500
+    #: 渠道库（channels.json）：搜索源与 TG 监控频道的唯一运行来源。
+    #: ``None`` 表示尚未按当前数据目录惰性创建。
+    _channels: Optional[ChannelStore] = None
+    # 跨盘缓存残留清理：启动时一次孤儿清理 + 手动按钮（1.10.0 起任务结束
+    # 即删临时文件，不再保留缓存、定时清理与磁盘压力清理）
+    _residue_cleanup: bool = True
+    #: STRM 全量校准单次时间预算（秒），0 表示不限；到达上限后断点续扫。
+    _strm_full_scan_budget: int = 900
+    _subscription_concurrency: int = 2
+    _batch_size: int = 20
+    _batch_interval: float = 3
+    _transfer_risk_cooldown: int = 1800
+    _skip_other_season_dirs: bool = True
+    _cross_season_path_guard: bool = True
+    # 「节目名 = 每期集数」多行配置：综艺期号换算成集号（留空=期号即集号）
+    _period_episode_rules_text: str = ""
+    _video_extensions: List[str] = [".mkv", ".mp4", ".avi", ".iso"]
+    _subtitle_extensions: List[str] = [
+        ".srt", ".ass", ".ssa", ".vtt", ".sub", ".sup", ".idx", ".smi", ".mks"
+    ]
+
+    # 1.12.20 Phase 1：补齐只做 setattr 挂载的运行期属性（此前仅在方法内
+    # 赋值，类上未声明，配置应用前直接读取会走 OwnerDelegator 委托甚至报错）。
+    _cross_transfer_manager: Optional[Any] = None
+    _notify_templates: Dict[str, str] = {}
+    _organize_source_path: str = ""
+    _organize_max_files: int = 500
+    _organize_max_depth: int = 8
+    _organize_include_subtitles: bool = True
+    _organize_conflict_policy: str = "skip"
+    _organize_schedule_enabled: bool = False
+    _organize_schedule_cron: str = "0 4 * * *"
+    _organize_schedule_auto_execute: bool = True
+    _organize_schedule_notify: bool = True
+    _strm_scan_lock: Optional[Any] = None
+    _subscribe_search_recent: Dict[str, Any] = {}
+
+    # 洗版配置
+    _upgrade_subscribe_ids: list = []
+    _last_scored_ids_hash: str = ""  # 上次评分过的ids hash值，用于保存配置时防重复触发
+    _self_heal_interval: int = 10
+    _enable_cloud_upgrade: bool = False
+    _enable_pt_upgrade: bool = False
+    _upgrade_mode: str = "largest"
+    _episode_dedup_enabled: bool = True
+    _verify_landed_enabled: bool = True
+    _prefer_template_named_version: bool = True
+    _quality_min_gain_percent: int = 10
+    _upgrade_episode_limit: int = 0
+    _quality_min_gain_mb: int = 200
+    _local_resource_path: str = ""
+    # 媒体库一级目录（按媒体类型分层：电影/剧集），仅作用于网盘媒体库与本地 STRM 目录结构
+    _type_folder_enabled: bool = False
+    _type_folder_movie: str = "电影"
+    _type_folder_tv: str = "剧集"
+    _strm_generate_enabled: bool = False
+    _nfo_scrape_enabled: bool = False
+    _image_scrape_enabled: bool = False
+    _strm_base_url: str = ""
+    _strm_url_template: str = (
+        "{base_url}/api/v1/plugin/CloudSubscribeX/redirect"
+        "?pickcode={pickcode}&file_name={file_name}"
+    )
+    _strm_full_scan_enabled: bool = False
+    _strm_full_scan_overwrite: bool = False
+    _strm_increment_enabled: bool = False
+    _strm_increment_minutes: int = 10
+    _strm_increment_budget: int = 180
+    _media_server_refresh_enabled: bool = False
+    _media_servers: List[str] = []
+    _media_server_ignore_paths: str = ""
+    _media_server_path_mappings: str = ""
+    _media_server_refresh_delay: int = 0
+    _emby_proxy_enabled: bool = False
+    _emby_proxy_port: int = 3010
+    _emby_proxy_upstream: str = ""
+    _emby_proxy_allowed_clients: str = ""
+    _emby_mediainfo_enabled: bool = False
+    _platform_media_sync_enabled: bool = False
+    _platform_deep_delete_enabled: bool = False
+    _platform_deep_delete_title_keywords: list = ["深度删除", "神医"]
+    _timeout_enabled: bool = True
+    _timeout_default_connect: float = 30
+    _timeout_default_pool: float = 15
+    _timeout_default_read: float = 60
+    _timeout_default_write: float = 60
+    _timeout_slow_connect: float = 30
+    _timeout_slow_pool: float = 15
+    _timeout_slow_read: float = 300
+    _timeout_slow_write: float = 300
+    # 屏蔽态时间段（block_system_subscribe=OFF 时生效）
+    _block_start_time: str = "18:00"
+    _block_end_time: str = "23:59"
+    # 全局配置是否已应用（安装成功首次执行时才修改MP系统配置）
+    _global_config_applied: bool = False
+
+    # 运行时对象
+    _cloud_drive_registry: Optional[CloudDriveRegistry] = None
+    _cloud_drive: Optional[CloudDriveProvider] = None
+    _drive_manager: Optional[CloudDriveManager] = None
+
+    # 处理器
+    _search_handler: Optional[SearchHandler] = None
+    _subscribe_handler: Optional[SubscribeHandler] = None
+    _sync_handler: Optional[SyncHandler] = None
+    _webhook_handler: Optional[WebhookHandler] = None
+    _subscribe_search_originals: Dict[str, Callable[..., Any]] = {}
+    _subscribe_chain_originals: Dict[str, Callable[..., Any]] = {}
+    _platform_search_originals: Dict[str, Callable[..., Any]] = {}
+    _interaction_originals: Dict[str, Callable[..., Any]] = {}
+    _stop_event: Optional[ThreadEvent] = None
+    _sync_running: bool = False
+    _sync_status: str = "idle"
+    _sync_task_text: str = "当前没有订阅处理任务"
+    _sync_progress: int = 0
+    _sync_context: Dict[str, Any] = {}
+    # 一次同步运行内被跳过的候选资源统计（运行期实例，类属性兜底为 None）
+    _skip_stats: Optional[SkipStatsCollector] = None
+    _sync_run_started_at: float = 0
+    _sync_last_finished_at: float = 0
+    _sync_last_elapsed_ms: int = 0
+    _sync_tasks: Dict[str, Dict[str, Any]] = {}
+    _sync_tasks_lock: Optional[RLock] = None
+    _runtime_revision: int = 0
+    _history_revision: int = 0
+    _runtime_revision_lock: Lock = Lock()
+    _task_local: Optional[local] = None
+    _pending_config: Optional[Dict[str, Any]] = None
+    _applied_config: Dict[str, Any] = {}
+    _pending_config_lock: RLock = RLock()
+    _subscribe_search_queue_lock: Optional[RLock] = None
+    _subscribe_search_pending: Dict[Optional[int], bool] = {}
+    _subscribe_search_active: Dict[Optional[int], bool] = {}
+    _subscribe_search_queue_shutdown: Optional[ThreadEvent] = None
+    _subscribe_search_coordinator_running: bool = False
+    _subscribe_search_queue_revision: int = 0
+    _sync_operation_executor: Optional[ThreadPoolExecutor] = None
+
+    @property
+    def _p115_manager(self) -> Any:
+        return self._drive_manager.get_client("115") if self._drive_manager else None
+
+    @_p115_manager.setter
+    def _p115_manager(self, value: Any) -> None:
+        if self._drive_manager:
+            self._drive_manager._clients["115"] = value
+
+    def _get_data_store(self) -> CloudSubscribeDataStore:
+        store = self.__dict__.get("_cloudsubscribe_data_store")
+        if store is None:
+            store = CloudSubscribeDataStore(self)
+            self.__dict__["_cloudsubscribe_data_store"] = store
+        return store
+
+    def _scheduler_registry(self) -> SchedulerRegistry:
+        """插件唯一的定时任务注册表（core.scheduler.SchedulerRegistry）。
+
+        正常由 init_plugin 在 _apply_plugin_config 之前创建；这里兜底懒创建，
+        保证配置保存、离线监控等在任何调用顺序下都能登记任务。注册表在
+        shutdown 后可重建，所以 stop_service 之后再登记不需要额外处理。
+        """
+        registry = self.__dict__.get("_job_registry")
+        if registry is None:
+            registry = SchedulerRegistry()
+            self.__dict__["_job_registry"] = registry
+        return registry
+
+    def get_data(self, key: Optional[str] = None, plugin_id: Optional[str] = None) -> Any:
+        """读取插件业务数据与可恢复运行状态，统一使用私有库。"""
+        target_plugin = plugin_id or self.__class__.__name__
+        if target_plugin == self.__class__.__name__ and key:
+            if CloudSubscribeDataStore.handles(key):
+                return self._get_data_store().load(key)
+            return None
+        return super().get_data(key=key, plugin_id=plugin_id)
+
+    def save_data(
+            self, key: str, value: Any, plugin_id: Optional[str] = None
+    ) -> None:
+        """保存插件数据"""
+        target_plugin = plugin_id or self.__class__.__name__
+        if target_plugin == self.__class__.__name__:
+            if CloudSubscribeDataStore.handles(key):
+                self._get_data_store().save(key, value)
+                return
+            raise ValueError(f"未声明的数据键不能写入 PluginData：{key}")
+        super().save_data(key=key, value=value, plugin_id=plugin_id)
+
+    def _get_component(self, component_type):
+        return get_component(self, component_type, "_plugin_components")
+
+    def __getattr__(self, name):
+        return resolve_component(self, _COMPONENT_TYPES, name, "_plugin_components")
+
+    def get_state(self) -> bool:
+        return self._get_component(MoviePilotRegistration).get_state()
+
+    @staticmethod
+    def get_render_mode() -> Tuple[str, str]:
+        return MoviePilotRegistration.get_render_mode()
+
+    def get_form(self) -> Tuple[Optional[List[dict]], Dict[str, Any]]:
+        return self._get_component(MoviePilotRegistration).get_form()
+
+    def get_page(self) -> Optional[List[dict]]:
+        return self._get_component(MoviePilotRegistration).get_page()
+
+    def get_api(self) -> List[Dict[str, Any]]:
+        return self._get_component(MoviePilotRegistration).get_api()
+
+    def get_command(self) -> List[Dict[str, Any]]:
+        return self._get_component(MoviePilotRegistration).get_command()
+
+    def get_service(self) -> List[Dict[str, Any]]:
+        return self._get_component(MoviePilotRegistration).get_service()
+
+    def get_dashboard_meta(self) -> List[Dict[str, str]]:
+        return self._get_component(MoviePilotRegistration).get_dashboard_meta()
+
+    def get_dashboard(self, key: str = "overview", **kwargs):
+        return self._get_component(MoviePilotRegistration).get_dashboard(key, **kwargs)
+
+    def get_sidebar_nav(self) -> List[Dict[str, Any]]:
+        return self._get_component(MoviePilotRegistration).get_sidebar_nav()
+
+    def get_actions(self) -> List[Dict[str, Any]]:
+        return self._get_component(MoviePilotRegistration).get_actions()
+
+    def get_agent_tools(self) -> List[type]:
+        return self._get_component(MoviePilotRegistration).get_agent_tools()
+
+    @eventmanager.register(EventType.SubscribeAdded)
+    def on_subscribe_added(self, event: Event):
+        return self._get_component(PluginEventHandler).on_subscribe_added(event)
+
+    # 注意：有意不监听 EventType.SubscribeModified——用户手动修改订阅
+    # 站点时，不自动覆盖用户操作（1.12.20 随 Phase 1 取消注册，
+    # 原 PluginEventHandler.on_subscribe_modified 本就是空操作）。
+
+    @eventmanager.register(ChainEventType.ResourceDownload)
+    def on_resource_download(self, event: Event):
+        return self._get_component(PluginEventHandler).on_resource_download(event)
+
+    @eventmanager.register(EventType.TransferComplete)
+    def on_transfer_complete(self, event: Event):
+        return self._get_component(PluginEventHandler).on_transfer_complete(event)
+
+    @eventmanager.register(EventType.PluginAction)
+    def on_plugin_action(self, event: Event):
+        return self._get_component(PluginEventHandler).on_plugin_action(event)
+
+    @eventmanager.register(EventType.MessageAction)
+    def on_message_action(self, event: Event):
+        return self._get_component(PluginEventHandler).on_message_action(event)
+
+    @eventmanager.register(EventType.WebhookMessage)
+    def on_media_server_webhook(self, event: Event):
+        event_info = getattr(event, "event_data", None) if event else None
+        event_name = str(getattr(event_info, "event", None) or (
+            event_info.get("event") if isinstance(event_info, dict) else "") or "")
+        channel = str(getattr(event_info, "channel", None) or (
+            event_info.get("channel") if isinstance(event_info, dict) else "") or "")
+        # 媒体库一次操作会连发多条 webhook（神医约 5 条），INFO 会刷屏；
+        # 真正的处理结果由 media_library 汇总成 2 行打印。
+        logger.debug(
+            f"收到平台媒体服务器 WebhookMessage 事件: channel={channel or '未知'}, event={event_name or '未知'}")
+        return self._get_component(MediaLibraryApi).handle_platform_media_webhook(
+            event_info
+        )
+
+    @staticmethod
+    def _cron_is_valid(cron_expr: str) -> bool:
+        """仅校验 cron 表达式是否合法,不再强制最小间隔"""
+        cron_expr = (cron_expr or "").strip()
+        if not cron_expr:
+            return False
+        try:
+            tz = pytz.timezone(settings.TZ)
+            CronTrigger.from_crontab(cron_expr, timezone=tz)
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _resolve_notification_type(value: Any) -> NotificationType:
+        """将配置值解析为消息类型，无效值回退为插件消息。"""
+        if isinstance(value, NotificationType):
+            return value
+        configured = str(value or NotificationType.Plugin.name).strip()
+        if configured in NotificationType.__members__:
+            return NotificationType[configured]
+        for item in NotificationType:
+            if item.value == configured:
+                return item
+        logger.warning(f"未知消息通知类型：{configured}，已回退为插件")
+        return NotificationType.Plugin
+
+
+    def init_plugin(self, config: dict = None):
+        """宿主加载或重载插件时初始化完整运行环境。"""
+        self._raise_file_limit()
+        # 独立 ID 的首次启动：先把旧 ID 的配置/数据/私有数据库搬过来，再建库并应用配置。
+        config = self._migrate_from_legacy_plugin(config)
+        self._offline_monitor_lock = RLock()
+        self._offline_scheduler_lock = RLock()
+        # 统一调度器先建好：_apply_plugin_config 末尾的各 _start_* 直接登记任务。
+        self.__dict__["_job_registry"] = SchedulerRegistry()
+        # 初始化独立数据库并修复历史分组键。
+        self._get_data_store().initialize()
+        self._apply_plugin_config(config, reset_runtime=True)
+        self._ensure_notify_template_defaults(config)
+        # 内置 Emby 302 反代：开关关闭时不建线程、不占端口。
+        try:
+            from .core.api.emby_proxy import start_emby_proxy
+
+            start_emby_proxy(self)
+        except Exception as error:  # noqa: BLE001 - 反代失败不得影响插件主流程
+            logger.error(f"Emby 302 反代初始化失败：{error}")
+        # 在下载管理页登记独立标签，任务进度改走下载页展示。
+        self._ensure_downloader_entry()
+
+    def _ensure_notify_template_defaults(self, config: Optional[dict]) -> None:
+        """把缺失的通知模板默认值写回配置。
+
+        配置页读的是数据库里的原始配置，新版本新增的模板键在用户保存之前并不存在，
+        这里在初始化时补全，保证首次打开「消息通知」就能看到可编辑的默认文案。
+        """
+        if not isinstance(config, dict):
+            return
+        missing = {
+            key: default
+            for key, default in DEFAULT_TEMPLATES.items()
+            if not str(config.get(key) or "").strip()
+        }
+        # 仍是旧默认值的模板随版本升级到新排版；用户改过的不动
+        upgraded = upgrade_legacy_templates(config)
+        if not missing and not upgraded:
+            return
+        merged = dict(config)
+        merged.update(missing)
+        merged.update(upgraded)
+        updates = {**missing, **upgraded}
+        if self.update_config(merged):
+            if missing:
+                logger.info(f"已为配置补全 {len(missing)} 个通知模板默认值")
+            if upgraded:
+                logger.info(f"已将 {len(upgraded)} 个旧版通知模板升级为新排版")
+        else:
+            logger.warning("通知模板默认值写回配置失败，运行时将使用内置默认模板")
+        # 本方法在 _apply_plugin_config 之后执行，内存里还是旧模板；
+        # 不同步就会「配置已更新但通知照旧」（1.7.75 线上实测）。
+        changed = apply_runtime_updates(
+            getattr(self, "_notify_templates", None), updates
+        )
+        if changed:
+            logger.info(f"运行期通知模板已同步 {changed} 项，本次进程内立即生效")
+
+    def _migrate_from_legacy_plugin(self, config: Optional[dict]) -> Optional[dict]:
+        """首次启动时把旧插件 ID（CloudSubscribe）的配置/数据/私有库搬到独立 ID。
+
+        明细见 :class:`~core.legacy_migration.LegacyIdMigrator`：只在自身尚无配置且
+        未迁移过时执行，迁移后 ``enabled`` 强制置 False（旧插件可能仍在跑，两个插件
+        同时转存会互相踩），启用与否留给用户手动决定。
+        """
+        return LegacyIdMigrator(
+            self, legacy_plugin_id=self.legacy_plugin_id
+        ).migrate(config)
+
+    @staticmethod
+    def _raise_file_limit(target: int = 65535) -> None:
+        """把进程的软 nofile 上限抬到 ``target``（受核允许的硬上限约束）。
+
+        容器里默认 ``soft=1024``，跨盘并发下载（每个分片一个连接）会把它撞爆，
+        表现为 ``Errno 24 Too many open files`` 加掉速。硬上限通常已是 524288，
+        所以插件自己就能抬，不必改 docker compose。
+        """
+        try:
+            import resource
+
+            soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+            if hard == resource.RLIM_INFINITY or int(hard) < 0:
+                desired = int(target)
+            else:
+                desired = min(int(target), int(hard))
+            if int(soft) >= desired:
+                return
+            resource.setrlimit(resource.RLIMIT_NOFILE, (desired, hard))
+            logger.info(f"已提升进程文件句柄上限：soft {soft} -> {desired}（hard {hard}）")
+        except Exception as error:  # noqa: BLE001 - 抬不动不影响插件可用性
+            logger.warning(f"提升进程文件句柄上限失败（不影响运行）：{error}")
+
+    @staticmethod
+    def _normalize_deep_delete_title_keywords(value: Any) -> List[str]:
+        """归一化深度删除标题关键词：列表原样去重，字符串按换行/逗号拆。
+
+        空列表表示标题分支永不命中（只剩事件名与 Item Path 两路），
+        此时记一条 warning，避免用户误以为配空就是全匹配。
+        """
+        if isinstance(value, str):
+            keywords = [
+                part.strip()
+                for part in re.split(r"[\n,，]", value)
+                if part.strip()
+            ]
+        elif isinstance(value, (list, tuple, set)):
+            keywords = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            keywords = []
+        if not keywords:
+            logger.warning(
+                "深度删除标题关键词为空：标题匹配分支将不触发，"
+                "仅保留事件名与 Item Path 匹配"
+            )
+        return keywords
+
+    def _apply_plugin_config(
+            self, config: Optional[Dict[str, Any]], reset_runtime: bool = False
+    ) -> None:
+        """应用配置并重建相关服务；普通保存不重置同步任务状态。"""
+        config = dict(config or {})
+        original_config = dict(config)
+        configure_media_path_ignores(config.get("media_server_ignore_paths", ""))
+        config = normalize_plugin_config(config)
+        if config != original_config:
+            # 宿主仅在真正失败时返回 False，None 表示库中已是该配置（无需更新）。
+            if self.update_config(config) is False:
+                logger.warning("订阅接管配置迁移持久化失败，本次运行仍使用迁移后配置")
+            else:
+                logger.info("插件配置已清理并迁移到当前格式")
+        hot_keys = {
+            "show_sidebar_nav",
+            "agent_enabled",
+            "direct_transfer_enabled",
+            "title_subscribe_enabled",
+            "subscribe_all_missing_seasons",
+            "subscribe_skip_season_zero",
+            "subscribe_season_limit",
+            "notify",
+            "notification_type",
+            "webhook_enabled",
+            "webhook_url",
+            "webhook_method",
+            "webhook_timeout",
+            "media_server_refresh_enabled",
+            "media_servers",
+            "media_server_ignore_paths",
+            "media_server_path_mappings",
+            "media_server_refresh_delay",
+            "emby_proxy_enabled",
+            "emby_proxy_port",
+            "emby_proxy_upstream",
+            "emby_proxy_allowed_clients",
+            "emby_mediainfo_enabled",
+            "platform_media_sync_enabled",
+            "platform_deep_delete_enabled",
+            "platform_deep_delete_title_keywords",
+            "video_extensions",
+            "subtitle_extensions",
+        }
+        changed_keys = set()
+        if not reset_runtime and self._applied_config:
+            changed_keys = {
+                key for key in set(self._applied_config) | set(config)
+                if self._applied_config.get(key) != config.get(key)
+            }
+            if not changed_keys:
+                # v1.15.0：配置没变也重登一次下载器条目（幂等、条目已在
+                # 时不写）；2026-11-18 线上条目丢过一次，init_plugin 外
+                # 的热更新路径原来从不重登，运行中丢了无人恢复。
+                self._ensure_downloader_entry()
+                return
+            if changed_keys <= hot_keys:
+                self._show_sidebar_nav = bool(config.get("show_sidebar_nav", True))
+                self._agent_enabled = bool(config.get("agent_enabled", True))
+                self._direct_transfer_enabled = bool(
+                    config.get("direct_transfer_enabled", True)
+                )
+                self._title_subscribe_enabled = bool(
+                    config.get("title_subscribe_enabled", True)
+                )
+                self._subscribe_all_missing_seasons = bool(config.get("subscribe_all_missing_seasons", True))
+                self._subscribe_skip_season_zero = bool(config.get("subscribe_skip_season_zero", True))
+                try:
+                    self._subscribe_season_limit = max(0, int(config.get("subscribe_season_limit", 0)))
+                except (TypeError, ValueError):
+                    self._subscribe_season_limit = 0
+                if "video_extensions" in changed_keys or "subtitle_extensions" in changed_keys:
+                    video_exts, sub_exts = MediaFileParser.configure_extensions(
+                        video_extensions=config.get("video_extensions"),
+                        subtitle_extensions=config.get("subtitle_extensions"),
+                    )
+                    self._video_extensions = sorted(video_exts)
+                    self._subtitle_extensions = sorted(sub_exts)
+                self._apply_notification_config(config)
+                self._get_component(MessageRoutingHook).install()
+                self._applied_config = copy.deepcopy(config)
+                from app.core.plugin import PluginManager
+                PluginManager().clear_plugin_agent_tools_cache()
+                logger.info("基础开关或扩展名/通知配置已热更新，网盘与搜索客户端保持运行")
+                # v1.15.0：热更新出口也重登下载器条目（同上）。
+                self._ensure_downloader_entry()
+                return
+        self.stop_service(preserve_subscribe_queue=not reset_runtime)
+        self._stop_event = ThreadEvent()
+        if reset_runtime:
+            self._sync_running = False
+            self._sync_status = "idle"
+            self._sync_task_text = "当前没有订阅处理任务"
+            self._sync_progress = 0
+            self._sync_context = {}
+            self._skip_stats = SkipStatsCollector()
+            self._sync_run_started_at = 0
+            self._sync_last_finished_at = 0
+            self._sync_last_elapsed_ms = 0
+            self._sync_tasks_lock = RLock()
+            self._task_local = local()
+            self._sync_tasks = {}
+            with self._runtime_revision_lock:
+                self._runtime_revision = 0
+                self._history_revision = 0
+            with self._pending_config_lock:
+                self._pending_config = None
+            self._subscribe_search_queue_lock = RLock()
+            self._subscribe_search_pending = {}
+            self._subscribe_search_active = {}
+            self._subscribe_search_recent = {}
+            self._subscribe_search_queue_shutdown = ThreadEvent()
+            self._subscribe_search_coordinator_running = False
+            self._subscribe_search_queue_revision = 0
+            self._sync_operation_executor = ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="cloudsubscribe-sync-operation",
+            )
+            self._subscribe_search_originals = {}
+            self._subscribe_chain_originals = {}
+            self._platform_search_originals = {}
+            self._interaction_originals = {}
+        else:
+            if self._sync_tasks_lock is None:
+                self._sync_tasks_lock = RLock()
+            if self._task_local is None:
+                self._task_local = local()
+            if self._sync_operation_executor is None:
+                self._sync_operation_executor = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="cloudsubscribe-sync-operation",
+                )
+
+        if config:
+            for key, val in config.items():
+                # 1.12.20 Phase 1：只允许白名单配置键落到实例属性上；
+                # 白名单外的新键直接忽略并记 warning，绝不抛错。
+                if not is_plugin_config_key(key):
+                    logger.warning(f"忽略未知插件配置键：{key}（未进白名单）")
+                    continue
+                setattr(self, f"_{key}", val)
+            # v1.30.0 阶段 4：funnel_enabled 总闸生效（kill-switch）。
+            # 插件实例属性是上面白名单循环写的原始值，各处读到的必须
+            # 是“总闸 AND 原始值”，否则只改一处关不掉 API 侧/运行侧的
+            # 入队路。_init_handlers 在下面建 SyncHandler（它读插件
+            # 属性），所以必须在此处、在建 handler 之前算出有效值。
+            _funnel_master = bool(getattr(self, "_funnel_enabled", True))
+            self._funnel_enabled = _funnel_master
+            self._funnel_phase1_enabled = bool(
+                _funnel_master and getattr(self, "_funnel_phase1_enabled", False)
+            )
+            self._funnel_phase2_enabled = bool(
+                _funnel_master and getattr(self, "_funnel_phase2_enabled", False)
+            )
+            self._funnel_phase3_enabled = bool(
+                _funnel_master and getattr(self, "_funnel_phase3_enabled", False)
+            )
+            # 渠道库是搜索源与 TG 频道的唯一运行来源：先迁移旧配置，
+            # 再让 _apply_search_config / _apply_tg_monitor_config 读渠道库。
+            self._migrate_channels_from_config(config)
+            self._apply_base_config(config)
+            self._apply_notification_config(config)
+            self._cloud_drive_key = str(config.get("cloud_drive", "115") or "115").strip().lower()
+            self._apply_search_config(config)
+            self._apply_sync_config(config)
+
+        # 初始化客户端/handlers
+        self._init_clients()
+        self._init_handlers()
+        if self._sync_handler:
+            # 1.12.14/1.12.15：清理插件以前写进 MP 整理历史的镜像记录
+            # （PanSou → 115网盘CS版、复制等），幂等、每次启动都跑。
+            # v1.28.1 例外（用户 2026-11-20 定方向 A）：直出 strm 时插件
+            # 经 MP 官方外部登记映射补写一行（origin="external"、
+            # downloader 为空、src 为真实 115 路径），清理的两个条件都
+            # 匹配不到补写行，补写行不受影响。
+            self._sync_handler.remove_platform_transfer_history_mirror()
+            # v1.29.6：修复 v1.28.1 补写坏掉的 registration（缺 actor_id、
+            # 多 note），否则 #/history 整页查不到（model_validate 抛错）。
+            # 幂等、只动插件补写行、失败不挡启动。
+            try:
+                self._sync_handler.repair_backfill_registrations()
+            except Exception as error:  # noqa: BLE001 - 修复失败不得影响插件主流程
+                logger.warning(f"修复补写 registration 失败（不影响启动）：{error}")
+            # v1.31.3：清漏斗孤儿待终态记录（行已挂起/已完成/不存在，
+            # 离线监控跳过漏斗记录、worker 不管挂起行，记录成孤儿后
+            # 任务卡永久 95%）。幂等、只动孤儿记录、失败不挡启动。
+            # 必须在下面 _update_offline_monitor 之前跑，否则任务卡
+            # 刷新用的计数还是旧的。
+            try:
+                self._sync_handler.repair_orphan_pending_records()
+            except Exception as error:  # noqa: BLE001 - 修复失败不得影响插件主流程
+                logger.warning(f"清孤儿待终态记录失败（不影响启动）：{error}")
+        self._update_offline_monitor(
+            self._sync_handler.count_offline_monitor_pending(
+                self._sync_handler.get_pending_finalize_tasks()
+            )
+            if self._sync_handler else 0
+        )
+        if self._sync_handler:
+            # v1.29.7 阶段 1：重启后续跑队列里未处理行（断点续跑）；
+            # 开关关闭时不建 job，行保留、开关再开时继续处理。
+            try:
+                self._sync_handler.funnel_ensure_worker()
+            except Exception as error:  # noqa: BLE001 - 恢复失败不挡启动
+                logger.warning(f"恢复整理队列 worker 失败：{error}")
+        service_config_keys = {
+            "enabled", "cron", "auto_subscribe_enabled", "auto_subscribe_cron",
+            "auto_subscribe_douban_enabled", "auto_subscribe_maoyan_enabled",
+            "auto_subscribe_netflix_enabled", "auto_subscribe_mikan_enabled",
+            "auto_subscribe_tmdb_enabled", "auto_subscribe_bangumi_enabled", "auto_subscribe_anilist_enabled",
+            "checkin_cron", "checkin_auto_retry", "checkin_retry_count",
+            "takeover_new_subscribes",
+            "block_start_time", "block_end_time", "block_system_subscribe",
+            "platform_download_policy", "block_platform_downloads",
+            "takeover_platform_downloads",
+            # v1.27.0：交给 MP 调度的插件维护任务
+            "strm_generate_enabled", "strm_full_scan_enabled",
+            "strm_increment_enabled", "strm_increment_minutes",
+            "organize_schedule_enabled", "organize_schedule_cron",
+            "organize_source_path", "organize_schedule_auto_execute",
+            # v1.30.0 阶段 4：漏斗总闸/阶段 1 开关影响 04:00 扫描对账
+            # 任务（CloudSubscribe_Organize）的注册，改动须刷新维护任务。
+            "funnel_enabled", "funnel_phase1_enabled",
+        }
+        try:
+            from .core.checkin_manager import get_checkin_definitions
+            for defn in get_checkin_definitions().values():
+                service_config_keys.add(f"{defn.key}_checkin_enabled")
+                service_config_keys.add(f"{defn.key}_checkin_mode")
+                if getattr(defn, "credential_keys", None):
+                    service_config_keys.update(defn.credential_keys)
+        except Exception as error:
+            logger.debug(f"动态收集服务签到配置键异常: {error}", exc_info=True)
+        if reset_runtime or changed_keys & service_config_keys:
+            self._refresh_platform_services()
+        self._install_subscribe_search_takeover()
+        self._get_component(MessageRoutingHook).install()
+
+        action = "插件初始化" if reset_runtime else "插件配置已应用"
+        self._applied_config = copy.deepcopy(config)
+        from app.core.plugin import PluginManager
+        PluginManager().clear_plugin_agent_tools_cache()
+        logger.info(
+            f"{action}：代码版本={self.plugin_version}, "
+            f"接管时段={self._block_start_time}~{self._block_end_time}, "
+            f"平台下载策略={self._platform_download_policy}, "
+            f"网盘洗版={'开启' if self._enable_cloud_upgrade else '关闭'}, "
+            f"洗版模式={self._upgrade_mode}, "
+            f"洗版范围={'指定订阅' if self._upgrade_subscribe_ids else '全部'}, "
+            f"当前接管态={self._is_takeover_active()}")
+        self._start_residue_cleanup()
+        # v1.27.0：STRM 全量/增量、115 整理定时、重试索引维护四个固定周期任务
+        # 改由 MP 调度（get_service → _run_scheduled_task），不再挂插件自建调度器；
+        # 开关/周期变化通过上面的 _refresh_platform_services 让 MP 重建服务。
+        # 配置保存可能改了开关/端口：apply 末尾同步一次代理运行态
+        # （stop_service 在重载开头已经停过，这里按新配置重新决定起不起）。
+        try:
+            from .core.api.emby_proxy import start_emby_proxy
+
+            start_emby_proxy(self)
+        except Exception as error:  # noqa: BLE001 - 反代失败不得影响插件主流程
+            logger.error(f"Emby 302 反代同步启停失败：{error}")
+
+        # 调度一次性任务。
+        if self._auto_subscribe_onlyonce:
+            logger.info("榜单自动订阅服务启动，立即运行一次")
+            self._scheduler_registry().ensure_job(
+                "cloudsubscribe_auto_subscribe_once",
+                func=self._run_auto_subscribe_once,
+                trigger="date",
+                run_date=(
+                    datetime.datetime.now(tz=pytz.timezone(settings.TZ))
+                    + datetime.timedelta(seconds=3)
+                ),
+            )
+            self._auto_subscribe_onlyonce = False
+            self._persist_config_values(auto_subscribe_onlyonce=False)
+
+        # v1.15.0：配置应用完成重登下载器条目（同上）。
+        self._ensure_downloader_entry()
+
+    def _strm_scan_time_budget(self) -> int:
+        """STRM 全量校准单次时间预算（秒）；读取失败或负数按 0（不限）处理。"""
+        try:
+            return max(0, int(getattr(self, "_strm_full_scan_budget", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _require_sync_handler(
+            self, *method_names: str,
+    ) -> Tuple[Any, Optional[Dict[str, Any]]]:
+        """取同步服务并确认它有要调用的方法；返回 ``(handler, None)`` 或 ``(None, 失败结果)``。
+
+        v1.27.0：区分两种“用不了”——
+        * 同步服务还没初始化（插件启动中 / 未启用）：照旧返回“同步服务未就绪”；
+        * 同步服务在、但缺方法：这是插件内部错误（v1.19.0 漏转发那类，会让功能
+          悄悄停摆），记 ERROR 并返回带 ``internal_error`` 的明确报错；
+          走 MP 调度时由 ``_run_scheduled_task`` 转成异常交给 MP 报出。
+        """
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler:
+            return None, {"success": False, "message": "同步服务未就绪"}
+        missing = [name for name in method_names if not hasattr(sync_handler, name)]
+        if missing:
+            message = (
+                f"同步服务缺少方法：{'、'.join(missing)}（插件内部错误，相关功能已停用，"
+                f"请升级或反馈）"
+            )
+            logger.error(f"{message}——{type(sync_handler).__name__} 上找不到这些方法")
+            return None, {"success": False, "message": message, "internal_error": True}
+        return sync_handler, None
+
+    def generate_share_strm(
+            self, share_url: str, save_path: str = "", overwrite: bool = False,
+    ) -> dict:
+        """为 115 分享直接生成 STRM（不转存）。"""
+        sync_handler, unavailable = self._require_sync_handler("generate_share_strm",)
+        if unavailable:
+            return unavailable
+        try:
+            data = sync_handler.generate_share_strm(
+                share_url, save_path=save_path, overwrite=overwrite,
+            )
+        except Exception as error:  # noqa: BLE001 - 统一回给前端
+            logger.error(f"分享 STRM 生成失败：{error}")
+            return {"success": False, "message": str(error)}
+        return {
+            "success": True,
+            "message": (
+                f"分享 STRM 生成完成：新增 {data.get('created')}，"
+                f"更新 {data.get('updated')}，跳过 {data.get('skipped')}"
+            ),
+            "data": data,
+        }
+
+    def clean_share_strm(self, share_url: str, save_path: str = "") -> dict:
+        """删除某个分享链接生成的 STRM。"""
+        sync_handler, unavailable = self._require_sync_handler("clean_share_strm",)
+        if unavailable:
+            return unavailable
+        try:
+            data = sync_handler.clean_share_strm(share_url, save_path=save_path)
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"分享 STRM 清理失败：{error}")
+            return {"success": False, "message": str(error)}
+        return {
+            "success": True,
+            "message": (
+                f"分享 STRM 已清理：删除 {data.get('removed')}，"
+                f"不存在 {data.get('missing')}"
+            ),
+            "data": data,
+        }
+
+    def refresh_media_servers(self) -> dict:
+        """手动触发媒体库刷新。"""
+        sync_handler, unavailable = self._require_sync_handler("refresh_media_servers",)
+        if unavailable:
+            return unavailable
+        try:
+            data = sync_handler.refresh_media_servers()
+        except Exception as error:  # noqa: BLE001
+            return {"success": False, "message": str(error)}
+        return {
+            "success": True,
+            "message": f"已提交媒体库刷新：{data or '无可用媒体服务器'}",
+            "data": data,
+        }
+
+    def migrate_legacy_strm(self, root: str = "", dry_run: bool = False) -> dict:
+        """把 P115StrmHelper 生成的 STRM 改写成本插件端点。"""
+        sync_handler, unavailable = self._require_sync_handler("migrate_legacy_strm",)
+        if unavailable:
+            return unavailable
+        try:
+            data = sync_handler.migrate_legacy_strm(root=root, dry_run=dry_run)
+        except Exception as error:  # noqa: BLE001
+            logger.error(f"旧 STRM 迁移失败：{error}")
+            return {"success": False, "message": str(error)}
+        return {
+            "success": True,
+            "message": (
+                f"旧 STRM 迁移{'预演' if dry_run else '完成'}："
+                f"扫描 {data.get('scanned')}，改写 {data.get('migrated')}，"
+                f"跳过 {data.get('skipped')}，失败 {data.get('failed')}"
+            ),
+            "data": data,
+        }
+
+    # ---- 源文件 SHA1 缓存（秒传未命中后零流量重试） ----
+    _SOURCE_SHA1_CACHE_TTL_DAYS = 30
+    _SOURCE_SHA1_CACHE_LIMIT = 2000
+
+    def get_cached_source_sha1(self, key: str) -> Optional[dict]:
+        """按「来源网盘|体积|文件名」取库中记录过的源文件 SHA1。"""
+        key = str(key or "").strip()
+        if not key:
+            return None
+        entry = self._get_data_store().get_source_sha1(
+            key, ttl_seconds=self._SOURCE_SHA1_CACHE_TTL_DAYS * 86400
+        )
+        if not entry:
+            return None
+        return {"sha1": entry.get("sha1") or "", "size": entry.get("size") or 0}
+
+    def put_cached_source_sha1(self, key: str, entry: dict) -> None:
+        """记录源文件 SHA1，供秒传未命中后的零流量重试使用。"""
+        key = str(key or "").strip()
+        payload = entry or {}
+        if not key or not str(payload.get("sha1") or "").strip():
+            return
+        self._get_data_store().put_source_sha1(
+            key,
+            str(payload.get("sha1") or "").strip().upper(),
+            size=int(payload.get("size") or 0),
+            name=str(payload.get("name") or ""),
+            limit=self._SOURCE_SHA1_CACHE_LIMIT,
+        )
+
+    # 秒传未命中负缓存：24 小时内同一哈希不再下载整份文件重试
+    _SOURCE_MISS_CACHE_TTL_HOURS = 24
+    _SOURCE_MISS_CACHE_LIMIT = 4000
+
+    def get_cached_rapid_miss(self, target_key: str, sha1: str) -> int:
+        """返回同一 (目标盘, SHA1) 的秒传未命中时间戳，0=没有或已过期。"""
+        return self._get_data_store().get_source_miss(
+            target_key, sha1,
+            ttl_seconds=self._SOURCE_MISS_CACHE_TTL_HOURS * 3600,
+        )
+
+    def put_cached_rapid_miss(self, target_key: str, sha1: str) -> None:
+        """记录一次秒传未命中，供后续同哈希任务直接跳过下载。"""
+        self._get_data_store().put_source_miss(
+            target_key, sha1, limit=self._SOURCE_MISS_CACHE_LIMIT
+        )
+
+    def run_strm_full_scan(self, reason: str = "手动") -> dict:
+        """后台按目录 CID 全量遍历媒体库，补齐/校准 STRM。"""
+        sync_handler, unavailable = self._require_sync_handler("rebuild_strm_files")
+        if unavailable:
+            return unavailable
+        lock = self.__dict__.get("_strm_scan_lock")
+        if lock is None:
+            lock = Lock()
+            self._strm_scan_lock = lock
+        if not lock.acquire(blocking=False):
+            return {"success": False, "message": "已有 STRM 全量校准在运行"}
+
+        overwrite = bool(self._strm_full_scan_overwrite)
+        budget = self._strm_scan_time_budget()
+        try:
+            state_store = self._get_data_store()
+        except Exception:  # noqa: BLE001
+            state_store = None
+
+        def _run():
+            try:
+                stats = sync_handler.rebuild_strm_files(
+                    overwrite=overwrite,
+                    time_budget_seconds=budget,
+                    state_store=state_store,
+                )
+                detail = (
+                    f"（{reason}）：目录 {stats.get('directories')}，"
+                    f"视频 {stats.get('files')}，新增 {stats.get('created')}，"
+                    f"更新 {stats.get('updated')}，跳过 {stats.get('skipped')}，"
+                    f"失败 {stats.get('errors')}"
+                )
+                if stats.get("interrupted"):
+                    logger.info(
+                        f"STRM 全量校准已分批{detail}；本次到时间上限，"
+                        f"剩余 {stats.get('pending_directories')} 个目录留待下次续扫"
+                    )
+                else:
+                    logger.info(f"STRM 全量校准完成{detail}")
+            except Exception as error:  # noqa: BLE001
+                logger.error(f"STRM 全量校准失败（{reason}）：{error}")
+            finally:
+                lock.release()
+
+        Thread(target=_run, daemon=True).start()
+        return {"success": True, "message": "已开始后台全量校准，完成后写入日志"}
+
+    def run_strm_increment(self, reason: str = "增量") -> dict:
+        """轻量增量补齐：只补缺失的 STRM，不改写已有文件。
+
+        与全量共用同一把扫描锁，避免两条链路同时写同一目录；
+        不写断点文件，保证不会污染全量校准的续扫进度。
+        """
+        sync_handler, unavailable = self._require_sync_handler(
+            "rebuild_strm_files", "rebuild_strm_increment_by_tree",
+        )
+        if unavailable:
+            return unavailable
+        lock = self.__dict__.get("_strm_scan_lock")
+        if lock is None:
+            lock = Lock()
+            self._strm_scan_lock = lock
+        if not lock.acquire(blocking=False):
+            logger.debug(f"STRM 增量补齐（{reason}）：全量校准正在运行，本次跳过")
+            return {"success": False, "message": "全量校准运行中，本次跳过"}
+
+        budget = max(30, int(getattr(self, "_strm_increment_budget", 180) or 180))
+
+        def _run():
+            try:
+                stats = None
+                if getattr(sync_handler, "_cloud_drive", None) is not None:
+                    provider = sync_handler._cloud_drive
+                    if provider.supports(CloudDriveCapability.STRM_EXPORT):
+                        stats = sync_handler.rebuild_strm_increment_by_tree(
+                            timeout_seconds=max(60.0, float(budget)),
+                        )
+                if stats is None or stats.get("errors"):
+                    # 网盘不支持导出目录树 / 导出失败 → 退回逐目录遍历
+                    if stats and stats.get("errors"):
+                        logger.warning("STRM 增量：导出目录树失败，改用逐目录遍历兜底")
+                    stats = sync_handler.rebuild_strm_files(
+                        overwrite=False,
+                        time_budget_seconds=budget,
+                        state_store=None,
+                    )
+                created = int(stats.get("created") or 0)
+                errors = int(stats.get("errors") or 0)
+                if created or errors:
+                    logger.info(
+                        f"STRM 增量补齐（{reason}）：目录 {stats.get('directories')}，"
+                        f"视频 {stats.get('files')}，新增 {created}，"
+                        f"失败 {errors}，跳过 {stats.get('skipped')}"
+                    )
+                else:
+                    logger.debug(
+                        f"STRM 增量补齐（{reason}）：无新增，"
+                        f"已检查 {stats.get('files')} 个视频"
+                    )
+            except Exception as error:  # noqa: BLE001
+                logger.error(f"STRM 增量补齐（{reason}）异常：{error}")
+            finally:
+                lock.release()
+
+        Thread(target=_run, daemon=True).start()
+        return {"success": True, "message": "已开始后台增量补齐"}
+
+    def _run_scheduled_organize_scan(self) -> Any:
+        """04:00 定时扫描：v1.30.0 阶段 4 改为漏斗扫描对账触发器。
+
+        漏斗开（总闸 + 阶段 1）时跑 dry-run 扫描对账：只分类记日志，
+        不入队、不删文件（接管留给以后一版）。漏斗关时保留旧整理台
+        定时扫描行为（源目录取退役前的配置值，配置已废弃故恒为空，
+        此时直接返回不跑，避免空目录扫描）。
+        """
+        if getattr(self, "_funnel_phase1_enabled", False):
+            if self._sync_handler is None:
+                return {"success": False, "message": "同步处理器未初始化"}
+            return self._sync_handler.funnel_run_scan_dry_run(trigger="定时")
+        source_path = str(getattr(self, "_organize_source_path", "") or "").strip()
+        if not source_path:
+            logger.info("04:00 整理扫描跳过：漏斗未启用且未配置整理台源目录")
+            return {"success": True, "message": "漏斗未启用，跳过整理扫描"}
+        return self.start_scan(
+            source_path=source_path,
+            auto_execute=self._organize_schedule_auto_execute,
+            trigger="定时",
+        )
+
+    def _run_scheduled_task(self, task: str) -> Any:
+        """MP 调度的插件维护任务唯一入口（get_service 声明的 func）。
+
+        v1.27.0：这几项原来挂在插件自建调度器上，异常只进 APScheduler 自己的
+        日志，95% 卡那次监控崩了一整晚没人看见。改由 MP 调度后，任务抛出的
+        异常由 MP 记 ERROR、发系统消息与 SystemError 事件（MP v3.2.6
+        app/scheduler/execution.py ``_handle_job_error``），「定时服务」页也能看到；
+        这里另在插件日志记一条带堆栈的 ERROR。同步服务缺方法这类插件内部错误
+        （``internal_error``）也转成异常抛给 MP，不再静默返回。
+        """
+        runners: Dict[str, Callable[[], Any]] = {
+            "strm_full_scan": lambda: self.run_strm_full_scan("定时"),
+            "strm_increment": lambda: self.run_strm_increment("定时"),
+            "retry_index_maintenance": self._run_retry_index_maintenance,
+            # v1.30.0 阶段 4：04:00 定时任务改为漏斗扫描对账触发器
+            #（设计 §12 修订范围）：漏斗开时跑 dry-run 扫描（只分类
+            # 记日志，不入队）；漏斗关时保留旧整理台定时扫描行为。
+            "organize": self._run_scheduled_organize_scan,
+            # 1.32.0：缓存目录体积 + 磁盘水位巡检（6 小时一轮，越阈值发通知）。
+            "cache_watch": self._run_cache_watch,
+        }
+        runner = runners.get(task)
+        if runner is None:
+            raise ValueError(f"未知的插件定时任务：{task}")
+        try:
+            result = runner()
+        except Exception as error:
+            logger.error(
+                f"插件定时任务执行异常（{task}）：{error}\n{traceback.format_exc()}"
+            )
+            raise
+        if isinstance(result, dict) and result.get("internal_error"):
+            raise RuntimeError(str(result.get("message") or f"插件定时任务内部错误：{task}"))
+        return result
+
+    def _run_retry_index_maintenance(self) -> None:
+        try:
+            purged = self._get_data_store().repositories.retry_index.purge_old()
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"重试索引过期清理失败：{error}")
+            return
+        if purged:
+            logger.info(f"重试索引过期清理完成：删除 {purged} 条")
+
+    def _start_residue_cleanup(self) -> None:
+        """启动时跑一次孤儿清理（崩溃 / 异常退出留下的临时文件）。
+
+        1.10.0 起任务结束即删临时文件，不再需要定时清理：定时任务
+        已移除，只保留启动时的一次性清理；手动清理走「立即清理残留」
+        按钮。配置改动后再次调用本方法即可：首次挂任务时才跑一次，
+        配置重载不重复跑。
+        """
+        registry = self._scheduler_registry()
+        registry.remove_job("cloudsubscribe_residue_cleanup")
+        if not self._residue_cleanup:
+            return
+        if registry.get_job("cloudsubscribe_residue_cleanup_startup") is None:
+            # 首次挂任务时才跑一次启动清理；配置重载不重复跑。
+            registry.ensure_job(
+                "cloudsubscribe_residue_cleanup_startup",
+                func=lambda: self.cleanup_transfer_residue("启动"),
+                trigger="date",
+                run_date=(
+                    datetime.datetime.now(tz=pytz.timezone(settings.TZ))
+                    + datetime.timedelta(seconds=1)
+                ),
+            )
+
+    def organize_staging(self, execute: bool = False) -> Dict[str, Any]:
+        """一键整理「待整理目录」（1.35.4）。
+
+        复用整理台（OrganizeService.start_scan）：扫描 → 识别 → 分批移动 →
+        生成 STRM。``execute=False`` 只预览（列计划不搬文件），``True`` 扫完
+        立即执行。用于消化「已上传但没整理」的存量（1.35.3 之前落盘的文件）。
+        """
+        root = str(
+            self._organize_staging_path or self._p115_transfer_path or ""
+        ).strip().rstrip("/")
+        if not root:
+            return {"success": False, "message": "待整理目录未配置"}
+        service = self._get_component(OrganizeService)
+        result = service.start_scan(
+            source_path=root,
+            auto_execute=bool(execute),
+            trigger="转存目录一键整理",
+        )
+        if not result.get("success"):
+            return result
+        logger.info(
+            f"转存目录整理已提交：{root}（{'扫描并执行' if execute else '仅预览'}，"
+            f"scan_id={result.get('scan_id')}）"
+        )
+        return result
+
+    def organize_staging_status(self) -> Dict[str, Any]:
+        """查看转存目录整理进度（1.35.4）。"""
+        service = self._get_component(OrganizeService)
+        return service.status()
+
+    def _run_cache_watch(self) -> Any:
+        """缓存目录与磁盘水位巡检（1.32.0，MP 每 6 小时调一次）。"""
+        return self._get_component(CacheWatchService).check("定时")
+
+    @staticmethod
+    def _parse_period_episode_rules(value: Any) -> Dict[str, int]:
+        """解析「节目名 = 每期集数」多行配置。
+
+        例：``现在就出发 = 2`` 表示该节目每期分上下两集，第3期上 → E05。
+        只接受 1~10 之间的整数，其余行静默忽略，避免把写错的配置带进匹配。
+        """
+        rules: Dict[str, int] = {}
+        for raw_line in str(value or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            normalized = line.replace("：", "=").replace("＝", "=")
+            if "=" not in normalized:
+                continue
+            key, _, raw_size = normalized.partition("=")
+            key = key.strip()
+            try:
+                size = int(str(raw_size).strip())
+            except (TypeError, ValueError):
+                continue
+            if key and 1 <= size <= 10:
+                rules[key] = size
+        return rules
+
+    @staticmethod
+    def _split_multiline(value: Any) -> list:
+        """把设置页的多行/逗号文本拆成去重列表。
+
+        兼容 MP 把多行字段存成列表、或存成 ``['a', 'b']`` / ``["a"]``
+        字符串的情况（前端编辑后原样提交）。
+        """
+        if isinstance(value, (list, tuple, set)):
+            parts = [str(item).strip() for item in value]
+        else:
+            text = str(value or "").strip()
+            if text.startswith("[") and text.endswith("]"):
+                parsed = None
+                for loader in (json.loads, ast.literal_eval):
+                    try:
+                        parsed = loader(text)
+                        break
+                    except (ValueError, SyntaxError, TypeError):
+                        continue
+                if isinstance(parsed, (list, tuple, set)):
+                    text = "\n".join(str(item) for item in parsed)
+                else:
+                    text = text.strip("[]")
+            parts = [
+                item.strip().strip("'\"").strip()
+                for item in text.replace(",", "\n").replace("，", "\n").splitlines()
+            ]
+        return [item for item in dict.fromkeys(parts) if item]
+
+    # -------------------------------------------------------------- 渠道库
+    def _channel_store(self) -> ChannelStore:
+        """返回渠道存储；未初始化时按当前数据目录惰性创建并迁移旧配置。"""
+        if self._channels is None:
+            self._channels = ChannelStore(self.get_data_path())
+            if self._channels.needs_migration:
+                self._migrate_channels_from_config(
+                    self._applied_config or self.get_config() or {}
+                )
+        return self._channels
+
+    def _migrate_channels_from_config(self, config: Dict[str, Any]) -> int:
+        """首次加载且无 channels.json 时，从旧配置生成渠道后写盘。
+
+        旧版全局 TG 配置（``tg_channels`` / ``tg_monitor_keywords`` 等）
+        在这里先展开成逐频道规则再迁移，避免后一步的
+        :meth:`_apply_tg_monitor_config` 转换完却写不进已落盘的渠道库。
+        写盘后旧配置保留，之后渠道库是唯一运行来源。
+        """
+        store = self._channel_store()
+        if not store.needs_migration:
+            return 0
+        cfg = dict(config or {})
+        rules = cfg.get("tg_channel_rules", []) or []
+        channels = self._split_multiline(cfg.get("tg_channels", ""))
+        if not rules and channels:
+            from .core.tg_monitor import migrate_legacy_channel_rules
+
+            try:
+                scan_limit = int(cfg.get("tg_monitor_scan_limit", 20) or 20)
+            except (TypeError, ValueError):
+                scan_limit = 20
+            rules = migrate_legacy_channel_rules(
+                [],
+                channels=channels,
+                keywords=self._split_multiline(
+                    cfg.get("tg_monitor_keywords", "")
+                ),
+                exclude_keywords=self._split_multiline(
+                    cfg.get("tg_monitor_exclude_keywords", "")
+                ),
+                scan_limit=max(1, min(scan_limit, 200)),
+            )
+            cfg["tg_channel_rules"] = rules
+        added = store.migrate_from_config(cfg)
+        if added:
+            logger.info(f"已从旧配置迁移 {added} 条渠道到 channels.json")
+        return added
+
+    def get_enabled_search_sources(self) -> List[str]:
+        """返回渠道库里已启用的搜索源 id（按 priority 倒序，去重）。"""
+        ordered: List[str] = []
+        for channel in self._channel_store().list():
+            if channel.get("type") == "tg_channel":
+                continue
+            if not channel.get("enabled"):
+                continue
+            source = str(channel.get("type") or "").strip().lower()
+            if source and source not in ordered:
+                ordered.append(source)
+        return ordered
+
+    def get_search_channel_order(self) -> List[str]:
+        """返回全部搜索渠道的展示顺序（渠道库 priority 倒序，含停用的）。"""
+        ordered: List[str] = []
+        for channel in self._channel_store().list():
+            if channel.get("type") == "tg_channel":
+                continue
+            source = str(channel.get("type") or "").strip().lower()
+            if source and source not in ordered:
+                ordered.append(source)
+        try:
+            registered = [
+                str(definition.id)
+                for definition in SearchSourceRegistry.get_definitions()
+            ]
+        except Exception as error:  # noqa: BLE001 - 注册表异常不影响已有顺序
+            logger.warning(f"读取搜索渠道注册表失败：{error}")
+            registered = []
+        for source in registered:
+            if source not in ordered:
+                ordered.append(source)
+        return ordered
+
+    def disable_search_channel(self, source: str) -> bool:
+        """封禁保护：停用指定搜索源的全部渠道并清搜索缓存。"""
+        source = str(source or "").strip().lower()
+        if not source:
+            return False
+        store = self._channel_store()
+        changed = False
+        for channel in store.list():
+            if channel.get("type") == source and channel.get("enabled"):
+                store.update(channel["id"], {"enabled": False})
+                changed = True
+        if changed:
+            self._search_source_order = self.get_enabled_search_sources()
+            handler = getattr(self, "_search_handler", None)
+            if handler is not None:
+                try:
+                    handler.clear_search_cache()
+                except Exception as error:
+                    logger.debug(f"停用渠道后清搜索缓存失败：{error}", exc_info=True)
+        return changed
+
+    def _tg_channel_rules_from_store(self) -> List[Dict[str, Any]]:
+        """把渠道库里的 tg_channel 渠道转成监控用的规则列表。"""
+        rules: List[Dict[str, Any]] = []
+        for channel in self._channel_store().list():
+            if channel.get("type") != "tg_channel":
+                continue
+            config = channel.get("config") or {}
+            rules.append({
+                "channel": str(config.get("channel") or ""),
+                "enabled": bool(channel.get("enabled", True)),
+                "keywords": list(config.get("keywords") or []),
+                "exclude_keywords": list(config.get("exclude_keywords") or []),
+                "scan_limit": int(config.get("scan_limit") or 20),
+                "auto_transfer": True,
+                "monitor_mode": "subscriptions",
+            })
+        return rules
+
+    def _refresh_channel_runtime(
+            self, search_config_updates: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """渠道增删改启停后刷新运行态：搜索端重读渠道、TG 监控重读规则。
+
+        搜索结果缓存一并清掉，否则开关渠道后搜同一关键词会直接命中旧结果，
+        渠道开关看起来“不生效”。只有搜索渠道的配置值真的变了才重建搜索
+        处理器（客户端在注册时按配置值固化）；只改启用/优先级时轻量刷新。
+        """
+        self._search_source_order = self.get_enabled_search_sources()
+        handler = getattr(self, "_search_handler", None)
+        if search_config_updates:
+            for key, value in search_config_updates.items():
+                setattr(self, f"_{key}", value)
+            if handler is not None:
+                try:
+                    handler.close(release_cache=True)
+                except Exception as error:  # noqa: BLE001
+                    logger.debug(f"关闭旧搜索处理器失败：{error}", exc_info=True)
+                self._search_handler = SearchHandler(plugin=self)
+        elif handler is not None:
+            refresh = getattr(handler, "refresh_enabled_sources", None)
+            if callable(refresh):
+                try:
+                    refresh()
+                except Exception as error:  # noqa: BLE001
+                    logger.warning(f"刷新搜索渠道运行态失败：{error}")
+        try:
+            self._apply_tg_monitor_config(
+                dict(self._applied_config or self.get_config() or {})
+            )
+        except Exception as error:  # noqa: BLE001 - 监控刷新失败不拖垮接口
+            logger.warning(f"刷新 TG 监控运行态失败：{error}")
+
+    def _apply_tg_monitor_config(self, config: Dict[str, Any]) -> None:
+        """应用 TG 频道监控配置并启动/停止扫描线程。"""
+        self._tg_monitor_enabled = bool(config.get("tg_monitor_enabled", False))
+        try:
+            self._tg_api_id = int(config.get("tg_api_id", 0) or 0)
+        except (TypeError, ValueError):
+            self._tg_api_id = 0
+        self._tg_api_hash = str(config.get("tg_api_hash", "") or "").strip()
+        self._tg_session = str(config.get("tg_session", "") or "").strip()
+        self._tg_channels = self._split_multiline(config.get("tg_channels", ""))
+        raw_channel_rules = config.get("tg_channel_rules", [])
+        if isinstance(raw_channel_rules, str):
+            self._tg_channel_rules = [raw_channel_rules] if raw_channel_rules.strip() else []
+        elif isinstance(raw_channel_rules, (list, tuple)):
+            self._tg_channel_rules = list(raw_channel_rules)
+        else:
+            self._tg_channel_rules = []
+        self._tg_monitor_keywords = self._split_multiline(
+            config.get("tg_monitor_keywords", "")
+        )
+        self._tg_monitor_exclude_keywords = self._split_multiline(
+            config.get("tg_monitor_exclude_keywords", "")
+        )
+        try:
+            scan_limit = int(config.get("tg_monitor_scan_limit", 20) or 20)
+        except (TypeError, ValueError):
+            scan_limit = 20
+        self._tg_monitor_scan_limit = max(1, min(scan_limit, 200))
+        # 1.6.64 前的「全局频道 + 全局关键词」：一次性展开成逐频道规则并写回配置，
+        # 之后只保留 tg_channel_rules 一个来源（旧键读一次即清空，避免两套配置互相覆盖）。
+        if not self._tg_channel_rules and self._tg_channels:
+            from .core.tg_monitor import migrate_legacy_channel_rules
+            migrated_rules = migrate_legacy_channel_rules(
+                [],
+                channels=self._tg_channels,
+                keywords=self._tg_monitor_keywords,
+                exclude_keywords=self._tg_monitor_exclude_keywords,
+                scan_limit=self._tg_monitor_scan_limit,
+            )
+            self._tg_channel_rules = migrated_rules
+            logger.info(
+                f"TG 频道规则为空，已把旧版全局配置迁移为逐频道规则："
+                f"{len(migrated_rules)} 个频道；旧键 tg_channels / "
+                "tg_monitor_keywords / tg_monitor_exclude_keywords 已清空"
+            )
+            self._tg_channels = []
+            self._tg_monitor_keywords = []
+            self._tg_monitor_exclude_keywords = []
+            self._persist_config_values(
+                tg_channel_rules=migrated_rules,
+                tg_channels="",
+                tg_monitor_keywords="",
+                tg_monitor_exclude_keywords="",
+            )
+        try:
+            interval = int(config.get("tg_monitor_interval_minutes", 10) or 10)
+        except (TypeError, ValueError):
+            interval = 10
+        self._tg_monitor_interval_minutes = max(1, min(interval, 1440))
+        try:
+            max_items = int(config.get("tg_monitor_max_items", 500) or 500)
+        except (TypeError, ValueError):
+            max_items = 500
+        self._tg_monitor_max_items = max(50, min(max_items, 5000))
+        # 白名单模式下与本频道关注订阅无关的消息是否仍入池。
+        # 默认 False：只保留最近 50 条供回补匹配，其余不进池，避免占满配额。
+        quality_preferences = {
+            "enabled": config.get("tg_quality_preference_enabled", True),
+            "resolution_order": config.get(
+                "tg_quality_resolution_order", "4K,1080P,720P"
+            ),
+            "hdr_order": config.get(
+                "tg_quality_hdr_order", "DOLBY VISION,HDR10+,HDR10,HDR,SDR"
+            ),
+            "codec_order": config.get(
+                "tg_quality_codec_order", "HEVC,AVC,AV1"
+            ),
+            "preferred_groups": config.get("tg_quality_preferred_groups", ""),
+        }
+        if self._tg_monitor_enabled and not (
+                self._tg_api_id and self._tg_api_hash and self._tg_session):
+            self._tg_monitor_enabled = False
+            if config.get("tg_monitor_enabled"):
+                logger.info(
+                    "TG 频道监控已关闭：缺少 api_id / api_hash / 会话，"
+                    "请在插件设置里先登录"
+                )
+        # 渠道库是 TG 规则的唯一运行来源：上面仍保留读配置（含旧全局配置的
+        # 一次性迁移），只是作为迁移来源；运行态一律以渠道库为准。
+        self._tg_channel_rules = self._tg_channel_rules_from_store()
+        try:
+            from .core.tg_monitor import get_channel_monitor
+            monitor = get_channel_monitor(self)
+            monitor.configure(
+                enabled=self._tg_monitor_enabled,
+                api_id=self._tg_api_id,
+                api_hash=self._tg_api_hash,
+                session=self._tg_session,
+                channels=self._tg_channels,
+                channel_rules=self._tg_channel_rules,
+                keywords=self._tg_monitor_keywords,
+                exclude_keywords=self._tg_monitor_exclude_keywords,
+                scan_limit=self._tg_monitor_scan_limit,
+                interval_minutes=self._tg_monitor_interval_minutes,
+                max_items=self._tg_monitor_max_items,
+                quality_preferences=quality_preferences,
+                auto_transfer_handler=self._auto_transfer_tg_item,
+                auto_transfer_batch_handler=self._auto_transfer_tg_batch,
+                subscribe_provider=self._tg_subscribe_rows,
+            )
+        except Exception as error:  # noqa: BLE001 - 监控不可用不应拖垮插件
+            logger.warning(f"TG 频道监控初始化失败：{error}")
+
+    def _tg_subscribe_rows(self) -> List[Dict[str, Any]]:
+        """给频道监控提供订阅匹配所需的精简字段。"""
+        from app.db.subscribe_oper import SubscribeOper
+
+        rows: List[Dict[str, Any]] = []
+        for sub in SubscribeOper().list() or []:
+            media_type = getattr(sub, "type", "")
+            media_type = getattr(media_type, "value", media_type)
+            rows.append({
+                "id": int(getattr(sub, "id", 0) or 0),
+                "name": str(getattr(sub, "name", "") or ""),
+                "season": int(getattr(sub, "season", 0) or 0),
+                "type": str(media_type or ""),
+                "year": str(getattr(sub, "year", "") or ""),
+                # 还缺几集：TG 队列靠它决定「先补集还是先洗版」。
+                # 订阅模型字段是 lack_episode；旧代码读 lack 恒为 0，
+                # 结果队列 100% 按洗版排（1.7.110 修正）。
+                "lack_episode": int(getattr(sub, "lack_episode", 0) or 0),
+            })
+        return rows
+
+    @staticmethod
+    def _tg_target_episodes(items: Any) -> List[int]:
+        """合并多条频道消息的目标集；任一条不限集则整体不限（返回空）。"""
+        rows = list(items) if isinstance(items, (list, tuple)) else [items]
+        merged: set = set()
+        for row in rows:
+            values = (row or {}).get("target_episodes") or []
+            if not values:
+                return []
+            for value in values:
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if number > 0:
+                    merged.add(number)
+        return sorted(merged)
+
+    def _auto_transfer_tg_item(self, item: Dict[str, Any], subscribe_id: int) -> Dict[str, Any]:
+        """频道规则命中自动转存：统一走 ``submit_candidate`` 入口。"""
+        from .core.services.discovery import Candidate, submit_candidate
+
+        candidate = Candidate(
+            links=list((item or {}).get("links") or []),
+            title=str((item or {}).get("title") or "").strip(),
+            subscribe_id=int(subscribe_id or 0),
+            channel=str((item or {}).get("channel") or ""),
+            message_id=int((item or {}).get("message_id") or 0),
+            run_id=str((item or {}).get("run_id") or ""),
+        )
+        # 1.7.110：把「这条消息只覆盖哪几集」带到同步链，避免单集消息触发整季洗版
+        targets = self._tg_target_episodes(item)
+        extra = {"target_episodes": targets} if targets else None
+        return submit_candidate(
+            self, candidate, wait=True, extra_payload=extra,
+        ).to_payload()
+
+    def _auto_transfer_tg_batch(
+            self, items: List[Dict[str, Any]], subscribe_id: int,
+    ) -> Dict[str, Any]:
+        """同一订阅的多条频道资源合并成一次手动转存（同样走 submit_candidate）。"""
+        from .core.services.discovery import MAX_LINKS as MAX_BATCH_LINKS
+        from .core.services.discovery import Candidate, submit_candidate
+
+        links: List[str] = []
+        titles: Dict[str, str] = {}
+        channel = ""
+        for item in items or []:
+            title = str((item or {}).get("title") or "").strip()
+            channel = channel or str((item or {}).get("channel") or "")
+            for link in (item or {}).get("links") or []:
+                text = str(link or "").strip()
+                if not text or text in titles:
+                    continue
+                links.append(text)
+                titles[text] = title
+                if len(links) >= MAX_BATCH_LINKS:
+                    break
+            if len(links) >= MAX_BATCH_LINKS:
+                break
+        if not links:
+            return {"success": False, "message": "没有可转存的网盘链接"}
+        candidate = Candidate(
+            links=links,
+            title=" / ".join(dict.fromkeys(t for t in titles.values() if t))[:200],
+            subscribe_id=int(subscribe_id or 0),
+            channel=channel,
+        )
+        # 批量里每条消息标题不同，逐链接标题由 extra_payload 精确透传；
+        # 目标集取并集，让这次同步只覆盖这些消息实际包含的集数。
+        extra_payload: Dict[str, Any] = {"resource_titles": titles}
+        targets = self._tg_target_episodes(items)
+        if targets:
+            extra_payload["target_episodes"] = targets
+        return submit_candidate(
+            self, candidate, wait=True, extra_payload=extra_payload,
+        ).to_payload()
+
+    def _apply_notification_config(self, config: Dict[str, Any]) -> None:
+        self._notify = bool(config.get("notify", False))
+        self._notify_templates = {
+            key: str(config.get(key) or "").strip() or default
+            for key, default in DEFAULT_TEMPLATES.items()
+        }
+        self._notification_type = self._resolve_notification_type(
+            config.get("notification_type")
+        )
+        self._webhook_enabled = bool(config.get("webhook_enabled", False))
+        self._webhook_url = str(config.get("webhook_url", "") or "").strip()
+        self._webhook_method = str(config.get("webhook_method", "POST") or "POST").upper()
+        if self._webhook_method not in {"POST", "GET"}:
+            self._webhook_method = "POST"
+        self._webhook_timeout = max(
+            1, min(int(config.get("webhook_timeout", 10) or 10), 120)
+        )
+        self._media_server_refresh_enabled = bool(
+            config.get("media_server_refresh_enabled", False)
+        )
+        self._media_servers = list(config.get("media_servers", []) or [])
+        self._media_server_ignore_paths = str(
+            config.get("media_server_ignore_paths", "") or ""
+        ).strip()
+        configure_media_path_ignores(self._media_server_ignore_paths)
+        self._media_server_path_mappings = str(
+            config.get("media_server_path_mappings", "") or ""
+        ).strip()
+        self._media_server_refresh_delay = max(
+            0, int(config.get("media_server_refresh_delay", 0) or 0)
+        )
+        self._emby_proxy_enabled = bool(
+            config.get("emby_proxy_enabled", False)
+        )
+        self._emby_proxy_port = max(
+            1, int(config.get("emby_proxy_port", 3010) or 3010)
+        )
+        self._emby_proxy_upstream = str(
+            config.get("emby_proxy_upstream", "") or ""
+        ).strip()
+        self._emby_proxy_allowed_clients = str(
+            config.get("emby_proxy_allowed_clients", "") or ""
+        ).strip()
+        self._emby_mediainfo_enabled = bool(
+            config.get("emby_mediainfo_enabled", False)
+        )
+        self._platform_media_sync_enabled = bool(
+            config.get("platform_media_sync_enabled", False)
+        )
+        self._platform_deep_delete_enabled = bool(
+            config.get("platform_deep_delete_enabled", False)
+        )
+        self._platform_deep_delete_title_keywords = (
+            self._normalize_deep_delete_title_keywords(
+                config.get(
+                    "platform_deep_delete_title_keywords",
+                    ["深度删除", "神医"],
+                )
+            )
+        )
+        if self._subscribe_handler:
+            self._subscribe_handler._notify = self._notify
+            self._subscribe_handler._notification_type = self._notification_type
+        if self._sync_handler:
+            self._sync_handler.update_notification_config(
+                notify=self._notify,
+                notification_type=self._notification_type,
+                media_server_refresh_enabled=self._media_server_refresh_enabled,
+                media_servers=self._media_servers,
+                media_server_path_mappings=self._media_server_path_mappings,
+                media_server_refresh_delay=self._media_server_refresh_delay,
+                emby_mediainfo_enabled=self._emby_mediainfo_enabled,
+            )
+        self._webhook_handler = WebhookHandler(
+            enabled=self._webhook_enabled,
+            url=self._webhook_url,
+            method=self._webhook_method,
+            timeout=self._webhook_timeout,
+        )
+
+    def _apply_base_config(self, config: Dict[str, Any]) -> None:
+        self._enabled = config.get("enabled", False)
+        self._show_sidebar_nav = bool(config.get("show_sidebar_nav", True))
+        self._agent_enabled = bool(config.get("agent_enabled", True))
+        self._direct_transfer_enabled = bool(
+            config.get("direct_transfer_enabled", True)
+        )
+        self._title_subscribe_enabled = bool(
+            config.get("title_subscribe_enabled", True)
+        )
+        self._subscribe_all_missing_seasons = bool(config.get("subscribe_all_missing_seasons", True))
+        self._subscribe_skip_season_zero = bool(config.get("subscribe_skip_season_zero", True))
+        try:
+            self._subscribe_season_limit = max(0, int(config.get("subscribe_season_limit", 0)))
+        except (TypeError, ValueError):
+            self._subscribe_season_limit = 0
+
+        self._cron = (config.get("cron", self._cron) or "").strip()
+        if self._cron and not self._cron_is_valid(self._cron):
+            logger.warning(f"Cron 表达式无效：{self._cron}，已回退默认 0 18-23 * * *")
+            self._cron = "0 18-23 * * *"
+
+        self._auto_subscribe_enabled = bool(config.get("auto_subscribe_enabled", False))
+        self._auto_subscribe_onlyonce = bool(config.get("auto_subscribe_onlyonce", False))
+        self._auto_subscribe_cron = str(config.get("auto_subscribe_cron", "0 8 * * *") or "0 8 * * *").strip()
+
+        self._subscribe_filter_mode = config.get("subscribe_filter_mode", "exclude") or "exclude"
+        self._exclude_subscribes = config.get("exclude_subscribes", []) or []
+        self._include_subscribes = config.get("include_subscribes", []) or []
+        if self._subscribe_filter_mode == "include":
+            logger.info(f"订阅过滤模式：指定模式，仅处理 {len(self._include_subscribes)} 个勾选订阅")
+
+        self._checkin_cron = str(config.get("checkin_cron") or "0 8 * * *").strip()
+        self._checkin_auto_retry = bool(config.get("checkin_auto_retry", True))
+        self._checkin_retry_count = max(1, min(10, int(config.get("checkin_retry_count", 2) or 2)))
+
+    def _apply_search_config(self, config: Dict[str, Any]) -> None:
+        # 搜索渠道的启用与优先级只读渠道库（channels.json），配置项
+        # search_source_order 只保留为迁移来源，不再进入运行态。
+        self._search_source_order = self.get_enabled_search_sources()
+        if not self._search_source_order:
+            registered_sources = {d.id for d in SearchSourceRegistry.get_definitions()}
+            raw_order = config.get("search_source_order", []) or []
+            if isinstance(raw_order, str):
+                raw_order = raw_order.split(",")
+            self._search_source_order = list(dict.fromkeys(
+                str(value).strip().lower()
+                for value in raw_order
+                if str(value).strip().lower() in registered_sources
+            ))
+            if self._search_source_order:
+                logger.warning(
+                    "渠道库为空，已回退到旧配置 search_source_order"
+                )
+        if self._search_source_order:
+            logger.info(f"搜索资源优先级：{' > '.join(self._search_source_order)}")
+
+        raw_search_proxy = str(config.get("search_proxy", "") or "").strip()
+        self._search_proxy_username = str(config.get("search_proxy_username", "") or "").strip()
+        self._search_proxy_password = str(config.get("search_proxy_password", "") or "")
+        try:
+            self._search_proxy_address = validate_proxy_address(raw_search_proxy)
+            self._search_proxy = build_proxy_url(
+                self._search_proxy_address,
+                self._search_proxy_username,
+                self._search_proxy_password,
+            )
+        except ValueError as error:
+            logger.error(f"搜索渠道代理配置无效，本次使用直连：{error}")
+            self._search_proxy_address = raw_search_proxy
+            self._search_proxy = ""
+
+        # 真实上传 115 的代理（只作用于 115 上传/API，源盘下载保持直连）
+        raw_upload_proxy = str(
+            config.get("cross_transfer_upload_proxy", "") or ""
+        ).strip()
+        # 插件没填时回落到 MP 自己的「网络设置」（PROXY_HOST），一处配置全站可用
+        if not raw_upload_proxy:
+            raw_upload_proxy = str(getattr(settings, "PROXY_HOST", "") or "").strip()
+        upload_proxy_user = str(
+            config.get("cross_transfer_upload_proxy_username", "") or ""
+        ).strip()
+        upload_proxy_pwd = str(
+            config.get("cross_transfer_upload_proxy_password", "") or ""
+        )
+        try:
+            upload_proxy_addr = validate_proxy_address(raw_upload_proxy)
+            self._cross_transfer_upload_proxy = build_proxy_url(
+                upload_proxy_addr, upload_proxy_user, upload_proxy_pwd,
+            )
+        except ValueError as error:
+            logger.warning(f"115 上传代理配置无效，本次使用直连：{error}")
+            self._cross_transfer_upload_proxy = ""
+        self._cross_transfer_daily_upload_limit_gb = clamp_limit_gb(
+            config.get("cross_transfer_daily_upload_limit_gb", CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_daily_upload_limit_gb"]["default"])
+        )
+        self._upload_quota = UploadQuota(
+            self, self._cross_transfer_daily_upload_limit_gb
+        )
+
+        configured_resource_order = config.get("resource_type_order", ["115", "ed2k"])
+        if not isinstance(configured_resource_order, list):
+            configured_resource_order = [configured_resource_order]
+        supported_resource_types = {d.id for d in DriverRegistry.get_definitions()} | {"ed2k", "magnet"}
+        self._resource_type_order = list(dict.fromkeys(
+            str(item).strip().lower()
+            for item in configured_resource_order
+            if str(item).strip().lower() in supported_resource_types
+        ))
+        # 注意：_platform_download_policy 在 _apply_sync_config 里才落到
+        # self 上（后于本函数），这里必须从 config 字典里读，不能读 self。
+        download_policy = str(config.get("platform_download_policy", "block") or "block")
+        self._resource_type_order, magnet_added = ensure_magnet_for_cloud_policy(
+            self._resource_type_order, download_policy,
+        )
+        if magnet_added:
+            logger.warning(
+                "平台下载策略为 cloud，已自动把 Magnet 加入资源类型顺序"
+                "（Magnet 走 115 离线下载接管）"
+            )
+        configured_metadata_url = str(config.get(
+            "magnet_metadata_url_template",
+            "https://itorrents.org/torrent/{info_hash}.torrent",
+        ) or "").strip()
+        self._magnet_metadata_url_template = configure_magnet_metadata_url(configured_metadata_url)
+        if self._magnet_metadata_url_template != configured_metadata_url:
+            logger.warning("Magnet元数据地址模板无效，已恢复默认iTorrents地址")
+
+        self._search_cache_enabled = bool(config.get("search_cache_enabled", True))
+        self._search_cache_ttl_minutes = max(1, min(int(config.get("search_cache_ttl_minutes", 30) or 30), 1440))
+        self._search_concurrency = max(1, min(int(config.get("search_concurrency", 2) or 2), 5))
+        self._search_source_timeout = max(5, min(int(config.get("search_source_timeout", 60) or 60), 120))
+        self._search_circuit_breaker_enabled = bool(config.get("search_circuit_breaker_enabled", True))
+        self._search_circuit_breaker_threshold = max(1, min(int(config.get("search_circuit_breaker_threshold", 3) or 3),
+                                                            10))
+        self._search_circuit_breaker_cooldown = max(10,
+                                                    min(int(config.get("search_circuit_breaker_cooldown", 60) or 60),
+                                                        600))
+
+    def _apply_sync_config(self, config: Dict[str, Any]) -> None:
+        self._transfer_task_batch_size = int(config.get("transfer_task_batch_size", CONCURRENCY_AND_COOLDOWN_PARAMS["transfer_task_batch_size"]["default"]) or 50)
+        self._cross_transfer_enabled = bool(config.get("cross_transfer_enabled", False))
+        raw_cross_types = config.get("cross_transfer_media_types", ["movie", "tv"])
+        if isinstance(raw_cross_types, str):
+            raw_cross_types = [value.strip().lower() for value in raw_cross_types.split(",")]
+        self._cross_transfer_media_types = [
+                                               value for value in (raw_cross_types or []) if value in {"movie", "tv"}
+                                           ] or ["movie", "tv"]
+        self._cross_transfer_download_path = str(config.get("cross_transfer_download_path", "") or "").strip()
+        self._cross_transfer_download_threads = max(1,
+                                                    min(int(config.get("cross_transfer_download_threads", 16) or 16), 256))
+        self._cross_transfer_max_concurrent = max(1, min(int(config.get("cross_transfer_max_concurrent", CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_max_concurrent"]["default"]) or 2), 10))
+        self._cross_transfer_aria2_enabled = bool(
+            config.get("cross_transfer_aria2_enabled", False)
+        )
+        self._cross_transfer_aria2_connections = max(
+            1,
+            min(int(config.get("cross_transfer_aria2_connections", 64) or 64), 96),
+        )
+        self._cross_transfer_aria2_max_concurrent = max(
+            1,
+            min(int(config.get("cross_transfer_aria2_max_concurrent", 2) or 2), 4),
+        )
+        self._cross_transfer_aria2_min_split_size = str(
+            config.get("cross_transfer_aria2_min_split_size", "1M") or "1M"
+        ).strip() or "1M"
+        self._cross_transfer_aria2_disk_cache = str(
+            config.get("cross_transfer_aria2_disk_cache", "32M") or "32M"
+        ).strip() or "32M"
+        try:
+            configure_aria2(
+                enabled=self._cross_transfer_aria2_enabled,
+                connections=self._cross_transfer_aria2_connections,
+                max_concurrent=self._cross_transfer_aria2_max_concurrent,
+                min_split_size=self._cross_transfer_aria2_min_split_size,
+                disk_cache=self._cross_transfer_aria2_disk_cache,
+                data_dir=resolve_data_dir(
+                    self._cross_transfer_download_path, self.get_data_path()
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - 配置失败不得阻塞插件加载
+            logger.warning(f"配置 aria2 下载引擎失败：{error}")
+        self._cross_transfer_direct_stream = bool(config.get("cross_transfer_direct_stream", True))
+        try:
+            upload_concurrency = int(
+                config.get(
+                    "cross_transfer_upload_concurrency",
+                    CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_concurrency"]["default"],
+                )
+            )
+        except (TypeError, ValueError):
+            upload_concurrency = CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_concurrency"]["default"]
+        # 0 表示关闭 115 分片并发上传（回退顺序上传），上限 16。
+        self._cross_transfer_upload_concurrency = max(0, min(upload_concurrency, 16))
+        self._sync_cross_transfer_upload_concurrency()
+        # 115 上传熔断器配置（Phase 3b-10）：阈值/冷却，非法值回落表默认值。
+        try:
+            breaker_threshold = int(
+                config.get(
+                    "cross_transfer_upload_breaker_threshold",
+                    CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_threshold"]["default"],
+                )
+            )
+        except (TypeError, ValueError):
+            breaker_threshold = CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_threshold"]["default"]
+        self._cross_transfer_upload_breaker_threshold = max(1, min(breaker_threshold, 100))
+        try:
+            breaker_cooldown = float(
+                config.get(
+                    "cross_transfer_upload_breaker_cooldown_seconds",
+                    CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_cooldown_seconds"]["default"],
+                )
+            )
+        except (TypeError, ValueError):
+            breaker_cooldown = CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_upload_breaker_cooldown_seconds"]["default"]
+        self._cross_transfer_upload_breaker_cooldown_seconds = max(5.0, min(breaker_cooldown, 3600.0))
+        self._sync_upload_breaker_config()
+
+        rapid_miss_action = str(
+            config.get("cross_transfer_rapid_miss_action", "abort") or "abort"
+        ).strip().lower()
+        # 秒传未命中处理：fallback=回落普通上传（默认）；abort=中止且不真实上传。
+        # 非法值一律回退 fallback，保证老行为逐字节不变。
+        self._cross_transfer_rapid_miss_action = (
+            rapid_miss_action if rapid_miss_action in {"fallback", "abort"} else "fallback"
+        )
+        # 改配置后立即同步到已存在的跨盘任务管理器（旧实现只在 initialize 时传一次，
+        # 导致切到「回落普通上传」后运行期仍是 abort，1.9.76 修复）。
+        manager = getattr(self, "_cross_transfer_manager", None)
+        setter = getattr(manager, "set_rapid_miss_action", None)
+        if callable(setter):
+            setter(self._cross_transfer_rapid_miss_action)
+        self._apply_tg_monitor_config(config)
+        self._residue_cleanup = bool(
+            config.get("cross_transfer_residue_cleanup", True)
+        )
+        # 1.32.0：真名媒体残留保留期（小时），0 = 关闭；非法值回落 24。
+        try:
+            real_name_hours = int(
+                config.get("cross_transfer_real_name_retention_hours", 24)
+            )
+        except (TypeError, ValueError):
+            real_name_hours = 24
+        self._cross_transfer_real_name_retention_hours = max(0, min(real_name_hours, 168))
+
+        self._subscription_concurrency = max(1, min(int(config.get("subscription_concurrency", CONCURRENCY_AND_COOLDOWN_PARAMS["subscription_concurrency"]["default"]) or 2), 5))
+        self._batch_size = int(config.get("batch_size", 20) or 20)
+        self._batch_interval = max(0, min(float(config.get("batch_interval", CONCURRENCY_AND_COOLDOWN_PARAMS["batch_interval"]["default"]) or 0), 60))
+        self._transfer_risk_cooldown = max(60, min(int(config.get("transfer_risk_cooldown", CONCURRENCY_AND_COOLDOWN_PARAMS["transfer_risk_cooldown"]["default"]) or 1800), 86400))
+        self._skip_other_season_dirs = config.get("skip_other_season_dirs", True)
+        # 跨季路径守卫：分享目录季号与目标季冲突时拒绝进候选（file_matcher 类级开关）
+        self._cross_season_path_guard = bool(config.get("cross_season_path_guard", True))
+        FileMatcher.path_season_guard_enabled = self._cross_season_path_guard
+        # 期集换算规则（综艺「第N期上/下」→ 集号），空配置保持原行为
+        self._period_episode_rules_text = str(
+            config.get("period_episode_rules", "") or ""
+        )
+        FileMatcher.period_episode_rules = self._parse_period_episode_rules(
+            self._period_episode_rules_text
+        )
+        configured_video_exts, configured_sub_exts = MediaFileParser.configure_extensions(
+            video_extensions=config.get("video_extensions"),
+            subtitle_extensions=config.get("subtitle_extensions"),
+        )
+        self._video_extensions = sorted(configured_video_exts)
+        self._subtitle_extensions = sorted(configured_sub_exts)
+
+        self._upgrade_subscribe_ids = config.get("upgrade_subscribe_ids", []) or []
+        self._self_heal_interval = int(config.get("self_heal_interval", 10))
+        self._enable_cloud_upgrade = bool(config.get("enable_cloud_upgrade", False))
+        self._enable_pt_upgrade = bool(config.get("enable_pt_upgrade", False))
+        self._upgrade_mode = str(config.get("upgrade_mode", "largest") or "largest").strip().lower()
+        if self._upgrade_mode not in {"coexist", "replace", "largest", "smallest"}:
+            self._upgrade_mode = "largest"
+        self._episode_dedup_enabled = bool(config.get("episode_dedup_enabled", True))
+        self._verify_landed_enabled = bool(config.get("verify_landed_enabled", True))
+        self._prefer_template_named_version = bool(
+            config.get("prefer_template_named_version", True)
+        )
+        if self._upgrade_mode == "coexist" and self._episode_dedup_enabled:
+            logger.warning(
+                "洗版模式为「新旧共存」：按季集判重不生效，"
+                "需要替换请改成「保留最大文件 / 保留最小文件 / 直接替换」"
+            )
+        self._quality_min_gain_percent = int(config.get("quality_min_gain_percent", 10) or 0)
+        self._upgrade_episode_limit = max(
+            0, int(config.get("upgrade_episode_limit", 0) or 0)
+        )
+        self._quality_min_gain_mb = int(config.get("quality_min_gain_mb", 200) or 0)
+        self._local_resource_path = str(config.get("local_resource_path", "") or "").strip()
+        self._type_folder_enabled = bool(config.get("type_folder_enabled", False))
+        self._type_folder_movie = (
+                str(config.get("type_folder_movie", "电影") or "").strip().strip("/") or "电影"
+        )
+        self._type_folder_tv = (
+                str(config.get("type_folder_tv", "剧集") or "").strip().strip("/") or "剧集"
+        )
+
+        # v1.30.0 阶段 4：organize_after_transfer 已退役（转存后整理恒开，
+        # 旧值由 normalize 静默丢弃）；类默认值 True 保持行为不变。
+        self._organize_subtitles = bool(config.get("organize_subtitles", True))
+        self._subtitle_traditional_to_simplified = bool(config.get("subtitle_traditional_to_simplified", False))
+        self._anime_pack_preferred = bool(config.get("anime_pack_preferred", True))
+        self._offline_timeout = max(10, min(int(config.get("offline_timeout", 30) or 30), 1440))
+        self._strm_generate_enabled = bool(config.get("strm_generate_enabled", True))
+        self._strm_full_scan_enabled = bool(config.get("strm_full_scan_enabled", True))
+        self._strm_full_scan_overwrite = bool(config.get("strm_full_scan_overwrite", False))
+        self._strm_increment_enabled = bool(config.get("strm_increment_enabled", True))
+        try:
+            self._strm_increment_minutes = max(
+                1, min(int(config.get("strm_increment_minutes", 10) or 10), 1440)
+            )
+        except (TypeError, ValueError):
+            self._strm_increment_minutes = 10
+        try:
+            self._strm_increment_budget = max(
+                30, min(int(config.get("strm_increment_budget", 180) or 180), 3600)
+            )
+        except (TypeError, ValueError):
+            self._strm_increment_budget = 180
+        # v1.30.0 阶段 4：organize_source_path 已退役（整理台源目录改
+        # 为手动现选，旧值由 normalize 静默丢弃）；类默认值 "" 保持行为不变。
+        try:
+            organize_max_files = int(config.get("organize_max_files", 500) or 500)
+        except (TypeError, ValueError):
+            organize_max_files = 500
+        try:
+            organize_max_depth = int(config.get("organize_max_depth", 8) or 8)
+        except (TypeError, ValueError):
+            organize_max_depth = 8
+        self._organize_max_files = max(1, min(organize_max_files, 5000))
+        self._organize_max_depth = max(1, min(organize_max_depth, 20))
+        self._organize_include_subtitles = bool(config.get("organize_include_subtitles", True))
+        self._organize_conflict_policy = str(config.get("organize_conflict_policy", "skip") or "skip")
+        self._organize_schedule_enabled = bool(config.get("organize_schedule_enabled", False))
+        self._organize_schedule_cron = str(config.get("organize_schedule_cron", "0 4 * * *") or "0 4 * * *")
+        self._organize_schedule_auto_execute = bool(config.get("organize_schedule_auto_execute", True))
+        self._organize_schedule_notify = bool(config.get("organize_schedule_notify", True))
+        self._nfo_scrape_enabled = bool(config.get("nfo_scrape_enabled", False))
+        self._image_scrape_enabled = bool(config.get("image_scrape_enabled", False))
+        self._strm_base_url = str(config.get("strm_base_url", "")).strip().rstrip("/")
+        self._strm_url_template = str(config.get(
+            "strm_url_template",
+            "{base_url}/api/v1/plugin/CloudSubscribeX/redirect"
+            "?pickcode={pickcode}&file_name={file_name}",
+        )).strip()
+
+        self._timeout_enabled = bool(config.get("timeout_enabled", True))
+        for key, default in (
+                ("timeout_default_connect", 30),
+                ("timeout_default_pool", 15),
+                ("timeout_default_read", 60),
+                ("timeout_default_write", 60),
+                ("timeout_slow_connect", 30),
+                ("timeout_slow_pool", 15),
+                ("timeout_slow_read", 300),
+                ("timeout_slow_write", 300),
+        ):
+            setattr(self, f"_{key}", max(0, float(config.get(key, default) or 0)))
+
+        self._block_start_time = str(config.get("block_start_time", self._block_start_time) or self._block_start_time)
+        self._block_end_time = str(config.get("block_end_time", self._block_end_time) or self._block_end_time)
+        self._block_system_subscribe = bool(config.get("block_system_subscribe", False))
+        self._takeover_new_subscribes = bool(config.get("takeover_new_subscribes", False))
+        self._platform_download_policy = str(config.get("platform_download_policy", "block") or "block")
+
+    def _p115_timeout_kwargs(self) -> Dict[str, Any]:
+        """组装 p115client 的普通与慢操作超时参数，0 表示不限制。"""
+
+        def timeout_values(prefix: str) -> Dict[str, float]:
+            values = {}
+            for name in ("connect", "pool", "read", "write"):
+                value = float(getattr(self, f"_timeout_{prefix}_{name}", 0) or 0)
+                if value > 0:
+                    values[name] = value
+            return values
+
+        return {
+            "timeout_enabled": self._timeout_enabled,
+            "default_timeout": timeout_values("default"),
+            "slow_timeout": timeout_values("slow"),
+        }
+
+    def _init_clients(self):
+        """初始化驱动管理器与跨盘任务调度。"""
+        self._cloud_drive = None
+        self._cloud_drive_registry = CloudDriveRegistry()
+        if self._search_proxy:
+            logger.info("搜索渠道已启用统一请求代理")
+
+        self._drive_manager = CloudDriveManager(self)
+        self._drive_manager.initialize()
+        self._cloud_drive_registry = self._drive_manager.registry
+        self._cloud_drive = self._drive_manager.active_drive
+        self._cross_transfer_manager = self._drive_manager.cross_transfer_manager
+        self._sync_cross_transfer_upload_concurrency()
+        self._sync_upload_breaker_config()
+
+    def _sync_cross_transfer_upload_concurrency(self) -> None:
+        """把 115 分片并发度注入 115 客户端管理器。
+
+        上传组件挂在客户端管理器下、靠属性委托读宿主值，构造期拿不到插件配置，
+        所以插件在初始化与每次保存配置后显式注入；注入失败时组件用默认值（2）。
+        """
+        manager = getattr(self, "_drive_manager", None)
+        client = manager.get_client("115") if manager else None
+        if not client:
+            return
+        try:
+            client._cross_transfer_upload_concurrency = self._cross_transfer_upload_concurrency
+        except Exception as error:  # noqa: BLE001 - 注入失败不影响主流程
+            logger.debug(f"注入 115 上传并发度失败：{error}", exc_info=True)
+
+    def _sync_upload_breaker_config(self) -> None:
+        """把 115 上传熔断器阈值/冷却注入 115 客户端管理器。
+
+        与并发度注入同一路子：上传组件每次用熔断器时从 manager 属性现读，
+        改配置即生效；注入失败时组件用默认值（阈值 5、冷却 300 秒）。
+        """
+        manager = getattr(self, "_drive_manager", None)
+        client = manager.get_client("115") if manager else None
+        if not client:
+            return
+        try:
+            client._upload_breaker_threshold = self._cross_transfer_upload_breaker_threshold
+            client._upload_breaker_cooldown_seconds = self._cross_transfer_upload_breaker_cooldown_seconds
+        except Exception as error:  # noqa: BLE001 - 注入失败不影响主流程
+            logger.debug(f"注入 115 上传熔断配置失败：{error}", exc_info=True)
+
+    def register_provider(self, key: str) -> bool:
+        """根据网盘标识动态注册驱动。"""
+        if self._drive_manager:
+            return self._drive_manager.register_provider(key)
+        return False
+
+    def _init_subscribe_handler(self):
+        self._subscribe_handler = SubscribeHandler(plugin=self)
+
+    def _init_handlers(self):
+        self._init_subscribe_handler()
+        self._search_handler = SearchHandler(plugin=self)
+        self._sync_handler = SyncHandler(plugin=self)
+
+        self._webhook_handler = WebhookHandler(
+            enabled=self._webhook_enabled,
+            url=self._webhook_url,
+            method=self._webhook_method,
+            timeout=self._webhook_timeout,
+        )
+
+    def _on_file_finalized(
+            self,
+            transfer_details: List[Dict[str, Any]],
+            total_count: int,
+    ) -> None:
+        """离线文件真正就绪后发送一次汇总 Webhook。"""
+        if not self._webhook_handler:
+            return
+        self._webhook_handler.send_transfer_complete(
+            transfer_details=transfer_details,
+            total_count=total_count,
+        )
+
+    def _persist_config_values(self, **updates: Any) -> None:
+        """基于当前完整配置更新少量运行时值，避免遗漏其他配置项。"""
+        updates = {
+            key: value
+            for key, value in updates.items()
+            if value is not None
+        }
+        if not updates:
+            return
+        config = copy.deepcopy(self.get_config() or self._applied_config or {})
+        if all(config.get(key) == value for key, value in updates.items()):
+            # 与库中配置一致时无需写库：宿主对“值未变化”的写入返回 None。
+            self._applied_config = config
+            return
+        config.update(updates)
+        try:
+            # 宿主仅在真正失败时返回 False，None 表示值未变化、无需更新。
+            if self.update_config(config) is False:
+                logger.warning(f"插件运行时配置持久化失败：{', '.join(updates)}")
+        except Exception as error:
+            logger.warning(
+                f"插件运行时配置持久化异常：{', '.join(updates)}：{error}"
+            )
+        self._applied_config = config
+
+    def _run_auto_subscribe_once(self) -> None:
+        try:
+            self.run_auto_subscribe()
+        except Exception as error:
+            logger.error(f"榜单自动订阅立即执行失败：{error}")
+
+    # ---------- 下载器投影：任务进度改走 MP 下载管理页 ----------
+
+    def _downloader_name(self) -> str:
+        """下载管理页的标签名。"""
+        return DOWNLOADER_NAME
+
+    def _ensure_downloader_entry(self) -> None:
+        """在系统下载器配置里登记本插件，让下载页出现独立标签。
+
+        MoviePilot 的下载页按系统配置里的下载器名称分标签，type 必须等于
+        插件类名（宿主按 type == 服务名匹配下载器服务），实际任务由本插件
+        自己的 list_torrents 返回。实现与网盘直链频道同款。
+        """
+        name = self._downloader_name()
+        try:
+            current = self.systemconfig.get(SystemConfigKey.Downloaders) or []
+        except Exception as error:  # noqa: BLE001 - 配置读取失败不应阻断插件
+            logger.warning(f"读取下载器配置失败：{error}")
+            return
+        updated = ensure_downloader_entry(
+            list(current), name=name, type_name=DOWNLOADER_TYPE
+        )
+        if updated == [dict(item) for item in current if isinstance(item, dict)]:
+            return
+        try:
+            self.systemconfig.set(SystemConfigKey.Downloaders, updated)
+            logger.info(f"已登记下载器条目：{name}")
+        except Exception as error:  # noqa: BLE001 - 登记失败时仅影响界面展示
+            logger.warning(f"登记下载器条目失败：{error}")
+
+    def _remove_downloader_entry(self) -> None:
+        """移除本插件登记的下载器条目，避免停用/卸载后下载页留一个空标签。"""
+        name = self._downloader_name()
+        try:
+            current = self.systemconfig.get(SystemConfigKey.Downloaders) or []
+        except Exception as error:  # noqa: BLE001 - 配置读取失败不阻断停机
+            logger.warning(f"读取下载器配置失败：{error}")
+            return
+        kept = remove_downloader_entry(
+            list(current), name=name, type_name=DOWNLOADER_TYPE
+        )
+        if len(kept) == len([item for item in current if isinstance(item, dict)]):
+            return
+        try:
+            self.systemconfig.set(SystemConfigKey.Downloaders, kept)
+            logger.info(f"已移除下载器条目：{name}")
+        except Exception as error:  # noqa: BLE001 - 移除失败时仅影响界面展示
+            logger.warning(f"移除下载器条目失败：{error}")
+
+    def _runtime_tasks_for_downloader(self) -> List[Dict[str, Any]]:
+        """取运行时任务快照；运行态未就绪时返回空列表。
+
+        再把进行中的 115 上传（进程内登记表）合并进来：MP 整理队列
+        里的整理没有对应的插件任务卡，不合并下载页就看不到上传进度。
+        合并失败时只返回原任务，绝不影响下载页。
+        """
+        try:
+            tasks = self._serialize_runtime_tasks()
+        except Exception as error:  # noqa: BLE001 - 运行态异常不影响下载页
+            logger.debug(f"读取运行时任务失败：{type(error).__name__}: {error}")
+            return []
+        merged = list(tasks or [])
+        try:
+            from .core.downloader_view import synthetic_upload_tasks
+
+            merged.extend(synthetic_upload_tasks())
+        except Exception as error:  # noqa: BLE001 - 合并失败只返回原任务
+            logger.debug(
+                f"合并上传任务失败：{type(error).__name__}: {error}",
+                exc_info=True,
+            )
+        return merged
+
+    def list_torrents(self, status: Optional[Union[str, TorrentQueryStatus]] = None,
+                      hashs: Optional[Union[list[str], str]] = None,
+                      downloader: Optional[str] = None,
+                      include_all_tags: bool = False) -> list[DownloaderTorrent]:
+        """把运行时任务投影成下载页的任务列表（口径与网盘直链一致）。"""
+        return project_tasks(
+            self._runtime_tasks_for_downloader(),
+            status=status,
+            hashs=hashs,
+            downloader=downloader,
+            own_name=self._downloader_name(),
+            torrent_cls=DownloaderTorrent,
+        )
+
+    def torrent_files(self, tid: Optional[str] = None, downloader: Optional[str] = None,
+                      **kwargs: Any) -> list[DownloaderFile]:
+        """返回任务文件清单与单文件进度；没有文件明细时返回 []。"""
+        if not tid:
+            return []
+        tasks = self._runtime_tasks_for_downloader()
+        task_id = resolve_task_id(tasks, str(tid))
+        if not task_id:
+            return []
+        task = next(
+            (item for item in tasks if str(item.get("id") or "") == task_id),
+            None,
+        )
+        if not task:
+            return []
+        return task_to_files(task, file_cls=DownloaderFile)
+
+    def start_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                       downloader: Optional[str] = None, **kwargs: Any) -> bool:
+        """同步任务不可续传：已停止的任务只能重新发起同步，不从下载页恢复。"""
+        return False
+
+    def stop_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                      downloader: Optional[str] = None, **kwargs: Any) -> bool:
+        """暂停任务：复用单任务停止逻辑（停止事件 + 跨盘子任务取消）。"""
+        if isinstance(hashs, str):
+            wanted = [hashs]
+        elif hashs:
+            wanted = list(hashs)
+        else:
+            wanted = []
+        if not wanted:
+            return False
+        tasks = self._runtime_tasks_for_downloader()
+        changed = False
+        for hash_value in wanted:
+            task_id = resolve_task_id(tasks, str(hash_value))
+            if not task_id:
+                continue
+            if task_id.startswith("upload:"):
+                # 合成上传卡：上传走 MP 整理链，没法从下载页停止。
+                continue
+            try:
+                result = self.api_stop_sync_task(task_id)
+            except Exception as error:  # noqa: BLE001 - 单任务停止失败不影响其它
+                logger.debug(f"停止任务失败：{task_id}，{type(error).__name__}")
+                continue
+            if isinstance(result, dict):
+                changed = bool(result.get("success")) or changed
+            else:
+                changed = bool(result) or changed
+        return changed
+
+    def remove_torrents(self, hashs: Optional[Union[list[str], str]] = None,
+                        delete_file: bool = False, downloader: Optional[str] = None,
+                        **kwargs: Any) -> bool:
+        """删除任务记录：只清内存中已终态的同步任务，不删文件、不碰历史表。
+
+        进行中的任务删不掉（先停再说）；终态任务本就不再出现在下载页，
+        这里只是清理 _sync_tasks 里残留的记录。
+        """
+        if isinstance(hashs, str):
+            wanted = [hashs]
+        elif hashs:
+            wanted = list(hashs)
+        else:
+            wanted = []
+        if not wanted:
+            return False
+        from .core.downloader_view import task_hash
+
+        # 终态任务已不在运行态快照里，拿内存表里的 id 逐个算 hash 反查。
+        sync_tasks = getattr(self, "_sync_tasks", None) or {}
+        lock = getattr(self, "_sync_tasks_lock", None)
+        terminal = {"completed", "failed", "stopped", "success"}
+        changed = False
+        for hash_value in wanted:
+            wanted_hash = str(hash_value or "").strip().lower()
+            if not wanted_hash:
+                continue
+            task_id = next(
+                (
+                    key for key in sync_tasks
+                    if task_hash(str(key)) == wanted_hash
+                ),
+                "",
+            )
+            if not task_id:
+                continue
+            if lock is not None:
+                with lock:
+                    task = sync_tasks.get(task_id)
+                    if task and str(task.get("status") or "") in terminal:
+                        sync_tasks.pop(task_id, None)
+                        changed = True
+            else:
+                task = sync_tasks.get(task_id)
+                if task and str(task.get("status") or "") in terminal:
+                    sync_tasks.pop(task_id, None)
+                    changed = True
+        return changed
+
+    # ---------- MP 原生搜索：搜索结果进搜索页，下载走本插件转存 ----------
+    # 实现在 core/mp_search.py，这里只做薄委托（与 list_torrents 委托给
+    # downloader_view.py 一个写法）。
+
+    def search_torrents(self, site: Optional[dict] = None,
+                        keyword: Optional[str] = None,
+                        mtype: Optional[Any] = None,
+                        cat: Optional[str] = None,
+                        page: int = 0):
+        """MP 搜索页入口：把订阅助手的搜索候选交给搜索页展示。"""
+        from .core.mp_search import search_torrents as _mp_search_torrents
+
+        return _mp_search_torrents(
+            self, site=site, keyword=keyword, mtype=mtype, cat=cat, page=page
+        )
+
+    def download(self, content: Any, download_dir: Any,
+                 cookie: Any = None, episodes: Optional[Any] = None,
+                 category: Optional[str] = None, label: Optional[str] = None,
+                 downloader: Optional[str] = None,
+                 custom_words: Optional[str] = None):
+        """MP 下载入口：只接管本插件合成种子的任务，其余返回 None。"""
+        from .core.mp_search import download as _mp_download
+
+        return _mp_download(
+            self, content, download_dir, cookie=cookie, episodes=episodes,
+            category=category, label=label, downloader=downloader,
+            custom_words=custom_words,
+        )
+
+    def api_torrent(self, sid: str = "", sig: str = ""):
+        """按分享 id 输出合成种子（匿名端点，靠 sid + HMAC 签名鉴权）。"""
+        from .core.mp_search import api_torrent as _mp_api_torrent
+
+        return _mp_api_torrent(self, sid=sid, sig=sig)
+
+    def get_module(self) -> dict:
+        """按模块合同向宿主声明下载器、搜索与下载能力。
+
+        MP 下载页查任务与搜索页查插件结果都走模块调度器，只认插件
+        get_module() 返回的字典：1.9.87 只声明了 5 个下载器方法，
+        调度器根本不调本插件的 list_torrents；这次补上
+        search_torrents 与 download，搜索页才能搜到订阅助手的结果，
+        点下载后才走本插件自己的转存流程。
+        """
+        return {
+            "search_torrents": self.search_torrents,
+            "download": self.download,
+            "list_torrents": self.list_torrents,
+            "torrent_files": self.torrent_files,
+            "start_torrents": self.start_torrents,
+            "stop_torrents": self.stop_torrents,
+            "remove_torrents": self.remove_torrents,
+        }
+
+    def stop_service(self, preserve_subscribe_queue: bool = False):
+        """停止服务"""
+        try:
+            from .core.api.emby_proxy import stop_emby_proxy
+
+            stop_emby_proxy(self)
+        except Exception as error:  # noqa: BLE001 - 反代停止失败不得阻塞插件卸载
+            logger.warning(f"Emby 302 反代停止失败：{error}")
+        try:
+            shutdown_aria2()
+        except Exception as error:  # noqa: BLE001 - 下载引擎停止失败不得阻塞卸载
+            logger.warning(f"关闭 aria2 下载引擎失败：{error}")
+        if not preserve_subscribe_queue and self._subscribe_search_queue_lock is not None:
+            self.cancel_pending_subscribe_searches(shutdown=True)
+            executor = self._sync_operation_executor
+            self._sync_operation_executor = None
+            if executor:
+                executor.shutdown(wait=False, cancel_futures=True)
+        if self._stop_event:
+            self._stop_event.set()
+        if self._sync_tasks_lock is not None:
+            with self._sync_tasks_lock:
+                for task in self._sync_tasks.values():
+                    stop_event = task.get("stop_event")
+                    if stop_event:
+                        stop_event.set()
+        self._restore_subscribe_search_takeover()
+        try:
+            components = self.__dict__.get("_plugin_components", {})
+            message_hook = components.pop(MessageRoutingHook, None)
+            if message_hook:
+                message_hook.close()
+        except Exception as error:
+            logger.debug(f"恢复平台消息路由失败：{error}", exc_info=True)
+        try:
+            components = self.__dict__.get("_plugin_components", {})
+            search_api = components.get(SearchApi)
+            if search_api:
+                search_api.close()
+        except Exception as error:
+            logger.debug(f"关闭搜索测试连接失败：{error}", exc_info=True)
+        try:
+            components = self.__dict__.get("_plugin_components", {})
+            media_library_api = components.get(MediaLibraryApi)
+            if media_library_api:
+                media_library_api.close()
+        except Exception as error:
+            logger.debug(f"关闭媒体库 Webhook 同步调度器失败：{error}", exc_info=True)
+        try:
+            if self._sync_handler:
+                self._sync_handler.close()
+        except Exception as error:
+            logger.debug(f"关闭媒体服务器入库通知器失败：{error}", exc_info=True)
+        try:
+            if self._search_handler:
+                self._search_handler.close(release_cache=True)
+        except Exception as error:
+            logger.debug(f"关闭搜索客户端失败：{error}", exc_info=True)
+        try:
+            if self._drive_manager:
+                self._drive_manager.close()
+                self._drive_manager = None
+        except Exception as error:
+            logger.debug(f"关闭网盘客户端失败：{error}", exc_info=True)
+        try:
+            components = self.__dict__.get("_plugin_components", {})
+            components.pop(PlatformIntegrationService, None)
+        except Exception as error:
+            logger.debug(f"关闭平台缓存失败：{error}", exc_info=True)
+        # 统一调度器一次停全部：包括以前漏停的历史状态维护与 115 整理两个任务。
+        try:
+            registry = self.__dict__.get("_job_registry")
+            if registry is not None:
+                registry.shutdown()
+                self.__dict__["_job_registry"] = None
+        except Exception:
+            logger.debug("stop_service 分支忽略异常", exc_info=True)
+
+        try:
+            store = self.__dict__.get("_cloudsubscribe_data_store")
+            if store:
+                store.close()
+        except Exception as error:
+            logger.debug(f"关闭插件独立数据库失败：{error}", exc_info=True)
+
+        # 停用/卸载后下载页不再留一个空标签；下次 init_plugin 会重新登记。
+        try:
+            self._remove_downloader_entry()
+        except Exception as error:  # noqa: BLE001 - 移除失败不阻断停机
+            logger.debug(f"移除下载器条目失败：{error}", exc_info=True)
+
+    @eventmanager.register(EventType.PluginReload)
+    def reload_plugin_api(self, event: Event):
+        """热重载完成后同步刷新本插件新增或变更的 API 路由。"""
+        event_data = event.event_data if event else None
+        if isinstance(event_data, dict) and event_data.get("plugin_id") == self.__class__.__name__:
+            register_plugin_api(plugin_id=self.__class__.__name__)
