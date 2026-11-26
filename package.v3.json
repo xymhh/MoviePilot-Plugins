@@ -17,13 +17,14 @@
     "name": "网盘订阅 Lite",
     "description": "只保留搜索渠道、跨盘转存、渠道签到与榜单订阅；整理与 STRM 交给 115 助手插件。",
     "labels": "订阅,网盘,转存,搜索,签到,榜单",
-    "version": "3.0.0",
+    "version": "3.0.1",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
     "release": true,
     "system_version": ">=3.0.0",
     "history": {
+      "v3.0.1": "修复重构遗留的孤立 @staticmethod 装饰器导致 init_plugin/_require_sync_handler/_init_clients 被变成静态方法、宿主调用时配置字典被当作 self 传入而加载失败（'dict' object has no attribute '_raise_file_limit'，3.0.0 在实例上无法加载）；移除 6 处多余装饰器并全树审计确认无同类问题。",
       "v3.0.0": "V3 版本（MoviePilot v3 专用）：从 V2 的 CloudSubscribeLite 1.0.3 复制为 V3 专用实现，源码目录 plugins.v3/cloudsubscribelite/，清单 package.v3.json；版本声明改走 version.py（VERSION = \"3.0.0\"，plugin_version = VERSION，不再硬编码），依赖改走 pyproject.toml（dynamic = [\"version\"]）。Lite 是基于最新 CloudSubscribeX 的简化版：只保留搜索渠道（15 源）、跨盘转存、渠道签到与榜单订阅，不注册 STRM/整理/漏斗服务与对应路由；整理与 STRM 交给 115 助手插件。注意：V3 宿主合同适配尚未在 V3 宿主上实测验证。"
     }
   }
