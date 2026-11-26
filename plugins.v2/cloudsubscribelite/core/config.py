@@ -362,7 +362,9 @@ class UIConfig:
             "cross_transfer_download_path": "/tmp",
             "cross_transfer_download_threads": 16,
             "cross_transfer_max_concurrent": CONCURRENCY_AND_COOLDOWN_PARAMS["cross_transfer_max_concurrent"]["default"],
-            "cross_transfer_aria2_enabled": False,
+            # Lite：跨盘下载默认内置 aria2（多连接 + 断点续传），
+            # 失败自动回落内置下载器（core/transfer.py 的旁路保护）。
+            "cross_transfer_aria2_enabled": True,
             "cross_transfer_aria2_connections": 64,
             "cross_transfer_aria2_max_concurrent": 2,
             "cross_transfer_aria2_min_split_size": "1M",

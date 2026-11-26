@@ -438,7 +438,7 @@
     "name": "网盘订阅 Lite",
     "description": "只保留搜索渠道、跨盘转存、渠道签到与榜单订阅；整理与 STRM 交给 115 助手插件。",
     "labels": "订阅,网盘,转存,搜索,签到,榜单",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "https://raw.githubusercontent.com/xymhh/MoviePilot-Plugins/main/icons/cloud.png",
     "author": "xymhh",
     "level": 1,
@@ -447,7 +447,8 @@
     "history": {
       "v1.0.0": "从 CloudSubscribeX 1.36.1 拆分出的 Lite 版：只保留搜索渠道（15 源）、跨盘转存（含下载腿/上传腿/失败即删本地）、渠道签到、榜单订阅。不再注册「115网盘CS版」MP 存储适配器，不再注册 STRM / 整理 / 漏斗 定时服务，侧栏只留渠道管理、频道监控、失败记录；整理与 STRM 由 115 助手插件负责。",
       "v1.0.1": "UI 换回上游 1.7.x（AppPage/Config/Dashboard），侧栏只保留「网盘订阅」；修 /overview 500（本分支没有 history_overview 聚合，改为能力探测降级为空统计，界面显示 0 而不是崩）；资源页后端接口（resource/detail|recommend、history/play|notify|reconcile_status）尚未补齐，暂不挂入口。",
-      "v1.0.2": "修「插件打开报 notfound」：MP 按侧栏 nav_key 拼组件名（nav_key=main → ./AppPageMain），上游前端只暴露 AppPage，于是页面加载 404。补一个 ./AppPageMain 别名指向同一个 AppPage.vue。"
+      "v1.0.2": "修「插件打开报 notfound」：MP 按侧栏 nav_key 拼组件名（nav_key=main → ./AppPageMain），上游前端只暴露 AppPage，于是页面加载 404。补一个 ./AppPageMain 别名指向同一个 AppPage.vue。",
+      "v1.0.3": "跨盘下载默认改用内置 aria2（多连接 + 断点续传，失败自动回落内置下载器）；插件自带 bin/aria2c-linux-x86_64.xz，运行时解压，不需要外部容器。"
     }
   },
   "version": "1.9.85",
