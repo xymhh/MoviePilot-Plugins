@@ -1,0 +1,2794 @@
+"""跨网盘传输编排：优先目标端秒传，失败后回退本地上传。"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import shutil
+import tempfile
+import time
+import uuid
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Event, Lock, Semaphore, Thread
+from typing import Any, Callable, Dict, Mapping, Optional
+
+import requests
+from requests.adapters import HTTPAdapter
+
+from app.log import logger
+
+from .cloud import (
+    CloudDriveCapability,
+    CloudDriveProvider,
+    CloudFile,
+    RapidUploadResult,
+)
+from .error_text import sanitize_error_text
+from .residue import RESIDUE_PATTERN
+from .target_writer import (
+    TargetConflictError,
+    TargetPlan,
+    TargetUnknownError,
+    TargetWriter,
+)
+from .aria2 import Aria2FileDownloadService, aria2_settings
+from .bypass_guard import bypass_guard
+
+
+def _fd_safe_workers(requested: int, ceiling: int = 256) -> int:
+    """按进程文件句柄软上限收敛分片并发数。
+
+    每个分片至少占一个 socket，句柄上限低时高并发会直接撞爆
+    ``Errno 24 Too many open files``（并把速度拖到接近单连接水平）。
+    插件加载时已尝试把 soft 抬到 65535；万一抬不动，这里兜底收敛。
+    """
+    try:
+        import resource
+
+        soft, _hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        soft = int(soft)
+    except Exception:  # noqa: BLE001 - 取不到上限时按保守值处理
+        return max(1, min(int(requested), 32))
+    if soft <= 0:
+        return max(1, min(int(requested), ceiling))
+    return max(1, min(int(requested), max(8, soft // 8), ceiling))
+
+
+class _RangeDownloadUnsupported(RuntimeError):
+    pass
+
+
+class RapidMissAborted(RuntimeError):
+    """秒传未命中且用户设置为「中止并清理」：不真实上传、不留缓存。
+
+    from_cache=True 表示这次是命中 24h 负缓存被跳过，不是新探测到的未命中；
+    except 分支据此避免反复刷新 TTL（否则负缓存永远不会过期）。
+    """
+
+    def __init__(self, message: str = "", from_cache: bool = False):
+        super().__init__(message)
+        self.from_cache = bool(from_cache)
+
+
+class _RemoteSha1RangeReader:
+    """abort 秒传探测：按 115 二次校验范围从源盘直链读取并返回大写 SHA1。
+
+    sign_check 由 115 下发、形如 "start-end"（见 p115client upload_file_init）；
+    只读取该小段并返回其 SHA1，不落本地文件、不产生上传流量。
+    """
+
+    def __init__(
+            self, url: str, headers: Mapping | None, size: int,
+            stop_requested: Optional[Callable[[], bool]] = None,
+    ):
+        self._url = str(url or "")
+        self._headers = dict(headers or {})
+        self._size = int(size or 0)
+        self._stop_requested = stop_requested
+
+    def read_range_sha1(self, value: str) -> str:
+        if self._stop_requested and self._stop_requested():
+            raise InterruptedError
+        try:
+            start, end = (int(part) for part in str(value).split("-", 1))
+        except (TypeError, ValueError) as error:
+            raise ValueError(f"无效的 115 校验范围：{value}") from error
+        if not self._url or start < 0 or end < start or end >= self._size:
+            raise ValueError(f"115 校验范围不可用：{value}/{self._size}")
+        headers = dict(self._headers)
+        headers["Range"] = f"bytes={start}-{end}"
+        headers.setdefault("Accept-Encoding", "identity")
+        response = requests.get(self._url, headers=headers, timeout=(15, 60))
+        if response.status_code != 206:
+            raise IOError(f"源盘不支持 HTTP Range：HTTP {response.status_code}")
+        data = response.content
+        if len(data) != end - start + 1:
+            raise IOError(f"源盘 Range 读取不完整：{len(data)}/{end - start + 1}")
+        return hashlib.sha1(data).hexdigest().upper()
+
+
+def _describe_transfer_error(error: BaseException) -> str:
+    """把常见底层报错翻译成可操作的提示。
+
+    所有文本先过一遍脱敏：这是任务 error 写进历史记录前的最后一道
+    关，任何一路带凭证字段的报错都不能原样落盘。
+    """
+    message = sanitize_error_text(str(error))
+    lowered = message.lower()
+    if "too many open files" in lowered or "errno 24" in lowered:
+        return (
+            f"{message[:180]}；提示：容器文件描述符已耗尽（Errno 24）。插件已尝试"
+            "自动抬升上限并按上限收敛并发数，仍失败请把「下载线程数」调低到 32 "
+            "以内（必要时给容器加 ulimits.nofile: 65535）后重试"
+        )
+    return message
+
+
+class _SpeedSampler:
+    """按固定时间窗口计算平滑速度，避免并发分块回调产生瞬时尖峰。"""
+
+    def __init__(self, window_seconds: float = 1.0):
+        self._window_seconds = max(0.5, float(window_seconds or 1.0))
+        self._sample_bytes = 0
+        self._sample_time = time.monotonic()
+        self._speed = 0.0
+
+    def update(self, done: int) -> float:
+        current = max(0, int(done or 0))
+        now = time.monotonic()
+        if current < self._sample_bytes:
+            self._sample_bytes = current
+            self._sample_time = now
+            self._speed = 0.0
+            return self._speed
+        elapsed = now - self._sample_time
+        if elapsed < self._window_seconds:
+            return self._speed
+        instant = max(0.0, (current - self._sample_bytes) / elapsed)
+        self._speed = (
+            instant if self._speed <= 0
+            else self._speed * 0.65 + instant * 0.35
+        )
+        self._sample_bytes = current
+        self._sample_time = now
+        return self._speed
+
+
+#: 校验和缓存：下载完算过一次，秒传前就不必再整文件读一遍（几十 GB 省几分钟）。
+#: 键是 (绝对路径, 算法)，值是 (size, mtime_ns, 摘要)；文件被改写后签名对不上就重算。
+_CHECKSUM_CACHE: "OrderedDict[tuple, tuple]" = OrderedDict()
+_CHECKSUM_CACHE_LIMIT = 8
+_CHECKSUM_CACHE_LOCK = Lock()
+
+
+def file_checksum(path: str, algorithm: str) -> str:
+    digest_name = algorithm.lower()
+    target = Path(path)
+    try:
+        resolved = str(target.resolve())
+        stat = target.stat()
+        size, mtime = int(stat.st_size), int(stat.st_mtime_ns)
+    except OSError:
+        resolved, size, mtime = str(target), -1, -1
+    key = (resolved, digest_name)
+    with _CHECKSUM_CACHE_LOCK:
+        cached = _CHECKSUM_CACHE.get(key)
+        if cached and (size < 0 or (cached[0] == size and cached[1] == mtime)):
+            _CHECKSUM_CACHE.move_to_end(key)
+            return cached[2]
+    digest = hashlib.new(digest_name)
+    with target.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    value = digest.hexdigest()
+    with _CHECKSUM_CACHE_LOCK:
+        _CHECKSUM_CACHE[key] = (size, mtime, value)
+        while len(_CHECKSUM_CACHE) > _CHECKSUM_CACHE_LIMIT:
+            _CHECKSUM_CACHE.popitem(last=False)
+    return value
+
+
+class _LinkRefresher:
+    """按需刷新源盘直链。
+
+    长任务（几十 GB）里直链可能被限速或过期，原先整段下载复用同一个直链，
+    一旦失效所有分片都会失败。这里在分片读取失败后重新取链，并对刷新做节流，
+    避免并发分片同时打爆取链接口。
+    """
+
+    def __init__(
+            self,
+            resolver: Callable[[], tuple[str, dict]],
+            refresh_interval: float = 30.0,
+            max_age: float = 20 * 60.0,
+    ):
+        self._resolver = resolver
+        self._refresh_interval = max(0.0, float(refresh_interval))
+        self._max_age = max(self._refresh_interval, float(max_age))
+        self._url = ""
+        self._headers: dict = {}
+        self._resolved_at = 0.0
+        self._lock = Lock()
+
+    def get(self, refresh: bool = False) -> tuple[str, dict]:
+        with self._lock:
+            now = time.time()
+            age = now - self._resolved_at
+            should_refresh = (
+                    not self._url
+                    or age >= self._max_age
+                    or (refresh and age >= self._refresh_interval)
+            )
+            if should_refresh:
+                url, headers = self._resolver()
+                if url:
+                    if self._url and url != self._url:
+                        logger.info("已刷新源盘直链，继续断点续传")
+                    self._url = str(url)
+                    self._headers = dict(headers or {})
+                    # 分段/Range 下载必须拿原始字节，禁止传输层压缩
+                    self._headers.setdefault("Accept-Encoding", "identity")
+                    self._resolved_at = now
+                elif not self._url:
+                    self._resolved_at = now
+            return self._url, dict(self._headers)
+
+
+class _RetryablePartError(RuntimeError):
+    """分片内可重试的失败（连接断、5xx、链接过期）：保留已落盘字节再续传。"""
+
+
+class _ProgressGate:
+    """进度回调节流：200ms 或 1% 才回调一次。
+
+    旧实现每 256KB 回调一次，1GB 文件要回调 4000 次，而回调会写任务表 +
+    唤醒上传线程——高频写库本身就是下载跑不快的原因之一。
+    """
+
+    def __init__(self, callback, total: int, min_interval: float = 0.2):
+        self._callback = callback
+        self._total = max(0, int(total or 0))
+        self._min_interval = max(0.05, float(min_interval))
+        self._done = 0
+        self._last_at = 0.0
+        self._last_done = 0
+        self._lock = Lock()
+
+    @property
+    def done(self) -> int:
+        with self._lock:
+            return self._done
+
+    def add(self, size: int) -> None:
+        if not self._callback or size <= 0:
+            return
+        with self._lock:
+            self._done += size
+            now = time.monotonic()
+            step = max(1, self._total // 100) if self._total else 0
+            due = (
+                    self._last_at == 0.0
+                    or now - self._last_at >= self._min_interval
+                    or (step and self._done - self._last_done >= step)
+                    or (self._total and self._done >= self._total)
+            )
+            if not due:
+                return
+            self._last_at = now
+            self._last_done = self._done
+            done = self._done
+        self._callback(done, self._total)
+
+    def seed(self, size: int) -> None:
+        """续传时把「已经下过的字节」计入，进度条才不会从 0 跳。"""
+        with self._lock:
+            self._done = max(0, int(size or 0))
+            self._last_done = self._done
+
+    def flush(self) -> None:
+        if not self._callback:
+            return
+        with self._lock:
+            done, total = self._done, self._total
+        self._callback(done, total)
+
+
+#: 并行分段下载的断点续传状态（进程内内存，1.12.19 起不再写 .parts.json）：
+#: （目标路径字符串，文件总字节，分片字节）→ 已完成分片起点的集合。
+#: 下载成功后删条目；失败且不保留半截文件时也删；保留半截文件时留着，
+#: 同进程内下次调用可续传；进程重启后自然清空，从头下。
+_PARTS_MEMORY: dict[tuple[str, int, int], set[int]] = {}
+_PARTS_MEMORY_LOCK = Lock()
+
+
+def _parts_memory_key(target: Path, total: int, part_size: int) -> tuple[str, int, int]:
+    return (str(target), int(total), int(part_size))
+
+
+def _parts_memory_get(target: Path, total: int, part_size: int) -> set[int]:
+    with _PARTS_MEMORY_LOCK:
+        return set(
+            _PARTS_MEMORY.get(_parts_memory_key(target, total, part_size)) or set()
+        )
+
+
+def _parts_memory_add(target: Path, total: int, part_size: int, start: int) -> None:
+    with _PARTS_MEMORY_LOCK:
+        _PARTS_MEMORY.setdefault(
+            _parts_memory_key(target, total, part_size), set()
+        ).add(int(start))
+
+
+def _parts_memory_discard(target: Path) -> None:
+    """删掉该目标的全部内存续传条目（文件删了、或回落串行下载时调用）。"""
+    name = str(target)
+    with _PARTS_MEMORY_LOCK:
+        for key in [key for key in _PARTS_MEMORY if key[0] == name]:
+            _PARTS_MEMORY.pop(key, None)
+
+
+def _parts_memory_for(target: Path, total: int) -> tuple[int, set[int]]:
+    """返回该目标当前内存里的（分片字节，已完成分片起点集合）；没有返回 (0, set())。"""
+    name = str(target)
+    with _PARTS_MEMORY_LOCK:
+        for (key_name, key_total, part_size), completed in _PARTS_MEMORY.items():
+            if key_name == name and key_total == int(total):
+                return int(part_size), set(completed)
+    return 0, set()
+
+
+class HttpFileDownloadService:
+    """把 Provider 的临时下载地址解析器适配为流式文件下载能力。
+
+    分片并发下载的实现与 115-station 里 Go 版夸克中继下载器对齐（16MB 级
+    分片、可续传、直链失效自动刷新重试），不再依赖外部下载器。
+    """
+
+    #: 自适应分片的上下界：小于 8MB 的片会让 Range 请求数暴涨，
+    #: 大于 64MB 的片在慢链路上重试代价太高。
+    MIN_PART_SIZE = 8 * 1024 * 1024
+    MAX_PART_SIZE = 64 * 1024 * 1024
+    #: 单连接读取块：256KB → 1MB，高并发下少一个量级的 GIL 切换。
+    READ_CHUNK = 1024 * 1024
+
+    def __init__(
+            self,
+            resolver: Callable[[CloudFile], tuple[str, dict]],
+            timeout: int = 300,
+            concurrency: int = 5,
+            part_size: int = 0,
+            link_refresh_interval: float = 30.0,
+            link_max_age: float = 20 * 60.0,
+            max_retries: int = 6,
+    ):
+        self._resolver = resolver
+        self._timeout = timeout
+        self._link_refresh_interval = float(link_refresh_interval)
+        self._link_max_age = float(link_max_age)
+        # 云盘 CDN 普遍按「单连接」限速（夸克约 100~200KB/s），提速只能靠并发连接数叠加
+        self._concurrency = max(1, min(int(concurrency or 5), 64))
+        # 0 = 自适应（见 _part_size_for）；显式给值时至少 1MB
+        self._part_size = max(0, int(part_size or 0))
+        self._max_retries = max(1, min(int(max_retries or 6), 12))
+        self._delegate = None
+        settings = aria2_settings()
+        if settings.enabled:
+            self._delegate = Aria2FileDownloadService(
+                resolver, timeout=timeout, concurrency=concurrency,
+                part_size=part_size, link_refresh_interval=link_refresh_interval,
+                link_max_age=link_max_age, max_retries=max_retries,
+            )
+
+    @property
+    def _request_timeout(self) -> tuple[int, int]:
+        # CDN 大文件分段可能长时间无数据，不能把调用方配置的 300 秒硬截断为 30 秒。
+        return 15, min(max(30, self._timeout), 120)
+
+    def _part_size_for(self, total: int) -> int:
+        """分片大小：显式配置优先，否则按「每线程 2 片」自适应。"""
+        if self._part_size:
+            return max(1024 * 1024, self._part_size)
+        if total <= 0:
+            return 16 * 1024 * 1024
+        target = total // max(1, self._concurrency * 2)
+        target = max(self.MIN_PART_SIZE, min(self.MAX_PART_SIZE, target))
+        # 对齐到 4MB，内存续传按 part_size 比对
+        return (target // (4 * 1024 * 1024)) * (4 * 1024 * 1024) or self.MIN_PART_SIZE
+
+    def _create_session(self) -> requests.Session:
+        """复用连接的下载 session。
+
+        每个分片都新建连接会耗尽容器文件描述符（Errno 24 Too many open files），
+        这里按并发上限建连接池并复用，socket 数被池大小夹住。
+        """
+        session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=max(2, self._concurrency),
+            pool_maxsize=max(2, self._concurrency),
+            max_retries=0,
+            pool_block=True,
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        return session
+
+    def _load_completed_ranges(
+            self, target: Path, total: int, ranges: list[tuple[int, int]],
+            part_size: int,
+    ) -> set[int]:
+        """读进程内内存里的已完成分片（1.12.19 起不再读 .parts.json）。
+
+        文件不存在、大小与 total 对不上、分片起点不在当前分片表里时，
+        一律返回空集（从头下），绝不把半截稀疏文件误认成已完成。
+        """
+        if not target.is_file():
+            return set()
+        try:
+            if target.stat().st_size != total:
+                return set()
+        except OSError:
+            return set()
+        completed = _parts_memory_get(target, total, part_size)
+        valid_starts = {start for start, _ in ranges}
+        if not completed.issubset(valid_starts):
+            return set()
+        return completed
+
+    def _download_serial(
+            self, refresher: _LinkRefresher, session: requests.Session,
+            file_item: CloudFile, target: Path, gate: _ProgressGate,
+            stop_requested=None,
+    ) -> str:
+        """单连接下载（源盘不支持 Range 时兜底）；有半截文件时从断点续。"""
+        resume_from = target.stat().st_size if target.is_file() else 0
+        emptied = False
+        for attempt in range(1, self._max_retries + 1):
+            url, headers = refresher.get(refresh=attempt > 1)
+            request_headers = dict(headers)
+            if resume_from > 0:
+                request_headers["Range"] = f"bytes={resume_from}-"
+            try:
+                with session.get(
+                        url,
+                        headers=request_headers,
+                        stream=True,
+                        timeout=self._request_timeout,
+                ) as response:
+                    if response.status_code not in (200, 206):
+                        if resume_from > 0 and response.status_code == 416:
+                            resume_from = 0
+                            continue
+                        if (
+                                response.status_code >= 500
+                                or response.status_code in (401, 403, 404, 410, 429)
+                        ):
+                            raise _RetryablePartError(f"HTTP {response.status_code}")
+                        raise _RangeDownloadUnsupported(f"HTTP {response.status_code}")
+                    if resume_from > 0 and response.status_code == 200:
+                        # 服务端忽略了 Range：只能从头下
+                        resume_from = 0
+                    if resume_from:
+                        gate.seed(resume_from)
+                    mode = "ab" if resume_from else "wb"
+                    with target.open(mode) as handle:
+                        for chunk in response.iter_content(self.READ_CHUNK):
+                            if stop_requested and stop_requested():
+                                raise InterruptedError
+                            if not chunk:
+                                continue
+                            handle.write(chunk)
+                            gate.add(len(chunk))
+                    if target.stat().st_size <= 0:
+                        raise RuntimeError("源网盘下载为空文件")
+                    gate.flush()
+                    return str(target)
+            except (_RangeDownloadUnsupported, InterruptedError):
+                raise
+            except (requests.RequestException, OSError, _RetryablePartError):
+                if emptied and attempt >= self._max_retries:
+                    raise
+                if not emptied:
+                    # 首次失败：保留已落盘部分，下次从断点续
+                    emptied = True
+                if attempt >= self._max_retries:
+                    raise
+                time.sleep(min(8.0, float(2 ** (attempt - 1))))
+                resume_from = target.stat().st_size if target.is_file() else 0
+        raise RuntimeError("源网盘下载重试次数用尽")
+
+    def _fetch_part(
+            self, session: requests.Session, refresher: _LinkRefresher,
+            target: Path, start: int, end: int, gate: _ProgressGate,
+            stop_requested, abort_event: Event,
+    ) -> None:
+        """下载一个分片；失败保留已落盘字节，下一次从断点续。"""
+        want = end - start + 1
+        offset = 0
+        last_error: Optional[BaseException] = None
+        for attempt in range(1, self._max_retries + 1):
+            if abort_event.is_set():
+                raise InterruptedError
+            url, headers = refresher.get(refresh=attempt > 1)
+            request_headers = dict(headers)
+            request_headers["Range"] = f"bytes={start + offset}-{end}"
+            try:
+                with session.get(
+                        url,
+                        headers=request_headers,
+                        stream=True,
+                        timeout=self._request_timeout,
+                ) as response:
+                    if response.status_code != 206:
+                        if (
+                                response.status_code >= 500
+                                or response.status_code in (401, 403, 404, 410, 429)
+                        ):
+                            raise _RetryablePartError(f"HTTP {response.status_code}")
+                        raise _RangeDownloadUnsupported(
+                            f"HTTP {response.status_code}"
+                        )
+                    content_range = str(response.headers.get("Content-Range") or "")
+                    if not content_range.lower().startswith(
+                            f"bytes {start + offset}-{end}/".lower()
+                    ):
+                        raise _RangeDownloadUnsupported(
+                            f"无效 Content-Range: {content_range or '空'}"
+                        )
+                    with target.open("r+b") as handle:
+                        handle.seek(start + offset)
+                        for chunk in response.iter_content(self.READ_CHUNK):
+                            if (
+                                    abort_event.is_set()
+                                    or (stop_requested and stop_requested())
+                            ):
+                                raise InterruptedError
+                            if not chunk:
+                                continue
+                            handle.write(chunk)
+                            offset += len(chunk)
+                            gate.add(len(chunk))
+                if offset != want:
+                    raise _RetryablePartError(
+                        f"分片长度不足 {offset}/{want}（{start}-{end}）"
+                    )
+                return
+            except (_RangeDownloadUnsupported, InterruptedError):
+                raise
+            except (requests.RequestException, OSError, _RetryablePartError) as error:
+                last_error = error
+                if attempt >= self._max_retries:
+                    break
+                # 直链过期要立刻换新链，普通抖动给指数退避
+                time.sleep(min(8.0, float(2 ** (attempt - 1))))
+        raise _RetryablePartError(
+            f"分片 {start}-{end} 重试 {self._max_retries} 次仍失败：{last_error}"
+        )
+
+    def _download_parallel(
+            self, refresher: _LinkRefresher, session: requests.Session,
+            total: int, target: Path, gate: _ProgressGate,
+            stop_requested=None,
+    ) -> str:
+        part_size = self._part_size_for(total)
+        ranges = [
+            (start, min(total - 1, start + part_size - 1))
+            for start in range(0, total, part_size)
+        ]
+        worker_count = min(self._concurrency, len(ranges))
+        safe_workers = _fd_safe_workers(worker_count)
+        if safe_workers < worker_count:
+            logger.warning(
+                f"按文件句柄上限收敛分段下载并发数：{worker_count} -> {safe_workers}"
+            )
+            worker_count = safe_workers
+        if worker_count <= 1:
+            raise _RangeDownloadUnsupported
+        logger.info(
+            f"分段下载启用：{worker_count} 并发连接 × "
+            f"{part_size // (1024 * 1024)}MB 分片 → {target.name}"
+        )
+
+        abort_event = Event()
+        completed = self._load_completed_ranges(target, total, ranges, part_size)
+        if not completed:
+            with target.open("wb") as handle:
+                handle.truncate(total)
+        gate.seed(sum(end - start + 1 for start, end in ranges if start in completed))
+        pending_ranges = [value for value in ranges if value[0] not in completed]
+        if not pending_ranges:
+            _parts_memory_discard(target)
+            gate.flush()
+            return str(target)
+
+        def download_part(byte_range: tuple[int, int]) -> None:
+            start, _end = byte_range
+            self._fetch_part(
+                session, refresher, target, byte_range[0], byte_range[1],
+                gate, stop_requested, abort_event,
+            )
+            with progress_lock:
+                completed.add(start)
+                _parts_memory_add(target, total, part_size, start)
+
+        progress_lock = Lock()
+        executor = ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="cloudsubscribe-range-download",
+        )
+        futures = [executor.submit(download_part, value) for value in pending_ranges]
+        try:
+            for future in as_completed(futures):
+                future.result()
+        except Exception:
+            abort_event.set()
+            for future in futures:
+                future.cancel()
+            raise
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
+        _parts_memory_discard(target)
+        gate.flush()
+        return str(target)
+
+    def download_file(self, file_item: CloudFile, local_path: str,
+                      progress_callback=None, stop_requested=None,
+                      preserve_partial: bool = False) -> str:
+        if self._delegate is not None:
+            try:
+                return self._delegate.download_file(
+                    file_item, local_path, progress_callback,
+                    stop_requested, preserve_partial,
+                )
+            except InterruptedError:
+                # 用户主动停止：直接上抛，不要回落重下。
+                raise
+            except Exception as error:
+                # aria2 是旁路加速能力：失败只记账并回落内置下载器，绝不打断转存
+                bypass_guard.note("aria2", error)
+                logger.warning(
+                    f"aria2 下载失败，回落内置下载器：{file_item.name}（{error}）"
+                )
+                self._delegate = None
+        refresher = _LinkRefresher(
+            lambda: self._resolver(file_item),
+            refresh_interval=self._link_refresh_interval,
+            max_age=self._link_max_age,
+        )
+        if not refresher.get()[0]:
+            raise RuntimeError("源网盘未返回下载地址")
+        target = Path(local_path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        total = int(file_item.size or 0)
+        gate = _ProgressGate(progress_callback, total)
+
+        session = self._create_session()
+        try:
+            if self._concurrency > 1 and total > self._part_size_for(total):
+                try:
+                    return self._download_parallel(
+                        refresher, session, total, target, gate, stop_requested,
+                    )
+                except _RangeDownloadUnsupported as error:
+                    logger.warning(
+                        f"源盘不支持分段下载（{error}），回落单线程顺序下载："
+                        f"{file_item.name}（实际并发 {self._concurrency}）"
+                    )
+                    # 403/失效链接也会走到这里，回退前先尝试换取新链接
+                    refresher.get(refresh=True)
+                    target.unlink(missing_ok=True)
+                    _parts_memory_discard(target)
+                    gate.seed(0)
+            return self._download_serial(
+                refresher, session, file_item, target, gate, stop_requested,
+            )
+        except Exception:
+            if not preserve_partial:
+                target.unlink(missing_ok=True)
+                _parts_memory_discard(target)
+            raise
+        finally:
+            session.close()
+
+
+class LocalRapidUploadAdapter:
+    """把现有 Provider 的上传服务暴露为统一能力。
+
+    Provider 必须单独实现 try_rapid_upload；秒传未命中后由编排器调用
+    upload_file，避免通过进度回调猜测是否发生了普通上传。
+    """
+
+    def __init__(self, upload: object, files: object, algorithms: frozenset[str]):
+        self._upload = upload
+        self._files = files
+        self._algorithms = algorithms
+
+    @property
+    def algorithms(self) -> frozenset[str]:
+        return self._algorithms
+
+    @property
+    def requires_local_file(self) -> bool:
+        return bool(getattr(self._upload, "rapid_requires_local_file", False))
+
+    def upload_by_hash(
+            self, local_path: str, save_path: str, target_name: str,
+            algorithm: str, checksum: str, size: int = 0,
+            progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> RapidUploadResult:
+        algorithm = str(algorithm or "").lower()
+        if algorithm not in self._algorithms:
+            return RapidUploadResult(False, message="目标网盘不支持该秒传算法")
+        actual = str(checksum or "").lower()
+        if local_path:
+            calculated = file_checksum(local_path, algorithm)
+            if actual and calculated.lower() != actual:
+                raise ValueError(f"{algorithm} 校验和不匹配")
+            actual = calculated.lower()
+        elif self.requires_local_file:
+            return RapidUploadResult(False, message="秒传探测需要本地文件")
+        if not actual:
+            return RapidUploadResult(False, message="缺少秒传校验和")
+        rapid_upload = getattr(self._upload, "try_rapid_upload", None)
+        if not callable(rapid_upload):
+            return RapidUploadResult(False, message="目标网盘未实现独立秒传探测")
+        reused = bool(rapid_upload(
+            local_path, save_path, target_name, algorithm, actual, size
+        ))
+        if not reused:
+            return RapidUploadResult(False, message="未命中秒传")
+        item = self._files.find_file(save_path, target_name)
+        if not item:
+            raise RuntimeError("秒传成功后未找到目标文件")
+        return RapidUploadResult(True, file=item, message="秒传命中")
+
+    def probe_by_hash(
+            self, save_path: str, target_name: str, algorithm: str,
+            checksum: str, size: int,
+            read_range_bytes_or_hash: Optional[Callable[[str], str]] = None,
+    ) -> Optional[RapidUploadResult]:
+        """无本地文件的秒传探测（abort 模式专用）。
+
+        返回 RapidUploadResult=已探测（reused 表示命中）/ None=无法探测
+        （提供方未实现或缺少探测条件），调用方在 None 时退回下载后再探测。
+        """
+        algorithm = str(algorithm or "").lower()
+        if algorithm not in self._algorithms:
+            return None
+        probe = getattr(self._upload, "try_rapid_upload_by_hash", None)
+        if not callable(probe):
+            return None
+        actual = str(checksum or "").lower()
+        if not actual:
+            return None
+        outcome = probe(
+            save_path, target_name, algorithm, actual.upper(),
+            int(size or 0), read_range_bytes_or_hash,
+        )
+        if outcome is None:
+            return None
+        if not outcome:
+            return RapidUploadResult(False, message="未命中秒传")
+        item = self._files.find_file(save_path, target_name)
+        if not item:
+            raise RuntimeError("秒传成功后未找到目标文件")
+        return RapidUploadResult(True, file=item, message="秒传命中")
+
+
+@dataclass(frozen=True)
+class CrossDriveTransferResult:
+    file: Optional[CloudFile]
+    method: str
+
+
+class CrossDriveTransfer:
+    """执行单文件传输；源文件需先由调用层下载到本地临时路径。"""
+
+    def __init__(self) -> None:
+        #: 最近一次 transfer() 失败的原因（调用方读它写进任务 error）。
+        #: upload_file 只返回 bool 不带原因；支持 last_error 属性的
+        #: 上传服务（如 115）会把底层报错原文留在这里。
+        self.last_error: str = ""
+
+    @staticmethod
+    def select_algorithm(source: CloudFile, target: CloudDriveProvider) -> tuple[str, str]:
+        """按目标能力选择源文件已有校验和，MD5 与 SHA1 绝不互换。"""
+        if not target.supports(CloudDriveCapability.RAPID_UPLOAD):
+            return "", ""
+        algorithms = target.require(CloudDriveCapability.RAPID_UPLOAD).algorithms
+        if "md5" in algorithms and source.md5:
+            return "md5", source.md5
+        if "sha1" in algorithms and source.sha1:
+            return "sha1", source.sha1
+        return "", ""
+
+    def transfer(
+            self, source_path: str, target: CloudDriveProvider, save_path: str,
+            target_name: str = "", algorithm: str = "", checksum: str = "",
+            fallback: bool = True,
+            progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> CrossDriveTransferResult | None:
+        target_name = target_name or Path(source_path).name
+        if target.supports(CloudDriveCapability.RAPID_UPLOAD) and algorithm:
+            rapid = target.require(CloudDriveCapability.RAPID_UPLOAD)
+            if algorithm.lower() in rapid.algorithms:
+                rapid_result = rapid.upload_by_hash(
+                    source_path, save_path, target_name, algorithm, checksum,
+                    Path(source_path).stat().st_size, progress_callback,
+                )
+                if rapid_result.reused and rapid_result.file:
+                    return CrossDriveTransferResult(rapid_result.file, "rapid")
+        if not fallback:
+            self.last_error = "秒传未命中"
+            return None
+        upload = target.require(CloudDriveCapability.LOCAL_UPLOAD)
+        if not upload.upload_file(source_path, save_path, target_name, progress_callback=progress_callback):
+            detail = str(getattr(upload, "last_error", "") or "").strip()
+            self.last_error = detail or "普通上传失败（目标盘未返回原因）"
+            return None
+        item = target.require(CloudDriveCapability.FILE_QUERY).find_file(
+            save_path, target_name
+        )
+        return CrossDriveTransferResult(item, "fallback")
+
+
+#: 缓存文件名里源文件名的最大字符数（截尾部、保留扩展名）。
+_CACHE_NAME_MAX_CHARS = 120
+#: 完整缓存文件名的最大字节数（多字节字符下仍不超过文件系统 255 字节限制）。
+_CACHE_FILENAME_MAX_BYTES = 200
+
+#: 目标名里的 TMDB 标记（与 handlers/sync/naming.py 的同名模式一致，
+#: MP 文件名识别能解析 {tmdb-123} / [tmdb-123] / {tmdbid-123} 等）：
+#: 1.12.4 起目标名带上标记，此前版本下载的文件用的是无标记的旧目标名，
+#: 两者只差一个标记，迁移时去掉标记比对。
+_TMDB_TAG_RE = re.compile(r"\s*[\[{]tmdb(?:id)?-\d+[\]}]", re.IGNORECASE)
+
+
+def _normalize_task_media(media: Any) -> Dict[str, Any]:
+    """规范化跨盘任务的媒体身份，只保留下载页投影认得的字段。
+
+    独立跨盘任务（无归属订阅）此前不带任何媒体信息，下载页拿不到
+    tmdb_id/媒体类型，投影不出海报与季集。调用方把已知的媒体身份
+    传进来，任务字典就带上，下载页直接按 tmdb_id 取海报。
+    """
+    if not isinstance(media, dict):
+        return {}
+    normalized: Dict[str, Any] = {}
+    try:
+        tmdb_id = int(media.get("tmdb_id") or 0)
+    except (TypeError, ValueError):
+        tmdb_id = 0
+    if tmdb_id > 0:
+        normalized["tmdb_id"] = tmdb_id
+    raw_type = getattr(media.get("media_type"), "name", media.get("media_type"))
+    media_type = {
+        "tv": "电视剧", "电视剧": "电视剧",
+        "movie": "电影", "电影": "电影",
+        # str(MediaType.TV) == "MediaType.TV" 时的形态。
+        "mediatype.tv": "电视剧", "mediatype.movie": "电影",
+    }.get(str(raw_type or "").strip().lower())
+    if media_type:
+        normalized["media_type"] = media_type
+    try:
+        season = int(media.get("season") or 0)
+    except (TypeError, ValueError):
+        season = 0
+    if season > 0:
+        normalized["season"] = season
+    try:
+        year = int(str(media.get("year") or "").strip() or 0)
+    except (TypeError, ValueError):
+        year = 0
+    if year > 0:
+        normalized["year"] = str(year)
+    title = str(media.get("media_title") or media.get("title") or "").strip()
+    if title:
+        normalized["media_title"] = title
+    episodes = media.get("target_episodes")
+    if isinstance(episodes, (list, tuple, set)):
+        parsed = sorted({
+            int(episode)
+            for episode in episodes
+            if str(episode).isdigit() and int(episode) > 0
+        })
+        if parsed:
+            normalized["target_episodes"] = parsed
+    # 存量海报地址（历史记录的 image / mediainfo 的 get_poster_image）：
+    # 下载页实时查 TMDB 取不到海报时（MP 自身都识别不到该媒体，如
+    # LOST10 tmdb:329490 详情页 500），就用这张存量图兜底；只认
+    # http(s) 绝对地址，相对路径与空串一律丢掉。
+    poster = str(
+        media.get("poster") or media.get("image") or ""
+    ).strip()
+    if poster.startswith(("http://", "https://")):
+        normalized["poster"] = poster
+    return normalized
+
+
+class CrossTransferTaskManager:
+    """本地中继任务管理器。"""
+
+    ACTIVE = frozenset({"pending", "running", "stopping"})
+    _MIN_FREE_BYTES = 512 * 1024 * 1024
+
+    def __init__(self, provider_resolver: Callable[[str], CloudDriveProvider],
+                 download_path: str = "", download_threads: int = 5,
+                 max_concurrent: int = 2,
+                 direct_stream: bool = True,
+                 rapid_miss_action: str = "abort",
+                 on_change: Optional[Callable[[], None]] = None,
+                 hash_cache_get: Optional[Callable[[str], Optional[dict]]] = None,
+                 hash_cache_put: Optional[Callable[[str, dict], None]] = None,
+                 miss_cache_get: Optional[Callable[[str, str], int]] = None,
+                 miss_cache_put: Optional[Callable[[str, str], None]] = None,
+                 quota: object = None):
+        self._provider_resolver = provider_resolver
+        self._quota = quota
+        self._target_writer = TargetWriter(provider_resolver)
+        self._download_path = str(download_path or "").strip()
+        self._download_threads = max(1, min(int(download_threads or 5), 256))
+        self._direct_stream = bool(direct_stream)
+        # 秒传未命中处理：abort=中止不上传（默认，未命中即删中继缓存并记负缓存，
+        # 让上层换下一个分享重试）；fallback=回落普通上传（老行为）。
+        # 非法值一律回退 fallback。
+        self._rapid_miss_action = (
+            "abort" if str(rapid_miss_action or "").strip().lower() == "abort" else "fallback"
+        )
+        self._transfer_slots = Semaphore(max(1, min(int(max_concurrent or 2), 10)))
+        self._tasks: dict[str, dict] = {}
+        self._lock = Lock()
+        self._on_change = on_change
+        # 同一 cache_key 的任务严格串行 + 中继文件引用计数（1.6.47 同源并发互删）
+        self._cache_key_locks: dict[str, Lock] = {}
+        self._cache_key_locks_guard = Lock()
+        self._cache_refs: dict[str, int] = {}
+        self._cache_refs_lock = Lock()
+        # 中继缓存登记表（进程内内存，1.12.19 起替代 .meta.json / .parts.json）：
+        # 绝对路径字符串 → {cache_key, size, sha1, md5, complete,
+        # parts（已完成分片起点集合）, part_size, total}。
+        # 只活在进程内，不写盘、不进任何数据键；进程重启后自然清空，
+        # 跨重启的缓存复用随之失效（本来就已死），从头下。
+        self._cache_registry: dict[str, dict] = {}
+        # 源文件 SHA1 缓存：秒传未命中时本地文件会被删掉，但哈希留着，
+        # 下次重试可以只走「零流量秒传探测」，不再重复下 5GB。
+        self._hash_cache_get = hash_cache_get
+        self._hash_cache_put = hash_cache_put
+        # 秒传未命中负缓存：同一 (目标盘, SHA1) 在 TTL 内不再下载整份文件重试。
+        self._miss_cache_get = miss_cache_get
+        self._miss_cache_put = miss_cache_put
+        self._miss_cache_ttl_seconds = 24 * 3600
+
+    def _notify_change(self) -> None:
+        if self._on_change:
+            self._on_change()
+
+    @staticmethod
+    def _hash_cache_key(task: Mapping) -> str:
+        """源文件哈希缓存键：来源网盘 + 文件名 + 体积（夸克分享链接会变，链接不进键）。"""
+        source_file = task.get("source_file")
+        name = str(
+            getattr(source_file, "name", None) or task.get("title") or ""
+        ).strip()
+        size = int(
+            getattr(source_file, "size", 0) or task.get("total") or 0
+        )
+        provider = str(task.get("source_provider") or "").strip().lower()
+        if not name or size <= 0:
+            return ""
+        return f"{provider}|{size}|{name}"
+
+    @staticmethod
+    def _hash_cache_loose_key(task: Mapping) -> str:
+        """体积兜底键：同一文件在不同分享里文件名可能不同，靠体积仍能命中。"""
+        provider = str(task.get("source_provider") or "").strip().lower()
+        size = int(getattr(task.get("source_file"), "size", 0) or task.get("total") or 0)
+        if not provider or size <= 0:
+            return ""
+        return f"{provider}|{size}"
+
+    def _hash_cache_keys(self, task: Mapping) -> list[str]:
+        keys = [self._hash_cache_key(task), self._hash_cache_loose_key(task)]
+        return [key for key in dict.fromkeys(keys) if key]
+
+    def _cached_source_sha1(self, task: Mapping) -> str:
+        keys = self._hash_cache_keys(task)
+        if not keys or not self._hash_cache_get:
+            return ""
+        for key in keys:
+            try:
+                entry = self._hash_cache_get(key) or {}
+            except Exception as error:  # noqa: BLE001 - 缓存异常不影响正常传输
+                logger.debug(f"读取源哈希缓存失败：{error}")
+                return ""
+            digest = str(entry.get("sha1") or "").strip().upper()
+            if digest:
+                return digest
+        return ""
+
+    def set_rapid_miss_action(self, action: str) -> None:
+        """配置变更后同步运行期动作，无需重建整个驱动管理器（1.9.76）。"""
+        self._rapid_miss_action = (
+            "abort" if str(action or "").strip().lower() == "abort" else "fallback"
+        )
+
+    def _rapid_miss_at(self, target_key: str, sha1: str) -> int:
+        """同一 (目标盘, SHA1) 的秒传未命中时间；0 表示没有记录或已过期。"""
+        if not self._miss_cache_get or not sha1:
+            return 0
+        try:
+            return int(self._miss_cache_get(target_key, sha1) or 0)
+        except Exception as error:  # noqa: BLE001 - 负缓存异常不影响正常传输
+            logger.debug(f"读取秒传未命中缓存失败：{error}", exc_info=True)
+            return 0
+
+    def _remember_rapid_miss(self, target_key: str, sha1: str) -> None:
+        if not self._miss_cache_put or not sha1:
+            return
+        try:
+            self._miss_cache_put(target_key, sha1)
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"写入秒传未命中缓存失败：{error}", exc_info=True)
+
+    def _remember_source_hash(self, task: Mapping, path: str) -> None:
+        """下载完成后把 SHA1 存档，供后续秒传重试复用（本地文件随后可删）。"""
+        if not self._hash_cache_put:
+            return
+        key = self._hash_cache_key(task)
+        if not key or not path:
+            return
+        try:
+            if not Path(path).is_file():
+                return
+            sha1 = file_checksum(path, "sha1").upper()
+        except Exception as error:  # noqa: BLE001 - 只影响后续重试效率
+            logger.debug(f"计算源文件 SHA1 失败，跳过缓存：{error}")
+            return
+        payload = {
+            "sha1": sha1,
+            "size": int(
+                getattr(task.get("source_file"), "size", 0)
+                or task.get("total") or 0
+            ),
+            "name": str(
+                getattr(task.get("source_file"), "name", "")
+                or task.get("title") or ""
+            ),
+        }
+        try:
+            for cache_key in self._hash_cache_keys(task) or [key]:
+                self._hash_cache_put(cache_key, payload)
+        except Exception as error:  # noqa: BLE001
+            logger.debug(f"写入源哈希缓存失败：{error}")
+            return
+        logger.info(
+            "已记录源文件 SHA1，后续重试可零流量秒传："
+            f"{getattr(task.get('source_file'), 'name', '') or task.get('title')}"
+        )
+
+    def _cache_root(self) -> Path:
+        root = Path(self._download_path) if self._download_path else Path(tempfile.gettempdir())
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    @staticmethod
+    def _cache_key(source_key: str, source: CloudFile) -> str:
+        fingerprint = "|".join((
+            str(source_key or ""),
+            str(source.sha1 or "").lower(),
+            str(source.md5 or "").lower(),
+            str(source.size or 0),
+            str(source.name or ""),
+        ))
+        return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()[:32]
+
+    @staticmethod
+    def _sanitize_cache_name(name: str, prefix_len: int | None = None) -> str:
+        """清洗文件名用于缓存命名。
+
+        去掉路径分隔符与非法字符、空白折叠、截断到安全长度（截尾部、保证扩展名
+        保留）；没有可用扩展名时返回空串，调用方退回旧命名。``prefix_len`` 是
+        文件名前要拼的前缀长度（旧命名预留 ``cloud-transfer-<hash>-`` 的位置）；
+        目标名直接落盘时传 0，不预留。
+        """
+        text = re.sub(r'[\\/:*?"<>|\x00-\x1f\x7f]', "_", str(name or ""))
+        text = re.sub(r"\s+", " ", text).strip(" .")
+        if not text:
+            return ""
+        suffix = Path(text).suffix
+        if not suffix or suffix == ".":
+            return ""
+        if len(text) > _CACHE_NAME_MAX_CHARS:
+            stem = text[: -len(suffix)]
+            text = stem[: max(0, _CACHE_NAME_MAX_CHARS - len(suffix))] + suffix
+        # 多字节字符下再按字节上限截断，仍保留扩展名。
+        if prefix_len is None:
+            prefix_len = len("cloud-transfer-" + "0" * 32 + "-")
+        while len(text.encode("utf-8")) + prefix_len > _CACHE_FILENAME_MAX_BYTES:
+            stem = text[: -len(suffix)]
+            if not stem:
+                return ""
+            text = stem[:-1] + suffix
+        return text
+
+    def _cache_path(self, cache_key: str, source: CloudFile | None = None) -> Path:
+        """旧命名中继缓存路径（无目标名时的退路）。
+
+        ``cloud-transfer-<hash>-<清洗后的源文件名>``（如
+        ``cloud-transfer-f0c9…-律界战争 S01E05.mp4``）；源文件名不可用
+        （空、无扩展名）时退回 ``cloud-transfer-<hash>.bin``。
+        1.12.1 起有目标名时下载直接用目标名落盘（见
+        :meth:`_desired_cache_path`），这里只作无目标名时的退路与
+        旧缓存迁移的来源。
+        """
+        if source is not None:
+            clean = self._sanitize_cache_name(getattr(source, "name", "") or "")
+            if clean:
+                return self._cache_root() / f"cloud-transfer-{cache_key}-{clean}"
+        return self._cache_root() / f"cloud-transfer-{cache_key}.bin"
+
+    def _legacy_cache_path(self, cache_key: str) -> Path:
+        """旧名中继缓存路径（``cloud-transfer-<hash>.bin``）。"""
+        return self._cache_root() / f"cloud-transfer-{cache_key}.bin"
+
+    def _target_cache_path(self, target_name: str | None) -> Path | None:
+        """目标名落盘路径：清洗后的目标名直接作文件名；不可用返回 None。"""
+        clean = self._sanitize_cache_name(target_name or "", prefix_len=0)
+        if not clean:
+            return None
+        return self._cache_root() / clean
+
+    def _source_cache_path(self, source: CloudFile | None) -> Path | None:
+        """源文件名落盘路径（1.12.1 历史重试漏传目标名时留下的文件）。
+
+        文件名本身不带 hash，归属不能只凭名字认——调用方必须再用
+        :meth:`_is_our_cache_file` 按进程内登记表核对是本次源的文件，
+        才可迁移或复用。
+        """
+        if source is None:
+            return None
+        clean = self._sanitize_cache_name(
+            getattr(source, "name", "") or "", prefix_len=0
+        )
+        if not clean:
+            return None
+        return self._cache_root() / clean
+
+    def _untagged_cache_path(self, target_name: str | None) -> Path | None:
+        """去掉目标名里 ``{tmdb-...}`` 标记后的旧目标名路径（1.12.4 迁移用）。
+
+        1.12.4 起目标名带标记，此前版本下载的文件用的是无标记的旧目标名
+        （如“十万狂花入梦来 - S01E06 - 第6集.mkv”），与当前目标名只差
+        一个标记。无标记时返回 None；归属仍由调用方按伴随文件核对。
+        """
+        if not target_name:
+            return None
+        stripped = _TMDB_TAG_RE.sub("", str(target_name)).strip()
+        if not stripped or stripped == target_name:
+            return None
+        clean = self._sanitize_cache_name(stripped, prefix_len=0)
+        if not clean:
+            return None
+        return self._cache_root() / clean
+
+    # ---------------------------------------------------------- 登记表读写
+    # 用 manager 已有的 self._lock 保护（临界区都很短，只做字典读写）。
+
+    def _registry_get(self, path: Path) -> dict | None:
+        """取登记表条目的快照（parts 集合也拷一份）；没有返回 None。"""
+        with self._lock:
+            entry = self._cache_registry.get(str(path))
+            if entry is None:
+                return None
+            snapshot = dict(entry)
+            snapshot["parts"] = set(entry.get("parts") or set())
+            return snapshot
+
+    def _registry_put(self, path: Path, entry: dict) -> None:
+        with self._lock:
+            self._cache_registry[str(path)] = dict(entry)
+
+    def _registry_drop(self, path: Path) -> None:
+        with self._lock:
+            self._cache_registry.pop(str(path), None)
+
+    def _registry_move(self, old_path: Path, new_path: Path) -> None:
+        with self._lock:
+            entry = self._cache_registry.pop(str(old_path), None)
+            if entry is not None:
+                self._cache_registry[str(new_path)] = entry
+
+    def _sync_registry_parts(self, path: Path, source) -> None:
+        """把 HttpFileDownloadService 内存里的并行分片进度同步进登记表。
+
+        登记表里没有该路径时什么都不做（没 stamp 过的文件不是本次缓存）。
+        """
+        total = int(getattr(source, "size", 0) or 0)
+        if total <= 0:
+            return
+        part_size, completed = _parts_memory_for(path, total)
+        if part_size <= 0:
+            return
+        with self._lock:
+            entry = self._cache_registry.get(str(path))
+            if entry is None:
+                return
+            entry["parts"] = set(completed)
+            entry["part_size"] = part_size
+            entry["total"] = total
+
+    def _read_cache_owner_key(self, path: Path) -> str:
+        """读登记表里 path 的 cache_key；没有登记返回 ''。"""
+        entry = self._registry_get(path)
+        if entry is None:
+            return ""
+        return str(entry.get("cache_key") or "").strip().lower()
+
+    def _is_our_cache_file(self, path: Path, cache_key: str, source) -> bool:
+        """path 上的文件是否属于本次源：只认登记表里的 cache_key。
+
+        登记表里没有该路径（跨重启的旧文件、别人下的裸文件）一律不认——
+        宁可重下或改名，绝不认错文件；完整性另由
+        :meth:`_validate_complete_cache` 按大小 + SHA1/MD5 校验兜底。
+        """
+        if not path.is_file():
+            return False
+        return self._read_cache_owner_key(path) == cache_key
+
+    def _desired_cache_path(
+            self, cache_key: str, source: CloudFile | None,
+            target_name: str | None = None,
+    ) -> Path:
+        """本次应落盘的路径（只读判断，不改名、不迁移）。
+
+        有目标名时直接用目标名（如 ``十万狂花入梦来 - S01E06 - 第6集.mkv``），
+        交给 MP 整理时文件名本身就能被识别；目标名已被别源占用时加
+        `` (8 位 hash)`` 区分；无目标名时沿用旧命名。
+        """
+        target_path = self._target_cache_path(target_name)
+        if target_path is None:
+            return self._cache_path(cache_key, source)
+        if (
+                not target_path.exists()
+                or self._is_our_cache_file(target_path, cache_key, source)
+        ):
+            return target_path
+        disambiguated = target_path.with_name(
+            f"{target_path.stem} ({cache_key[:8]}){target_path.suffix}"
+        )
+        if (
+                not disambiguated.exists()
+                or self._is_our_cache_file(disambiguated, cache_key, source)
+        ):
+            return disambiguated
+        return self._cache_path(cache_key, source)
+
+    def _resolve_cache_path(
+            self, cache_key: str, source: CloudFile | None,
+            target_name: str | None = None,
+    ) -> Path:
+        """返回本次应使用的缓存路径（调用方必须持有该 cache_key 的锁）。
+
+        目标名路径不存在、旧命名缓存存在时，把旧缓存连同伴随文件改名成目标名——
+        这是旧缓存唯一的改名迁移路径，已下好的文件不用重下。
+        """
+        desired = self._desired_cache_path(cache_key, source, target_name)
+        if desired.exists():
+            return desired
+        for legacy in dict.fromkeys((
+            self._cache_path(cache_key, source),
+            self._legacy_cache_path(cache_key),
+        )):
+            if legacy == desired or not legacy.is_file():
+                continue
+            logger.info(f"中继缓存改名：{legacy.name} → {desired.name}")
+            if self._rename_cache_files(legacy, desired):
+                return desired
+            return legacy
+        # 1.12.2：1.12.1 历史重试漏传目标名，文件以源文件名落盘（如 06.mkv，
+        # 06.mkv.aria2）。源文件名不带 hash，改名前
+        # 必须按登记表核对归属，否则别家同名文件会被错改名。
+        source_path = self._source_cache_path(source)
+        if (
+                source_path is not None
+                and source_path != desired
+                and source_path.is_file()
+                and self._is_our_cache_file(source_path, cache_key, source)
+        ):
+            logger.info(f"中继缓存改名（源文件名）：{source_path.name} → {desired.name}")
+            if self._rename_cache_files(source_path, desired):
+                return desired
+            return source_path
+        # 1.12.4：目标名从本版起带 {tmdb-...} 标记，此前版本下载的文件
+        # 用的是无标记的旧目标名（如“十万狂花入梦来 - S01E06 - 第6集.mkv”）。
+        # 与当前目标名只差一个标记，同样按登记表核对归属后改名复用，不重下。
+        untagged_path = self._untagged_cache_path(target_name)
+        if (
+                untagged_path is not None
+                and untagged_path != desired
+                and untagged_path.is_file()
+                and self._is_our_cache_file(untagged_path, cache_key, source)
+        ):
+            logger.info(f"中继缓存改名（无标记旧目标名）：{untagged_path.name} → {desired.name}")
+            if self._rename_cache_files(untagged_path, desired):
+                return desired
+            return untagged_path
+        return desired
+
+    def _lookup_cache_path(
+            self, cache_key: str, source: CloudFile | None,
+            target_name: str | None = None,
+    ) -> Path:
+        """不持有 cache_key 锁时的只读查找：先找本次应落盘的路径、再找旧命名，不改名。
+
+        改名迁移留待下次传输时由 :meth:`_resolve_cache_path` 在锁内完成。
+        """
+        desired = self._desired_cache_path(cache_key, source, target_name)
+        if desired.exists():
+            return desired
+        for legacy in dict.fromkeys((
+            self._cache_path(cache_key, source),
+            self._legacy_cache_path(cache_key),
+        )):
+            if legacy == desired or not legacy.is_file():
+                continue
+            return legacy
+        source_path = self._source_cache_path(source)
+        if (
+                source_path is not None
+                and source_path != desired
+                and source_path.is_file()
+                and self._is_our_cache_file(source_path, cache_key, source)
+        ):
+            return source_path
+        untagged_path = self._untagged_cache_path(target_name)
+        if (
+                untagged_path is not None
+                and untagged_path != desired
+                and untagged_path.is_file()
+                and self._is_our_cache_file(untagged_path, cache_key, source)
+        ):
+            return untagged_path
+        return desired
+
+    def _rename_cache_files(self, old_path: Path, new_path: Path) -> bool:
+        """把旧名缓存连同 .aria2 改名到新名；主文件改名失败返回 False。
+
+        登记表条目也从旧路径键移到新路径键（没有条目时什么都不做）。
+        """
+        try:
+            old_path.replace(new_path)
+        except OSError as error:
+            logger.warning(
+                f"中继缓存改名失败：{old_path.name} → {new_path.name}：{error}"
+            )
+            return False
+        # aria2 控制文件也一起改名：改名后 aria2（continue=true）才能按新
+        # 名断点续传，否则已落盘的字节白下。
+        aria2_old = old_path.with_name(f"{old_path.name}.aria2")
+        aria2_new = new_path.with_name(f"{new_path.name}.aria2")
+        if aria2_old.is_file():
+            try:
+                aria2_old.replace(aria2_new)
+            except OSError as error:  # noqa: BLE001 - 伴随文件改名失败不影响主文件
+                logger.debug(
+                    f"中继缓存伴随文件改名失败：{aria2_old.name}：{error}",
+                    exc_info=True,
+                )
+        self._registry_move(old_path, new_path)
+        return True
+
+
+    @staticmethod
+    def _task_cache_key(task: dict | None) -> str:
+        """任务级中继 cache_key：与 _temporary_path/_cache_key 同源。
+
+        本地源文件任务（source_file 为空）不使用中继缓存，返回空串（不加锁、不计数）。
+        """
+        data = task or {}
+        source_file = data.get("source_file")
+        if source_file is None:
+            return ""
+        return CrossTransferTaskManager._cache_key(
+            str(data.get("source_provider") or ""), source_file
+        )
+
+    def _delete_cache_path(self, path: Path) -> int:
+        """删主文件 + .aria2，并删登记表条目；返回删掉的文件数。"""
+        deleted = 0
+        for candidate in (
+                path,
+                # aria2 控制文件：主文件删了它就是孤儿，不跟上会一直
+                # 堆在 /downloads 里（1.12.1 重试留下的 06.mkv.aria2
+                # 就是这么来的）。
+                path.with_name(f"{path.name}.aria2"),
+        ):
+            if candidate.is_file():
+                candidate.unlink(missing_ok=True)
+                deleted += 1
+        self._registry_drop(path)
+        return deleted
+
+    def _cache_key_lock(self, cache_key: str) -> Lock:
+        """同一 cache_key 的任务串行执行：第二个任务排在第一个之后。"""
+        with self._cache_key_locks_guard:
+            lock = self._cache_key_locks.get(cache_key)
+            if lock is None:
+                lock = Lock()
+                self._cache_key_locks[cache_key] = lock
+            return lock
+
+    def _acquire_cache_ref(self, cache_key: str) -> None:
+        if not cache_key:
+            return
+        with self._cache_refs_lock:
+            self._cache_refs[cache_key] = self._cache_refs.get(cache_key, 0) + 1
+
+    def _release_cache_ref(self, cache_key: str) -> None:
+        if not cache_key:
+            return
+        with self._cache_refs_lock:
+            remaining = self._cache_refs.get(cache_key, 0) - 1
+            if remaining > 0:
+                self._cache_refs[cache_key] = remaining
+            else:
+                self._cache_refs.pop(cache_key, None)
+
+    def _cache_ref_count(self, cache_key: str) -> int:
+        if not cache_key:
+            return 0
+        with self._cache_refs_lock:
+            return self._cache_refs.get(cache_key, 0)
+
+    def active_cache_keys(self) -> set:
+        """进行中任务持有的中继缓存组键（``cloud-transfer-<32 位 hash>``）。
+
+        1.10.0 起任务结束即删临时文件，残留清理只删无主文件；在途文件
+        靠这里的引用精确保护，不再依赖修改时间。
+        """
+        with self._cache_refs_lock:
+            return {
+                f"cloud-transfer-{key}"
+                for key, count in self._cache_refs.items()
+                if count > 0
+            }
+
+    def active_cache_names(self) -> set:
+        """进行中任务持有的中继缓存文件名（目标名落盘后的实际文件名）。
+
+        残留清理用它保护目标名落盘的文件（文件名本身没有 hash，
+        residue 只认 cloud-transfer-* 命名）；cloud-transfer-* 命名的
+        文件靠 :meth:`active_cache_keys` 的组键保护。
+        只读查找，不触发改名迁移。
+        """
+        names = set()
+        with self._lock:
+            tasks = [
+                task for task in self._tasks.values()
+                if task.get("status") in self.ACTIVE
+            ]
+        for task in tasks:
+            source = task.get("source_file")
+            if source is None:
+                continue
+            try:
+                cache_key = self._cache_key(task.get("source_provider"), source)
+                path = self._lookup_cache_path(
+                    cache_key, source, target_name=str(task.get("title") or ""),
+                )
+            except Exception:  # noqa: BLE001 - 取不到名字不影响清理
+                continue
+            names.add(path.name)
+        return names
+
+    def _cache_retained_for_others(self, task: dict | None) -> bool:
+        """任务自身持有 1 个引用；计数 > 1 说明还有兄弟任务在用同一中继文件。"""
+        cache_key = self._task_cache_key(task)
+        return bool(cache_key) and self._cache_ref_count(cache_key) > 1
+
+    def _delete_cache_path_for_task(self, task: dict | None, path: Path) -> int:
+        """任务级中继清理：仍有兄弟任务使用时保留文件（连同 .aria2），供其复用。"""
+        if self._cache_retained_for_others(task):
+            logger.debug(
+                f"跨盘缓存仍被其它任务使用，保留不删：{path.name}"
+                f"（在用引用 {self._cache_ref_count(self._task_cache_key(task))}）"
+            )
+            return 0
+        return self._delete_cache_path(path)
+
+    def delete_cache(self, cache_key: str) -> int:
+        normalized = str(cache_key or "").strip().lower()
+        if len(normalized) != 32 or any(value not in "0123456789abcdef" for value in normalized):
+            return 0
+        in_use = self._cache_ref_count(normalized)
+        if in_use > 0:
+            logger.debug(
+                f"跨盘缓存正在使用中，跳过清理：{normalized}（在用引用 {in_use}）"
+            )
+            return 0
+        # 按 cache_key 查找：旧命名（cloud-transfer-<key>-<源文件名>／.bin）
+        # 按文件名匹配；目标名落盘的文件按登记表里的 cache_key 匹配。
+        wanted = f"cloud-transfer-{normalized}"
+        deleted = 0
+        try:
+            entries = list(self._cache_root().iterdir())
+        except OSError as error:
+            logger.debug(f"读取跨盘缓存目录失败：{error}", exc_info=True)
+            return 0
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            match = RESIDUE_PATTERN.match(entry.name)
+            if not match or match.group("key") != wanted:
+                continue
+            try:
+                entry.unlink()
+                deleted += 1
+            except OSError as error:  # noqa: BLE001 - 单个文件删失败不影响其余
+                logger.debug(f"删除跨盘缓存失败：{entry.name}：{error}", exc_info=True)
+                continue
+            self._registry_drop(entry)
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            if (
+                    entry.name.endswith(".meta.json")
+                    or entry.name.endswith(".parts.json")
+                    or entry.name.endswith(".tmp")
+            ):
+                continue
+            if self._read_cache_owner_key(entry) != normalized:
+                continue
+            deleted += self._delete_cache_path(entry)
+        return deleted
+
+    def _is_stale_partial_cache(self, path: Path, cache_key: str) -> bool:
+        """半截旧缓存是否可删：登记表里没有该路径（跨重启的旧文件，
+        内存状态已丢、没有续传依据），或登记表标为未完成、且没有兄弟
+        任务在用同一 cache_key。正在下载的别动：当前任务持有 1 个引用，
+        引用计数 > 1 说明还有兄弟任务在用。
+        """
+        entry = self._registry_get(path)
+        if entry is None:
+            return True
+        if entry.get("complete"):
+            return False
+        return self._cache_ref_count(cache_key) <= 1
+
+    def _validate_complete_cache(
+            self, path: Path, cache_key: str, source: CloudFile,
+            verify_checksum: bool = True,
+    ) -> bool:
+        """登记表里必须有该路径、cache_key 一致、complete=True、大小与
+        source 一致、磁盘文件大小一致；登记表里的 sha1/md5 有值时必须与
+        source 的一致。完整性只认登记表 complete=True，不认大小——
+        半截的预分配稀疏文件大小也是满的，绝不能误认完成。"""
+        entry = self._registry_get(path)
+        if entry is None:
+            return False
+        expected_size = int(source.size or 0)
+        if (
+                str(entry.get("cache_key") or "") != cache_key
+                or not entry.get("complete")
+                or int(entry.get("size") or 0) != expected_size
+                or expected_size <= 0
+        ):
+            return False
+        try:
+            if not path.is_file() or path.stat().st_size != expected_size:
+                return False
+        except OSError:
+            return False
+        expected_sha1 = str(source.sha1 or "").lower()
+        expected_md5 = str(source.md5 or "").lower()
+        if (
+                str(entry.get("sha1") or "").lower() != expected_sha1
+                or str(entry.get("md5") or "").lower() != expected_md5
+        ):
+            return False
+        if not verify_checksum:
+            return True
+        if expected_sha1:
+            return file_checksum(str(path), "sha1").lower() == expected_sha1
+        if expected_md5:
+            return file_checksum(str(path), "md5").lower() == expected_md5
+        return True
+
+    def _partial_cache_size(self, path: Path, source: CloudFile) -> int:
+        """已下字节：登记表里有并行分片进度时按它算，否则返回 0。
+
+        分片进度先从 HttpFileDownloadService 的进程内内存同步进登记表
+        （part_size/total 校验与旧 _read_parts_total 的逻辑一致）；
+        串行下载的半截文件没有分片进度，返回 0（与旧行为一致）。
+        """
+        self._sync_registry_parts(path, source)
+        entry = self._registry_get(path)
+        expected_size = int(source.size or 0)
+        if entry is None or expected_size <= 0:
+            return 0
+        part_size = int(entry.get("part_size") or 0)
+        total = int(entry.get("total") or 0)
+        if part_size <= 0 or total != expected_size:
+            return 0
+        try:
+            if not path.is_file() or path.stat().st_size != expected_size:
+                return 0
+        except OSError:
+            return 0
+        completed = set(entry.get("parts") or set())
+        valid_starts = set(range(0, expected_size, part_size))
+        if not completed or not completed.issubset(valid_starts):
+            return 0
+        return sum(
+            min(part_size, expected_size - start) for start in completed
+        )
+
+    def _mark_complete_cache(
+            self, path: Path, cache_key: str, source: CloudFile,
+    ) -> None:
+        """下载完成后把登记表该条目标成 complete=True。
+
+        先按老逻辑校验磁盘文件大小 + SHA1/MD5（不匹配仍抛 IOError），
+        不写任何文件。
+        """
+        expected_size = int(source.size or 0)
+        if expected_size <= 0 or path.stat().st_size != expected_size:
+            raise IOError(
+                f"本地缓存文件大小不完整：{path.stat().st_size}/{expected_size}"
+            )
+        sha1 = str(source.sha1 or "").lower()
+        md5 = str(source.md5 or "").lower()
+        if sha1 and file_checksum(str(path), "sha1").lower() != sha1:
+            raise IOError("本地缓存 SHA1 校验失败")
+        if md5 and file_checksum(str(path), "md5").lower() != md5:
+            raise IOError("本地缓存 MD5 校验失败")
+        with self._lock:
+            entry = self._cache_registry.get(str(path))
+            if entry is None:
+                entry = {
+                    "cache_key": str(cache_key or "").strip().lower(),
+                    "size": expected_size,
+                    "sha1": sha1,
+                    "md5": md5,
+                    "complete": False,
+                    "parts": set(),
+                    "part_size": 0,
+                    "total": expected_size,
+                }
+                self._cache_registry[str(path)] = entry
+            entry["cache_key"] = str(cache_key or "").strip().lower()
+            entry["size"] = expected_size
+            entry["sha1"] = sha1
+            entry["md5"] = md5
+            entry["total"] = expected_size
+            entry["complete"] = True
+
+    def _stamp_cache_owner(
+            self, path: Path, cache_key: str, source: CloudFile,
+    ) -> None:
+        """下载开始前在登记表里记一条未完成条目（complete=False），只记归属。
+
+        校验只认 complete=True，所以它不会被误当作完整缓存；成功后
+        :meth:`_mark_complete_cache` 会把它标成完成。不写文件。
+        """
+        size = int(getattr(source, "size", 0) or 0)
+        self._registry_put(path, {
+            "cache_key": str(cache_key or "").strip().lower(),
+            "size": size,
+            "sha1": str(getattr(source, "sha1", "") or "").lower(),
+            "md5": str(getattr(source, "md5", "") or "").lower(),
+            "complete": False,
+            "parts": set(),
+            "part_size": 0,
+            "total": size,
+        })
+
+    def cache_info(
+            self, source_key: str, source: CloudFile,
+            verify_checksum: bool = True,
+            target_name: str | None = None,
+    ) -> dict:
+        cache_key = self._cache_key(source_key, source)
+        path = self._lookup_cache_path(cache_key, source, target_name=target_name)
+        complete = self._validate_complete_cache(
+            path, cache_key, source, verify_checksum=verify_checksum
+        )
+        partial_size = 0 if complete else self._partial_cache_size(path, source)
+        return {
+            "cache_key": cache_key,
+            "cache_status": (
+                "complete" if complete else "partial" if partial_size else "missing"
+            ),
+            "cache_size": int(source.size or 0) if complete else partial_size,
+        }
+
+    def _temporary_path(self, task: dict) -> str:
+        source = task.get("source_file")
+        cache_key = self._cache_key(task.get("source_provider"), source)
+        # _run_locked 全程持有该 cache_key 的锁，命中旧名缓存时在此改名迁移。
+        # 任务标题就是目标名（create 时 target_name 落进 title）：有目标名时
+        # 下载直接用目标名落盘，交给 MP 整理时文件名本身就能被识别。
+        return str(self._resolve_cache_path(
+            cache_key, source, target_name=str(task.get("title") or ""),
+        ))
+
+    def create(self, source_path: str = "", target_key: str = "", save_path: str = "/",
+                target_name: str = "", algorithm: str = "", checksum: str = "",
+                fallback: bool = True, source_key: str = "", source_file: CloudFile | None = None,
+                parent_task_id: str = "", media: Optional[Dict[str, Any]] = None,
+                download_only: bool = False) -> dict:
+        source = Path(source_path) if source_path else None
+        if source is not None and not source.is_file():
+            raise ValueError("源文件不存在或不是文件")
+        if source is None and (not source_key or not source_file):
+            raise ValueError("缺少源文件路径或源网盘文件")
+        task_id = uuid.uuid4().hex
+        now = time.time()
+        total = int(source.stat().st_size) if source else int(source_file.size or 0)
+        cache_root = self._cache_root()
+        required = max(self._MIN_FREE_BYTES, int(total * 1.10))
+        try:
+            free_bytes = int(shutil.disk_usage(cache_root).free)
+        except OSError as error:
+            raise RuntimeError(f"无法检查跨盘缓存磁盘空间：{error}") from error
+        if free_bytes < required:
+            raise RuntimeError(
+                f"跨盘缓存磁盘可用空间不足：剩余 {free_bytes} 字节，"
+                f"至少需要 {required} 字节"
+            )
+        task = {
+            "id": f"cross:{task_id}", "task_kind": "cross_transfer",
+            "parent_task_id": str(parent_task_id or ""),
+            "title": target_name or (source.name if source else source_file.name),
+            "source_path": str(source) if source else "",
+            "source_provider": source_key,
+            "source_file": source_file,
+            "target_provider": target_key, "target_path": save_path,
+            "status": "pending", "phase": "pending", "progress": 0,
+            "transferred": 0, "total": total,
+            "stage_transferred": 0, "stage_total": 0,
+            "downloaded_bytes": 0, "uploaded_bytes": 0,
+            "download_speed_bytes_per_second": 0.0,
+            "upload_speed_bytes_per_second": 0.0,
+            "speed_bytes_per_second": 0.0, "message": "等待跨盘传输",
+            "error": "", "method": "rapid" if algorithm else "fallback",
+            "algorithm": algorithm.lower(), "fallback": bool(fallback),
+            # P2：只下载到本地（/downloads），不向目标盘上传；下载完成后
+            # 调用方触发 MP 整理，由 MP 把本地文件上传进媒体库。秒传探测
+            # 不受此限（文件已在目标盘时无需下载、无需上传）。
+            "download_only": bool(download_only),
+            "queued_at": now, "started_at": None, "finished_at": None,
+            "updated_at": now, "stop_event": Event(),
+        }
+        # 媒体身份只做展示用（下载页海报/季集）：有归属订阅的任务由父任务
+        # 提供，独立任务靠这里带上，否则下载页永远画不出海报。
+        task.update(_normalize_task_media(media))
+        with self._lock:
+            terminal = [key for key, value in self._tasks.items()
+                        if value["status"] not in self.ACTIVE]
+            for stale_id in terminal[:-49]:
+                self._tasks.pop(stale_id, None)
+            self._tasks[task["id"]] = task
+        self._acquire_cache_ref(self._task_cache_key(task))
+        self._notify_change()
+        Thread(target=self._run, args=(task["id"], checksum), daemon=True).start()
+        return self._public(task)
+
+    def create_from_cloud_file(self, source_key: str, source_file: CloudFile,
+                                target_key: str, save_path: str, target_name: str = "",
+                                algorithm: str = "", fallback: bool = True,
+                                parent_task_id: str = "",
+                                media: Optional[Dict[str, Any]] = None,
+                                download_only: bool = False) -> dict:
+        selected = algorithm or ""
+        if not selected:
+            try:
+                selected, _ = CrossDriveTransfer.select_algorithm(
+                    source_file, self._provider_resolver(target_key)
+                )
+            except Exception:
+                selected = ""
+        checksum = source_file.md5 if selected == "md5" else source_file.sha1
+        return self.create(
+            target_key=target_key, save_path=save_path, target_name=target_name,
+            algorithm=selected, checksum=checksum, fallback=fallback,
+            source_key=source_key, source_file=source_file,
+            parent_task_id=parent_task_id, media=media,
+            download_only=download_only,
+        )
+
+    def list(self, active_only: bool = False) -> list[dict]:
+        with self._lock:
+            tasks = [self._public(task) for task in self._tasks.values()
+                     if not active_only or task["status"] in self.ACTIVE]
+        return sorted(tasks, key=lambda item: item["queued_at"], reverse=True)
+
+    def wait(self, task_id: str, poll_seconds: float = 0.2,
+             cancel_check: Optional[Callable[[], bool]] = None) -> bool:
+        while True:
+            with self._lock:
+                task = self._tasks.get(task_id)
+                if not task:
+                    return False
+                status = task["status"]
+            if status not in self.ACTIVE:
+                return status == "success"
+            if cancel_check and cancel_check():
+                self.cancel(task_id)
+            time.sleep(max(0.05, poll_seconds))
+
+    def cancel(self, task_id: str) -> bool:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task or task["status"] not in self.ACTIVE:
+                return False
+            task["status"], task["phase"] = "stopping", "stopping"
+            task["message"] = "等待当前网络操作安全停止"
+            task["stop_event"].set()
+        self._notify_change()
+        return True
+
+    def cancel_parent(self, parent_task_id: str) -> int:
+        """取消属于同一订阅任务的全部跨盘子任务。"""
+        parent_task_id = str(parent_task_id or "")
+        if not parent_task_id:
+            return 0
+        canceled = 0
+        with self._lock:
+            for task in self._tasks.values():
+                if (
+                        task.get("parent_task_id") == parent_task_id
+                        and task.get("status") in self.ACTIVE
+                ):
+                    task["status"], task["phase"] = "stopping", "stopping"
+                    task["message"] = "等待当前网络操作安全停止"
+                    task["stop_event"].set()
+                    canceled += 1
+        if canceled:
+            self._notify_change()
+        return canceled
+
+    def _update(self, task_id: str, **values) -> None:
+        """更新任务字段。
+
+        progress 只增不减：一个任务就是一份文件，中途回退（边下边传失败回退
+        本地缓存、分片重下从 0 记数、聚合基线切换）只会让界面进度条来回蹦。
+        需要真正归零的阶段用新建任务表达，不要复用同一个 task_id。
+        """
+        changed = False
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if task and "progress" in values:
+                try:
+                    requested = int(values["progress"])
+                except (TypeError, ValueError):
+                    requested = int(task.get("progress") or 0)
+                values["progress"] = max(int(task.get("progress") or 0), requested)
+            if task and any(task.get(key) != value for key, value in values.items()):
+                task.update(values)
+                task["updated_at"] = time.time()
+                changed = True
+        if changed:
+            # 每日额度只累加「真实上传」字节：秒传命中(rapid)/复用(reuse) 不计
+            if (
+                    values.get("status") == "success"
+                    and self._quota is not None
+                    and str(values.get("method") or "") not in ("rapid", "reuse")
+            ):
+                self._quota.add(int(values.get("uploaded_bytes") or 0))
+            self._notify_change()
+
+    @staticmethod
+    def _public(task: dict) -> dict:
+        return {key: value for key, value in task.items()
+                if key not in {"stop_event", "source_path", "source_file"}}
+
+    @staticmethod
+    def _ranges_cover(
+            completed: list[int], part_size: int, total: int,
+            start: int, end: int,
+    ) -> bool:
+        cursor = start
+        for part_start in sorted(completed):
+            part_end = min(total, part_start + part_size) - 1
+            if part_end < cursor:
+                continue
+            if part_start > cursor:
+                return False
+            cursor = part_end + 1
+            if cursor > end:
+                return True
+        return cursor > end
+
+    def _progressive_transfer(
+            self, task_id: str, task: dict, downloader: object,
+            target: CloudDriveProvider, temporary_path: str,
+            cache_key: str, target_name_text: str,
+            algorithm: str, checksum: str,
+    ) -> CrossDriveTransferResult | None:
+        """下载 Range 落盘后立即交给支持该能力的目标盘上传。"""
+        stop_event = task["stop_event"]
+        source_file = task["source_file"]
+        expected_size = int(source_file.size or task["total"] or 0)
+        cache_path = Path(temporary_path)
+        download_done = Event()
+        progress_changed = Event()
+        download_error: list[BaseException] = []
+        download_speed = _SpeedSampler()
+        upload_speed = _SpeedSampler()
+
+        def update_progress(**values) -> None:
+            with self._lock:
+                current = self._tasks.get(task_id) or {}
+                downloaded = int(values.get(
+                    "downloaded_bytes", current.get("downloaded_bytes") or 0
+                ))
+                uploaded = int(values.get(
+                    "uploaded_bytes", current.get("uploaded_bytes") or 0
+                ))
+                download_rate = float(values.get(
+                    "download_speed_bytes_per_second",
+                    current.get("download_speed_bytes_per_second") or 0,
+                ))
+                upload_rate = float(values.get(
+                    "upload_speed_bytes_per_second",
+                    current.get("upload_speed_bytes_per_second") or 0,
+                ))
+            progress = (
+                min(99, int((downloaded + uploaded) * 50 / expected_size))
+                if expected_size > 0 else 0
+            )
+            values.update(
+                phase="streaming", progress=progress,
+                transferred=int(expected_size * progress / 100),
+                stage_transferred=uploaded, stage_total=expected_size,
+                speed_bytes_per_second=(
+                    upload_rate if uploaded > 0 else download_rate
+                ),
+                message=f"正在边下载边上传到{target_name_text}",
+            )
+            self._update(task_id, **values)
+
+        def download_progress(done: int, total: int) -> None:
+            if stop_event.is_set():
+                raise InterruptedError
+            speed = download_speed.update(done)
+            update_progress(
+                downloaded_bytes=done,
+                download_speed_bytes_per_second=speed,
+            )
+            progress_changed.set()
+
+        def run_download() -> None:
+            try:
+                path = downloader.download_file(
+                    source_file, temporary_path, download_progress,
+                    stop_event.is_set, preserve_partial=True,
+                    download_threads=self._download_threads,
+                )
+                self._mark_complete_cache(Path(path), cache_key, source_file)
+            except BaseException as error:
+                download_error.append(error)
+            finally:
+                download_done.set()
+                progress_changed.set()
+
+        def wait_for_range(start: int, end: int) -> None:
+            while True:
+                if stop_event.is_set():
+                    raise InterruptedError
+                if download_error:
+                    raise download_error[0]
+                # 并行分片进度在登记表里（由下载器内存同步过来）：
+                # 覆盖了要上传的区间就可以开始传，不必等整文件下完。
+                self._sync_registry_parts(cache_path, source_file)
+                entry = self._registry_get(cache_path)
+                if entry is not None:
+                    part_size = int(entry.get("part_size") or 0)
+                    total = int(entry.get("total") or expected_size)
+                    if part_size > 0 and self._ranges_cover(
+                            sorted(entry.get("parts") or set()),
+                            part_size, total, start, end,
+                    ):
+                        return
+                if download_done.is_set():
+                    if download_error:
+                        raise download_error[0]
+                    if cache_path.is_file() and cache_path.stat().st_size == expected_size:
+                        return
+                    raise IOError("本地缓存下载完成但文件大小不完整")
+                progress_changed.wait(0.1)
+                progress_changed.clear()
+
+        def upload_progress(done: int, total: int) -> None:
+            if stop_event.is_set():
+                raise InterruptedError
+            speed = upload_speed.update(done)
+            update_progress(
+                uploaded_bytes=done,
+                upload_speed_bytes_per_second=speed,
+            )
+
+        self._update(
+            task_id, phase="streaming",
+            message=f"准备边下载边上传到{target_name_text}",
+        )
+        download_thread = Thread(
+            target=run_download,
+            name="cloudsubscribe-progressive-download",
+            daemon=True,
+        )
+        download_thread.start()
+        uploaded = False
+        upload_error: Exception | None = None
+        try:
+            uploaded = bool(target.require(
+                CloudDriveCapability.LOCAL_UPLOAD
+            ).upload_progressive(
+                temporary_path, task["target_path"], task["title"],
+                expected_size, algorithm, checksum, wait_for_range,
+                upload_progress, stop_event.is_set,
+            ))
+        except InterruptedError:
+            raise
+        except Exception as error:
+            upload_error = error
+        finally:
+            download_thread.join()
+        if stop_event.is_set():
+            raise InterruptedError
+        if download_error:
+            raise download_error[0]
+        if upload_error:
+            # 下载缓存已完整保留，后续由普通本地上传继续，不丢失本轮成果。
+            self._update(task_id, message="流水线上传未完成，正在使用完整缓存重试")
+            return None
+        if not uploaded:
+            return None
+        item = target.require(CloudDriveCapability.FILE_QUERY).find_file(
+            task["target_path"], task["title"]
+        )
+        return CrossDriveTransferResult(item, "progressive")
+
+    @staticmethod
+    def _target_plan(
+            task: dict, target_path: str, target_name: str,
+            algorithm: str, checksum: str,
+    ) -> TargetPlan:
+        algorithm = str(algorithm or "").strip().lower()
+        source = task.get("source_file")
+        source_sha1 = str(getattr(source, "sha1", "") or "")
+        source_md5 = str(getattr(source, "md5", "") or "")
+        return TargetPlan(
+            provider_key=str(task["target_provider"]),
+            path=target_path,
+            name=target_name,
+            size=int(task.get("total") or 0),
+            sha1=str(checksum or "") if algorithm == "sha1" else source_sha1,
+            md5=str(checksum or "") if algorithm == "md5" else source_md5,
+        )
+
+    def _run(self, task_id: str, checksum: str) -> None:
+        # 同一 cache_key 的任务严格串行：第二个任务排在第一个之后，
+        # 兄弟任务先完成时由引用计数保留完整缓存供其复用（1.6.47 同源并发互删）。
+        with self._lock:
+            task = self._tasks.get(task_id)
+        cache_key = self._task_cache_key(task)
+        if not cache_key:
+            self._run_locked(task_id, checksum, cache_key)
+            return
+        with self._cache_key_lock(cache_key):
+            self._run_locked(task_id, checksum, cache_key)
+
+    def _run_locked(self, task_id: str, checksum: str, cache_key: str) -> None:
+        self._transfer_slots.acquire()
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                self._release_cache_ref(cache_key)
+                self._transfer_slots.release()
+                return
+            source_path = task["source_path"]
+            stop_event = task["stop_event"]
+            target_key, target_path = task["target_provider"], task["target_path"]
+            target_name, algorithm = task["title"], task["algorithm"]
+            fallback = task["fallback"]
+            # P2 只下载到本地：下载完成后不秒传、不上传，调用方触发 MP 整理。
+            download_only = bool(task.get("download_only"))
+        # 每日上传额度预检：超限直接跳过本次，不下载、不占本地缓存，等次日恢复
+        if self._quota is not None:
+            allowed, quota_reason = self._quota.can_start(
+                int(task.get("total") or 0)
+            )
+            if not allowed:
+                self._update(
+                    task_id, status="skipped", phase="done", progress=100,
+                    message=quota_reason, error=quota_reason,
+                    finished_at=time.time(),
+                )
+                self._release_cache_ref(cache_key)
+                self._transfer_slots.release()
+                return
+        if not checksum and not algorithm:
+            # 上次下载过但秒传未命中：本地文件已删，哈希还在。
+            # 用缓存的 SHA1 直接做零流量探测，命中就成功、未命中也不重复下载。
+            cached_sha1 = self._cached_source_sha1(task)
+            if cached_sha1:
+                algorithm, checksum = "sha1", cached_sha1
+                with self._lock:
+                    live_task = self._tasks.get(task_id)
+                    if live_task is not None:
+                        live_task["algorithm"] = algorithm
+                        live_task["hash_from_cache"] = True
+                logger.info(
+                    "命中源文件 SHA1 缓存，改为零流量秒传探测："
+                    f"{target_name}"
+                )
+        observed_sha1 = str(checksum or "").strip().upper() \
+            if str(algorithm or "").strip().lower() == "sha1" else ""
+        started = time.time()
+        self._update(
+            task_id, status="running",
+            phase="hashing" if source_path else "downloading",
+            started_at=started,
+            message="正在校验源文件" if source_path else "准备下载源文件",
+            progress=2 if source_path else 0,
+        )
+        try:
+            if stop_event.is_set():
+                raise InterruptedError
+            # 同一 (目标盘, SHA1) 24 小时内已确认秒传未命中：不再下载整份文件重试。
+            # 线上 19 小时里同一个文件被下了 2 次、白费 25GiB，就卡在这一步。
+            known_sha1 = (
+                str(checksum or "").strip().upper()
+                if str(algorithm or "").strip().lower() == "sha1" else ""
+            )
+            # 负缓存只服务 abort 模式：fallback（回落普通上传）必须放行去下载+上传，
+            # 否则历史 abort 留下的记录会让文件永远被跳过（1.9.76 真机事故）。
+            if (
+                    self._rapid_miss_action == "abort"
+                    and known_sha1 and target_name and not source_path
+            ):
+                missed_at = self._rapid_miss_at(target_key, known_sha1)
+                if missed_at:
+                    age_minutes = max(0, int((time.time() - missed_at) / 60))
+                    logger.info(
+                        f"跳过：{target_name} 的秒传 {age_minutes} 分钟前已确认未命中"
+                        f"（{target_key}），{self._miss_cache_ttl_seconds // 3600} 小时内不再下载"
+                    )
+                    raise RapidMissAborted(
+                        f"{target_key} 已确认无此哈希，跳过下载",
+                        from_cache=True,
+                    )
+            target = self._provider_resolver(target_key)
+            target_name_text = str(
+                getattr(target, "name", "") or target_key or "目标网盘"
+            )
+            rapid_miss_abort = self._rapid_miss_action == "abort"
+            remote_rapid_attempted = False
+            if (
+                    not source_path and algorithm and checksum
+                    and target.supports(CloudDriveCapability.RAPID_UPLOAD)
+            ):
+                rapid_service = target.require(CloudDriveCapability.RAPID_UPLOAD)
+                if not bool(getattr(rapid_service, "requires_local_file", True)):
+                    remote_rapid_attempted = True
+                    self._update(
+                        task_id, phase="rapid_upload",
+                        message=f"正在向{target_name_text}尝试秒传",
+                        progress=5,
+                    )
+                    rapid_result = rapid_service.upload_by_hash(
+                        "", target_path, target_name, algorithm, checksum,
+                        int(task["total"] or 0),
+                    )
+                    if rapid_result.reused and rapid_result.file:
+                        result_file = rapid_result.file
+                        self._update(
+                            task_id, status="success", phase="done", progress=100,
+                            transferred=task["total"], speed_bytes_per_second=0.0,
+                            stage_transferred=0, stage_total=0,
+                            message=f"已秒传到{target_name_text}", method="rapid",
+                            result_file_id=str(result_file.id or ""),
+                            result_file_name=str(result_file.name or target_name),
+                            result_file_size=int(result_file.size or task["total"] or 0),
+                            result_sha1=str(result_file.sha1 or ""),
+                            result_md5=str(result_file.md5 or ""),
+                            finished_at=time.time(),
+                        )
+                        return
+                    if rapid_miss_abort:
+                        # abort 模式：下载前探测未命中即中止（不下载、不上传）
+                        raise RapidMissAborted()
+            source_provider = None
+            source_name = ""
+            if not source_path:
+                source_provider = self._provider_resolver(task["source_provider"])
+                source_name = str(
+                    getattr(source_provider, "name", "")
+                    or task["source_provider"] or "源网盘"
+                )
+            if (
+                    rapid_miss_abort and not source_path
+                    and not remote_rapid_attempted
+                    and algorithm and checksum
+                    and target.supports(CloudDriveCapability.RAPID_UPLOAD)
+            ):
+                # abort 模式（先探测后下载）：115 这类探测器需要本地文件的提供方
+                # 走无本地文件的秒传探测；源文件有校验和时零流量，≥1MB 时用源盘
+                # 直链读取 115 二次校验小段（不落本地）；无法探测才继续下载。
+                probe = getattr(
+                    target.require(CloudDriveCapability.RAPID_UPLOAD),
+                    "probe_by_hash", None,
+                )
+                if callable(probe):
+                    expected_size = int(task["total"] or 0)
+                    read_range = None
+                    if (
+                            expected_size >= 1024 * 1024
+                            and source_provider.supports(
+                                CloudDriveCapability.FILE_DOWNLOAD
+                            )
+                    ):
+                        try:
+                            download_url, download_headers = source_provider.require(
+                                CloudDriveCapability.FILE_DOWNLOAD
+                            ).resolve_download_link(task["source_file"])
+                            read_range = _RemoteSha1RangeReader(
+                                download_url, download_headers, expected_size,
+                                stop_requested=stop_event.is_set,
+                            ).read_range_sha1
+                        except Exception as error:  # noqa: BLE001 - 取链失败退回下载后探测
+                            logger.debug(f"秒传探测取链失败，转为下载后探测：{error}")
+                            read_range = None
+                    self._update(
+                        task_id, phase="rapid_upload",
+                        message=f"正在向{target_name_text}尝试秒传（先探测后下载）",
+                        progress=5,
+                    )
+                    probe_result = probe(
+                        target_path, target_name, algorithm, checksum,
+                        expected_size, read_range,
+                    )
+                    if (
+                            probe_result is not None and probe_result.reused
+                            and probe_result.file
+                    ):
+                        result_file = probe_result.file
+                        # 探测命中也可能已有完整缓存，先清理再标成功（避免观测到
+                        # success 时缓存还在）；同 cache_key 兄弟任务在用时保留
+                        self._delete_cache_path_for_task(
+                            task, Path(self._temporary_path(task))
+                        )
+                        self._update(
+                            task_id, status="success", phase="done", progress=100,
+                            transferred=task["total"], speed_bytes_per_second=0.0,
+                            stage_transferred=0, stage_total=0,
+                            message=f"已秒传到{target_name_text}", method="rapid",
+                            result_file_id=str(result_file.id or ""),
+                            result_file_name=str(result_file.name or target_name),
+                            result_file_size=int(result_file.size or task["total"] or 0),
+                            result_sha1=str(result_file.sha1 or ""),
+                            result_md5=str(result_file.md5 or ""),
+                            finished_at=time.time(),
+                        )
+                        return
+                    if probe_result is not None and not probe_result.reused:
+                        if rapid_miss_abort:
+                            raise RapidMissAborted()
+                    # 无法零流量探测（缺校验和/取链失败/接口异常）时不做任何处理：
+                    # 继续下载后再按 abort 处理（与 1.6.55 一致）
+            if (
+                    not source_path
+                    and self._direct_stream
+                    and not rapid_miss_abort
+                    and not download_only
+                    and fallback
+                    and algorithm == "sha1"
+                    and bool(checksum)
+                    and int(task["total"] or 0) > 0
+                    and source_provider.supports(CloudDriveCapability.FILE_DOWNLOAD)
+                    and target.supports(CloudDriveCapability.LOCAL_UPLOAD)
+                    and callable(getattr(
+                target.require(CloudDriveCapability.LOCAL_UPLOAD),
+                "upload_from_link", None,
+            ))
+            ):
+                range_plan = self._target_plan(
+                    task, target_path, target_name, algorithm, checksum
+                )
+                range_probe = self._target_writer.probe(range_plan)
+                if range_probe.status == "reused":
+                    result_file = range_probe.file
+                    self._update(
+                        task_id, status="success", phase="done", progress=100,
+                        transferred=task["total"],
+                        downloaded_bytes=task["total"],
+                        uploaded_bytes=task["total"],
+                        download_speed_bytes_per_second=0.0,
+                        upload_speed_bytes_per_second=0.0,
+                        speed_bytes_per_second=0.0,
+                        stage_transferred=0, stage_total=0,
+                        message=(
+                            f"目标已存在相同文件，跳过 Range 直传："
+                            f"{range_probe.actual_name}"
+                        ),
+                        method="reuse",
+                        result_file_id=str(getattr(result_file, "id", "") or ""),
+                        result_file_name=str(
+                            getattr(result_file, "name", "")
+                            or range_probe.actual_name or target_name
+                        ),
+                        result_file_size=int(
+                            getattr(result_file, "size", 0)
+                            or range_probe.actual_size or 0
+                        ),
+                        result_sha1=str(getattr(result_file, "sha1", "") or ""),
+                        result_md5=str(getattr(result_file, "md5", "") or ""),
+                        finished_at=time.time(),
+                    )
+                    return
+                if range_probe.status == "conflict":
+                    raise TargetConflictError(range_probe.reason)
+                if range_probe.status == "unknown":
+                    raise TargetUnknownError(range_probe.reason)
+                try:
+                    download_url, download_headers = source_provider.require(
+                        CloudDriveCapability.FILE_DOWNLOAD
+                    ).resolve_download_link(task["source_file"])
+                    remote_speed = _SpeedSampler()
+
+                    def remote_progress(done: int, total: int) -> None:
+                        if stop_event.is_set():
+                            raise InterruptedError
+                        percent = min(99, int(done * 100 / total)) if total else 0
+                        speed = remote_speed.update(done)
+                        self._update(
+                            task_id, phase="streaming", progress=percent,
+                            transferred=done, total=total,
+                            downloaded_bytes=done, uploaded_bytes=done,
+                            download_speed_bytes_per_second=speed,
+                            upload_speed_bytes_per_second=speed,
+                            speed_bytes_per_second=speed,
+                            stage_transferred=done, stage_total=total,
+                            message=f"正在从{source_name} Range 直传到{target_name_text}",
+                        )
+
+                    self._update(
+                        task_id, phase="rapid_upload", progress=1,
+                        message=(
+                            f"正在从{source_name}向{target_name_text}尝试 SHA1 秒传"
+                        ),
+                    )
+                    remote_uploaded = target.require(
+                        CloudDriveCapability.LOCAL_UPLOAD
+                    ).upload_from_link(
+                        download_url, download_headers, target_path,
+                        target_name, int(task["total"]), algorithm, checksum,
+                        remote_progress, stop_event.is_set,
+                        refresh_link=lambda: source_provider.require(
+                            CloudDriveCapability.FILE_DOWNLOAD
+                        ).resolve_download_link(task["source_file"]),
+                    )
+                    if remote_uploaded:
+                        remote_rapid = remote_uploaded == "rapid"
+                        result_file = target.require(
+                            CloudDriveCapability.FILE_QUERY
+                        ).find_file(target_path, target_name)
+                        if not result_file:
+                            raise RuntimeError("跨盘传输完成后未找到目标文件")
+                        self._update(
+                            task_id, status="success", phase="done", progress=100,
+                            transferred=task["total"],
+                            downloaded_bytes=task["total"],
+                            uploaded_bytes=task["total"],
+                            download_speed_bytes_per_second=0.0,
+                            upload_speed_bytes_per_second=0.0,
+                            speed_bytes_per_second=0.0,
+                            stage_transferred=0, stage_total=0,
+                            message=(
+                                f"已从{source_name} SHA1 秒传到{target_name_text}"
+                                if remote_rapid else
+                                f"已从{source_name} Range 直传到{target_name_text}"
+                            ),
+                            method="rapid" if remote_rapid else "remote",
+                            result_file_id=str(result_file.id or ""),
+                            result_file_name=str(result_file.name or target_name),
+                            result_file_size=int(
+                                result_file.size or task["total"] or 0
+                            ),
+                            result_sha1=str(result_file.sha1 or ""),
+                            result_md5=str(result_file.md5 or ""),
+                            finished_at=time.time(),
+                        )
+                        return
+                except InterruptedError:
+                    raise
+                except (TargetConflictError, TargetUnknownError):
+                    raise
+                except Exception as error:  # noqa: BLE001 - 直传失败回退本地缓存
+                    logger.warning(
+                        f"Range 直传失败，回退本地缓存下载："
+                        f"{type(error).__name__}: {error}"
+                    )
+                    logger.debug("Range 直传异常详情", exc_info=True)
+                    self._update(
+                        task_id, phase="downloading", progress=0,
+                        message="Range 直传不可用，正在回退本地缓存",
+                    )
+            temporary_path = ""
+            cache_complete = False
+            cache_reused = False
+            if not source_path:
+                temporary_path = self._temporary_path(task)
+                cache_path = Path(temporary_path)
+                source_file = task["source_file"]
+                cache_key = self._cache_key(task["source_provider"], source_file)
+                expected_size = int(source_file.size or task["total"] or 0)
+                cache_complete = self._validate_complete_cache(
+                    cache_path, cache_key, source_file
+                )
+                if (
+                        cache_path.exists() and not cache_complete
+                        and self._is_stale_partial_cache(cache_path, cache_key)
+                ):
+                    self._delete_cache_path(cache_path)
+                if cache_complete:
+                    cache_reused = True
+                    source_path = temporary_path
+                    self._update(task_id, phase="cache_ready", progress=50,
+                                 transferred=int(expected_size * 0.5),
+                                 stage_transferred=0, stage_total=0,
+                                 speed_bytes_per_second=0.0,
+                                 message="已找到完整本地缓存，继续目标盘上传")
+                else:
+                    # 下载开始前先在登记表里落一个未完成条目（complete=False），
+                    # 只记归属：断点续传文件也有 cache_key，取消/失败后
+                    # delete_cache 与 residue 扫描都能按 key 认出它；成功后
+                    # _mark_complete_cache 会把它标成 complete=True，
+                    # 校验只认 complete=True。
+                    self._stamp_cache_owner(cache_path, cache_key, source_file)
+                    download_message = f"正在从{source_name}下载到本地缓存"
+                    downloader = source_provider.require(CloudDriveCapability.FILE_DOWNLOAD)
+                    can_stream = (
+                            fallback and not rapid_miss_abort
+                            and not download_only
+                            and algorithm == "md5"
+                            and bool(checksum)
+                            and expected_size > 0
+                            and target.supports(CloudDriveCapability.LOCAL_UPLOAD)
+                            and callable(getattr(
+                        target.require(CloudDriveCapability.LOCAL_UPLOAD),
+                        "upload_progressive", None,
+                    ))
+                    )
+                    if can_stream:
+                        progressive_plan = self._target_plan(
+                            task, target_path, target_name, algorithm, checksum
+                        )
+
+                        def write_progressive():
+                            outcome = self._progressive_transfer(
+                                task_id, task, downloader, target, temporary_path,
+                                cache_key, target_name_text,
+                                algorithm, checksum,
+                            )
+                            if not outcome:
+                                return None
+                            return outcome.file if outcome.file is not None else True
+
+                        progressive_target_result = self._target_writer.commit(
+                            progressive_plan, write_progressive
+                        )
+                        source_path = temporary_path
+                        if progressive_target_result.status in {"reused", "written"}:
+                            result_file = progressive_target_result.file
+                            reused = progressive_target_result.status == "reused"
+                            self._update(
+                                task_id, status="success", phase="done", progress=100,
+                                transferred=task["total"],
+                                downloaded_bytes=task["total"],
+                                uploaded_bytes=task["total"],
+                                download_speed_bytes_per_second=0.0,
+                                upload_speed_bytes_per_second=0.0,
+                                speed_bytes_per_second=0.0,
+                                stage_transferred=0, stage_total=0,
+                                message=(
+                                    "目标已存在相同文件，跳过上传："
+                                    f"{progressive_target_result.actual_name}"
+                                    if reused else
+                                    f"已边下载边上传到{target_name_text}"
+                                ),
+                                method="reuse" if reused else "progressive",
+                                result_file_id=str(
+                                    getattr(result_file, "id", "") or ""
+                                ),
+                                result_file_name=str(
+                                    getattr(result_file, "name", "")
+                                    or progressive_target_result.actual_name
+                                    or target_name
+                                ),
+                                result_file_size=int(
+                                    getattr(result_file, "size", 0)
+                                    or progressive_target_result.actual_size or 0
+                                ),
+                                result_sha1=str(
+                                    getattr(result_file, "sha1", "") or ""
+                                ),
+                                result_md5=str(
+                                    getattr(result_file, "md5", "") or ""
+                                ),
+                                finished_at=time.time(),
+                            )
+                            self._delete_cache_path_for_task(
+                                task, Path(temporary_path)
+                            )
+                            return
+                    else:
+                        self._update(
+                            task_id, phase="downloading",
+                            message=download_message, progress=0,
+                            # 重试回落重新下载时清零字节计数，否则下载页
+                            # 按阶段算进度会读到上一轮的残值、起手就显示 100%。
+                            downloaded_bytes=0, uploaded_bytes=0,
+                        )
+                        download_speed = _SpeedSampler()
+
+                        def download_progress(done: int, total: int) -> None:
+                            if stop_event.is_set():
+                                raise InterruptedError
+                            percent = min(49, int(done * 50 / total)) if total else 0
+                            display_total = int(task["total"] or total or 0)
+                            speed = download_speed.update(done)
+                            self._update(
+                                task_id, progress=percent,
+                                transferred=int(display_total * percent / 100),
+                                stage_transferred=done, stage_total=total,
+                                downloaded_bytes=done,
+                                download_speed_bytes_per_second=speed,
+                                speed_bytes_per_second=speed,
+                                message=download_message,
+                            )
+
+                        source_path = downloader.download_file(
+                            task["source_file"], temporary_path,
+                            download_progress, stop_event.is_set,
+                            preserve_partial=True,
+                            download_threads=self._download_threads,
+                        )
+                        self._mark_complete_cache(
+                            Path(source_path), cache_key, source_file
+                        )
+                        self._remember_source_hash(task, source_path)
+                    cache_complete = True
+            if source_path and not Path(source_path).is_file():
+                # 中继文件在传输途中被清理（历史删除联动删缓存/手工清缓存/插件重载）：
+                # 明确报错并让下一次重试重新下载，避免抛出裸 Errno 2 让用户无从下手
+                raise RuntimeError(
+                    "本地跨盘缓存文件已被清理（可能来自历史删除联动清缓存或手工清理），"
+                    "请重新点击重试，插件会重新下载"
+                )
+            if download_only:
+                # 只下载到本地：本地文件已就绪，不再走秒传/上传；调用方
+                # 触发 MP 整理，由 MP 把它上传进媒体库。本地文件归 MP
+                # 整理所有：finally 的缓存清理对此任务跳过（见 finally）。
+                source_file = task.get("source_file")
+                self._update(
+                    task_id, status="success", phase="done", progress=100,
+                    transferred=task["total"], speed_bytes_per_second=0.0,
+                    downloaded_bytes=task["total"], uploaded_bytes=0,
+                    stage_transferred=0, stage_total=0,
+                    message=f"已下载到本地，待 MP 整理上传到{target_name_text}",
+                    method="download_only",
+                    result_local_path=str(source_path),
+                    result_file_name=str(target_name),
+                    result_file_size=int(
+                        task["total"] or getattr(source_file, "size", 0) or 0
+                    ),
+                    result_sha1=str(
+                        checksum if str(algorithm or "").lower() == "sha1"
+                        else getattr(source_file, "sha1", "") or ""
+                    ),
+                    result_md5=str(
+                        checksum if str(algorithm or "").lower() == "md5"
+                        else getattr(source_file, "md5", "") or ""
+                    ),
+                    finished_at=time.time(),
+                )
+                return
+            had_download = bool(temporary_path)
+            hash_message = (
+                "正在校验本地缓存"
+                if cache_reused else (
+                    f"正在校验从{source_name}下载的文件"
+                    if had_download and source_name else "正在校验源文件"
+                )
+            )
+            self._update(task_id, phase="hashing", message=hash_message,
+                         progress=50 if had_download else 2,
+                         stage_transferred=0, stage_total=0,
+                         speed_bytes_per_second=0.0)
+            upload_speed = _SpeedSampler()
+
+            def progress(done: int, total: int) -> None:
+                if stop_event.is_set():
+                    raise InterruptedError
+                raw_percent = min(99, int(done * 100 / total)) if total else 0
+                # 基准 52 与上面 rapid_upload 阶段对齐：50 会让进度条先跳回 50
+                percent = 52 + min(47, raw_percent // 2) if had_download else raw_percent
+                display_total = int(task["total"] or total or 0)
+                display_done = (
+                    int(display_total * percent / 100) if had_download else done
+                )
+                speed = upload_speed.update(done)
+                self._update(task_id, phase="uploading",
+                             message=f"正在上传到{target_name_text}",
+                             progress=percent, transferred=display_done,
+                             total=display_total,
+                             uploaded_bytes=done,
+                             upload_speed_bytes_per_second=speed,
+                             stage_transferred=done, stage_total=total,
+                             speed_bytes_per_second=speed)
+
+            self._update(task_id, phase="rapid_upload",
+                         message=f"正在向{target_name_text}尝试秒传",
+                         progress=52 if had_download else 5,
+                         stage_transferred=0, stage_total=0)
+            transfer_algorithm = "" if remote_rapid_attempted else algorithm
+            transfer_checksum = "" if remote_rapid_attempted else checksum
+            if (
+                    not remote_rapid_attempted and not transfer_algorithm
+                    and target.supports(CloudDriveCapability.RAPID_UPLOAD)
+            ):
+                supported = target.require(
+                    CloudDriveCapability.RAPID_UPLOAD
+                ).algorithms
+                transfer_algorithm = (
+                    "md5" if "md5" in supported
+                    else "sha1" if "sha1" in supported else ""
+                )
+                if transfer_algorithm:
+                    transfer_checksum = file_checksum(
+                        source_path, transfer_algorithm
+                    )
+                    if transfer_algorithm == "sha1":
+                        observed_sha1 = str(transfer_checksum or "").upper()
+            local_method = {"value": ""}
+            # write_local 拿不到返回值以外的信息：transfer() 只返回 None，
+            # 底层原因（115 报错原文）先留在这个格子里，not_written 分支
+            # 再把它拼进任务 error——否则任务只剩一句通用的
+            # 「秒传未命中且普通上传失败」，历史记录也查不到真正原因。
+            local_error = {"value": ""}
+
+            def write_local():
+                transfer = CrossDriveTransfer()
+                uploaded = transfer.transfer(
+                    source_path, target, target_path, target_name,
+                    transfer_algorithm, transfer_checksum,
+                    # abort 模式：秒传未命中时不进入真实上传（fallback 参数不变）
+                    fallback=(fallback and not rapid_miss_abort),
+                    progress_callback=progress,
+                )
+                if not uploaded:
+                    local_error["value"] = str(transfer.last_error or "").strip()
+                    return None
+                local_method["value"] = uploaded.method
+                return uploaded.file if uploaded.file is not None else True
+
+            local_plan = self._target_plan(
+                task, target_path, target_name,
+                transfer_algorithm, transfer_checksum,
+            )
+            local_result = self._target_writer.commit(local_plan, write_local)
+            if local_result.status == "not_written":
+                if rapid_miss_abort:
+                    raise RapidMissAborted()
+                detail = str(local_error["value"] or "").strip()[:300]
+                if fallback:
+                    raise RuntimeError(
+                        f"秒传未命中且普通上传失败：{detail}"
+                        if detail else "秒传未命中且普通上传失败"
+                    )
+                raise RuntimeError("秒传未命中")
+            result_file = local_result.file
+            reused = local_result.status == "reused"
+            rapid = (not reused) and local_method["value"] == "rapid"
+            self._update(
+                task_id, status="success", phase="done", progress=100,
+                transferred=task["total"], speed_bytes_per_second=0.0,
+                downloaded_bytes=task["total"],
+                uploaded_bytes=task["total"],
+                stage_transferred=0, stage_total=0,
+                message=(
+                    f"目标已存在相同文件，跳过上传：{local_result.actual_name}"
+                    if reused else (
+                        f"已秒传到{target_name_text}"
+                        if rapid else f"已上传到{target_name_text}"
+                    )
+                ),
+                method="reuse" if reused else ("rapid" if rapid else "fallback"),
+                result_file_id=str(getattr(result_file, "id", "") or ""),
+                result_file_name=str(
+                    getattr(result_file, "name", "") or local_result.actual_name
+                    or target_name
+                ),
+                result_file_size=int(
+                    getattr(result_file, "size", 0)
+                    or local_result.actual_size or task["total"] or 0
+                ),
+                result_sha1=str(getattr(result_file, "sha1", "") or ""),
+                result_md5=str(getattr(result_file, "md5", "") or ""),
+                finished_at=time.time(),
+            )
+            if temporary_path:
+                self._delete_cache_path_for_task(task, Path(temporary_path))
+        except InterruptedError:
+            # 手动取消即清空中继（含已下完的完整缓存）：只删本任务的
+            # cloud-transfer-<hash>-<源文件名>（或旧名 .bin）及其 .aria2，
+            # 不碰同目录下其它文件；
+            # 同 cache_key 还有任务在用时保留。
+            retained = (
+                'temporary_path' in locals() and temporary_path
+                and self._cache_retained_for_others(task)
+            )
+            if 'temporary_path' in locals() and temporary_path and not retained:
+                self._delete_cache_path(Path(temporary_path))
+            if retained:
+                logger.debug("任务取消：跨盘缓存仍有其它任务使用，保留文件")
+            self._update(
+                task_id, status="canceled", phase="canceled",
+                message=("任务已取消，跨盘缓存保留（其它任务使用中）"
+                         if retained else "任务已取消并已清理中继缓存"),
+                speed_bytes_per_second=0.0, finished_at=time.time(),
+            )
+        except RapidMissAborted as rapid_miss_error:
+            # abort 模式（秒传未命中即中止）：无条件清理本任务中继缓存；
+            # 1.10.0 起 fallback 失败也不再保留（任务结束无论成败都删），
+            # 这里与通用失败分支一致；探测在下载前发生时
+            # temporary_path 尚未赋值，无需清理。
+            if 'temporary_path' in locals() and temporary_path:
+                self._delete_cache_path_for_task(task, Path(temporary_path))
+            message = "未命中秒传，已按设置中止（未上传任何数据；中继缓存已清理）"
+            miss_sha1 = observed_sha1 or (
+                str(checksum or "").strip().upper()
+                if str(algorithm or "").strip().lower() == "sha1" else ""
+            )
+            if (
+                    miss_sha1
+                    and self._rapid_miss_action == "abort"
+                    and not getattr(rapid_miss_error, "from_cache", False)
+            ):
+                # 只在 abort 模式记录真实探测到的未命中；命中负缓存被跳过时不再
+                # 刷新时间戳，否则 TTL 自我续期，24 小时永远等不到（1.9.76）。
+                self._remember_rapid_miss(target_key, miss_sha1)
+            logger.info(
+                "秒传未命中：已清理中继缓存并记录 SHA1"
+                f"（{miss_sha1 or '无'}），跳过该资源，继续尝试其它分享"
+            )
+            self._update(task_id, status="failed", phase="aborted",
+                         message=message, error=message,
+                         abort_reason="rapid_miss",
+                         speed_bytes_per_second=0.0, finished_at=time.time())
+        except Exception as error:
+            # 1.10.0 起任务结束无论成败都删临时文件：失败不再保留完整
+            # 缓存供重试（重试 = 完整重跑，重新从源盘下载），
+            # 内存断点续传状态也随之失效；同 cache_key 还有兄弟
+            # 任务在用时 _delete_cache_path_for_task 会保留文件。
+            if 'temporary_path' in locals() and temporary_path:
+                self._delete_cache_path_for_task(task, Path(temporary_path))
+            self._update(task_id, status="failed", phase="failed", message="跨盘传输失败",
+                         error=_describe_transfer_error(error),
+                         speed_bytes_per_second=0.0, finished_at=time.time())
+        finally:
+            # download_only 成功时本地文件归 MP 整理所有：MP 整理会把它
+            # 移出 /downloads，任务结束不能删（否则 MP 整理读不到文件）；
+            # 失败/取消时仍按原规则清理。
+            keep_local = (
+                bool(task.get("download_only"))
+                and str(task.get("status") or "") == "success"
+            )
+            if 'temporary_path' in locals() and temporary_path and not keep_local:
+                self._delete_cache_path_for_task(task, Path(temporary_path))
+            self._release_cache_ref(cache_key)
+            self._transfer_slots.release()

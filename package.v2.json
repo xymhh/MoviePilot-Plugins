@@ -432,7 +432,8 @@
       "v1.33.0": "同集重复入库治理（存量自愈 + 入队时间窗 + 上传前查重）：① 陈旧 .strm 清扫——增量/全量扫描时用同一份 115 目录树算出「期望 .strm 全集」，本地镜像里不在全集内的 .strm 就是「115 已无对应视频」的陈旧指针，直接删（只删本地指针、不动网盘视频）；一次待删比例超 30%（样本 ≥20 份）时判定目录树导出不完整、整轮放弃，删除同时登记 Emby 删除屏蔽防深度删除连锁。现网 85 组重复 .strm 里 46 组至少一份已对不上 115 视频（Emby 同一集出现 3 个条目），这一类下次增量扫描会自动消掉。② 入队时间窗——终态 done 会释放入队去重键，同一集换个来源又能再入队并真实转存（实测无声的回响 S01E07 一小时内传了三次 4694MB + 4820MB + 272MB）；新增 funnel_recent_done_window_hours（默认 12、0 关闭、clamp 0~168），同集窗口内已 done 的再来一份在入队处直接挡掉（洗版 is_upgrade 放行），落盘前实查仍是第二道防线。③ 上传前查重——TargetWriter 精确名未命中时按「去扩展名的同名主干」再查一次目标目录，已有同大小或更大版本判 reused（不重复上传、不降级覆盖），只找到更小版本则记 warning 后照常上传，绝不自动删云盘文件（删视频一律留给重复扫描页人工确认）。验证：新增 11 条回归（旧代码反证 9 failed），全量 pytest 3000 passed / 13 failed（13 个存量失败全部在 test_strm_redirect.py，与基线逐条一致）；lint 0 error；前端构建 4.63s。",
       "v1.32.0": "缓存残留看得见、清得掉（P0+P1）：① 真名残留清理——1.12.1 起下载即用目标名落盘（文件名没有 cloud-transfer-<hash> 前缀），而残留清理的正则只认这个前缀、注释明写「其它文件一律不碰」，所以 MP 整理/115 上传一失败，文件就永久堆在缓存目录（2026-11-24 德国 VPS 堆了 38.16GB / 19 个文件直到盘用到 91%）。现把真名媒体纳入清理：12 种视频扩展名白名单 + 独立保留期 cross_transfer_real_name_retention_hours（默认 24 小时、0 关闭、clamp 0~168）+ 在途任务名保护 + .aria2 伴随文件保护；漏斗里 queued/processing/failed 的行指向的文件永不删，held 不保护（held 已不再自动重试，本地副本再留一个保留期就是纯占盘）。清理结果新增 real_name_deleted_files / real_name_freed_bytes / real_name_skipped_recent / deleted_real_names，日志单独一条带文件名。② 磁盘水位巡检——新增 CloudSubscribe_CacheWatch（每 6 小时）量缓存目录顶层体积与所在分区剩余，目录 >20GB 或剩余 <15% 发通知（带处理建议），恢复后发恢复通知，同状态 12 小时内不重复（状态落插件数据目录 cache_watch_state.json）。此前插件对磁盘零感知，只有 transfer_ops 把 \"No space left on device\" 翻成中文，等于撞墙才知道。③ 配置页新增「真名缓存保留期（小时）」，并改写「立即清理残留」「启动时清理孤儿临时文件」说明。验证：全量 pytest 2989 passed（基线 2972 + 新增 17），13 个存量失败全部在 test_strm_redirect.py（与基线逐条一致，非本次引入）；lint 0 error；前端构建 4.32s；新增 17 条回归测试。",
       "v1.31.7": "重复扫描页三处原生确认框换成 MP 原生对话框：单组删除、批量删除同视频组、一键还原全部改用共享 ConfirmDialog（Vuetify v-dialog），文案一字未动，确认按钮执行中转圈防重复点、执行中不可点外部关闭；取消只关框不调接口。云端浏览器点不了原生确认框的问题解决，还原可由自动化执行。后端、接口、配置一字未动。前端构建 6.34s 确定性校验通过，全量 pytest 2981 / unittest 2869 通过。"
-    }
+    },
+    "v3": false
   },
   "CloudSubscribeLite": {
     "name": "网盘订阅 Lite",
@@ -449,7 +450,8 @@
       "v1.0.1": "UI 换回上游 1.7.x（AppPage/Config/Dashboard），侧栏只保留「网盘订阅」；修 /overview 500（本分支没有 history_overview 聚合，改为能力探测降级为空统计，界面显示 0 而不是崩）；资源页后端接口（resource/detail|recommend、history/play|notify|reconcile_status）尚未补齐，暂不挂入口。",
       "v1.0.2": "修「插件打开报 notfound」：MP 按侧栏 nav_key 拼组件名（nav_key=main → ./AppPageMain），上游前端只暴露 AppPage，于是页面加载 404。补一个 ./AppPageMain 别名指向同一个 AppPage.vue。",
       "v1.0.3": "跨盘下载默认改用内置 aria2（多连接 + 断点续传，失败自动回落内置下载器）；插件自带 bin/aria2c-linux-x86_64.xz，运行时解压，不需要外部容器。"
-    }
+    },
+    "v3": false
   },
   "version": "1.9.85",
   "history": {

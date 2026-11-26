@@ -1,0 +1,241 @@
+"""STRM 内容与本地目标路径生成。"""
+from pathlib import Path, PurePosixPath
+from string import Formatter
+from urllib.parse import quote
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
+
+
+class StrmTemplateError(ValueError):
+    """STRM 模板配置错误。"""
+
+
+#: 分享 STRM 默认跳过的非视频后缀之外的判定集合（不依赖 organize_plan，避免循环导入）。
+DEFAULT_VIDEO_EXTENSIONS = frozenset({
+    ".mkv", ".mp4", ".avi", ".iso", ".ts", ".m2ts",
+    ".wmv", ".mov", ".flv", ".rmvb", ".rm", ".webm", ".mpg", ".mpeg",
+})
+
+#: 分享 STRM 走同一套 302 端点，但参数换成 share_code/receive_code/id。
+SHARE_QUERY_KEYS = ("share_code", "receive_code", "id", "file_name")
+
+
+def build_share_strm_url(
+        base_url: str,
+        share_code: str,
+        receive_code: str,
+        file_id: str,
+        file_name: str = "",
+) -> str:
+    """拼出分享型 STRM 内容（播放时由插件现场换链，不转存）。"""
+    base = str(base_url or "").strip().rstrip("/")
+    if not base:
+        raise StrmTemplateError("STRM base_url 不能为空")
+    query = (
+        f"share_code={quote(str(share_code))}"
+        f"&receive_code={quote(str(receive_code))}"
+        f"&id={quote(str(file_id))}"
+    )
+    if file_name:
+        query += f"&file_name={quote(str(file_name))}"
+    return f"{base}{StrmGenerator.REDIRECT_PATH}?{query}"
+
+
+def plan_share_strm_files(
+        root: str,
+        files: Iterable[Mapping[str, Any]],
+        base_url: str,
+        share_code: str,
+        receive_code: str,
+        video_extensions: Optional[Iterable[str]] = None,
+) -> Tuple[list, int]:
+    """把分享文件清单规划成 [(本地路径, STRM 内容)]，返回 (计划, 跳过的非视频数)。"""
+    allowed = {
+        str(ext).lower()
+        for ext in (video_extensions or DEFAULT_VIDEO_EXTENSIONS)
+    }
+    target_root = Path(str(root))
+    planned = []
+    skipped = 0
+    for item in files:
+        name = str(item.get("name") or "")
+        file_id = str(item.get("id") or "")
+        if not name or not file_id:
+            continue
+        suffix = PurePosixPath(name).suffix.lower()
+        if suffix not in allowed:
+            skipped += 1
+            continue
+        relative = str(item.get("relative_path") or name)
+        target = (target_root / relative).with_suffix(".strm")
+        planned.append((
+            target,
+            build_share_strm_url(base_url, share_code, receive_code, file_id, name),
+        ))
+    return planned, skipped
+
+
+class StrmGenerator:
+    """按固定变量渲染 STRM URL，并写入本地挂载目录。"""
+
+    CORE_VARIABLES = {"base_url", "file_name", "file_path"}
+    DEFAULT_BASE_URL = "http://172.17.0.1:9527"
+    DEFAULT_TEMPLATE = "{base_url}{file_path}"
+    #: 本插件内置 302 端点；`strm_base_url` 只需要填到主机端口，这一段由插件自动补齐。
+    REDIRECT_PATH = "/api/v1/plugin/CloudSubscribeX/redirect"
+    REDIRECT_TEMPLATE = (
+        "{base_url}" + REDIRECT_PATH + "?pickcode={pickcode}&file_name={file_name}"
+    )
+    #: 1.7.39 ~ 1.7.55 的老形态：base_url 里已经带了完整端点。
+    LEGACY_REDIRECT_TEMPLATE = "{base_url}?pickcode={pickcode}&file_name={file_name}"
+
+    def __init__(
+            self,
+            base_url: str,
+            template: str,
+            provider_variables: Iterable[str] = (),
+    ):
+        raw_base = str(
+            self.DEFAULT_BASE_URL if base_url is None else base_url
+        ).strip().rstrip("/")
+        raw_template = str(
+            self.DEFAULT_TEMPLATE if template is None else template
+        ).strip()
+        # 老配置把完整端点写进了 base_url：截回纯基础地址，端点由模板负责。
+        if raw_base.endswith(self.REDIRECT_PATH):
+            raw_base = raw_base[: -len(self.REDIRECT_PATH)].rstrip("/")
+        # 老模板 `{base_url}?pickcode=…` 缺少端点，自动补上。
+        if raw_template == self.LEGACY_REDIRECT_TEMPLATE:
+            raw_template = self.REDIRECT_TEMPLATE
+        self.base_url = raw_base
+        self.template = raw_template
+        self.allowed_variables = self.CORE_VARIABLES | {
+            str(value or "").strip()
+            for value in provider_variables
+            if str(value or "").strip()
+        }
+        self._template_variables = set()
+        self._validate_template()
+
+    def _validate_template(self) -> None:
+        if not self.base_url:
+            raise StrmTemplateError("STRM base_url 不能为空")
+        if not self.template:
+            raise StrmTemplateError("STRM URL 模板不能为空")
+
+        variables = set()
+        try:
+            parsed = Formatter().parse(self.template)
+            for _, field_name, format_spec, conversion in parsed:
+                if field_name is None:
+                    continue
+                if field_name not in self.allowed_variables:
+                    raise StrmTemplateError(f"STRM URL 模板包含不支持的变量：{field_name}")
+                if format_spec or conversion:
+                    raise StrmTemplateError(f"STRM URL 模板变量不支持格式转换：{field_name}")
+                variables.add(field_name)
+        except ValueError as error:
+            raise StrmTemplateError(f"STRM URL 模板格式错误：{error}") from error
+
+        if not variables:
+            raise StrmTemplateError("STRM URL 模板至少需要一个变量")
+        self._template_variables = variables
+
+    @staticmethod
+    def _cloud_file_path(cloud_dir: str, file_name: str) -> str:
+        normalized_dir = "/" + str(cloud_dir or "/").replace("\\", "/").strip("/")
+        if normalized_dir != "/":
+            normalized_dir = normalized_dir.rstrip("/")
+        return f"{normalized_dir.rstrip('/')}/{file_name}" if normalized_dir != "/" else f"/{file_name}"
+
+    @staticmethod
+    def _relative_cloud_dir(cloud_dir: str, cloud_root: str) -> PurePosixPath:
+        normalized_dir = "/" + str(cloud_dir or "/").replace("\\", "/").strip("/")
+        normalized_root = "/" + str(cloud_root or "/").replace("\\", "/").strip("/")
+        normalized_dir = normalized_dir.rstrip("/") or "/"
+        normalized_root = normalized_root.rstrip("/") or "/"
+
+        if normalized_root == "/":
+            relative = normalized_dir.lstrip("/")
+        elif normalized_dir == normalized_root:
+            relative = ""
+        elif normalized_dir.startswith(f"{normalized_root}/"):
+            relative = normalized_dir[len(normalized_root):].lstrip("/")
+        else:
+            raise StrmTemplateError(
+                f"目标目录不在网盘根路径下：{normalized_dir}（根路径：{normalized_root}）"
+            )
+        return PurePosixPath(relative)
+
+    def render(
+            self,
+            file_name: str,
+            file_path: str,
+            template_values: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        values: Dict[str, str] = {
+            "base_url": self.base_url,
+            # 文件名会带空格与中文：不编码会让 HTTP 请求行非法，Emby 直接播不了。
+            "file_name": quote(str(file_name or "").strip(), safe=""),
+            "file_path": quote(str(file_path or "").strip(), safe="/"),
+        }
+        values.update({
+            str(key): str(value or "").strip()
+            for key, value in (template_values or {}).items()
+            if str(key) in self.allowed_variables
+        })
+        if not values["file_name"]:
+            raise StrmTemplateError("生成 STRM 时缺少 file_name")
+        missing = sorted(
+            name for name in self._template_variables if not values.get(name)
+        )
+        if missing:
+            raise StrmTemplateError(
+                f"生成 STRM 时缺少模板变量：{', '.join(missing)}"
+            )
+        return self.template.format_map(values)
+
+    def local_path(
+            self,
+            local_root: str,
+            cloud_root: str,
+            cloud_dir: str,
+            file_name: str,
+    ) -> Path:
+        """按网盘目录映射计算 STRM 本地路径，不创建目录或文件。"""
+        local_root_text = str(local_root or "").strip()
+        if not local_root_text:
+            raise StrmTemplateError("本地挂载媒体根路径不能为空")
+        local_root_path = Path(local_root_text).expanduser()
+        relative_dir = self._relative_cloud_dir(cloud_dir, cloud_root)
+        local_dir = local_root_path.joinpath(*relative_dir.parts)
+        root_resolved = local_root_path.resolve(strict=False)
+        target_resolved = local_dir.resolve(strict=False)
+        if target_resolved != root_resolved and root_resolved not in target_resolved.parents:
+            raise StrmTemplateError(f"STRM 目标目录越出本地挂载根路径：{target_resolved}")
+        return local_dir / f"{Path(file_name).stem}.strm"
+
+    def write(
+            self,
+            local_root: str,
+            cloud_root: str,
+            cloud_dir: str,
+            file_name: str,
+            template_values: Optional[Mapping[str, Any]] = None,
+    ) -> Tuple[Path, str]:
+        cloud_file_path = self._cloud_file_path(cloud_dir, file_name)
+        content = self.render(
+            file_name=file_name,
+            file_path=cloud_file_path,
+            template_values=template_values,
+        )
+        strm_path = self.local_path(
+            local_root=local_root,
+            cloud_root=cloud_root,
+            cloud_dir=cloud_dir,
+            file_name=file_name,
+        )
+        strm_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = strm_path.with_suffix(f"{strm_path.suffix}.tmp")
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.replace(strm_path)
+        return strm_path, content

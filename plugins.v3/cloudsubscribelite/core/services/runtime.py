@@ -1,0 +1,1284 @@
+"""同步任务运行态、停止控制。离线任务见 core/services/offline.py。"""
+
+import time
+from threading import Event as ThreadEvent, Lock, Thread
+from typing import Any, Dict, List, Optional, Tuple
+
+from app.core.config import global_vars
+from app.log import logger
+from app.schemas.types import MediaType
+
+from ...core import CloudDriveCapability
+from ...core import OwnerDelegator
+from ...core.media import media_identity, tmdb_id_of
+from ..downloader_view import display_phase, display_progress
+
+sync_lock = Lock()
+
+# 已完成/失败/已停止任务在下载页的保留时长（秒）：任务一完成就从
+# _serialize_sync_tasks 里消失，用户看不到完成态；保留 10 分钟，到期或
+# 下一轮同步登记（_register_sync_tasks）时再清掉。下载页本身只查
+# DOWNLOADING，保留完成态不会污染正在下载列表。
+_COMPLETED_TASK_RETENTION_SECONDS = 600.0
+
+
+def _organizing_task_id(item: Dict[str, Any]) -> str:
+    """pending 后处理记录 → 下载页父任务 id。
+
+    与 PostprocessService._postprocess_task_id 同口径：订阅项取
+    subscribe_id，非订阅项取 sub_key。注意不能用记录里的 task_id
+    字段——磁力/ed2k 项的 task_id 是离线任务哈希（info_hash），
+    不是父任务 id。
+    """
+    subscribe_id = int(item.get("subscribe_id") or 0)
+    if subscribe_id > 0:
+        return f"subscribe:{subscribe_id}"
+    sub_key = str(item.get("sub_key") or "").strip()
+    return f"media:{sub_key}" if sub_key else ""
+
+
+class SyncRuntimeService(OwnerDelegator):
+    """管理同步任务运行态及离线任务生命周期。"""
+
+    def _runtime_revision_value(self) -> int:
+        with self._runtime_revision_lock:
+            return int(self._runtime_revision)
+
+    def _mark_runtime_changed(self) -> None:
+        """递增运行态版本，供 SSE 合并并推送状态变化。"""
+        with self._runtime_revision_lock:
+            self._runtime_revision += 1
+
+    def _runtime_snapshot(self) -> Dict[str, Any]:
+        with self._runtime_revision_lock:
+            revision = int(self._runtime_revision)
+            history_revision = int(self._history_revision)
+        return {
+            "status": self._sync_status,
+            "task": self._sync_task_text,
+            "progress": self._sync_progress,
+            "context": dict(self._sync_context),
+            "tasks": self._serialize_runtime_tasks(),
+            "offline_supported": bool(
+                self._cloud_drive
+                and self._cloud_drive.supports(CloudDriveCapability.OFFLINE_TASKS)
+            ),
+            "revision": revision,
+            "history_revision": history_revision,
+        }
+
+    def _mark_history_changed(self) -> None:
+        with self._runtime_revision_lock:
+            self._history_revision += 1
+            self._runtime_revision += 1
+
+    def _current_task_context(self) -> Tuple[str, Optional[ThreadEvent]]:
+        """返回当前订阅线程的任务标识与停止事件。"""
+        if self._task_local is None:
+            return "", None
+        return (
+            str(getattr(self._task_local, "task_id", "") or ""),
+            getattr(self._task_local, "stop_event", None),
+        )
+
+    def _stop_requested(self) -> bool:
+        if self._stop_event and self._stop_event.is_set():
+            return True
+        task_event = (
+            getattr(self._task_local, "stop_event", None)
+            if self._task_local is not None
+            else None
+        )
+        return bool(task_event and task_event.is_set())
+
+    def _sync_task_id(self, subscribe: Any) -> str:
+        if bool(getattr(subscribe, "_transient_target", False)):
+            return f"media:{self._sync_handler.subscription_budget_key(subscribe)}"
+        return f"subscribe:{getattr(subscribe, 'id', '')}"
+
+    @staticmethod
+    def _sync_media_key(subscribe: Any) -> Tuple[str, str, int]:
+        media_type = str(getattr(subscribe, "type", "") or "")
+        source, source_id = media_identity(subscribe)
+        media_id = (
+            f"{source}:{source_id}"
+            if source and source_id
+            else str(getattr(subscribe, "name", "") or "")
+        )
+        season = int(getattr(subscribe, "season", 1) or 1) if media_type == MediaType.TV.value else 0
+        return media_type, media_id, season
+
+    def _register_sync_tasks(self, subscribes: List[Any]) -> None:
+        queued_at = time.time()
+        tasks = {}
+        for subscribe in subscribes:
+            is_tv = getattr(subscribe, "type", "") == MediaType.TV.value
+            preparation = getattr(
+                subscribe, "_cloudsubscribe_preparation", {}
+            ) or {}
+            # 订阅自带的存量海报：下载页实时查 TMDB 取不到时（MP 自身都
+            # 识别不到该媒体，如 LOST10）就用它；只认 http(s) 绝对地址。
+            subscribe_poster = str(
+                getattr(subscribe, "poster", "") or ""
+            ).strip()
+            if not subscribe_poster.startswith(("http://", "https://")):
+                subscribe_poster = ""
+            task_id = self._sync_task_id(subscribe)
+            tasks[task_id] = {
+                "id": task_id,
+                "subscribe_id": getattr(subscribe, "id", None),
+                "tmdb_id": tmdb_id_of(subscribe),
+                "sub_key": (
+                    self._sync_handler.subscription_budget_key(subscribe)
+                    if bool(getattr(subscribe, "_transient_target", False))
+                    else ""
+                ),
+                "title": str(getattr(subscribe, "name", "") or "未命名订阅"),
+                "poster": subscribe_poster,
+                "media_type": "电视剧" if is_tv else "电影",
+                "year": getattr(subscribe, "year", None) or "",
+                "season": int(getattr(subscribe, "season", 1) or 1) if is_tv else None,
+                "target_episodes": (
+                    preparation.get("aired_target_episodes", []) if is_tv else []
+                ),
+                "status": "queued",
+                "phase": "等待调度",
+                "progress": 0,
+                "transferred": 0,
+                "message": "",
+                "queued_at": queued_at,
+                "started_at": None,
+                "finished_at": None,
+                "stop_event": ThreadEvent(),
+            }
+        with self._sync_tasks_lock:
+            retained = {
+                task_id: task
+                for task_id, task in self._sync_tasks.items()
+                if task.get("status") in {"downloading", "transferring", "postprocessing"}
+                   or (
+                           task.get("task_kind") == "pt_upgrade"
+                           and task.get("status") in {"queued", "running", "stopping"}
+                   )
+            }
+            for task_id, task in tasks.items():
+                previous = retained.get(task_id)
+                if previous and previous.get("status") in {
+                    "downloading", "transferring", "postprocessing"
+                }:
+                    task["_postprocess_file_keys"] = list(
+                        previous.get("_postprocess_file_keys") or []
+                    )
+            retained.update(tasks)
+            self._sync_tasks = retained
+        self._mark_runtime_changed()
+
+    def _update_sync_task(self, task_id: str, **values: Any) -> None:
+        changed = False
+        with self._sync_tasks_lock:
+            task = self._sync_tasks.get(task_id)
+            if task:
+                next_status = values.get("status")
+                # 状态机约束：当任务流转至下载、转存、后处理或完成状态时，自动收敛并清理搜索渠道中间态
+                if next_status in {
+                    "downloading", "transferring", "postprocessing", "completed"
+                }:
+                    if task.get("search_active") or task.get("search_channels"):
+                        for key, val in self._idle_search_state().items():
+                            values.setdefault(key, val)
+                if any(task.get(key) != value for key, value in values.items()):
+                    task.update(values)
+                    changed = True
+        if changed:
+            self._mark_runtime_changed()
+
+    def _update_postprocess_task(self, task_id: str, **values: Any) -> None:
+        """仅更新当前后处理卡片，避免旧回调污染同订阅的新一轮任务。"""
+        changed = False
+        with self._sync_tasks_lock:
+            task = self._sync_tasks.get(task_id)
+            if not task or task.get("status") not in {
+                "downloading", "transferring", "postprocessing"
+            }:
+                return
+            pending_key = str(values.pop("_pending_key", "") or "").strip()
+            file_completed = bool(values.pop("file_completed", False))
+            item_failed = bool(values.pop("item_failed", False))
+            active = values.get("postprocess_active")
+            active_key = str(task.get("_postprocess_active_key") or "")
+
+            file_keys = list(task.get("_postprocess_file_keys") or [])
+            if pending_key and pending_key not in file_keys:
+                file_keys.append(pending_key)
+            completed_keys = set(task.get("_postprocess_completed_keys") or [])
+            failed_keys = set(task.get("_postprocess_failed_keys") or [])
+            if file_completed and pending_key:
+                completed_keys.add(pending_key)
+                if item_failed:
+                    failed_keys.add(pending_key)
+            task["_postprocess_completed_keys"] = list(completed_keys)
+            task["_postprocess_failed_keys"] = list(failed_keys)
+            completed_count = len(completed_keys)
+            failed_count = len(failed_keys)
+            total_count = max(len(file_keys), int(task.get("postprocess_file_total") or len(file_keys)))
+            values["postprocess_file_completed"] = completed_count
+            values["postprocess_file_total"] = total_count
+
+            if active is False:
+                if not active_key or pending_key == active_key:
+                    task["_postprocess_active_key"] = ""
+                if total_count > 0:
+                    values["postprocess_progress"] = round(completed_count * 100 / max(1, total_count), 2)
+            elif pending_key:
+                values["status"] = (
+                    "downloading"
+                    if int(task.get("download_pending_count") or 0) > 0
+                    else "transferring"
+                    if int(task.get("transfer_pending_count") or 0) > 0
+                    else "postprocessing"
+                )
+                task["_postprocess_active_key"] = pending_key
+                values["postprocess_file_index"] = file_keys.index(pending_key) + 1
+                step_index = max(0, int(values.get("postprocess_step_index") or 0))
+                step_total = max(1, int(values.get("postprocess_step_total") or 1))
+                file_progress = (
+                    completed_count
+                    + (step_index + 1) / step_total
+                ) / max(1, total_count)
+                values["postprocess_progress"] = round(min(1.0, file_progress) * 100, 2)
+                values["progress"] = min(99, 95 + int(file_progress * 4))
+
+            # 当所有文件均已结束（无论成功或定位失败结算），后处理任务必须正确停止
+            if total_count > 0 and completed_count >= total_count:
+                task["_postprocess_active_key"] = ""
+                values["postprocess_active"] = False
+                values["postprocess_progress"] = 100.0
+                values["progress"] = 100
+                values["pending_count"] = 0
+                values["finished_at"] = time.time()
+                values["postprocess_step"] = ""
+                if failed_count >= total_count:
+                    values["status"] = "failed"
+                    values["phase"] = "文件定位失败，后处理已停止"
+                    values["message"] = values.get("postprocess_detail") or "网盘未定位到转存文件，任务停止"
+                else:
+                    values["status"] = "completed"
+                    values["phase"] = "文件后处理已结束"
+                    values["postprocess_detail"] = ""
+
+            task["_postprocess_file_keys"] = file_keys
+            if any(task.get(key) != value for key, value in values.items()):
+                task.update(values)
+                changed = True
+        if changed:
+            self._mark_runtime_changed()
+
+    def _serialize_sync_tasks(self) -> List[Dict[str, Any]]:
+        now = time.time()
+        sync_handler = self._sync_handler
+        disabled_postprocess_steps = set()
+        if not (
+                sync_handler
+                and bool(getattr(sync_handler, "_strm_generate_enabled", False))
+                and getattr(sync_handler, "_strm_generator", None)
+                and getattr(sync_handler, "_local_resource_path", None)
+        ):
+            disabled_postprocess_steps.add("strm")
+        if not (
+                sync_handler
+                and getattr(sync_handler, "_metadata_scraper", None)
+                and getattr(sync_handler, "_local_resource_path", None)
+                and (
+                        bool(getattr(sync_handler, "_nfo_scrape_enabled", False))
+                        or bool(getattr(sync_handler, "_image_scrape_enabled", False))
+                )
+        ):
+            disabled_postprocess_steps.add("metadata")
+        with self._sync_tasks_lock:
+            tasks = []
+            for task in self._sync_tasks.values():
+                status = str(task.get("status") or "")
+                if status in {"completed", "failed", "stopped"}:
+                    # 终态短暂保留：刚完成的任务能在下载页看到完成态；
+                    # 超过保留期（或 finished_at 缺失无法判断）即丢弃。
+                    try:
+                        finished_at = float(
+                            task.get("finished_at")
+                            or task.get("started_at")
+                            or task.get("queued_at")
+                            or 0
+                        )
+                    except (TypeError, ValueError):
+                        finished_at = 0.0
+                    if (
+                            not finished_at
+                            or now - finished_at > _COMPLETED_TASK_RETENTION_SECONDS
+                    ):
+                        continue
+                elif status not in {
+                    "queued", "running", "stopping", "downloading",
+                    "transferring", "postprocessing"
+                }:
+                    continue
+                serialized = {
+                    key: value for key, value in task.items()
+                    if key != "stop_event" and not key.startswith("_postprocess_")
+                }
+                serialized_steps = [
+                    step for step in serialized.get("postprocess_steps") or []
+                    if isinstance(step, dict)
+                                     and str(step.get("key") or "")
+                                     not in disabled_postprocess_steps
+                ]
+                serialized["postprocess_steps"] = serialized_steps
+                if str(serialized.get("postprocess_step") or "") in (
+                        disabled_postprocess_steps
+                ):
+                    serialized["postprocess_step"] = ""
+                    serialized["postprocess_step_index"] = 0
+                serialized["postprocess_step_total"] = len(serialized_steps)
+                queued_at = float(task.get("queued_at") or now)
+                started_at = float(task.get("started_at") or 0)
+                serialized["queue_seconds"] = round(
+                    max(0.0, (started_at or now) - queued_at), 2
+                )
+                serialized["elapsed_seconds"] = round(
+                    max(0.0, now - started_at), 2
+                ) if started_at else 0
+                tasks.append(serialized)
+            status_order = {
+                "running": 0,
+                "stopping": 1,
+                "downloading": 2,
+                "transferring": 3,
+                "postprocessing": 4,
+                "queued": 5,
+            }
+            tasks.sort(key=lambda task: (
+                status_order.get(str(task.get("status") or ""), 9),
+                -float(task.get("started_at") or task.get("queued_at") or 0),
+            ))
+            return tasks
+
+    def _pending_finalize_items(self, subscribe: Any) -> List[Dict[str, Any]]:
+        if not self._sync_handler:
+            return []
+        normalized_id = int(getattr(subscribe, "id", 0) or 0)
+        sub_key = (
+            self._sync_handler.subscription_budget_key(subscribe)
+            if bool(getattr(subscribe, "_transient_target", False))
+            else ""
+        )
+        return [
+            item
+            for item in self._sync_handler.get_pending_finalize_tasks()
+            if (
+                    normalized_id > 0
+                    and int(item.get("subscribe_id") or 0) == normalized_id
+            ) or (
+                    bool(sub_key)
+                    and str(item.get("sub_key") or "") == sub_key
+            )
+        ]
+
+    def _pending_finalize_count(self, subscribe: Any) -> int:
+        return len(self._pending_finalize_items(subscribe))
+
+    def _postprocessing_text(
+            self, items: List[Dict[str, Any]]
+    ) -> Tuple[str, str]:
+        """描述后处理当前等待点、目标文件和下一次检查时间。"""
+        if not items:
+            return "文件后处理已结束", ""
+        stage_counts: Dict[str, int] = {}
+        file_names = []
+        next_check_at = 0.0
+        for item in items:
+            task_type = str(item.get("task_type") or "share").lower()
+            if not item.get("download_completed_at") and not item.get("moved_at"):
+                stage = {
+                    "magnet": "等待 Magnet 下载完成",
+                    "ed2k": "等待 115 离线下载完成",
+                }.get(task_type, "等待网盘文件就绪")
+            elif not item.get("moved_at"):
+                stage = "整理、移动并重命名文件"
+            else:
+                stage = "完成字幕与本地媒体文件处理"
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+            file_name = str(item.get("file_name") or "").strip()
+            if file_name and file_name not in file_names:
+                file_names.append(file_name)
+            candidate_check = float(item.get("next_check_at") or 0)
+            if candidate_check > 0:
+                next_check_at = (
+                    min(next_check_at, candidate_check)
+                    if next_check_at else candidate_check
+                )
+
+        stage_text = "；".join(
+            f"{stage} {count} 个" for stage, count in stage_counts.items()
+        )
+        actions = "完成文件整理与字幕处理"
+        if bool(getattr(self._sync_handler, "_strm_generate_enabled", False)):
+            actions += "并生成 STRM"
+        phase = f"{stage_text}；就绪后将{actions}"
+
+        visible_names = file_names[:2]
+        file_text = "、".join(visible_names)
+        if len(file_names) > len(visible_names):
+            file_text += f" 等 {len(file_names)} 个文件"
+        message_parts = [f"文件：{file_text}"] if file_text else []
+        remaining = max(0, int(next_check_at - time.time() + 0.999))
+        if remaining > 0:
+            if remaining < 60:
+                message_parts.append(f"约 {remaining} 秒后复查")
+            else:
+                message_parts.append(f"约 {(remaining + 59) // 60} 分钟后复查")
+        return phase, "；".join(message_parts)
+
+    @staticmethod
+    def _idle_search_state() -> Dict[str, Any]:
+        """清理仅用于搜索阶段实时展示的渠道与中间状态。"""
+        return {
+            "search_active": False,
+            "search_channels": [],
+            "search_total_results": 0,
+        }
+
+    @staticmethod
+    def _idle_postprocess_state() -> Dict[str, Any]:
+        """清理仅用于实时展示的后处理文件进度。"""
+        return {
+            "current_file": "",
+            "postprocess_active": False,
+            "postprocess_detail": "",
+            "postprocess_step": "",
+            "postprocess_step_index": 0,
+            "postprocess_step_total": 0,
+            "postprocess_steps": [],
+            "postprocess_file_index": 0,
+            "postprocess_file_total": 0,
+            "postprocess_file_completed": 0,
+            "postprocess_progress": 0,
+            "download_pending_count": 0,
+            "transfer_pending_count": 0,
+            "_postprocess_active_key": "",
+            "_postprocess_file_keys": [],
+        }
+
+    def _refresh_postprocessing_sync_tasks(self) -> None:
+        """按持久化后处理记录恢复并刷新订阅任务状态。"""
+        pending_items = (
+            self._sync_handler.get_pending_finalize_tasks()
+            if self._sync_handler else []
+        )
+        groups: Dict[str, Dict[str, Any]] = {}
+        for item in pending_items:
+            subscribe_id = int(item.get("subscribe_id") or 0)
+            sub_key = str(item.get("sub_key") or "").strip()
+            task_id = (
+                f"subscribe:{subscribe_id}"
+                if subscribe_id > 0
+                else f"media:{sub_key}" if sub_key else ""
+            )
+            if not task_id:
+                continue
+            media_data = item.get("mediainfo") or {}
+            group = groups.setdefault(task_id, {
+                "count": 0,
+                "items": [],
+                "pending_keys": [],
+                "subscribe_id": subscribe_id if subscribe_id > 0 else None,
+                "sub_key": sub_key,
+                "tmdb_id": tmdb_id_of(media_data),
+                "title": str(media_data.get("title") or "未命名订阅"),
+                "year": media_data.get("year") or "",
+                "season": item.get("season"),
+                "queued_at": float(item.get("created_at") or time.time()),
+                "task_kind": (
+                    "pt_upgrade"
+                    if str(item.get("share_url") or "").lower().startswith("pt://")
+                    else "cloud_upgrade" if item.get("upgrade") else "subscribe"
+                ),
+            })
+            group["count"] += 1
+            group["items"].append(item)
+            task_type = str(item.get("task_type") or "share").strip().lower()
+            if task_type in {"magnet", "ed2k", "offline"} and not bool(
+                    item.get("offline_completed") or item.get("moved_at")
+            ):
+                group["download_pending_count"] = int(
+                    group.get("download_pending_count") or 0
+                ) + 1
+            elif task_type not in {"magnet", "ed2k", "offline"} and not item.get("moved_at"):
+                group["transfer_pending_count"] = int(
+                    group.get("transfer_pending_count") or 0
+                ) + 1
+            pending_key = str(item.get("pending_key") or "").strip()
+            if pending_key:
+                group["pending_keys"].append(pending_key)
+            if str(item.get("share_url") or "").lower().startswith("pt://"):
+                group["task_kind"] = "pt_upgrade"
+            elif item.get("upgrade") and group["task_kind"] == "subscribe":
+                group["task_kind"] = "cloud_upgrade"
+            group["queued_at"] = min(
+                float(group["queued_at"]),
+                float(item.get("created_at") or group["queued_at"]),
+            )
+
+        now = time.time()
+        changed = False
+        with self._sync_tasks_lock:
+            for task in self._sync_tasks.values():
+                if task.get("status") not in {
+                    "downloading", "transferring", "postprocessing"
+                }:
+                    continue
+                if str(task.get("id") or "") not in groups:
+                    task.update({
+                        "status": "completed",
+                        "phase": "文件后处理已结束",
+                        "progress": 100,
+                        "pending_count": 0,
+                        "finished_at": now,
+                        **self._idle_postprocess_state(),
+                    })
+                    changed = True
+            for task_id, group in groups.items():
+                task = self._sync_tasks.get(task_id)
+                if task and task.get("status") in {"queued", "running", "stopping"}:
+                    continue
+                pending_count = int(group["count"])
+                phase, message = self._postprocessing_text(group["items"])
+                download_pending_count = int(group.get("download_pending_count") or 0)
+                transfer_pending_count = int(group.get("transfer_pending_count") or 0)
+                current_keys = list(dict.fromkeys(group["pending_keys"]))
+                file_keys = list(task.get("_postprocess_file_keys") or []) if task else []
+                for pending_key in current_keys:
+                    if pending_key not in file_keys:
+                        file_keys.append(pending_key)
+                completed_count = len(
+                    [pending_key for pending_key in file_keys if pending_key not in current_keys]
+                )
+                values = {
+                    "status": (
+                        "downloading" if download_pending_count
+                        else "transferring" if transfer_pending_count
+                        else "postprocessing"
+                    ),
+                    "task_kind": group["task_kind"],
+                    "phase": phase,
+                    "message": message,
+                    "progress": 95,
+                    "pending_count": pending_count,
+                    "download_pending_count": download_pending_count,
+                    "transfer_pending_count": transfer_pending_count,
+                    "postprocess_file_completed": completed_count,
+                    "postprocess_file_total": len(file_keys),
+                    "_postprocess_file_keys": file_keys,
+                    "finished_at": None,
+                }
+                if group.get("tmdb_id"):
+                    values["tmdb_id"] = group["tmdb_id"]
+                if not task:
+                    values = {**self._idle_postprocess_state(), **values}
+                if not task or not task.get("postprocess_active"):
+                    next_key = next(
+                        (pending_key for pending_key in file_keys if pending_key in current_keys),
+                        "",
+                    )
+                    values.update({
+                        "postprocess_active": False,
+                        "postprocess_detail": "",
+                        "postprocess_file_index": (
+                            file_keys.index(next_key) + 1 if next_key else 0
+                        ),
+                        "postprocess_progress": round(
+                            completed_count * 100 / max(1, len(file_keys)), 2
+                        ),
+                    })
+                else:
+                    active_key = str(task.get("_postprocess_active_key") or "")
+                    if active_key in file_keys:
+                        file_index = file_keys.index(active_key) + 1
+                        step_index = max(
+                            0, int(task.get("postprocess_step_index") or 0)
+                        )
+                        step_total = max(
+                            1, int(task.get("postprocess_step_total") or 1)
+                        )
+                        file_progress = (
+                                                file_index - 1 + (step_index + 1) / step_total
+                                        ) / max(1, len(file_keys))
+                        values.update({
+                            "postprocess_file_index": file_index,
+                            "postprocess_progress": round(file_progress * 100, 2),
+                            "progress": min(99, 95 + int(file_progress * 4)),
+                        })
+                if task:
+                    if any(task.get(key) != value for key, value in values.items()):
+                        task.update(values)
+                        changed = True
+                    continue
+                is_tv = bool(group.get("season"))
+                self._sync_tasks[task_id] = {
+                    "id": task_id,
+                    "subscribe_id": group["subscribe_id"],
+                    "sub_key": group["sub_key"],
+                    "tmdb_id": group.get("tmdb_id"),
+                    "title": group["title"],
+                    "media_type": "电视剧" if is_tv else "电影",
+                    "year": group["year"],
+                    "season": int(group["season"] or 1) if is_tv else None,
+                    **values,
+                    "transferred": 0,
+                    "queued_at": group["queued_at"],
+                    "started_at": group["queued_at"],
+                    "stop_event": ThreadEvent(),
+                }
+                changed = True
+        if changed:
+            self._mark_runtime_changed()
+
+    def _run_subscription_group(
+            self,
+            subscribes: List[Any],
+            history_seed: List[dict],
+            manual_resources: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        # v1.13.3：history_seed 恒为空列表（旧的插件 history 快照已删，
+        # 判重基线改走云盘目录与媒体库）；本轮新增记录仍往 local_history
+        # 里追加，返回时只取本轮新增的部分。
+        local_history = list(history_seed)
+        initial_history_count = len(local_history)
+        transfer_details: List[Dict[str, Any]] = []
+        transferred_count = 0
+        # v1.27.1：本组「一条都没转存」的真实原因随组结果返回（组是并发跑的，
+        # 不再写插件实例上的共享属性）。
+        group_skip_reason = ""
+        direct_cloud_paths = self._direct_cloud_manual_resources(
+            manual_resources
+        )
+
+        for subscribe in subscribes:
+            task_id = self._sync_task_id(subscribe)
+            with self._sync_tasks_lock:
+                task = self._sync_tasks.get(task_id) or {}
+                task_event = task.get("stop_event")
+            if (
+                    global_vars.is_system_stopped
+                    or (self._stop_event and self._stop_event.is_set())
+                    or (task_event and task_event.is_set())
+            ):
+                self._update_sync_task(
+                    task_id, status="stopped", phase="已停止", progress=100
+                )
+                continue
+
+            self._task_local.stop_event = task_event
+            self._task_local.task_id = task_id
+            manual_upgrade = bool(getattr(subscribe, "_manual_upgrade", False))
+            transient_target = bool(getattr(subscribe, "_transient_target", False))
+            target_episodes = getattr(subscribe, "_target_episodes", None)
+            upgrade_task = manual_upgrade or self._is_cloud_upgrade_subscribe(subscribe)
+            self._update_sync_task(
+                task_id,
+                status="running",
+                phase="建立洗版基线" if upgrade_task else "检查缺失内容",
+                task_kind="cloud_upgrade" if upgrade_task else "subscribe",
+                progress=10,
+                message="",
+                started_at=time.time(),
+            )
+            try:
+                if getattr(subscribe, "type", "") == MediaType.MOVIE.value:
+                    task_count = self._sync_handler.process_movie_subscribe(
+                        subscribe=subscribe,
+                        history=local_history,
+                        transfer_details=transfer_details,
+                        transferred_count=0,
+                        manual_resources=manual_resources,
+                        manual_upgrade=manual_upgrade,
+                        transient_target=transient_target,
+                    )
+                else:
+                    task_count = self._sync_handler.process_tv_subscribe(
+                        subscribe=subscribe,
+                        history=local_history,
+                        transfer_details=transfer_details,
+                        transferred_count=0,
+                        manual_resources=manual_resources,
+                        manual_upgrade=manual_upgrade,
+                        target_episodes=target_episodes,
+                        transient_target=transient_target,
+                    )
+                transferred_count += int(task_count or 0)
+                if int(task_count or 0) <= 0:
+                    # v1.27.1：原因由 SyncHandler 的组件写在 SyncHandler 上
+                    # （唯一来源）；以前这里读的是插件实例自己的
+                    # _last_skip_reason（组开头清空、组件从不写那里），
+                    # 读出来恒为空，频道监控只能退回「本轮无新集」。
+                    skip_reason = self._sync_handler.last_skip_reason()
+                    if skip_reason:
+                        group_skip_reason = skip_reason
+                stopped = bool(task_event and task_event.is_set())
+                pending_items = self._pending_finalize_items(subscribe)
+                pending_count = len(pending_items)
+                postprocess_phase, postprocess_message = (
+                    self._postprocessing_text(pending_items)
+                )
+                postprocess_state = (
+                    {} if pending_count and not stopped
+                    else self._idle_postprocess_state()
+                )
+                self._update_sync_task(
+                    task_id,
+                    status=(
+                        "stopped" if stopped
+                        else (
+                            "downloading"
+                            if any(
+                                str(item.get("task_type") or "share").lower()
+                                in {"magnet", "ed2k", "offline"}
+                                and not bool(item.get("offline_completed") or item.get("moved_at"))
+                                for item in pending_items
+                            )
+                            else "transferring"
+                            if any(not item.get("moved_at") for item in pending_items)
+                            else "postprocessing"
+                        ) if pending_count
+                        else "completed"
+                    ),
+                    phase=(
+                        "已停止" if stopped
+                        else postprocess_phase
+                        if pending_count
+                        else (
+                            f"已整理 {int(task_count or 0)} 个文件"
+                            if direct_cloud_paths
+                            else f"已转存 {int(task_count or 0)} 个文件"
+                        )
+                        if int(task_count or 0) > 0
+                        else "无需转存"
+                    ),
+                    progress=95 if pending_count and not stopped else 100,
+                    pending_count=pending_count,
+                    message=postprocess_message if pending_count else "",
+                    transferred=int(task_count or 0),
+                    finished_at=None if pending_count and not stopped else time.time(),
+                    **postprocess_state,
+                )
+                if pending_count and not stopped:
+                    self._refresh_postprocessing_sync_tasks()
+                    pending_keys = {
+                        str(item.get("pending_key") or "").strip()
+                        for item in pending_items
+                        if str(item.get("pending_key") or "").strip()
+                    }
+                    if pending_keys and self._sync_handler:
+                        try:
+                            self._sync_handler.monitor_offline_strm_tasks(
+                                force=True, pending_keys=pending_keys
+                            )
+                        except Exception as finalize_err:
+                            logger.debug(
+                                f"单订阅完成后执行文件后处理异常：{finalize_err}"
+                            , exc_info=True)
+            except Exception as error:
+                logger.error(f"订阅 {getattr(subscribe, 'name', '')} 处理异常：{error}")
+                self._update_sync_task(
+                    task_id,
+                    status="failed",
+                    phase="处理失败",
+                    progress=100,
+                    message=str(error),
+                    finished_at=time.time(),
+                )
+            finally:
+                try:
+                    del self._task_local.stop_event
+                except AttributeError:
+                    logger.debug("_run_subscription_group 分支忽略异常", exc_info=True)
+                try:
+                    del self._task_local.task_id
+                except AttributeError:
+                    logger.debug("_run_subscription_group 分支忽略异常", exc_info=True)
+
+        return {
+            "history": [
+                record
+                for record in local_history[initial_history_count:]
+                if not record.get("skip_history")
+            ],
+            "transfer_details": transfer_details,
+            "transferred": transferred_count,
+            "skip_reason": group_skip_reason,
+        }
+
+    def _set_sync_status(
+            self,
+            status: str,
+            text: str,
+            progress: int = None,
+            context: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        previous = (
+            self._sync_status,
+            self._sync_task_text,
+            self._sync_progress,
+            dict(self._sync_context),
+        )
+        self._sync_status = status
+        self._sync_task_text = text
+        if progress is not None:
+            self._sync_progress = max(0, min(100, int(progress)))
+        if context is not None:
+            self._sync_context = dict(context)
+        current = (
+            self._sync_status,
+            self._sync_task_text,
+            self._sync_progress,
+            dict(self._sync_context),
+        )
+        if current != previous:
+            self._mark_runtime_changed()
+
+    def _organizing_entries_from_pending(self) -> Dict[str, Dict[str, Any]]:
+        """从 pending 后处理记录推导“MP 整理中”条目（Phase 4，替代登记表）。
+
+        条目形状与旧登记表一致：{"mp_organize": ..., "status_text": ...}。
+        只有带 mp_organize 身份且尚未 moved_at 的项才算整理中；停滞文案
+        取 pending 项上的 mp_organize_status_text（由
+        _track_mp_organize_stall 写进记录）。_sync_handler 未就绪或
+        pending 存储不可读时返回空字典，下载页退回无整理中态。
+        """
+        entries: Dict[str, Dict[str, Any]] = {}
+        sync_handler = getattr(self, "_sync_handler", None)
+        if not sync_handler:
+            return entries
+        get_pending = getattr(sync_handler, "get_pending_finalize_tasks", None)
+        if not callable(get_pending):
+            return entries
+        try:
+            pending_items = get_pending()
+        except Exception:
+            return entries
+        for item in pending_items or []:
+            if not isinstance(item, dict):
+                continue
+            mp_organize = item.get("mp_organize")
+            if not isinstance(mp_organize, dict) or not mp_organize:
+                continue
+            if item.get("moved_at"):
+                continue
+            task_id = _organizing_task_id(item)
+            if not task_id:
+                continue
+            entries[task_id] = {
+                "mp_organize": mp_organize,
+                "status_text": str(item.get("mp_organize_status_text") or ""),
+            }
+        return entries
+
+    def _serialize_runtime_tasks(self) -> List[Dict[str, Any]]:
+        """合并订阅任务与其跨盘子任务，避免同一操作重复展示。"""
+        tasks = self._serialize_sync_tasks()
+        transfer_manager = getattr(self, "_cross_transfer_manager", None)
+        if not transfer_manager:
+            return tasks
+        # Phase 4：_MP_ORGANIZING 内存登记表已删。下载页的“MP 整理中”态
+        # 改从持久化的 pending 后处理记录推导（见
+        # _organizing_entries_from_pending）：带 mp_organize 身份、尚未
+        # moved_at 的项即正在等 MP 整理终态；pending 记录在终态时出队，
+        # 所以这里不可能残留过期“整理中”。
+        organizing_entries = self._organizing_entries_from_pending()
+        tasks_by_id = {
+            str(task.get("id") or ""): task for task in tasks
+            if task.get("id")
+        }
+        grouped_transfers: Dict[str, List[Dict[str, Any]]] = {}
+        active_statuses = set(getattr(transfer_manager, "ACTIVE", ()))
+        for transfer in transfer_manager.list():
+            parent_id = str(transfer.get("parent_task_id") or "")
+            if parent_id not in tasks_by_id:
+                if transfer.get("status") in active_statuses:
+                    tasks.append(transfer)
+                continue
+            grouped_transfers.setdefault(parent_id, []).append(transfer)
+
+        # 有整理中 pending 项的父任务即使子任务已全部结束也要保留在下载页
+        # （MP 整理中）；没有整理中 pending 项也没有活跃子任务的才跳过。
+        parent_ids = list(grouped_transfers.keys())
+        for parent_id in organizing_entries:
+            if parent_id in tasks_by_id and parent_id not in grouped_transfers:
+                parent_ids.append(parent_id)
+        for parent_id in parent_ids:
+            transfers = grouped_transfers.get(parent_id, [])
+            organizing_entry = organizing_entries.get(parent_id)
+            if not organizing_entry and not any(
+                    item.get("status") in active_statuses for item in transfers
+            ):
+                continue
+            parent = tasks_by_id[parent_id]
+            total = 0
+            transferred = 0
+            speed = 0.0
+            downloaded = 0
+            uploaded = 0
+            download_speed = 0.0
+            upload_speed = 0.0
+            child_phases: List[str] = []
+            stage_transferred = 0
+            stage_total = 0
+            messages: Dict[str, int] = {}
+            file_names: List[str] = []
+            for item in transfers:
+                # 子任务标题即文件名（跨盘任务 title=目标文件名），供父任务
+                # 从文件名推导集号。
+                for key in ("title", "result_file_name"):
+                    file_name = str(item.get(key) or "").strip()
+                    if file_name and file_name not in file_names:
+                        file_names.append(file_name)
+                item_total = int(item.get("total") or 0)
+                total += item_total
+                transferred += int(item.get("transferred") or 0)
+                speed += float(item.get("speed_bytes_per_second") or 0)
+                if item.get("status") in {"success", "skipped"}:
+                    # 已完成/跳过的子任务按整份计入（与旧加权口径一致：成功按
+                    # 100% 计）；否则秒传成功的任务会因 uploaded_bytes 未及时
+                    # 更新，把正在传的兄弟任务的父进度拉低。
+                    downloaded += item_total
+                    uploaded += item_total
+                else:
+                    downloaded += int(item.get("downloaded_bytes") or 0)
+                    uploaded += int(item.get("uploaded_bytes") or 0)
+                download_speed += float(
+                    item.get("download_speed_bytes_per_second") or 0
+                )
+                upload_speed += float(
+                    item.get("upload_speed_bytes_per_second") or 0
+                )
+                child_phases.append(display_phase(item))
+                if (
+                        item.get("status") in active_statuses
+                        and int(item.get("stage_total") or 0) > 0
+                ):
+                    stage_transferred += int(item.get("stage_transferred") or 0)
+                    stage_total += int(item.get("stage_total") or 0)
+                message = str(
+                    item.get("error") or item.get("message")
+                    or item.get("phase") or "正在跨盘转存"
+                )
+                messages[message] = messages.get(message, 0) + 1
+            # 父任务按阶段展示：有子任务在下载看已下载占比，都下完看已上传占比；
+            # 旧的加权总进度（下载 0-50、上传 50-100）会让“下载完了”还显示 50%。
+            # organizing 覆盖一切：只要 pending 里还有该父任务的整理中项，
+            # 就按 MP 整理中展示——哪怕父任务同时在后处理（postprocessing 的
+            # 95% 待收尾文案不再出现），也不按字节算进度。
+            if organizing_entry:
+                transfer_phase = "organizing"
+                status_text = str(
+                    organizing_entry.get("status_text") or ""
+                ).strip()
+                phase = status_text or "MP 整理中"
+                shown_progress = None
+            else:
+                if "downloading" in child_phases:
+                    transfer_phase = "downloading"
+                elif "uploading" in child_phases:
+                    transfer_phase = "uploading"
+                else:
+                    transfer_phase = "done"
+                shown_progress = display_progress({
+                    "total": total,
+                    "downloaded_bytes": downloaded,
+                    "uploaded_bytes": uploaded,
+                    "transfer_phase": transfer_phase,
+                })
+                if len(transfers) == 1:
+                    phase = next(iter(messages))
+                else:
+                    detail = " · ".join(
+                        f"{message} × {count}" if count > 1 else message
+                        for message, count in messages.items()
+                    )
+                    phase = f"跨盘转存 {len(transfers)} 个文件 · {detail}"
+            merged: Dict[str, Any] = {
+                "phase": phase,
+                "transfer_phase": transfer_phase,
+                "transferred": transferred,
+                "total": total,
+                "downloaded_bytes": downloaded,
+                "uploaded_bytes": uploaded,
+                "download_speed_bytes_per_second": download_speed,
+                "upload_speed_bytes_per_second": upload_speed,
+                "stage_transferred": stage_transferred,
+                "stage_total": stage_total,
+                "speed_bytes_per_second": speed,
+                "transfer_active": True,
+                "transfer_file_count": len(transfers),
+                "transfer_file_names": file_names,
+                "transfer_task_ids": [
+                    str(item.get("id") or "") for item in transfers
+                ],
+            }
+            # 后处理阶段不改进度：收尾未完成时保持 95%，不按阶段算到 100%。
+            # organizing 同样不按字节算：沿用父任务自带进度，但上限 95%，
+            # 绝不让已下载=总量（downloaded=total、uploaded=0）被算成 100%。
+            if organizing_entry:
+                try:
+                    stored_progress = float(parent.get("progress") or 0)
+                except (TypeError, ValueError):
+                    stored_progress = 0.0
+                merged["progress"] = max(0.0, min(95.0, stored_progress))
+            elif (
+                    str(parent.get("status") or "") != "postprocessing"
+                    and shown_progress is not None
+            ):
+                merged["progress"] = shown_progress
+            parent.update(merged)
+            if not parent.get("poster"):
+                # 父任务没带订阅海报时，把子任务的存量海报带上来（第二兜底）：
+                # 子任务创建时 media 里已带 poster（_normalize_task_media）。
+                for item in transfers:
+                    child_poster = str(item.get("poster") or "").strip()
+                    if child_poster.startswith(("http://", "https://")):
+                        parent["poster"] = child_poster
+                        break
+            if any(item.get("status") == "stopping" for item in transfers):
+                parent["status"] = "stopping"
+        return tasks
+
+    def api_runtime_status(self) -> dict:
+        return {
+            "success": True,
+            "data": self._runtime_snapshot(),
+        }
+
+    def api_stop_sync(self) -> dict:
+        self.cancel_pending_subscribe_searches()
+        transfer_manager = getattr(self, "_cross_transfer_manager", None)
+        if transfer_manager:
+            for task in transfer_manager.list(active_only=True):
+                transfer_manager.cancel(str(task.get("id") or ""))
+
+        with self._sync_tasks_lock:
+            pending_task_ids = [
+                str(task_id)
+                for task_id, task in self._sync_tasks.items()
+                if task.get("status") in {
+                    "downloading", "transferring", "postprocessing"
+                }
+            ]
+        if not self._sync_running:
+            for task_id in pending_task_ids:
+                self.api_stop_sync_task(task_id)
+            if pending_task_ids:
+                return {
+                    "success": True,
+                    "message": f"已请求停止 {len(pending_task_ids)} 个待完成任务",
+                }
+            return {"success": True, "message": "当前没有正在处理的任务"}
+
+        self._stop_event.set()
+        with self._sync_tasks_lock:
+            for task in self._sync_tasks.values():
+                if task.get("status") in {"queued", "running", "stopping"}:
+                    stop_event = task.get("stop_event")
+                    if not stop_event:
+                        continue
+                    task["status"] = "stopping"
+                    task["phase"] = "等待安全停止"
+                    stop_event.set()
+        for task_id in pending_task_ids:
+            self.api_stop_sync_task(task_id)
+        self._set_sync_status("stopping", "已收到停止请求，等待当前操作安全结束", self._sync_progress)
+        logger.info("收到快速停止请求，当前操作结束后将立即停止任务")
+        return {"success": True, "message": "已发送停止请求"}
+
+    def _postprocessing_pending_keys(
+            self, task_snapshot: Dict[str, Any]
+    ) -> set[str]:
+        if not self._sync_handler:
+            return set()
+        subscribe_id = int(task_snapshot.get("subscribe_id") or 0)
+        sub_key = str(task_snapshot.get("sub_key") or "").strip()
+        return {
+            str(item.get("pending_key") or "")
+            for item in self._sync_handler.get_pending_finalize_tasks()
+            if (
+                       subscribe_id > 0
+                       and int(item.get("subscribe_id") or 0) == subscribe_id
+               ) or (
+                       bool(sub_key)
+                       and str(item.get("sub_key") or "") == sub_key
+               )
+        }
+
+    def api_stop_sync_task(self, task_id: str) -> dict:
+        with self._sync_tasks_lock:
+            task = self._sync_tasks.get(task_id)
+            if not task:
+                transfer_manager = getattr(self, "_cross_transfer_manager", None)
+                if transfer_manager and transfer_manager.cancel(task_id):
+                    return {"success": True, "message": "已发送跨盘任务取消请求"}
+                return {"success": False, "message": "订阅任务不存在"}
+            if (
+                    task.get("status") == "stopping"
+                    and task.get("postprocess_stop_token")
+            ):
+                return {
+                    "success": True,
+                    "message": "文件后处理正在安全停止，请等待当前提交完成",
+                }
+            if task.get("status") in {"downloading", "transferring", "postprocessing"}:
+                stop_token = f"{task_id}:{time.time_ns()}"
+                task["postprocess_stop_token"] = stop_token
+                task_snapshot = dict(task)
+            else:
+                task_snapshot = None
+            if task.get("status") not in {
+                "queued", "running", "stopping", "downloading",
+                "transferring", "postprocessing"
+            }:
+                if not task_snapshot:
+                    return {"success": True, "message": "该订阅任务已经结束"}
+            if task_snapshot:
+                task["status"] = "stopping"
+                task["phase"] = "正在停止文件后处理"
+            else:
+                stop_event = task.get("stop_event")
+                if not stop_event:
+                    return {"success": False, "message": "当前任务不支持停止"}
+                task["status"] = "stopping"
+                task["phase"] = "等待安全停止"
+                stop_event.set()
+
+        self._mark_runtime_changed()
+
+        transfer_manager = getattr(self, "_cross_transfer_manager", None)
+        if transfer_manager:
+            transfer_manager.cancel_parent(task_id)
+
+        if task_snapshot:
+            try:
+                pending_keys = self._postprocessing_pending_keys(task_snapshot)
+                with self._sync_tasks_lock:
+                    current = self._sync_tasks.get(task_id)
+                    if (
+                            not current
+                            or str(current.get("postprocess_stop_token") or "")
+                            != str(task_snapshot.get("postprocess_stop_token") or "")
+                    ):
+                        return {"success": False, "message": "任务状态已变化，请刷新后重试"}
+                    current["postprocess_stop_pending_keys"] = sorted(pending_keys)
+                Thread(
+                    target=self._finish_postprocessing_stop,
+                    args=(task_id, task_snapshot),
+                    daemon=True,
+                    name="cloudsubscribe-safe-postprocess-stop",
+                ).start()
+            except Exception as error:
+                with self._sync_tasks_lock:
+                    current = self._sync_tasks.get(task_id)
+                    if current:
+                        current.update({
+                            "status": "postprocessing",
+                            "phase": task_snapshot.get("phase")
+                                     or "文件后处理中",
+                        })
+                        current.pop("postprocess_stop_token", None)
+                        current.pop("postprocess_stop_pending_keys", None)
+                logger.error(
+                    f"启动文件后处理安全停止失败："
+                    f"{task_snapshot.get('title')}，{error}"
+                )
+                return {"success": False, "message": f"停止后处理失败：{error}"}
+            logger.info(
+                f"文件后处理任务进入安全停止：{task_snapshot.get('title')}，"
+                "等待当前文件提交完成"
+            )
+            return {
+                "success": True,
+                "message": (
+                    f"正在安全停止：{task_snapshot.get('title')}，"
+                    "当前文件提交完成后停止"
+                ),
+            }
+        logger.info(f"收到单任务停止请求：{task.get('title')}（{task_id}）")
+        return {"success": True, "message": f"已请求停止：{task.get('title')}"}
+
+    def _finish_postprocessing_stop(
+            self,
+            task_id: str,
+            task_snapshot: Dict[str, Any],
+    ) -> None:
+        """等待当前后处理原子提交完成，再移除尚未开始的持久任务。"""
+        stop_token = str(task_snapshot.get("postprocess_stop_token") or "")
+        self._offline_monitor_lock.acquire()
+        try:
+            with self._sync_tasks_lock:
+                current = self._sync_tasks.get(task_id)
+                if (
+                        not current
+                        or str(current.get("postprocess_stop_token") or "")
+                        != stop_token
+                ):
+                    return
+            pending_keys = self._postprocessing_pending_keys(task_snapshot)
+            # 安全停止前核查
+            if self._sync_handler and pending_keys and hasattr(self._sync_handler, "monitor_offline_strm_tasks"):
+                try:
+                    self._sync_handler.monitor_offline_strm_tasks(force=True, pending_keys=pending_keys)
+                except Exception as monitor_err:
+                    logger.warning(f"安全停止前处理已有文件异常：{monitor_err}")
+            remaining_keys = self._postprocessing_pending_keys(task_snapshot)
+            removed = self._sync_handler.stop_pending_finalize_tasks(
+                remaining_keys
+            ) if self._sync_handler and remaining_keys else 0
+            if self._sync_handler and hasattr(self._sync_handler, "finish_notification_batch"):
+                try:
+                    self._sync_handler.finish_notification_batch()
+                except Exception as notify_err:
+                    logger.debug(f"停止后处理时提交通知批次异常：{notify_err}", exc_info=True)
+            with self._sync_tasks_lock:
+                current = self._sync_tasks.get(task_id)
+                if (
+                        not current
+                        or str(current.get("postprocess_stop_token") or "")
+                        != stop_token
+                ):
+                    return
+                current.update({
+                    "status": "stopped",
+                    "phase": "文件后处理已停止，网盘文件已保留",
+                    "progress": 100,
+                    "pending_count": 0,
+                    "finished_at": time.time(),
+                })
+                current.pop("postprocess_stop_token", None)
+                current.pop("postprocess_stop_pending_keys", None)
+            logger.info(
+                f"文件后处理任务已停止：{task_snapshot.get('title')}，"
+                f"已移除 {removed} 个待处理记录；"
+                "网盘离线任务和现有文件均保留"
+            )
+        except Exception as error:
+            with self._sync_tasks_lock:
+                current = self._sync_tasks.get(task_id)
+                if current and str(
+                        current.get("postprocess_stop_token") or ""
+                ) == stop_token:
+                    current.update({
+                        "status": "postprocessing",
+                        "phase": task_snapshot.get("phase") or "文件后处理中",
+                    })
+                    current.pop("postprocess_stop_token", None)
+                    current.pop("postprocess_stop_pending_keys", None)
+            logger.error(
+                f"安全停止文件后处理任务失败："
+                f"{task_snapshot.get('title')}，{error}"
+            )
+        finally:
+            self._offline_monitor_lock.release()
+            self._mark_runtime_changed()
