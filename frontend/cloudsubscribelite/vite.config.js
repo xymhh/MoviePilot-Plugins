@@ -28,6 +28,9 @@ export default defineConfig({
                 "./Config": "./src/components/Config.vue",
                 "./Dashboard": "./src/components/Dashboard.vue",
                 "./AppPage": "./src/components/AppPage.vue",
+                // MP 按 nav_key 拼组件名（nav_key=main → ./AppPageMain），
+                // 上游只暴露 AppPage，补一个别名避免「打开报 not found」。
+                "./AppPageMain": "./src/components/AppPage.vue",
                 "./AppPageResource": "./src/components/AppPageResource.vue",
             },
             shared: {
