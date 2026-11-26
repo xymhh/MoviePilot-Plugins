@@ -21,6 +21,7 @@ class PluginUtilsMixin:
     方法由重构脚本逐字搬移（行为不变），入口类通过多继承混入。
     """
 
+    @staticmethod
     def _cron_is_valid(cron_expr: str) -> bool:
         """仅校验 cron 表达式是否合法,不再强制最小间隔"""
         cron_expr = (cron_expr or "").strip()
@@ -34,6 +35,7 @@ class PluginUtilsMixin:
             return False
 
 
+    @staticmethod
     def _resolve_notification_type(value: Any) -> NotificationType:
         """将配置值解析为消息类型，无效值回退为插件消息。"""
         if isinstance(value, NotificationType):
@@ -48,6 +50,7 @@ class PluginUtilsMixin:
         return NotificationType.Plugin
 
 
+    @staticmethod
     def _raise_file_limit(target: int = 65535) -> None:
         """把进程的软 nofile 上限抬到 ``target``（受核允许的硬上限约束）。
 
@@ -71,6 +74,7 @@ class PluginUtilsMixin:
             logger.warning(f"提升进程文件句柄上限失败（不影响运行）：{error}")
 
 
+    @staticmethod
     def _parse_period_episode_rules(value: Any) -> Dict[str, int]:
         """解析「节目名 = 每期集数」多行配置。
 
@@ -96,6 +100,7 @@ class PluginUtilsMixin:
         return rules
 
 
+    @staticmethod
     def _split_multiline(value: Any) -> list:
         """把设置页的多行/逗号文本拆成去重列表。
 
