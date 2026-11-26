@@ -45,8 +45,6 @@ from .matching import FileMatchingService
 from .media_refresh import MediaRefreshMixin
 from .media_targets import MediaTargetsService
 from .mp_organize import MpOrganizeMixin
-from .recyclebin_restore import RecyclebinRestoreService
-from .strm_duplicates import StrmDuplicatesService
 from .strm_ops import StrmOpsMixin
 from .transfer_ops import TransferOpsMixin
 
@@ -133,8 +131,6 @@ COMPONENT_FIELDS = (
     ("transfer_ops", TransferOpsMixin),
     ("history_backfill", HistoryBackfillService),
     ("funnel", FunnelService),
-    ("strm_duplicates", StrmDuplicatesService),
-    ("recyclebin_restore", RecyclebinRestoreService),
 )
 
 
@@ -788,9 +784,6 @@ class SyncHandler:
     def build_transient_media_target(self, media: Dict[str, Any], target_id: int=-1, episodes: Optional[Set[int]]=None, manual_upgrade: bool=False, manual_baseline: Optional[Dict[str, Any]]=None) -> Any:
         return self.media_targets.build_transient_media_target(media, target_id, episodes, manual_upgrade, manual_baseline)
 
-    def clean_share_strm(self, share_url: str, save_path: str = "") -> Dict[str, Any]:
-        return self.strm_ops.clean_share_strm(share_url, save_path=save_path)
-
     def delete_by_media_server_paths(self, paths: List[str]) -> Dict[str, int]:
         return self.history_cleanup.delete_by_media_server_paths(paths)
 
@@ -832,9 +825,6 @@ class SyncHandler:
     def finish_notification_batch(self) -> bool:
         return self.media_refresh.finish_notification_batch()
 
-    def generate_share_strm(self, share_url: str, save_path: str = "", overwrite: bool = False) -> Dict[str, Any]:
-        return self.strm_ops.generate_share_strm(share_url, save_path=save_path, overwrite=overwrite)
-
     def get_due_offline_task_groups(self, force: bool = False, pending_keys: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
         return self.postprocess.get_due_offline_task_groups(force=force, pending_keys=pending_keys)
 
@@ -850,9 +840,6 @@ class SyncHandler:
     def list_media_server_content(self, server: str='', keyword: str='', tmdb_id: Any=None, media_type: str='', limit: int=500) -> Dict[str, Any]:
         return self.media_targets.list_media_server_content(server, keyword, tmdb_id, media_type, limit)
 
-    def migrate_legacy_strm(self, root: str = "", dry_run: bool = False) -> Dict[str, Any]:
-        return self.strm_ops.migrate_legacy_strm(root=root, dry_run=dry_run)
-
     def monitor_offline_strm_tasks(self, force: bool=False, pending_keys: Optional[Set[str]]=None, offline_tasks: Optional[List[Dict[str, Any]]]=None, offline_tasks_valid: Optional[bool]=None) -> Dict[str, int]:
         return self.postprocess.monitor_offline_strm_tasks(force, pending_keys, offline_tasks, offline_tasks_valid)
 
@@ -867,12 +854,6 @@ class SyncHandler:
 
     def process_tv_subscribe(self, subscribe, history: List[dict], transfer_details: List[Dict[str, Any]], transferred_count: int, manual_resources: Optional[List[Dict[str, Any]]]=None, allow_upgrade: bool=True, manual_upgrade: bool=False, target_episodes: Optional[Set[int]]=None, transient_target: bool=False) -> int:
         return self.television.process_tv_subscribe(subscribe, history, transfer_details, transferred_count, manual_resources, allow_upgrade, manual_upgrade, target_episodes, transient_target)
-
-    def rebuild_strm_files(self, overwrite: bool = False, time_budget_seconds: float = 0.0, state_store: Any = None) -> Dict[str, int]:
-        return self.strm_ops.rebuild_strm_files(overwrite=overwrite, time_budget_seconds=time_budget_seconds, state_store=state_store)
-
-    def rebuild_strm_increment_by_tree(self, timeout_seconds: float = 600.0) -> Dict[str, int]:
-        return self.strm_ops.rebuild_strm_increment_by_tree(timeout_seconds=timeout_seconds)
 
     def refresh_media_servers(self) -> Dict[str, Any]:
         return self.media_refresh.refresh_media_servers()
@@ -934,76 +915,6 @@ class SyncHandler:
                 f"subscribe_id={subscribe_id}，{error}"
             )
             return True
-
-    def funnel_delete_old_version(self, row_ids) -> Dict[str, Any]:
-        """v1.29.10 热修复：队列页人工删旧版（held/failed 行）。"""
-        return self.funnel.delete_old_version(row_ids)
-
-    def duplicates_scan(self) -> Dict[str, Any]:
-        """v1.31.0 重复扫描：递归走 .strm 根目录，只读本地文件。"""
-        return self.strm_duplicates.duplicates_scan()
-
-    def duplicates_enrich(self, groups) -> Dict[str, Any]:
-        """v1.31.0 重复扫描：按 115 列表核对视频实际大小，给留大建议。"""
-        return self.strm_duplicates.duplicates_enrich(groups)
-
-    def duplicates_delete(self, group, keep_index) -> Dict[str, Any]:
-        """v1.31.0 重复扫描：按用户确认删一组重复（视频 + STRM + NFO）。"""
-        return self.strm_duplicates.duplicates_delete(group, keep_index)
-
-    def duplicates_save_state(self, state) -> Dict[str, Any]:
-        """v1.31.2 重复扫描：保存上次扫描状态（离开页面回来可恢复）。"""
-        return self.strm_duplicates.duplicates_save_state(state)
-
-    def duplicates_load_state(self) -> Dict[str, Any]:
-        """v1.31.2 重复扫描：读取上次扫描状态（无保存时返回空）。"""
-        return self.strm_duplicates.duplicates_load_state()
-
-    def duplicates_delete_batch(self, items) -> Dict[str, Any]:
-        """v1.31.3 重复扫描：批量删除重复组（逐组复用单组删除校验）。"""
-        return self.strm_duplicates.duplicates_delete_batch(items)
-
-    def restore_list_candidates(self, window_start=None, window_end=None) -> Dict[str, Any]:
-        """v1.31.6 回收站恢复：按删除时间窗口列出可还原的回收站记录。"""
-        return self.recyclebin_restore.restore_list_candidates(window_start, window_end)
-
-    def restore_revert(self, items, window_start=None, window_end=None) -> Dict[str, Any]:
-        """v1.31.6 回收站恢复：只还原调用方确认过的 rid，逐项核对。"""
-        return self.recyclebin_restore.restore_revert(items, window_start, window_end)
-
-    def funnel_run_scan_dry_run(self, trigger: str = "手动") -> Dict[str, Any]:
-        """v1.30.0 阶段 4：04:00 扫描对账（默认 dry-run，只分类记日志）。"""
-        return self.funnel.run_scan_dry_run(trigger=trigger)
-
-    def funnel_round_history(self) -> List[Dict[str, Any]]:
-        """v1.30.0 阶段 4：最近 20 轮漏斗轮次摘要（worker + 扫描轮次）。"""
-        return self.funnel.round_history()
-
-    def funnel_claim_row(
-            self, row_id: int, tmdb_id: int, media_type: str,
-            season: Any = None, episode: Any = None,
-    ) -> Dict[str, Any]:
-        """v1.30.0 阶段 4：held 行人工认领（指定剧集/TMDB 后重新入队）。"""
-        return self.funnel.claim_row(
-            row_id, tmdb_id, media_type, season=season, episode=episode,
-        )
-
-    def funnel_delete_orphan_files(self, row_ids) -> Dict[str, Any]:
-        """v1.30.0 阶段 4：held 行人工删孤儿文件（.mkv 连带同名 .strm）。"""
-        return self.funnel.delete_orphan_files(row_ids)
-
-    def funnel_find_row_by_pending_key(self, pending_key: str) -> Optional[Dict[str, Any]]:
-        """v1.30.0 阶段 4：按终态键查漏斗行（任意状态，含 held/done）。"""
-        return self.funnel.find_row_by_pending_key(pending_key)
-
-    def funnel_run_round(self) -> Dict[str, int]:
-        return self.funnel.run_round()
-
-    def funnel_run_now(self) -> Dict[str, Any]:
-        return self.funnel.run_now()
-
-    def funnel_request_stop(self) -> Dict[str, Any]:
-        return self.funnel.request_stop()
 
     def funnel_precommit_recheck(self, item, pending_key, media, ctx=None):
         return self.funnel.precommit_recheck(item, pending_key, media, ctx)

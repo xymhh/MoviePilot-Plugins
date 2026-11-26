@@ -29,7 +29,6 @@ from ..agent import (
     CloudSubscribeSyncTool,
 )
 from ..config import UIConfig
-from .emby_proxy import emby_proxy_status, restart_emby_proxy
 
 
 class _WorkflowActionHandler(dict):
@@ -64,9 +63,7 @@ class MoviePilotRegistration(OwnerDelegator):
         return None
 
     def get_api(self) -> List[Dict[str, Any]]:
-        # Lite：整理/STRM/重复扫描/回收站/漏斗/整理台的路由一律不注册
-        # （代码留到 P2 清理，先保证不暴露给前端）。
-        apis = [
+        return [
             {
                 "path": "/auto_subscribe/run",
                 "endpoint": self.api_run_auto_subscribe,
@@ -115,13 +112,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "获取历史记录聚合摘要",
-            },
-            {
-                "path": "/duplicate/list",
-                "endpoint": self.api_duplicate_list,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "列出重复订阅组",
             },
             {
                 "path": "/ui_options",
@@ -411,159 +401,11 @@ class MoviePilotRegistration(OwnerDelegator):
                 "auth": "bear",
                 "summary": "目标订阅列表",
             },
-            # v1.29.7 阶段 1：整理队列（漏斗）接口。
-            {
-                "path": "/organize/staging",
-                "endpoint": self.api_vue_organize_staging,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "一键整理待整理目录（execute=true 扫描并执行）",
-            },
-            {
-                "path": "/organize/staging/status",
-                "endpoint": self.api_vue_organize_staging_status,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "待整理目录整理进度",
-            },
-            {
-                "path": "/funnel/rows",
-                "endpoint": self.api_vue_funnel_rows,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "整理队列列表（待处理/处理中/已挂起）",
-            },
-            {
-                "path": "/funnel/status",
-                "endpoint": self.api_vue_funnel_status,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "整理队列状态与 worker 运行状态",
-            },
-            {
-                "path": "/funnel/run",
-                "endpoint": self.api_vue_funnel_run,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "立即整理一轮",
-            },
-            {
-                "path": "/funnel/stop",
-                "endpoint": self.api_vue_funnel_stop,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "停止整理队列",
-            },
-            {
-                "path": "/funnel/requeue",
-                "endpoint": self.api_vue_funnel_requeue,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "把挂起/失败行放回队列",
-            },
-            {
-                "path": "/funnel/delete",
-                "endpoint": self.api_vue_funnel_delete,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "删除整理队列行（pending 记录与网盘文件均保留）",
-            },
-            {
-                "path": "/funnel/delete-old-version",
-                "endpoint": self.api_vue_funnel_delete_old_version,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "人工删旧版：删除挂起/失败行 replaced_from 里的旧文件",
-            },
-            {
-                "path": "/funnel/rounds",
-                "endpoint": self.api_vue_funnel_rounds,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "漏斗轮次历史（最近 20 轮，worker + 扫描轮次）",
-            },
-            {
-                "path": "/funnel/scan",
-                "endpoint": self.api_vue_funnel_scan,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "手动触发一次扫描对账（默认 dry-run，只分类记日志）",
-            },
-            {
-                "path": "/funnel/claim",
-                "endpoint": self.api_vue_funnel_claim,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "挂起行人工认领：指定剧集/TMDB 后重新入队",
-            },
-            {
-                "path": "/funnel/delete-orphan",
-                "endpoint": self.api_vue_funnel_delete_orphan,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "人工删孤儿文件：删除挂起行落盘后拦截留下的 .mkv 连带 .strm",
-            },
             # v1.31.0 重复扫描：递归走 .strm 根目录（只读本地文件），
             # 按集分组 → 按 115 列表核对视频大小 → 人工确认后删除。
-            {
-                "path": "/duplicates/scan",
-                "endpoint": self.api_vue_duplicates_scan,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重复扫描：递归 .strm 根目录，列出同集多份 .strm 的组",
-            },
-            {
-                "path": "/duplicates/enrich",
-                "endpoint": self.api_vue_duplicates_enrich,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重复扫描核对：按 115 列表取各份视频实际大小，给留大建议",
-            },
-            {
-                "path": "/duplicates/delete",
-                "endpoint": self.api_vue_duplicates_delete,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重复扫描删除：按用户确认删一组重复（视频 + STRM + NFO）",
-            },
-            {
-                "path": "/duplicates/delete-batch",
-                "endpoint": self.api_vue_duplicates_delete_batch,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重复扫描批量删除：逐组复用单组删除校验，一键删全部同视频组",
-            },
-            {
-                "path": "/duplicates/save-state",
-                "endpoint": self.api_vue_duplicates_save_state,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重复扫描状态保存：扫描结果 + 核对进度 + 保留选择落库",
-            },
-            {
-                "path": "/duplicates/load-state",
-                "endpoint": self.api_vue_duplicates_load_state,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重复扫描状态读取：离开页面回来恢复上次扫描结果",
-            },
             # v1.31.6 回收站恢复：2026-11-23 批量删除误删的 115 视频
             # （48 个文件 + 32 个目录）从回收站还原。先列窗口内候选给用户
             # 确认，再只还原确认过的 rid，逐项重查回收站核对。
-            {
-                "path": "/recyclebin/list",
-                "endpoint": self.api_vue_recyclebin_list,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "回收站恢复：按删除时间窗口列出可还原的回收站记录",
-            },
-            {
-                "path": "/recyclebin/revert",
-                "endpoint": self.api_vue_recyclebin_revert,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "回收站恢复：只还原前端确认过的 rid 清单，逐项核对",
-            },
             {
                 "path": "/tg/transfer",
                 "endpoint": self.api_vue_tg_transfer,
@@ -680,20 +522,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "从媒体服务器内容发起洗版",
             },
             {
-                "path": "/media/servers",
-                "endpoint": self.api_vue_media_servers,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "获取可用媒体服务器选项",
-            },
-            {
-                "path": "/media/content",
-                "endpoint": self.api_vue_media_server_content,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "搜索路径符合插件配置的媒体服务器内容",
-            },
-            {
                 "path": "/history/retry",
                 "endpoint": self.api_vue_retry_history,
                 "methods": ["POST"],
@@ -729,27 +557,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "STRM 播放直链 302 跳转（pickcode → 网盘直链）",
             },
             {
-                "path": "/emby_proxy/status",
-                "endpoint": self.api_emby_proxy_status,
-                "methods": ["GET"],
-                "auth": "bear",
-                "summary": "Emby 302 反代运行状态",
-            },
-            {
-                "path": "/emby_proxy/restart",
-                "endpoint": self.api_emby_proxy_restart,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "重启 Emby 302 反代",
-            },
-            {
-                "path": "/strm/full_scan",
-                "endpoint": self.api_vue_strm_full_scan,
-                "methods": ["POST"],
-                "auth": "bear",
-                "summary": "按目录 CID 全量校准 STRM",
-            },
-            {
                 "path": "/residue/cleanup",
                 "endpoint": self.api_vue_cleanup_residue,
                 "methods": ["POST"],
@@ -771,21 +578,6 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "检查网盘扫码登录状态（POST）",
             },
         ]
-        removed_prefixes = (
-            "/strm", "/duplicates", "/recyclebin", "/funnel", "/organize",
-        )
-        return [
-            item for item in apis
-            if not str(item.get("path") or "").startswith(removed_prefixes)
-        ]
-
-    def api_emby_proxy_status(self) -> Dict[str, Any]:
-        """返回内置 Emby 302 反代的开关、运行态与命中统计。"""
-        return emby_proxy_status(self._owner)
-
-    def api_emby_proxy_restart(self) -> Dict[str, Any]:
-        """停再起自带反代；配置关闭时只停不起。"""
-        return restart_emby_proxy(self._owner)
 
     def get_dashboard_meta(self) -> List[Dict[str, str]]:
         if not self._enabled:
@@ -1033,54 +825,8 @@ class MoviePilotRegistration(OwnerDelegator):
         重叠执行。触发器、周期与开关和迁移前一致；只在插件启用时声明。
         """
         services: List[Dict[str, Any]] = []
-        strm_enabled = bool(getattr(self, "_strm_generate_enabled", False))
-        if strm_enabled and bool(getattr(self, "_strm_full_scan_enabled", False)):
-            # 每天 04:20 分批校准，避开 04:30 的其它定时任务。
-            services.append({
-                "id": "CloudSubscribe_StrmFullScan",
-                "name": "STRM 全量校准",
-                "trigger": CronTrigger(hour=4, minute=20),
-                "func": self._run_scheduled_task,
-                "func_kwargs": {"task": "strm_full_scan"},
-                "kwargs": {},
-            })
-        if strm_enabled and bool(getattr(self, "_strm_increment_enabled", False)):
-            try:
-                minutes = max(1, int(getattr(self, "_strm_increment_minutes", 10) or 10))
-            except (TypeError, ValueError):
-                minutes = 10
-            services.append({
-                "id": "CloudSubscribe_StrmIncrement",
-                "name": "STRM 增量补齐",
-                "trigger": IntervalTrigger(minutes=minutes),
-                "func": self._run_scheduled_task,
-                "func_kwargs": {"task": "strm_increment"},
-                "kwargs": {},
-            })
-        if bool(getattr(self, "_organize_schedule_enabled", False)):
-            cron = str(getattr(self, "_organize_schedule_cron", "") or "")
-            # v1.30.0 阶段 4：04:00 定时任务改为漏斗扫描对账触发器
-            #（设计 §12 修订范围）。organize_source_path 已退役，注册
-            # 条件改读漏斗总闸 + 阶段 1：漏斗开时 04:00 跑 dry-run 扫描
-            # 对账；漏斗关时不注册（旧整理台定时扫描随源目录退役而停用，
-            # 手动整理仍可在整理台页面上现选源目录）。
-            funnel_live = bool(
-                getattr(self, "_funnel_enabled", True)
-                and getattr(self, "_funnel_phase1_enabled", False)
-            )
-            if not funnel_live:
-                logger.info("04:00 扫描对账任务未注册：漏斗未启用")
-            elif not self._cron_is_valid(cron):
-                logger.warning(f"整理台定时任务 Cron 无效：{cron}，未注册")
-            else:
-                services.append({
-                    "id": "CloudSubscribe_Organize",
-                    "name": "115 网盘整理",
-                    "trigger": CronTrigger.from_crontab(cron),
-                    "func": self._run_scheduled_task,
-                    "func_kwargs": {"task": "organize"},
-                    "kwargs": {},
-                })
+        # Lite：STRM 校准（全量/增量）与 115 整理定时服务已删除，
+        # 由 115网盘STRM助手接管；这里只保留 Lite 自身的维护任务。
         # 每天清理一次过期的重试索引行（失败 90 天、待修复 30 天）。
         services.append({
             "id": "CloudSubscribe_RetryIndexMaintenance",
@@ -1100,16 +846,7 @@ class MoviePilotRegistration(OwnerDelegator):
             "func_kwargs": {"task": "cache_watch"},
             "kwargs": {},
         })
-        # Lite：不注册任何 STRM / 整理 / 115 整理 定时服务。
-        removed_ids = (
-            "CloudSubscribe_StrmFullScan",
-            "CloudSubscribe_StrmIncrement",
-            "CloudSubscribe_Organize",
-        )
-        return [
-            item for item in services
-            if str(item.get("id") or "") not in removed_ids
-        ]
+        return services
 
     def _refresh_platform_services(self) -> None:
         """配置保存后刷新当前插件在中注册的定时服务。"""

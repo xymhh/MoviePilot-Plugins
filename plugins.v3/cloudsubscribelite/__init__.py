@@ -55,8 +55,6 @@ from .core.api import (
     CheckinApi,
     DoctorApi,
     MoviePilotRegistration,
-    DuplicateApi,
-    MediaLibraryApi,
     PageApi,
     QRCodeService,
     RedirectApi,
@@ -64,9 +62,6 @@ from .core.api import (
     SearchApi,
     SyncApi,
     TgMonitorApi,
-    FunnelApi,
-    RecyclebinRestoreApi,
-    StrmDuplicatesApi,
 )
 from .core.channels import ChannelStore
 from .core.config_normalize import normalize_plugin_config
@@ -118,14 +113,9 @@ _COMPONENT_TYPES = (
     CheckinApi,
     SyncApi,
     RuntimeApi,
-    MediaLibraryApi,
     QRCodeService,
     RedirectApi,
-    DuplicateApi,
     TgMonitorApi,
-    FunnelApi,
-    RecyclebinRestoreApi,
-    StrmDuplicatesApi,
     MessageRoutingHook,
     PluginEventHandler,
     MoviePilotRegistration,
@@ -354,7 +344,6 @@ class CloudSubscribeLite(_PluginBase):
     _organize_schedule_cron: str = "0 4 * * *"
     _organize_schedule_auto_execute: bool = True
     _organize_schedule_notify: bool = True
-    _strm_scan_lock: Optional[Any] = None
     _subscribe_search_recent: Dict[str, Any] = {}
 
     # 洗版配置
@@ -380,7 +369,7 @@ class CloudSubscribeLite(_PluginBase):
     _image_scrape_enabled: bool = False
     _strm_base_url: str = ""
     _strm_url_template: str = (
-        "{base_url}/api/v1/plugin/CloudSubscribeX/redirect"
+        "{base_url}/api/v1/plugin/CloudSubscribeLite/redirect"
         "?pickcode={pickcode}&file_name={file_name}"
     )
     _strm_full_scan_enabled: bool = False
@@ -393,14 +382,7 @@ class CloudSubscribeLite(_PluginBase):
     _media_server_ignore_paths: str = ""
     _media_server_path_mappings: str = ""
     _media_server_refresh_delay: int = 0
-    _emby_proxy_enabled: bool = False
-    _emby_proxy_port: int = 3010
-    _emby_proxy_upstream: str = ""
-    _emby_proxy_allowed_clients: str = ""
     _emby_mediainfo_enabled: bool = False
-    _platform_media_sync_enabled: bool = False
-    _platform_deep_delete_enabled: bool = False
-    _platform_deep_delete_title_keywords: list = ["深度删除", "神医"]
     _timeout_enabled: bool = True
     _timeout_default_connect: float = 30
     _timeout_default_pool: float = 15
@@ -575,21 +557,6 @@ class CloudSubscribeLite(_PluginBase):
     def on_message_action(self, event: Event):
         return self._get_component(PluginEventHandler).on_message_action(event)
 
-    @eventmanager.register(EventType.WebhookMessage)
-    def on_media_server_webhook(self, event: Event):
-        event_info = getattr(event, "event_data", None) if event else None
-        event_name = str(getattr(event_info, "event", None) or (
-            event_info.get("event") if isinstance(event_info, dict) else "") or "")
-        channel = str(getattr(event_info, "channel", None) or (
-            event_info.get("channel") if isinstance(event_info, dict) else "") or "")
-        # 媒体库一次操作会连发多条 webhook（神医约 5 条），INFO 会刷屏；
-        # 真正的处理结果由 media_library 汇总成 2 行打印。
-        logger.debug(
-            f"收到平台媒体服务器 WebhookMessage 事件: channel={channel or '未知'}, event={event_name or '未知'}")
-        return self._get_component(MediaLibraryApi).handle_platform_media_webhook(
-            event_info
-        )
-
     @staticmethod
     def _cron_is_valid(cron_expr: str) -> bool:
         """仅校验 cron 表达式是否合法,不再强制最小间隔"""
@@ -631,13 +598,6 @@ class CloudSubscribeLite(_PluginBase):
         self._get_data_store().initialize()
         self._apply_plugin_config(config, reset_runtime=True)
         self._ensure_notify_template_defaults(config)
-        # 内置 Emby 302 反代：开关关闭时不建线程、不占端口。
-        try:
-            from .core.api.emby_proxy import start_emby_proxy
-
-            start_emby_proxy(self)
-        except Exception as error:  # noqa: BLE001 - 反代失败不得影响插件主流程
-            logger.error(f"Emby 302 反代初始化失败：{error}")
         # 在下载管理页登记独立标签，任务进度改走下载页展示。
         self._ensure_downloader_entry()
 
@@ -711,30 +671,6 @@ class CloudSubscribeLite(_PluginBase):
         except Exception as error:  # noqa: BLE001 - 抬不动不影响插件可用性
             logger.warning(f"提升进程文件句柄上限失败（不影响运行）：{error}")
 
-    @staticmethod
-    def _normalize_deep_delete_title_keywords(value: Any) -> List[str]:
-        """归一化深度删除标题关键词：列表原样去重，字符串按换行/逗号拆。
-
-        空列表表示标题分支永不命中（只剩事件名与 Item Path 两路），
-        此时记一条 warning，避免用户误以为配空就是全匹配。
-        """
-        if isinstance(value, str):
-            keywords = [
-                part.strip()
-                for part in re.split(r"[\n,，]", value)
-                if part.strip()
-            ]
-        elif isinstance(value, (list, tuple, set)):
-            keywords = [str(item).strip() for item in value if str(item).strip()]
-        else:
-            keywords = []
-        if not keywords:
-            logger.warning(
-                "深度删除标题关键词为空：标题匹配分支将不触发，"
-                "仅保留事件名与 Item Path 匹配"
-            )
-        return keywords
-
     def _apply_plugin_config(
             self, config: Optional[Dict[str, Any]], reset_runtime: bool = False
     ) -> None:
@@ -768,14 +704,7 @@ class CloudSubscribeLite(_PluginBase):
             "media_server_ignore_paths",
             "media_server_path_mappings",
             "media_server_refresh_delay",
-            "emby_proxy_enabled",
-            "emby_proxy_port",
-            "emby_proxy_upstream",
-            "emby_proxy_allowed_clients",
             "emby_mediainfo_enabled",
-            "platform_media_sync_enabled",
-            "platform_deep_delete_enabled",
-            "platform_deep_delete_title_keywords",
             "video_extensions",
             "subtitle_extensions",
         }
@@ -987,17 +916,9 @@ class CloudSubscribeLite(_PluginBase):
             f"洗版范围={'指定订阅' if self._upgrade_subscribe_ids else '全部'}, "
             f"当前接管态={self._is_takeover_active()}")
         self._start_residue_cleanup()
-        # v1.27.0：STRM 全量/增量、115 整理定时、重试索引维护四个固定周期任务
-        # 改由 MP 调度（get_service → _run_scheduled_task），不再挂插件自建调度器；
+        # v1.27.0：重试索引维护等固定周期任务改由 MP 调度
+        # （get_service → _run_scheduled_task），不再挂插件自建调度器；
         # 开关/周期变化通过上面的 _refresh_platform_services 让 MP 重建服务。
-        # 配置保存可能改了开关/端口：apply 末尾同步一次代理运行态
-        # （stop_service 在重载开头已经停过，这里按新配置重新决定起不起）。
-        try:
-            from .core.api.emby_proxy import start_emby_proxy
-
-            start_emby_proxy(self)
-        except Exception as error:  # noqa: BLE001 - 反代失败不得影响插件主流程
-            logger.error(f"Emby 302 反代同步启停失败：{error}")
 
         # 调度一次性任务。
         if self._auto_subscribe_onlyonce:
@@ -1016,13 +937,6 @@ class CloudSubscribeLite(_PluginBase):
 
         # v1.15.0：配置应用完成重登下载器条目（同上）。
         self._ensure_downloader_entry()
-
-    def _strm_scan_time_budget(self) -> int:
-        """STRM 全量校准单次时间预算（秒）；读取失败或负数按 0（不限）处理。"""
-        try:
-            return max(0, int(getattr(self, "_strm_full_scan_budget", 0) or 0))
-        except (TypeError, ValueError):
-            return 0
 
     def _require_sync_handler(
             self, *method_names: str,
@@ -1048,48 +962,6 @@ class CloudSubscribeLite(_PluginBase):
             return None, {"success": False, "message": message, "internal_error": True}
         return sync_handler, None
 
-    def generate_share_strm(
-            self, share_url: str, save_path: str = "", overwrite: bool = False,
-    ) -> dict:
-        """为 115 分享直接生成 STRM（不转存）。"""
-        sync_handler, unavailable = self._require_sync_handler("generate_share_strm",)
-        if unavailable:
-            return unavailable
-        try:
-            data = sync_handler.generate_share_strm(
-                share_url, save_path=save_path, overwrite=overwrite,
-            )
-        except Exception as error:  # noqa: BLE001 - 统一回给前端
-            logger.error(f"分享 STRM 生成失败：{error}")
-            return {"success": False, "message": str(error)}
-        return {
-            "success": True,
-            "message": (
-                f"分享 STRM 生成完成：新增 {data.get('created')}，"
-                f"更新 {data.get('updated')}，跳过 {data.get('skipped')}"
-            ),
-            "data": data,
-        }
-
-    def clean_share_strm(self, share_url: str, save_path: str = "") -> dict:
-        """删除某个分享链接生成的 STRM。"""
-        sync_handler, unavailable = self._require_sync_handler("clean_share_strm",)
-        if unavailable:
-            return unavailable
-        try:
-            data = sync_handler.clean_share_strm(share_url, save_path=save_path)
-        except Exception as error:  # noqa: BLE001
-            logger.error(f"分享 STRM 清理失败：{error}")
-            return {"success": False, "message": str(error)}
-        return {
-            "success": True,
-            "message": (
-                f"分享 STRM 已清理：删除 {data.get('removed')}，"
-                f"不存在 {data.get('missing')}"
-            ),
-            "data": data,
-        }
-
     def refresh_media_servers(self) -> dict:
         """手动触发媒体库刷新。"""
         sync_handler, unavailable = self._require_sync_handler("refresh_media_servers",)
@@ -1104,30 +976,6 @@ class CloudSubscribeLite(_PluginBase):
             "message": f"已提交媒体库刷新：{data or '无可用媒体服务器'}",
             "data": data,
         }
-
-    def migrate_legacy_strm(self, root: str = "", dry_run: bool = False) -> dict:
-        """把 P115StrmHelper 生成的 STRM 改写成本插件端点。"""
-        sync_handler, unavailable = self._require_sync_handler("migrate_legacy_strm",)
-        if unavailable:
-            return unavailable
-        try:
-            data = sync_handler.migrate_legacy_strm(root=root, dry_run=dry_run)
-        except Exception as error:  # noqa: BLE001
-            logger.error(f"旧 STRM 迁移失败：{error}")
-            return {"success": False, "message": str(error)}
-        return {
-            "success": True,
-            "message": (
-                f"旧 STRM 迁移{'预演' if dry_run else '完成'}："
-                f"扫描 {data.get('scanned')}，改写 {data.get('migrated')}，"
-                f"跳过 {data.get('skipped')}，失败 {data.get('failed')}"
-            ),
-            "data": data,
-        }
-
-    # ---- 源文件 SHA1 缓存（秒传未命中后零流量重试） ----
-    _SOURCE_SHA1_CACHE_TTL_DAYS = 30
-    _SOURCE_SHA1_CACHE_LIMIT = 2000
 
     def get_cached_source_sha1(self, key: str) -> Optional[dict]:
         """按「来源网盘|体积|文件名」取库中记录过的源文件 SHA1。"""
@@ -1172,135 +1020,6 @@ class CloudSubscribeLite(_PluginBase):
             target_key, sha1, limit=self._SOURCE_MISS_CACHE_LIMIT
         )
 
-    def run_strm_full_scan(self, reason: str = "手动") -> dict:
-        """后台按目录 CID 全量遍历媒体库，补齐/校准 STRM。"""
-        sync_handler, unavailable = self._require_sync_handler("rebuild_strm_files")
-        if unavailable:
-            return unavailable
-        lock = self.__dict__.get("_strm_scan_lock")
-        if lock is None:
-            lock = Lock()
-            self._strm_scan_lock = lock
-        if not lock.acquire(blocking=False):
-            return {"success": False, "message": "已有 STRM 全量校准在运行"}
-
-        overwrite = bool(self._strm_full_scan_overwrite)
-        budget = self._strm_scan_time_budget()
-        try:
-            state_store = self._get_data_store()
-        except Exception:  # noqa: BLE001
-            state_store = None
-
-        def _run():
-            try:
-                stats = sync_handler.rebuild_strm_files(
-                    overwrite=overwrite,
-                    time_budget_seconds=budget,
-                    state_store=state_store,
-                )
-                detail = (
-                    f"（{reason}）：目录 {stats.get('directories')}，"
-                    f"视频 {stats.get('files')}，新增 {stats.get('created')}，"
-                    f"更新 {stats.get('updated')}，跳过 {stats.get('skipped')}，"
-                    f"失败 {stats.get('errors')}"
-                )
-                if stats.get("interrupted"):
-                    logger.info(
-                        f"STRM 全量校准已分批{detail}；本次到时间上限，"
-                        f"剩余 {stats.get('pending_directories')} 个目录留待下次续扫"
-                    )
-                else:
-                    logger.info(f"STRM 全量校准完成{detail}")
-            except Exception as error:  # noqa: BLE001
-                logger.error(f"STRM 全量校准失败（{reason}）：{error}")
-            finally:
-                lock.release()
-
-        Thread(target=_run, daemon=True).start()
-        return {"success": True, "message": "已开始后台全量校准，完成后写入日志"}
-
-    def run_strm_increment(self, reason: str = "增量") -> dict:
-        """轻量增量补齐：只补缺失的 STRM，不改写已有文件。
-
-        与全量共用同一把扫描锁，避免两条链路同时写同一目录；
-        不写断点文件，保证不会污染全量校准的续扫进度。
-        """
-        sync_handler, unavailable = self._require_sync_handler(
-            "rebuild_strm_files", "rebuild_strm_increment_by_tree",
-        )
-        if unavailable:
-            return unavailable
-        lock = self.__dict__.get("_strm_scan_lock")
-        if lock is None:
-            lock = Lock()
-            self._strm_scan_lock = lock
-        if not lock.acquire(blocking=False):
-            logger.debug(f"STRM 增量补齐（{reason}）：全量校准正在运行，本次跳过")
-            return {"success": False, "message": "全量校准运行中，本次跳过"}
-
-        budget = max(30, int(getattr(self, "_strm_increment_budget", 180) or 180))
-
-        def _run():
-            try:
-                stats = None
-                if getattr(sync_handler, "_cloud_drive", None) is not None:
-                    provider = sync_handler._cloud_drive
-                    if provider.supports(CloudDriveCapability.STRM_EXPORT):
-                        stats = sync_handler.rebuild_strm_increment_by_tree(
-                            timeout_seconds=max(60.0, float(budget)),
-                        )
-                if stats is None or stats.get("errors"):
-                    # 网盘不支持导出目录树 / 导出失败 → 退回逐目录遍历
-                    if stats and stats.get("errors"):
-                        logger.warning("STRM 增量：导出目录树失败，改用逐目录遍历兜底")
-                    stats = sync_handler.rebuild_strm_files(
-                        overwrite=False,
-                        time_budget_seconds=budget,
-                        state_store=None,
-                    )
-                created = int(stats.get("created") or 0)
-                errors = int(stats.get("errors") or 0)
-                if created or errors:
-                    logger.info(
-                        f"STRM 增量补齐（{reason}）：目录 {stats.get('directories')}，"
-                        f"视频 {stats.get('files')}，新增 {created}，"
-                        f"失败 {errors}，跳过 {stats.get('skipped')}"
-                    )
-                else:
-                    logger.debug(
-                        f"STRM 增量补齐（{reason}）：无新增，"
-                        f"已检查 {stats.get('files')} 个视频"
-                    )
-            except Exception as error:  # noqa: BLE001
-                logger.error(f"STRM 增量补齐（{reason}）异常：{error}")
-            finally:
-                lock.release()
-
-        Thread(target=_run, daemon=True).start()
-        return {"success": True, "message": "已开始后台增量补齐"}
-
-    def _run_scheduled_organize_scan(self) -> Any:
-        """04:00 定时扫描：v1.30.0 阶段 4 改为漏斗扫描对账触发器。
-
-        漏斗开（总闸 + 阶段 1）时跑 dry-run 扫描对账：只分类记日志，
-        不入队、不删文件（接管留给以后一版）。漏斗关时保留旧整理台
-        定时扫描行为（源目录取退役前的配置值，配置已废弃故恒为空，
-        此时直接返回不跑，避免空目录扫描）。
-        """
-        if getattr(self, "_funnel_phase1_enabled", False):
-            if self._sync_handler is None:
-                return {"success": False, "message": "同步处理器未初始化"}
-            return self._sync_handler.funnel_run_scan_dry_run(trigger="定时")
-        source_path = str(getattr(self, "_organize_source_path", "") or "").strip()
-        if not source_path:
-            logger.info("04:00 整理扫描跳过：漏斗未启用且未配置整理台源目录")
-            return {"success": True, "message": "漏斗未启用，跳过整理扫描"}
-        return self.start_scan(
-            source_path=source_path,
-            auto_execute=self._organize_schedule_auto_execute,
-            trigger="定时",
-        )
-
     def _run_scheduled_task(self, task: str) -> Any:
         """MP 调度的插件维护任务唯一入口（get_service 声明的 func）。
 
@@ -1312,13 +1031,7 @@ class CloudSubscribeLite(_PluginBase):
         （``internal_error``）也转成异常抛给 MP，不再静默返回。
         """
         runners: Dict[str, Callable[[], Any]] = {
-            "strm_full_scan": lambda: self.run_strm_full_scan("定时"),
-            "strm_increment": lambda: self.run_strm_increment("定时"),
             "retry_index_maintenance": self._run_retry_index_maintenance,
-            # v1.30.0 阶段 4：04:00 定时任务改为漏斗扫描对账触发器
-            #（设计 §12 修订范围）：漏斗开时跑 dry-run 扫描（只分类
-            # 记日志，不入队）；漏斗关时保留旧整理台定时扫描行为。
-            "organize": self._run_scheduled_organize_scan,
             # 1.32.0：缓存目录体积 + 磁盘水位巡检（6 小时一轮，越阈值发通知）。
             "cache_watch": self._run_cache_watch,
         }
@@ -1368,37 +1081,6 @@ class CloudSubscribeLite(_PluginBase):
                     + datetime.timedelta(seconds=1)
                 ),
             )
-
-    def organize_staging(self, execute: bool = False) -> Dict[str, Any]:
-        """一键整理「待整理目录」（1.35.4）。
-
-        复用整理台（OrganizeService.start_scan）：扫描 → 识别 → 分批移动 →
-        生成 STRM。``execute=False`` 只预览（列计划不搬文件），``True`` 扫完
-        立即执行。用于消化「已上传但没整理」的存量（1.35.3 之前落盘的文件）。
-        """
-        root = str(
-            self._organize_staging_path or self._p115_transfer_path or ""
-        ).strip().rstrip("/")
-        if not root:
-            return {"success": False, "message": "待整理目录未配置"}
-        service = self._get_component(OrganizeService)
-        result = service.start_scan(
-            source_path=root,
-            auto_execute=bool(execute),
-            trigger="转存目录一键整理",
-        )
-        if not result.get("success"):
-            return result
-        logger.info(
-            f"转存目录整理已提交：{root}（{'扫描并执行' if execute else '仅预览'}，"
-            f"scan_id={result.get('scan_id')}）"
-        )
-        return result
-
-    def organize_staging_status(self) -> Dict[str, Any]:
-        """查看转存目录整理进度（1.35.4）。"""
-        service = self._get_component(OrganizeService)
-        return service.status()
 
     def _run_cache_watch(self) -> Any:
         """缓存目录与磁盘水位巡检（1.32.0，MP 每 6 小时调一次）。"""
@@ -1858,34 +1540,8 @@ class CloudSubscribeLite(_PluginBase):
         self._media_server_refresh_delay = max(
             0, int(config.get("media_server_refresh_delay", 0) or 0)
         )
-        self._emby_proxy_enabled = bool(
-            config.get("emby_proxy_enabled", False)
-        )
-        self._emby_proxy_port = max(
-            1, int(config.get("emby_proxy_port", 3010) or 3010)
-        )
-        self._emby_proxy_upstream = str(
-            config.get("emby_proxy_upstream", "") or ""
-        ).strip()
-        self._emby_proxy_allowed_clients = str(
-            config.get("emby_proxy_allowed_clients", "") or ""
-        ).strip()
         self._emby_mediainfo_enabled = bool(
             config.get("emby_mediainfo_enabled", False)
-        )
-        self._platform_media_sync_enabled = bool(
-            config.get("platform_media_sync_enabled", False)
-        )
-        self._platform_deep_delete_enabled = bool(
-            config.get("platform_deep_delete_enabled", False)
-        )
-        self._platform_deep_delete_title_keywords = (
-            self._normalize_deep_delete_title_keywords(
-                config.get(
-                    "platform_deep_delete_title_keywords",
-                    ["深度删除", "神医"],
-                )
-            )
         )
         if self._subscribe_handler:
             self._subscribe_handler._notify = self._notify
@@ -2250,9 +1906,15 @@ class CloudSubscribeLite(_PluginBase):
         self._strm_base_url = str(config.get("strm_base_url", "")).strip().rstrip("/")
         self._strm_url_template = str(config.get(
             "strm_url_template",
-            "{base_url}/api/v1/plugin/CloudSubscribeX/redirect"
+            "{base_url}/api/v1/plugin/CloudSubscribeLite/redirect"
             "?pickcode={pickcode}&file_name={file_name}",
         )).strip()
+        # 精简前默认值写死 X 端点：已保存的旧模板若仍指向 X，改指本插件自己的
+        # /redirect（Lite 保留该端点，X 未安装时旧链接 404）。
+        self._strm_url_template = self._strm_url_template.replace(
+            "/api/v1/plugin/CloudSubscribeX/redirect",
+            "/api/v1/plugin/CloudSubscribeLite/redirect",
+        )
 
         self._timeout_enabled = bool(config.get("timeout_enabled", True))
         for key, default in (
@@ -2648,12 +2310,6 @@ class CloudSubscribeLite(_PluginBase):
     def stop_service(self, preserve_subscribe_queue: bool = False):
         """停止服务"""
         try:
-            from .core.api.emby_proxy import stop_emby_proxy
-
-            stop_emby_proxy(self)
-        except Exception as error:  # noqa: BLE001 - 反代停止失败不得阻塞插件卸载
-            logger.warning(f"Emby 302 反代停止失败：{error}")
-        try:
             shutdown_aria2()
         except Exception as error:  # noqa: BLE001 - 下载引擎停止失败不得阻塞卸载
             logger.warning(f"关闭 aria2 下载引擎失败：{error}")
@@ -2686,13 +2342,6 @@ class CloudSubscribeLite(_PluginBase):
                 search_api.close()
         except Exception as error:
             logger.debug(f"关闭搜索测试连接失败：{error}", exc_info=True)
-        try:
-            components = self.__dict__.get("_plugin_components", {})
-            media_library_api = components.get(MediaLibraryApi)
-            if media_library_api:
-                media_library_api.close()
-        except Exception as error:
-            logger.debug(f"关闭媒体库 Webhook 同步调度器失败：{error}", exc_info=True)
         try:
             if self._sync_handler:
                 self._sync_handler.close()

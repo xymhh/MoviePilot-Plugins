@@ -309,7 +309,7 @@ class UIConfig:
             # 默认留空 = 未配置，开启生成时会明确报错而不是写出坏链接。
             "strm_base_url": "",
             "strm_url_template": (
-                "{base_url}/api/v1/plugin/CloudSubscribeX/redirect"
+                "{base_url}/api/v1/plugin/CloudSubscribeLite/redirect"
                 "?pickcode={pickcode}&file_name={file_name}"
             ),
             "media_server_refresh_enabled": False,

@@ -395,40 +395,6 @@ class RuntimeApi(OwnerDelegator):
 
 
 
-    def api_vue_strm_full_scan(
-            self, payload: Optional[Dict[str, Any]] = None
-    ) -> dict:
-        """手动触发 STRM 全量校准（后台线程执行）。"""
-        del payload
-        result = self._owner.run_strm_full_scan("手动")
-        return {
-            "success": bool(result.get("success")),
-            "message": str(result.get("message") or ""),
-        }
-
-    def api_vue_organize_staging(
-            self, payload: Optional[Dict[str, Any]] = None
-    ) -> dict:
-        """一键整理待整理目录（1.35.4）：execute=true 扫描并执行，false 只预览。"""
-        payload = payload or {}
-        try:
-            result = self._owner.organize_staging(bool(payload.get("execute")))
-        except Exception as error:  # noqa: BLE001 - 整理异常返回失败
-            return {"success": False, "message": f"转存目录整理失败：{error}"}
-        if isinstance(result, dict) and result.get("success"):
-            result.setdefault(
-                "message",
-                "已开始扫描待整理目录" if not payload.get("execute") else "已开始扫描并执行",
-            )
-        return result if isinstance(result, dict) else {"success": False, "message": "整理未返回结果"}
-
-    def api_vue_organize_staging_status(self) -> dict:
-        """转存目录整理进度（1.35.4）。"""
-        try:
-            return self._owner.organize_staging_status()
-        except Exception as error:  # noqa: BLE001 - 取状态异常返回失败
-            return {"success": False, "message": f"读取整理状态失败：{error}"}
-
     def api_vue_cleanup_residue(
             self, payload: Optional[Dict[str, Any]] = None
     ) -> dict:

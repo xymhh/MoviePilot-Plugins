@@ -8,7 +8,7 @@
 网盘订阅助手监听 MoviePilot 的订阅，自动到网盘搜索源找缺失的影视资源，命中后转存到目标网盘（默认 115），再整理入库、生成 STRM、刷新媒体服务器并通知你。
 
 - **X（`CloudSubscribeX`，网盘订阅助手）**：完整版，含整理、漏斗、STRM、重复扫描。
-- **Lite（`CloudSubscribeLite`，网盘订阅 Lite）**：**基于最新 X 的简化版**，同一套代码，精简发生在注册/暴露层——不注册 STRM 全量/增量校准与 115 整理服务，不暴露 `/strm`、`/duplicates`、`/recyclebin`、`/funnel`、`/organize` 路由与对应侧边栏。整理与 STRM 交给 115 助手插件。其他能力（搜索、转存、秒传、TG 频道监控、榜单自动订阅、签到）与 X 相同。
+- **Lite（`CloudSubscribeLite`，网盘订阅 Lite）**：**基于最新 X 的简化版**，同一套代码，精简已做到代码层——整理 / STRM 校准 / 重复扫描 / 回收站 / 漏斗 / 媒体库同步 / Emby 302 反代的相关模块已从 Lite 源码中删除（不再随包发出），不注册对应服务与 `/strm`、`/duplicates`、`/recyclebin`、`/funnel`、`/organize` 路由。整理与 STRM 校准交给 115 助手插件；转存时仍会为已转存文件生成 `.strm`（走 Lite 自己的 `/redirect` 播放），转存完成后的媒体服务器刷新保留。其他能力（搜索、转存、秒传、TG 频道监控、榜单自动订阅、签到）与 X 相同。
 - X 另有运行时 Lite 模式（配置项 `cs_lite_mode`，默认关闭），那是 X 内部的一个开关，与 Lite 插件不是同一个东西，不要混淆。
 
 ## 安装与适用版本
@@ -74,7 +74,7 @@ https://github.com/xymhh/MoviePilot-Plugins
 
 ## 整理与 STRM（仅 X）
 
-Lite 没有这一节的全部功能，整理与 STRM 交给 115 助手插件。
+Lite 没有整理漏斗、STRM 校准与 Emby 302 反代，相关代码已删除，交给 115 助手插件。但 Lite 转存时仍会为已转存文件生成 `.strm`（播放地址形如 `{base_url}/api/v1/plugin/CloudSubscribeLite/redirect?pickcode={pickcode}&file_name={file_name}`，走 Lite 自己的 `/redirect` 端点），转存完成后的媒体服务器刷新也保留。
 
 - **整理漏斗**：转存后的文件先进漏斗队列排队整理，去重键为剧集（媒体类型 + TMDB ID + 季 + 集）或电影（媒体类型 + TMDB ID），同一去重键同一时间只有一行在途；失败待重试，人工复核的行不再自动重试。
 - **STRM**：全量校准每天 04:20，单次预算 900 秒，到上限后断点续扫；增量补齐默认每 10 分钟。STRM 播放地址形如 `{base_url}/api/v1/plugin/CloudSubscribeX/redirect?pickcode={pickcode}&file_name={file_name}`。
@@ -106,9 +106,12 @@ Lite 没有这一节的全部功能，整理与 STRM 交给 115 助手插件。
 | 渠道签到 | 有 | 有 |
 | 榜单自动订阅（7 个渠道） | 有 | 有 |
 | TG 频道监控 | 有 | 有 |
-| 115 整理、整理漏斗 | 有 | 不注册服务与路由，整理交给 115 助手插件 |
-| STRM 全量/增量生成 | 有 | 不注册服务与路由 |
-| `/strm`、`/duplicates`、`/recyclebin`、`/funnel`、`/organize` 路由 | 全部注册（X 共 99 条 API 路由） | 一律不注册 |
+| 115 整理、整理漏斗 | 有 | 相关代码已删除（转存管线内部的漏斗预检保留），整理交给 115 助手插件 |
+| STRM 全量/增量校准 | 有 | 校准服务与路由代码已删除；转存时仍为已转存文件生成 `.strm`（播放走 Lite 自己的 `/redirect`） |
+| Emby 302 反代 | 有（默认关，端口 3010） | 代码已删除，用 MediaWarp / 115 助手 |
+| 重复文件扫描、回收站恢复 | 有 | 代码已删除 |
+| 媒体库 Webhook 同步、深度删除 | 有 | 代码已删除；转存完成后的媒体服务器刷新保留 |
+| `/strm`、`/duplicates`、`/recyclebin`、`/funnel`、`/organize` 路由 | 全部注册（X 共 99 条 API 路由） | 一律不注册，对应模块代码已删除；`/redirect` 播放端点保留 |
 | 侧边栏 | 渠道管理、频道监控、失败记录、整理队列、重复扫描（5 个入口） | 当前代码只返回 1 个入口（网盘订阅）；代码注释里写的“两个入口”是旧描述，以代码为准 |
 | 115 存储 `U115CSStorage`（`u115cs`） | 有 | 不注册 |
 | 运行时 Lite 模式 `cs_lite_mode` | 有（X 的配置项，默认关） | 无此配置项（Lite 插件本身就是简化版，不要与 X 的 Lite 模式混淆） |

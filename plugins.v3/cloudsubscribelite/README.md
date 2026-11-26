@@ -8,17 +8,21 @@ MoviePilot v3 后端源码及 Release 前端产物目录。面向用户的安装
 
 ## Lite 是什么
 
-**Lite 是基于最新 CloudSubscribeX 的简化版**，不是独立实现。它与 X 共用同一套代码基（入口文件相似度 98.65%），只保留搜索渠道、跨盘转存、渠道签到与榜单订阅；整理与 STRM 交给 115 助手插件。
+**Lite 是基于最新 CloudSubscribeX 的简化版**，不是独立实现。它与 X 共用同一套代码基（入口文件相似度 98.65%），只保留搜索渠道、跨盘转存、渠道签到与榜单订阅；整理与 STRM 校准交给 115 助手插件。
 
-精简发生在**注册/暴露层**，底层代码仍然随包发出（代码留待后续清理，先保证不暴露给前端）：
+精简已做到**代码层**，不只是不注册：重复功能的 API 模块、服务与工具已从 Lite 源码中删除，不再随包发出（2026-11-26 精简）：
 
 | 被精简掉的 | 具体表现（以当前代码为准） |
 | --- | --- |
-| API 路由 | 整理 / STRM / 重复扫描 / 回收站 / 漏斗 / 整理台的路由一律不注册，包括 `/strm`、`/duplicates`、`/recyclebin`、`/funnel`、`/organize` |
+| API 路由 | 整理 / STRM / 重复扫描 / 回收站 / 漏斗 / 整理台的路由一律不注册，包括 `/strm`、`/duplicates`、`/recyclebin`、`/funnel`、`/organize`；对应 API 模块代码已删除（`core/api/{duplicate,funnel,media_library,recyclebin_restore,strm_duplicates,season_rules}.py`、`core/api/emby_proxy*.py`） |
 | 定时服务 | 不注册任何 STRM / 整理 / 115 整理定时服务（无 `CloudSubscribe_StrmFullScan`、`CloudSubscribe_StrmIncrement`、`CloudSubscribe_Organize`） |
+| 重复扫描与回收站 | 重复文件扫描、回收站恢复的后端与工具已删除（`handlers/sync/{strm_duplicates,recyclebin_restore}.py`、`utils/deep_delete_*.py`） |
+| 媒体库同步 | 媒体库 Webhook 同步、深度删除、Emby 302 反代已删除（`core/api/media_library.py`、`core/api/emby_proxy*.py`）；转存完成后的媒体服务器刷新保留 |
 | 侧边栏 | 当前代码只返回 1 个入口：网盘订阅（`main`）。代码注释里写的“两个入口（网盘订阅 / 网盘资源）”是旧描述，以代码为准 |
 | 115 存储 | 不注册“115 网盘 CS 版”存储适配器（`U115CSStorage` / `u115cs`，X 独有） |
 | 跨盘下载默认引擎 | 与 X 相反：Lite 默认用内置 aria2（多连接 + 断点续传），失败自动回落内置下载器；X 默认关闭内置 aria2 |
+
+**保留、但与 X 不同的细节**：转存管线内部仍会为已转存文件生成 `.strm`（供播放），走 Lite 自己的 `/redirect` 端点；生成时用的 STRM 模板已改指 `CloudSubscribeLite`（精简前写死 `CloudSubscribeX`，只装 Lite 时播不了）。转存管线内部的漏斗预检（`funnel_precommit_recheck`）与整理服务（`OrganizeService`，转存后整理上传文件用）也保留，因为删掉会断转存流程——它们不是对外暴露的整理功能。
 
 保留的能力与 X 相同：订阅缺集搜索补缺、15 个搜索源、多网盘转存与跨盘转存、秒传、TG 频道监控、榜单自动订阅（7 个渠道）、渠道签到。
 
@@ -48,7 +52,7 @@ cloudsubscribelite/
 - `handlers/` 组合领域服务并对接事件、API、通知和任务入口。
 - `utils/` 仅保留无状态或低状态的通用辅助逻辑。
 
-与 X 的差异不在模块边界，而在 `core/api/registration.py` 的注册层：`get_api()` 过滤掉整理 / STRM / 重复扫描 / 回收站 / 漏斗 / 整理台路由，`get_service()` 不注册 STRM 与整理定时服务，`get_sidebar_nav()` 只返回主入口。
+与 X 的差异在 `core/api/registration.py` 的注册层与已删除的模块：`get_api()` 不再构建整理 / STRM / 重复扫描 / 回收站 / 漏斗 / 整理台路由（对应模块已删除，不再是“建好再过滤”），`get_service()` 不注册 STRM 与整理定时服务，`get_sidebar_nav()` 只返回主入口；`__init__.py` 里也不再有 Emby 反代启动、媒体库 Webhook 处理与 STRM 校准方法。
 
 ## 前端与发布
 
