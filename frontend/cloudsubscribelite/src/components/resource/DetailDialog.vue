@@ -589,7 +589,7 @@ const props = defineProps({
   isCrossTransferResource: { type: Function, default: null },
   openCrossTransferDialog: { type: Function, default: null },
   api: { type: Object, default: null },
-  pluginId: { type: String, default: "CloudSubscribe" },
+  pluginId: { type: String, default: "CloudSubscribeLite" },
   showMessage: { type: Function, default: null },
 })
 

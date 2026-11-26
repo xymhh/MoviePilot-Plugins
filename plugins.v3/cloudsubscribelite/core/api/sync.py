@@ -935,3 +935,20 @@ class SyncApi(OwnerDelegator):
             "message": f"已提交 {len(selected)} 个候选资源，开始按现有规则处理",
             "data": {"submitted": len(selected)},
         }
+
+    def api_vue_media_servers(self) -> dict:
+        """返回可用于洗版的媒体服务器选项，不触发内容查询。"""
+        sync_handler, unavailable = self._require_sync_handler(
+            "list_media_server_content",
+        )
+        if unavailable:
+            return unavailable
+        try:
+            data = sync_handler.list_media_server_content()
+            return {
+                "success": True,
+                "data": {"servers": data.get("servers") or []},
+            }
+        except Exception as error:  # noqa: BLE001
+            logger.warning(f"读取媒体服务器选项失败：{error}")
+            return {"success": False, "message": str(error)}

@@ -2,7 +2,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from "vue"
 import { createPluginApi } from "../api"
 import { connectRuntimeStream } from "../utils/runtimeStream.js"
 
-export function useRuntimeData(api, notify, pluginId = "CloudSubscribe", { onSettled, onHistoryChanged } = {}) {
+export function useRuntimeData(api, notify, pluginId = "CloudSubscribeLite", { onSettled, onHistoryChanged } = {}) {
   const pluginApi = createPluginApi(api, pluginId)
   const offlineSupported = ref(false)
   const runtime = reactive({

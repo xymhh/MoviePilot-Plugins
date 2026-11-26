@@ -310,7 +310,7 @@ import { createPluginApi } from "../../api"
 const props = defineProps({
   modelValue: Boolean,
   api: { type: [Object, Function], required: true },
-  pluginId: { type: String, default: "CloudSubscribe" },
+  pluginId: { type: String, default: "CloudSubscribeLite" },
   initialMode: { type: String, default: "links" },
   initialMedia: { type: Object, default: null },
 })

@@ -88,7 +88,7 @@ const props = defineProps({
   provider: { type: String, default: "115" },
 })
 const emit = defineEmits(["update:modelValue", "success"])
-const pluginId = "CloudSubscribe"
+const pluginId = "CloudSubscribeLite"
 const pluginApi = createPluginApi(props.api, () => pluginId)
 const providerMeta = ref({})
 const channels = computed(() => (Array.isArray(providerMeta.value.channels) ? providerMeta.value.channels : []))

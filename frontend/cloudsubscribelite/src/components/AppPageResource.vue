@@ -164,7 +164,7 @@ import { createPluginApi } from "../api"
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
-  pluginId: { type: String, default: "CloudSubscribe" },
+  pluginId: { type: String, default: "CloudSubscribeLite" },
   navKey: { type: String, default: "resource" },
 })
 

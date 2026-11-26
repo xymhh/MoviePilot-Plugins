@@ -206,7 +206,7 @@ function scheduleFallbackRefresh(delay = refreshSeconds.value * 1000) {
 
 function openRuntimeStream() {
   if (runtimeStreamDisabled || runtimeStream || refreshSeconds.value <= 0) return false
-  const source = connectRuntimeStream("CloudSubscribe", {
+  const source = connectRuntimeStream("CloudSubscribeLite", {
     onOpen() {
       runtimeStreamFailures = 0
       clearRefreshTimer()

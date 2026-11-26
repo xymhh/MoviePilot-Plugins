@@ -290,7 +290,7 @@ const OfflineTasksDialog = defineAsyncComponent(() => import("./dialogs/OfflineT
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
-  pluginId: { type: String, default: "CloudSubscribe" },
+  pluginId: { type: String, default: "CloudSubscribeLite" },
   navKey: { type: String, default: "main" },
 })
 

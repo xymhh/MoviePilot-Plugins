@@ -2,7 +2,7 @@ import { computed, reactive, ref } from "vue"
 import { createPluginApi } from "../api"
 import { applyDisplayCatalog } from "./resourceUtils"
 
-export function useHistoryPageData(api, notify, pluginId = "CloudSubscribe") {
+export function useHistoryPageData(api, notify, pluginId = "CloudSubscribeLite") {
   const pluginApi = createPluginApi(api, pluginId)
   const historyGroups = ref([])
   const embyPlayItems = ref({})
