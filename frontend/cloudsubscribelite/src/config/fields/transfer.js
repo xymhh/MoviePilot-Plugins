@@ -173,6 +173,28 @@ export function createTransferSection(options) {
             show: enabled("cross_transfer_enabled"),
           },
           {
+            key: "cross_transfer_upload_proxy",
+            label: "115 上传代理",
+            type: "text",
+            hint: "留空=直连。仅真实上传的分片数据走代理，115 API 直连，秒传不走代理；支持 http/https/socks4/socks5/socks5h，鉴权填下面两项",
+            cols: 4,
+            show: enabled("cross_transfer_enabled"),
+          },
+          {
+            key: "cross_transfer_upload_proxy_username",
+            label: "上传代理用户名",
+            type: "text",
+            cols: 4,
+            show: enabled("cross_transfer_enabled"),
+          },
+          {
+            key: "cross_transfer_upload_proxy_password",
+            label: "上传代理密码",
+            type: "text",
+            cols: 4,
+            show: enabled("cross_transfer_enabled"),
+          },
+          {
             key: "cross_transfer_media_types",
             label: "允许跨盘转存类型",
             type: "select",
