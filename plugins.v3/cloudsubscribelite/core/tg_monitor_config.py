@@ -151,6 +151,7 @@ class TgMonitorConfigMixin:
         return rows
 
 
+    @staticmethod
     def _tg_target_episodes(items: Any) -> List[int]:
         """合并多条频道消息的目标集；任一条不限集则整体不限（返回空）。"""
         rows = list(items) if isinstance(items, (list, tuple)) else [items]
