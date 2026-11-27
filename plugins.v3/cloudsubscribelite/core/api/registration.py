@@ -449,6 +449,13 @@ class MoviePilotRegistration(OwnerDelegator):
                 "summary": "退出 TG 登录",
             },
             {
+                "path": "/tg/import_from_x",
+                "endpoint": self.api_vue_tg_import_from_x,
+                "methods": ["POST"],
+                "auth": "bear",
+                "summary": "从 CloudSubscribeX 导入 TG 监控配置",
+            },
+            {
                 "path": "/runtime/stream",
                 "endpoint": self.api_vue_runtime_stream,
                 "methods": ["GET"],

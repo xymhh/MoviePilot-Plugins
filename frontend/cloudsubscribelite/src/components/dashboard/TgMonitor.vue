@@ -33,6 +33,17 @@
           @click="retryFailed">
           重试失败 ({{ failedCount }})
         </v-btn>
+        <v-btn
+          v-if="!status.configured"
+          class="tg-import-x"
+          size="small"
+          variant="tonal"
+          prepend-icon="mdi-database-import-outline"
+          :loading="importing"
+          title="把同一台机器上 CloudSubscribeX 的 TG 监控配置（登录会话、频道、关键词、画质偏好）搬过来，不用重新登录"
+          @click="importFromX">
+          从 X 导入配置
+        </v-btn>
         <v-menu location="bottom end">
           <template #activator="{ props: menuProps }">
             <v-btn v-bind="menuProps" size="small" variant="tonal" icon="mdi-dots-vertical" title="TG 账号设置" />
@@ -366,6 +377,7 @@ const page = ref(1)
 const PAGE_SIZE = 30
 const scanning = ref(false)
 const retrying = ref(false)
+const importing = ref(false)
 const loadingSubscribes = ref(false)
 const subscribes = ref([])
 const transferVisible = ref(false)
@@ -805,6 +817,22 @@ async function retryFailed() {
     }
   } finally {
     retrying.value = false
+  }
+}
+
+async function importFromX() {
+  if (importing.value) return
+  importing.value = true
+  try {
+    const result = await props.api.post(`plugin/${props.pluginId}/tg/import_from_x`, {})
+    if (result?.success) {
+      props.notify(result.message || "导入完成", "success")
+      await refreshAll()
+    } else {
+      props.notify(result?.message || "导入失败", "error")
+    }
+  } finally {
+    importing.value = false
   }
 }
 
