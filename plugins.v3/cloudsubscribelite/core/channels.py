@@ -527,6 +527,65 @@ class ChannelMixin:
             })
         return rules
 
+    def _tg_importable_channels(self, x_cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """X 配置里有、Lite 渠道库里没有的 TG 频道规则。
+
+        只用于「从 X 导入」：运行态频道只读渠道库，导入只写配置会让
+        页面仍显示 0 个频道；这里只算缺失项——配置里有、库里没有的才
+        算，绝不复活用户在渠道页主动删掉的频道。X 用逐频道规则
+        （tg_channel_rules）时直接归一化；只有旧全局频道
+        （tg_channels）时按 _migrate_channels_from_config 同一套办法
+        展开成逐频道规则。
+        """
+        from .tg_monitor import (
+            migrate_legacy_channel_rules,
+            normalize_channel_rules,
+        )
+
+        cfg = dict(x_cfg or {})
+        rules = normalize_channel_rules(cfg.get("tg_channel_rules", []) or [])
+        if not rules:
+            channels = self._split_multiline(cfg.get("tg_channels", ""))
+            if not channels:
+                return []
+            try:
+                scan_limit = int(cfg.get("tg_monitor_scan_limit", 20) or 20)
+            except (TypeError, ValueError):
+                scan_limit = 20
+            rules = migrate_legacy_channel_rules(
+                [],
+                channels=channels,
+                keywords=self._split_multiline(
+                    cfg.get("tg_monitor_keywords", "")
+                ),
+                exclude_keywords=self._split_multiline(
+                    cfg.get("tg_monitor_exclude_keywords", "")
+                ),
+                scan_limit=max(1, min(scan_limit, 200)),
+            )
+        existing = set()
+        for item in self._channel_store().list():
+            if item.get("type") != TG_CHANNEL_TYPE:
+                continue
+            channel = str((item.get("config") or {}).get("channel") or "").strip()
+            if channel:
+                existing.add(channel.lower().lstrip("@"))
+        missing: List[Dict[str, Any]] = []
+        for rule in rules:
+            channel = str(rule.get("channel") or "").strip()
+            if not channel:
+                continue
+            if channel.lower().lstrip("@") in existing:
+                continue
+            missing.append({
+                "channel": channel,
+                "enabled": bool(rule.get("enabled", True)),
+                "keywords": list(rule.get("keywords") or []),
+                "exclude_keywords": list(rule.get("exclude_keywords") or []),
+                "scan_limit": int(rule.get("scan_limit") or 20),
+            })
+        return missing
+
 
     def _refresh_channel_runtime(
             self, search_config_updates: Optional[Dict[str, Any]] = None
