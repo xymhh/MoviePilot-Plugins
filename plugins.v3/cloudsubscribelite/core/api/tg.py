@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 
+from ..channels import TG_PRIORITY_BASE
 from ..config import UIConfig
 from ..delegation import OwnerDelegator
 from ..services.runtime import sync_lock
@@ -48,8 +49,25 @@ class TgMonitorApi(OwnerDelegator):
             raw = [raw]
         return [str(item) for item in (raw or []) if str(item).strip()]
 
+    def _status_with_importable(self) -> dict:
+        """监控状态 + 可从 X 导入的频道数。
+
+        loadItems 也会拿同一份 status 覆盖前端状态，两处必须同口径，
+        否则导入按钮会在刷新后闪烁消失。X 配置读取失败只算 0，不拖垮
+        状态接口。
+        """
+        data = self._monitor().status()
+        try:
+            x_cfg = self.get_config("CloudSubscribeX") or {}
+            data["importable_channels"] = len(
+                self._tg_importable_channels(x_cfg)
+            )
+        except Exception:  # noqa: BLE001 - 状态接口不能因导入计数挂掉
+            data["importable_channels"] = 0
+        return data
+
     def api_vue_tg_status(self) -> dict:
-        return {"success": True, "data": self._monitor().status()}
+        return {"success": True, "data": self._status_with_importable()}
 
     def api_vue_tg_items(self, status: str = "") -> dict:
         monitor = self._monitor()
@@ -57,7 +75,7 @@ class TgMonitorApi(OwnerDelegator):
             "success": True,
             "data": {
                 "items": monitor.list_items(status=str(status or "")),
-                "status": monitor.status(),
+                "status": self._status_with_importable(),
             },
         }
 
@@ -224,61 +242,111 @@ class TgMonitorApi(OwnerDelegator):
         """把同一台机器上 CloudSubscribeX 的 TG 监控配置搬到 Lite。
 
         TG 登录就是 StringSession 字符串（+ api_id/api_hash），X 与 Lite
-        的 tg_* 键完全同名，复制即恢复登录，无需重新登录。只在 Lite
-        尚未配置会话时可用；只取 Lite 当前值等于默认值的那几项，绝不
-        覆盖用户已在 Lite 里设好的值；不导入 tg_monitor_enabled，导入
-        后监控仍保持关闭，由用户自己启用。会话与 api_hash 绝不记入
-        日志、也不出现在返回里。
+        的 tg_* 键完全同名，复制即恢复登录，无需重新登录。会话只在 Lite
+        尚未配置时导入；只取 Lite 当前值等于默认值的那几项，绝不覆盖用
+        户已在 Lite 里设好的值；不导入 tg_monitor_enabled，导入后监控
+        仍保持关闭，由用户自己启用。
+
+        3.0.11：运行态频道只读渠道库，3.0.10 只写了配置，页面仍显示
+        0 个频道——现在同时把配置里有、库里没有的频道写入渠道库并刷新
+        运行态；只补缺失项，绝不复活用户在渠道页主动删掉的频道。会话
+        与 api_hash 绝不记入日志、也不出现在返回里。
         """
         try:
             lite_cfg = self.get_config() or {}
-            if str(lite_cfg.get("tg_session") or "").strip():
-                return {"success": False, "message": "Lite 已有 TG 会话，无需导入"}
             x_cfg = self.get_config("CloudSubscribeX")
-            if not x_cfg or not str(x_cfg.get("tg_session") or "").strip():
+            has_session = bool(str(lite_cfg.get("tg_session") or "").strip())
+            x_has_session = bool(
+                x_cfg and str(x_cfg.get("tg_session") or "").strip()
+            )
+            missing = self._tg_importable_channels(x_cfg or {})
+            if not has_session and not x_has_session and not missing:
                 return {
                     "success": False,
                     "message": "未找到 CloudSubscribeX 的 TG 配置（可能从未登录，或已被彻底删除）",
                 }
-            defaults = UIConfig.get_default_config()
             imported: Dict[str, Any] = {}
-            for key in _TG_IMPORT_KEYS:
-                if key not in x_cfg:
-                    continue
-                # Lite 里已有用户设置的值不覆盖；缺键按默认值算。
-                if lite_cfg.get(key, defaults.get(key)) != defaults.get(key):
-                    continue
-                imported[key] = copy.deepcopy(x_cfg[key])
-            merged = {**lite_cfg, **imported}
-            # 宿主 update_config 是整库替换（仅真正失败返回 False），
-            # 必须传完整合并配置。
-            if self.update_config(merged) is False:
-                return {"success": False, "message": "配置保存失败，请重试"}
-            # 与保存配置同一套内存应用逻辑：有同步任务在跑就暂存等它结束。
             pending = False
-            if not sync_lock.acquire(blocking=False):
-                self._queue_pending_config(merged)
-                pending = True
-            else:
-                try:
-                    self._apply_plugin_config(merged, reset_runtime=False)
-                finally:
-                    sync_lock.release()
+            if not has_session and x_has_session:
+                defaults = UIConfig.get_default_config()
+                for key in _TG_IMPORT_KEYS:
+                    if not x_cfg or key not in x_cfg:
+                        continue
+                    # Lite 里已有用户设置的值不覆盖；缺键按默认值算。
+                    if lite_cfg.get(key, defaults.get(key)) != defaults.get(key):
+                        continue
+                    imported[key] = copy.deepcopy(x_cfg[key])
+                merged = {**lite_cfg, **imported}
+                # 宿主 update_config 是整库替换（仅真正失败返回 False），
+                # 必须传完整合并配置。
+                if self.update_config(merged) is False:
+                    return {"success": False, "message": "配置保存失败，请重试"}
+                # 与保存配置同一套内存应用逻辑：有同步任务在跑就暂存等它结束。
+                if not sync_lock.acquire(blocking=False):
+                    self._queue_pending_config(merged)
+                    pending = True
+                else:
+                    try:
+                        self._apply_plugin_config(merged, reset_runtime=False)
+                    finally:
+                        sync_lock.release()
+            # 渠道库同步：配置里有、库里没有的频道写进渠道库（3.0.10
+            # 只写了配置，运行态读不到，页面仍显示 0 个频道）。
+            synced = 0
+            if missing:
+                store = self._channel_store()
+                for index, rule in enumerate(missing):
+                    store.create({
+                        "name": rule["channel"],
+                        "type": "tg_channel",
+                        "enabled": bool(rule.get("enabled", True)),
+                        "priority": TG_PRIORITY_BASE - 10 * index,
+                        "config": {
+                            "channel": rule["channel"],
+                            "keywords": list(rule.get("keywords") or []),
+                            "exclude_keywords": list(rule.get("exclude_keywords") or []),
+                            "scan_limit": int(rule.get("scan_limit") or 20),
+                        },
+                    })
+                synced = len(missing)
+                self._refresh_channel_runtime()
             count = len(imported)
             channels = self._count_channels(imported)
-            logger.info(
-                f"已从 CloudSubscribeX 导入 TG 配置：{count} 项，{channels} 个频道"
-            )
-            message = (
-                f"已从 CloudSubscribeX 导入 TG 配置（{count} 项，{channels} 个频道），"
-                "登录状态已恢复，启用监控后即可使用"
-            )
+            if imported:
+                logger.info(
+                    f"已从 CloudSubscribeX 导入 TG 配置：{count} 项，{channels} 个频道"
+                )
+            if synced:
+                logger.info(f"已从 CloudSubscribeX 同步 {synced} 个频道到渠道库")
+            if imported and synced:
+                message = (
+                    f"已从 CloudSubscribeX 导入 TG 配置（{count} 项，{channels} 个频道），"
+                    f"登录状态已恢复，{synced} 个频道已写入渠道库，启用监控后即可使用"
+                )
+            elif imported:
+                message = (
+                    f"已从 CloudSubscribeX 导入 TG 配置（{count} 项，{channels} 个频道），"
+                    "登录状态已恢复，启用监控后即可使用"
+                )
+            elif synced and not has_session:
+                message = (
+                    f"已同步 {synced} 个频道到渠道库；未找到 X 的 TG 登录会话，"
+                    "登录后才能启用监控"
+                )
+            elif synced:
+                message = f"Lite 已有 TG 会话，仅同步了 {synced} 个频道到渠道库"
+            else:
+                return {"success": False, "message": "无需导入：会话与频道均已就绪"}
             if pending:
                 message += "，将在当前订阅任务结束后自动生效"
             return {
                 "success": True,
                 "message": message,
-                "data": {"imported_keys": sorted(imported), "channels": channels},
+                "data": {
+                    "imported_keys": sorted(imported),
+                    "channels": channels,
+                    "synced_channels": synced,
+                },
             }
         except Exception as error:  # noqa: BLE001
             logger.warning(f"从 CloudSubscribeX 导入 TG 配置失败：{error}")

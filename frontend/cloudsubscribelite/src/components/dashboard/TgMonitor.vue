@@ -34,7 +34,7 @@
           重试失败 ({{ failedCount }})
         </v-btn>
         <v-btn
-          v-if="!status.configured"
+          v-if="!status.configured || (status.importable_channels || 0) > 0"
           class="tg-import-x"
           size="small"
           variant="tonal"
@@ -355,6 +355,7 @@ const props = defineProps({
 const status = ref({
   enabled: false,
   configured: false,
+  importable_channels: 0,
   channel_count: 0,
   item_count: 0,
   new_count: 0,
