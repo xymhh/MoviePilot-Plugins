@@ -33,6 +33,7 @@ export default defineConfig({
                 "./AppPageMain": "./src/components/AppPage.vue",
                 "./AppPageResource": "./src/components/AppPageResource.vue",
                 "./AppPageTgMonitor": "./src/components/AppPageTgMonitor.vue",
+                "./AppPageDashboard": "./src/components/AppPageDashboard.vue",
             },
             shared: {
                 vue: {requiredVersion: false, generate: false},

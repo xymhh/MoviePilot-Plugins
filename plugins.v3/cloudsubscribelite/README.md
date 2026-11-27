@@ -18,7 +18,7 @@ MoviePilot v3 后端源码及 Release 前端产物目录。面向用户的安装
 | 定时服务 | 不注册任何 STRM / 整理 / 115 整理定时服务（无 `CloudSubscribe_StrmFullScan`、`CloudSubscribe_StrmIncrement`、`CloudSubscribe_Organize`） |
 | 重复扫描与回收站 | 重复文件扫描、回收站恢复的后端与工具已删除（`handlers/sync/{strm_duplicates,recyclebin_restore}.py`、`utils/deep_delete_*.py`） |
 | 媒体库同步 | 媒体库 Webhook 同步、深度删除、Emby 302 反代已删除（`core/api/media_library.py`、`core/api/emby_proxy*.py`）；转存完成后的媒体服务器刷新保留 |
-| 侧边栏 | 当前代码只返回 1 个入口：网盘订阅（`main`）。代码注释里写的“两个入口（网盘订阅 / 网盘资源）”是旧描述，以代码为准 |
+| 侧边栏 | 当前代码只返回 1 个入口：网盘订阅仪表盘（`dashboard`，开始分类，115助手仪表盘下方）。网盘订阅（`main`）与频道监控（`tg-monitor`）页面仍在，可通过仪表盘链接与直达地址打开 |
 | 115 存储 | 不注册“115 网盘 CS 版”存储适配器（`U115CSStorage` / `u115cs`，X 独有） |
 | 跨盘下载默认引擎 | 与 X 相反：Lite 默认用内置 aria2（多连接 + 断点续传），失败自动回落内置下载器；X 默认关闭内置 aria2 |
 
@@ -66,7 +66,7 @@ cloudsubscribelite/
 - `handlers/` 组合领域服务并对接事件、API、通知和任务入口。
 - `utils/` 仅保留无状态或低状态的通用辅助逻辑。
 
-与 X 的差异在 `core/api/registration.py` 的注册层与已删除的模块：`get_api()` 不再构建整理 / STRM / 重复扫描 / 回收站 / 漏斗 / 整理台路由（对应模块已删除，不再是“建好再过滤”），`get_service()` 不注册 STRM 与整理定时服务，`get_sidebar_nav()` 只返回主入口；入口 `__init__.py` 里也不再有 Emby 反代启动、媒体库 Webhook 处理与 STRM 校准方法，且入口逻辑已拆进 `core/` 的混入类（见上表）。
+与 X 的差异在 `core/api/registration.py` 的注册层与已删除的模块：`get_api()` 不再构建整理 / STRM / 重复扫描 / 回收站 / 漏斗 / 整理台路由（对应模块已删除，不再是“建好再过滤”），`get_service()` 不注册 STRM 与整理定时服务，`get_sidebar_nav()` 只返回仪表盘入口（`dashboard`）；入口 `__init__.py` 里也不再有 Emby 反代启动、媒体库 Webhook 处理与 STRM 校准方法，且入口逻辑已拆进 `core/` 的混入类（见上表）。
 
 ## 前端与发布
 

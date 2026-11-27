@@ -628,25 +628,18 @@ class MoviePilotRegistration(OwnerDelegator):
         )
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
-        # Lite 侧栏两个入口（网盘订阅 / 频道监控）；频道监控页由 3.0.9 从 X 搬运而来。
+        # Lite 侧栏只有一个入口：网盘订阅仪表盘（开始分类，115助手仪表盘下方）。
+        # 网盘订阅与频道监控两个页面仍在，只是从侧栏撤下，仍可通过仪表盘链接与直达地址打开。
         if not self._enabled or not self._show_sidebar_nav:
             return []
         return [
             {
-                "nav_key": "main",
-                "title": "网盘订阅",
-                "icon": "mdi-cloud-sync-outline",
-                "section": "subscribe",
+                "nav_key": "dashboard",
+                "title": "网盘订阅仪表盘",
+                "icon": "mdi-view-dashboard",
+                "section": "start",
                 "permission": "subscribe",
-                "order": 30,
-            },
-            {
-                "nav_key": "tg-monitor",
-                "title": "频道监控",
-                "icon": "mdi-telegram",
-                "section": "system",
-                "permission": "manage",
-                "order": 31,
+                "order": 11,
             },
         ]
 

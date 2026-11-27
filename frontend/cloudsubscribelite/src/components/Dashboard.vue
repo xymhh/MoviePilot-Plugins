@@ -77,6 +77,7 @@ import { createPluginApi } from "../api"
 
 const props = defineProps({
   api: { type: Object, default: () => ({}) },
+  pluginId: { type: String, default: "CloudSubscribeLite" },
   config: { type: Object, default: () => ({ attrs: {} }) },
   allowRefresh: { type: Boolean, default: true },
   refreshInterval: { type: Number, default: 0 },
