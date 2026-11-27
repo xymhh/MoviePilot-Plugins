@@ -34,7 +34,7 @@
             <v-chip size="x-small" variant="tonal">{{ activeTaskCount }} 个任务</v-chip>
           </div>
 
-          <div class="metric-grid">
+          <div v-if="showStats" class="metric-grid">
             <div v-for="item in overview.stats || []" :key="item.title">
               <span>{{ item.title }}</span>
               <strong :class="`text-${item.color || 'primary'}`">
@@ -81,6 +81,8 @@ const props = defineProps({
   config: { type: Object, default: () => ({ attrs: {} }) },
   allowRefresh: { type: Boolean, default: true },
   refreshInterval: { type: Number, default: 0 },
+  // 仪表盘页不展示转存统计（统计无数据源，全是 0）；主页面保持默认显示。
+  showStats: { type: Boolean, default: true },
 })
 
 const pluginApi = createPluginApi(props.api, () => props.pluginId)
