@@ -32,6 +32,7 @@ export default defineConfig({
                 // 上游只暴露 AppPage，补一个别名避免「打开报 not found」。
                 "./AppPageMain": "./src/components/AppPage.vue",
                 "./AppPageResource": "./src/components/AppPageResource.vue",
+                "./AppPageTgMonitor": "./src/components/AppPageTgMonitor.vue",
             },
             shared: {
                 vue: {requiredVersion: false, generate: false},

@@ -3,4 +3,4 @@
 __init__.py 的 plugin_version 必须引用这里的 VERSION，不得硬编码。
 """
 
-VERSION = "3.0.8"
+VERSION = "3.0.9"

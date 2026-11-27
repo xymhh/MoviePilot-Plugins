@@ -621,7 +621,7 @@ class MoviePilotRegistration(OwnerDelegator):
         )
 
     def get_sidebar_nav(self) -> List[Dict[str, Any]]:
-        # Lite 直接使用上游 1.7.x 的 UI：两个入口（网盘订阅 / 网盘资源）。
+        # Lite 侧栏两个入口（网盘订阅 / 频道监控）；频道监控页由 3.0.9 从 X 搬运而来。
         if not self._enabled or not self._show_sidebar_nav:
             return []
         return [
@@ -632,6 +632,14 @@ class MoviePilotRegistration(OwnerDelegator):
                 "section": "subscribe",
                 "permission": "subscribe",
                 "order": 30,
+            },
+            {
+                "nav_key": "tg-monitor",
+                "title": "频道监控",
+                "icon": "mdi-telegram",
+                "section": "system",
+                "permission": "manage",
+                "order": 31,
             },
         ]
 
