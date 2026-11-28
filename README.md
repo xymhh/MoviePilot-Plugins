@@ -1,6 +1,6 @@
 # MoviePilot-Plugins
 
-个人 MoviePilot **v3** 插件市场：网盘订阅助手（CloudSubscribeX）与网盘订阅 Lite（CloudSubscribeLite）。
+个人 MoviePilot **v3** 插件市场：网盘订阅助手（CloudSubscribeX）、网盘订阅 Lite（CloudSubscribeLite）与 115网盘STRM助手自用构建（P115StrmHelper）。
 
 插件在 MoviePilot v3 的插件市场中安装和使用，版本与更新记录以 [`package.v3.json`](package.v3.json) 为准。
 
@@ -10,6 +10,7 @@
 | --- | --- | --- | --- |
 | 网盘订阅助手（`CloudSubscribeX`） | 3.0.0 | ≥ 3.0.0 | 订阅缺失的影视，自动去网盘搜源、转存、整理入库 |
 | 网盘订阅 Lite（`CloudSubscribeLite`） | 3.0.0 | ≥ 3.0.0 | 基于最新 CloudSubscribeX 的简化版：只保留搜索、转存、签到与榜单订阅 |
+| 115网盘STRM助手（`P115StrmHelper`） | 3.1.1 | ≥ 3.2.12 | 基于 DDSRem 3.1.0 的自用构建：修复同步服务停止死锁 |
 
 两个插件是同一代码基的两种发行形态（入口文件相似度 98.65%），不是两个独立实现。**Lite 是基于最新 X 的简化版**：底层代码与 X 相同，精简发生在注册/暴露层——不注册 STRM 全量/增量校准与 115 整理服务，不暴露 `/strm`、`/duplicates`、`/recyclebin`、`/funnel`、`/organize` 路由与对应侧边栏；整理与 STRM 交给 115 助手插件处理。其他能力（多网盘转存、秒传、TG 频道监控、榜单自动订阅、签到）两者相同。X 另有运行时 Lite 模式（`cs_lite_mode`），与 Lite 插件不是同一个东西，不要混淆。
 
@@ -30,6 +31,10 @@
 基于最新 CloudSubscribeX 的简化版，只保留搜索渠道、跨盘转存、渠道签到与榜单订阅；整理与 STRM 交给 115 助手插件。
 
 适合已经用 115 助手插件做整理，只需要“搜源 + 转存 + 签到 + 榜单”的用户。Lite 的 `system_version >=3.0.0` 不是笔误——它就是 v3 版本。
+
+### 115网盘STRM助手自用构建（P115StrmHelper）
+
+基于 DDSRem 的 [P115StrmHelper 3.1.0](https://github.com/DDSRem-Dev/MoviePilot-Plugins)（GPLv3，作者 DDSRem）的自用构建，版本号 3.1.1。只改了一处：修复同步服务停止死锁——生活事件监控线程在一次拉取内逐条处理事件时不响应停止信号，停止等待 25 秒超时后服务永久拒绝新任务且重载无法恢复；修复后拉取循环中增加停止检查，停止失败时清除停止标志。后续上游 DDSRem 发布含同等修复的新版本后，以上游为准。
 
 ## 安装
 
@@ -57,7 +62,8 @@ https://github.com/xymhh/MoviePilot-Plugins
 MoviePilot-Plugins/
 ├── plugins.v3/          # MoviePilot v3 插件（当前版本）
 │   ├── cloudsubscribex/ # 网盘订阅助手（CloudSubscribeX）
-│   └── cloudsubscribelite/ # 网盘订阅 Lite（CloudSubscribeLite，基于最新 X 的简化版）
+│   ├── cloudsubscribelite/ # 网盘订阅 Lite（CloudSubscribeLite，基于最新 X 的简化版）
+│   └── p115strmhelper/ # 115网盘STRM助手自用构建（P115StrmHelper，基于 DDSRem 3.1.0，含停止死锁修复）
 ├── plugins.v2/          # MoviePilot v2 历史实现（仅维护，不再加新功能）
 │   ├── cloudsubscribex/ # X 1.36.1
 │   └── cloudsubscribelite/ # Lite 1.0.3
