@@ -7,7 +7,7 @@
 
     <!-- 转存概览：复用已有的 Dashboard 卡片。 -->
     <div class="dashboard-page__overview">
-      <Dashboard :api="api" :plugin-id="pluginId" :allow-refresh="true" />
+      <Dashboard :api="api" :plugin-id="pluginId" :allow-refresh="true" :show-stats="false" />
     </div>
 
     <!-- 频道监控状态：只读摘要，详情与操作在频道监控页。 -->
